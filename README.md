@@ -149,3 +149,4 @@ We learned a lot from the following projects when developing LightLLM.
 - [Text Generation Inference](https://github.com/huggingface/text-generation-inference)
 - [vLLM](https://github.com/vllm-project/vllm)
 - [Flash Attention 1&2](https://github.com/Dao-AILab/flash-attention)
+- [OpenAI Triton](https://github.com/openai/triton)
