@@ -26,6 +26,7 @@ setup(
         "packaging",
         "rpyc",
         "ninja",
+        "safetensors",
         "triton==2.0.0.dev20221202"
     ],
 )
