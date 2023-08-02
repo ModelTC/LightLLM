@@ -99,11 +99,11 @@ The total used tokens of Time 3 is equal to the number of yellow squares (see th
 
 ![Untitled](LightLLM/Untitled%204.png)
 
-实际的 token 最大使用量，必然是 Time 1， Time 2， Time 3 其中之一。
+The actual maximum token usage is always one of Time 1, Time 2, or Time 3.
 
-只要保证动态推理过程中的最大token使用量  <= max_total_token_num, 说明新的请求可以进行合并Batch推理。
+As long as the maximum token usage during the dynamic inference process is lower than max_total_token_num, it indicates that new requests can be batched for inference.
 
-为了快速的计算一个Batch的所有请求需要的最大token使用量，我们利用numpy实现了一个高效的示例实现，下面是python伪代码：
+To quickly calculate the maximum token usage required for all requests in a batch, we have implemented an efficient example using numpy.
 
 ```
 import numpy as np
@@ -125,27 +125,26 @@ def demo():
         print("oom")
 ```
 
-## 性能表现
+## Performance
 
-我们在数据集ShareGPT_Vicuna_unfiltered上和目前主流的推理框架 TGI，NV Triton + FasterTransformer以及vLLM进行了性能对比，结果如下图所示。可以看到，LightLLM在不同大小的模型下都获得了更高的吞吐量。TGI由于显存碎片化严重，所以很难达到较高的吞吐量。vLLM因引入了PageAttention，但是由于整体实现细节更利于小模型推理，所以在大模型上的并发性能并不是十分理想（使用的默认配置）。相比之下，LightLLM则可以在各种大小的模型下都保持稳健的性能，在大模型上（LLaMA-65B）相对TGI和vLLM实现了3倍左右的2提升。
+We conducted performance comparisons on the ShareGPT_Vicuna_unfiltered dataset using the current mainstream inference frameworks TGI, NV Triton + FasterTransformer, and vLLM. The results are shown in the graph below. It can be observed that LightLLM achieves higher throughput across different model sizes. TGI suffers from severe memory fragmentation, making it difficult to achieve high throughput. vLLM introduces PageAttention but due to its overall implementation details being more favorable for small model inference, its concurrent performance on large models is not very ideal (using default configurations). In contrast, LightLLM maintains robust performance across various model sizes and achieves around a 2-3x improvement over TGI and vLLM on large models (LLaMA-65B).
 
 ![Untitled](LightLLM/Untitled%205.png)
 
-**TGI兼容&消融分析：**为了进一步验证TokenAttention和Router的有效性，我们同样将这些特性接入到了TGI中，来改善其显存碎片化的问题，结果如下图（左）所示。可以看到，在引入TokenAttention以及Router以后，可以给原始TGI带来4倍以上的性能提升。
+**TGI Compatibility & Ablation Analysis** To further validate the effectiveness of TokenAttention and Router, we also integrated these features into TGI to address its memory fragmentation issue, as shown in the figure below (left). It can be observed that introducing TokenAttention and Router leads to more than a 4x performance improvement compared to the original TGI.
 
-**长短不齐请求情况下的提升**：从下图（左）中可以发现，Router的引入并未带来较为明显的性能提升，这是由于ShareGPT_Vicuna_unfiltered的数据集问题长短差异并不显著，为此我们构建了一个问题差异更大的请求集合，对我们的Efficient Router的性能进行了验证，结果如下图（右）所示。可以看到，我们的高性能Router可以更好的利用GPU资源，在问题长度差异很大的请求下，可以带来近50%的性能提升。
+**Improvement in case of mixed long and short requests**：From the figure below (left), it can be noticed that the introduction of Router did not bring a more significant performance improvement, which is due to the fact that the difference in the question length of ShareGPT_Vicuna_unfiltered's dataset is not significant. For this reason, we constructed a collection of requests with a greater difference in the length, and verified the performance of our Efficient Router. The results are shown below (right). It can be seen that our Efficient Router can make better use of GPU resources, and can bring about nearly 50% performance improvement with requests that have large differences in question lengths.
 
-![左图展示了LightLLM和TGI的兼容效果以及消融分析，右图展示了我们的Efficient Router在长短不齐请求下的提升](LightLLM/Untitled%206.png)
+![The left figure shows the compatibility of LightLLM and TGI and the ablation analysis, and the right figure shows the enhancement of our Efficient Router with the long and short request](LightLLM/Untitled%206.png)
+The left figure shows the compatibility of LightLLM and TGI and the ablation analysis, and the right figure shows the enhancement of our Efficient Router with the long and short request
 
-左图展示了LightLLM和TGI的兼容效果以及消融分析，右图展示了我们的Efficient Router在长短不齐请求下的提升
+## Future Work
 
-## 未来和展望
+- Support for more models
+- router scheduling enhancements
+- High-performance int8 int4 weight only support and int8 kv cache.
+- Fully quantized models
+- Mixed-precision models
+- Sparsification
 
-- 支持更多的模型
-- router 调度提升
-- 高性能的 int8 int4 weight only 支持以及int8 kv cache
-- 全量化模型
-- 混合精度模型
-- 模型稀疏化
-
-LightLLM致力于让更多人参与进来，能够灵活、高效的探索各种LLM部署和推理方案，以推动领域的发展，希望大家可以多多star → fork → contribute。相信未来也会涌现出更多技术和解决方案（如TensorRT等），持续压低部署成本，让AGI更快的迈入平常百姓家。
+LightLLM is committed to enabling more people to participate and explore various LLM deployment and inference solutions flexibly and efficiently, in order to promote the development of the field. We hope that everyone can give it more stars, fork the project, and contribute. We believe that in the future, more technologies and solutions (such as TensorRT) will emerge, continuously reducing deployment costs and making AGI more accessible to ordinary households.
