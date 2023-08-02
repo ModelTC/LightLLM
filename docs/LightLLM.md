@@ -147,4 +147,4 @@ The left figure shows the compatibility of LightLLM and TGI and the ablation ana
 - Mixed-precision models
 - Sparsification
 
-LightLLM is committed to enabling more people to participate and explore various LLM deployment and inference solutions flexibly and efficiently, in order to promote the development of the field. We hope that everyone can give it more stars, fork the project, and contribute. We believe that in the future, more technologies and solutions (such as TensorRT) will emerge, continuously reducing deployment costs and making AGI more accessible to ordinary households.
+LightLLM is committed to enabling more people to participate, allowing flexible and efficient exploration of various LLM deployment and inference solutions. It also serves as a reference for hardware manufacturers to promote the development of the field. We hope that everyone can give it more stars, fork the project, and contribute. We believe that in the future, more technologies and solutions (such as TensorRT) will emerge, continuously reducing deployment costs and making AGI more accessible to ordinary households.
