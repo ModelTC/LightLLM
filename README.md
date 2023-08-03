@@ -137,8 +137,8 @@ The performance comparisons results are presented below:
 For debugging, we offer static performance testing scripts for various models. For instance, you can evaluate the inference performance of the LLaMA model by
 
 ~~~shell
-cd test/lightllama
-python test_model_infer.py
+cd test/model
+python test_llama.py
 ~~~
 
 ### FAQ
