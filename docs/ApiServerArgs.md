@@ -66,5 +66,5 @@ the max value for one reqest's input token len.
 
 
 #### --max_req_total_len
-default is 3072,
+default is 3072,  
 the max value for req_input_len + req_output_len.
