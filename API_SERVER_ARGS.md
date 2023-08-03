@@ -1,26 +1,26 @@
-#### api_server args 
+### api_server args 
 
-##### --host
+#### --host
 default is "127.0.0.1",  
 http server host ip.
 
-##### --port
+#### --port
 default is "8000",  
 http server port.
 
-##### --tp
+#### --tp
 default is 1,  
 tensor parrall size.
 
-##### --model_dir
+#### --model_dir
 
 the model weight dir path, the server will load config, weights and tokenizer from this dir.
 
-##### --tokenizer_mode
+#### --tokenizer_mode
 default is "slow",  
 tokenizer load mode, can be "slow" or "auto", "slow" mode always load fast but run slow, "slow" mode is good for debug and test, when you want to get best performance, please use "auto" mode.
 
-##### --max_total_token_num
+#### --max_total_token_num
 
 default is 6000,  
 the total token num the gpu and model can support, a sample about how to set this arg:   
@@ -46,25 +46,25 @@ max_total_token_num = int(299008 * ratio)
 
 We recommend setting the ratio between 0.8 and 0.9, perhaps slightly higher. if OOM error happens, you can reduce the ratio or arg "batch_max_tokens".  
 
-##### --batch_max_tokens
+#### --batch_max_tokens
 
 the server will merge requests in waiting list to a batch to inference first (called prefill), batch_max_tokens will control tokens num of the merged batch, Reasonable setting of this arg can prevent OOM. if not set, it will be 1 / 6 * max_total_token_num.
 
-##### --eos_id
+#### --eos_id
 
 defautl is 2,  
 eos_id refers to the token id used to indicate the end of a sequence.
 
-##### --running_max_req_size  
+#### --running_max_req_size  
 
 default is 1000,   
 the max size for running requests in the same time.  
 
-##### --max_req_input_len
+#### --max_req_input_len
 default is 2048,  
 the max value for one reqest's input token len.  
 
 
-##### --max_req_total_len
+#### --max_req_total_len
 default is 3072,
 the max value for req_input_len + req_output_len.
