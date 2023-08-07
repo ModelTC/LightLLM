@@ -55,7 +55,7 @@ docker run -it --gpus all -p 8080:80 -v your_local_path:/data/ image_name /bin/b
 python setup.py install
 ~~~
 
- The code has been tested on a range of GPUs including V100, A100, A800, 4090, and H800. If you are running the code on V100, A100, A800, etc., we recommend using triton==2.0.0.dev20221202. If you are running the code on 4090, H800, etc., it is necessary to compile and install the source code of [triton==2.1.0](https://github.com/openai/triton/tree/main) from the GitHub repository. If the code doesn't work on other GPUs, try modifying the triton kernel used in model inference.
+ The code has been tested on a range of GPUs including A100, A800, 4090, and H800. If you are running the code on A100, A800, etc., we recommend using triton==2.0.0.dev20221202. If you are running the code on 4090, H800, etc., it is necessary to compile and install the source code of [triton==2.1.0](https://github.com/openai/triton/tree/main) from the GitHub repository. If the code doesn't work on other GPUs, try modifying the triton kernel used in model inference.
 
 ### RUN LLaMA
 With efficient Routers and TokenAttention, LightLLM can be deployed as a service and achieve the state-of-the-art throughput performance.
