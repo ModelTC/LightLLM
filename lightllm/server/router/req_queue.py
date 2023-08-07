@@ -10,10 +10,8 @@ class ReqQueue:
 
     def __init__(self, max_total_tokens, batch_max_tokens, running_max_req_size) -> None:
         self.max_total_tokens = max_total_tokens
-        if batch_max_tokens is not None:
-            self.batch_max_tokens = batch_max_tokens
-        else:
-            self.batch_max_tokens = int(self.max_total_tokens * 1 / 6)
+        assert batch_max_tokens is not None
+        self.batch_max_tokens = batch_max_tokens
         self.running_max_req_size = running_max_req_size
         self.waiting_req_list: List[Req] = []
         

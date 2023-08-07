@@ -143,7 +143,14 @@ if __name__ == "__main__":
     
     assert args.max_req_input_len < args.max_req_total_len
     setting['max_req_total_len'] = args.max_req_total_len
-    
+
+    if args.batch_max_tokens is None:
+        batch_max_tokens = int(1 / 6 * args.max_total_token_num)
+        batch_max_tokens = max(batch_max_tokens, args.max_req_total_len)
+        args.batch_max_tokens = batch_max_tokens
+    else:
+        assert args.batch_max_tokens >= args.max_req_total_len, "batch_max_tokens must >= max_req_total_len"
+
     can_use_ports = alloc_can_use_network_port(num=3 + args.tp)
     router_port, detokenization_port, httpserver_port = can_use_ports[0:3]
     model_rpc_ports = can_use_ports[3:]
@@ -151,7 +158,8 @@ if __name__ == "__main__":
     httpserver_manager = HttpServerManager(args.model_dir, 
                                            args.tokenizer_mode, 
                                            router_port=router_port, 
-                                           httpserver_port=httpserver_port, 
+                                           httpserver_port=httpserver_port,
+                                           total_token_num=args.max_total_token_num,
                                            max_req_input_len=args.max_req_input_len,
                                            max_req_total_len=args.max_req_total_len)
     load_state = mp.Value('i', 0)

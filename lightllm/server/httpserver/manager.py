@@ -7,7 +7,7 @@ from ..tokenizer import get_tokenizer
 from ..io_struct import BatchStrOut, AbortReq
 
 class HttpServerManager:
-    def __init__(self, model_weightdir, tokenizor_mode, router_port, httpserver_port, max_req_input_len, max_req_total_len):
+    def __init__(self, model_weightdir, tokenizor_mode, router_port, httpserver_port, total_token_num, max_req_input_len, max_req_total_len):
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"tcp://127.0.0.1:{router_port}")
@@ -19,6 +19,7 @@ class HttpServerManager:
         
         self.req_id_to_out_inf = {}  # value type (out_str, finished, event)
         
+        self.total_token_num = total_token_num
         self.max_req_input_len = max_req_input_len
         self.max_req_total_len = max_req_total_len
         
@@ -29,7 +30,9 @@ class HttpServerManager:
             raise ValueError(f"the input prompt token len is too long > {self.max_req_input_len}")
         req_total_len = len(prompt_ids) + sampling_params.max_new_tokens
         if req_total_len > self.max_req_total_len:
-            raise ValueError(f"the req token total len (input len + output len) is too long > {self.max_req_total_len}")
+            raise ValueError(f"the req token total len (input len + output len) is too long > max_req_total_len:{self.max_req_total_len}")
+        if req_total_len + 1 > self.total_token_num:
+            raise ValueError(f"the req token total len + 1 (input len + output len + 1) is too long > max_total_token_num:{self.total_token_num}")
         
         self.send_to_router.send_pyobj((prompt_ids, sampling_params, request_id))
         event = asyncio.Event()
