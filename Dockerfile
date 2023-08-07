@@ -49,5 +49,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 
 COPY --from=pytorch-install /opt/conda /opt/conda
 COPY requirements.txt requirements.txt
+COPY . /lightllm
 RUN pip install -r requirements.txt && rm -rf requirements.txt
+RUN pip install /lightllm
 RUN apt update -y && apt install -y vim wget curl git
