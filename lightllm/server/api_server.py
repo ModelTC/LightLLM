@@ -165,25 +165,25 @@ def main():
                                            total_token_num=args.max_total_token_num,
                                            max_req_input_len=args.max_req_input_len,
                                            max_req_total_len=args.max_req_total_len)
-    pipe_router, pipe_router_child = mp.Pipe(duplex=False)
-    pipe_detoken, pipe_detoken_child = mp.Pipe(duplex=False)
+    pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
+    pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
     proc_router = mp.Process(target=start_router_process, args=(
-        args, router_port, detokenization_port, model_rpc_ports, pipe_router_child))
+        args, router_port, detokenization_port, model_rpc_ports, pipe_router_writer))
     proc_router.start()
     proc_detoken = mp.Process(target=start_detokenization_process, args=(
-        args, detokenization_port, httpserver_port, pipe_detoken_child))
+        args, detokenization_port, httpserver_port, pipe_detoken_writer))
     proc_detoken.start()
+    
+    # wait load model ready
+    router_init_state = pipe_router_reader.recv()
+    detoken_init_state = pipe_detoken_reader.recv()
 
-    for item in [pipe_router, pipe_detoken]:
-        e = item.recv()
-        if e != 'ok':
-            print('subprocess failed')
-            print(e)
-            for p in [proc_router, proc_detoken]:
-                p.kill()
-            for p in [proc_router, proc_detoken]:
-                p.join()
-            sys.exit(1)
+    if router_init_state != "init ok" or detoken_init_state != "init ok":
+        proc_router.kill()
+        proc_detoken.kill()
+        print("router init state:", router_init_state, "detoken init state:", detoken_init_state)
+        sys.exit(1)
+
     assert proc_router.is_alive() and proc_detoken.is_alive()
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="debug",

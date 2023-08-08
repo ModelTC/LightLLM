@@ -141,9 +141,10 @@ class ModelRpcServer(rpyc.Service):
 
 
 class ModelRpcClient:
-    def __init__(self, model_rpc, world_size):
+    def __init__(self, model_rpc, world_size, rpc_server_process=None):
         self.model: ModelRpcServer = model_rpc
         self.world_size = world_size
+        self.rpc_server_process = rpc_server_process
         self.use_rpc = self.world_size != 1
         if self.use_rpc:
             def async_wrap(f):
@@ -224,6 +225,12 @@ class ModelRpcClient:
             return
         else:
             return
+        
+    def shutdown_rpc_process(self):
+        if self.rpc_server_process is not None:
+            self.rpc_server_process.kill()
+            self.rpc_server_process.join()
+        return
 
 
 def _init_env(port):
@@ -236,7 +243,7 @@ def _init_env(port):
 async def start_model_process(port, world_size):
     # 单卡时不使用 rpc
     if world_size == 1:
-        return None, ModelRpcClient(ModelRpcServer(), world_size)
+        return ModelRpcClient(ModelRpcServer(), world_size)
     
     import multiprocessing
     proc = multiprocessing.Process(target=_init_env, args=(port,))
@@ -254,4 +261,4 @@ async def start_model_process(port, world_size):
         raise Exception("init rpc env error!")
 
     assert proc.is_alive()
-    return proc, ModelRpcClient(con.root, world_size)
+    return ModelRpcClient(con.root, world_size, rpc_server_process=proc)
