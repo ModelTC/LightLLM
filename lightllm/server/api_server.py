@@ -139,6 +139,8 @@ def main():
                         help="the max value for req_input_len + req_output_len")
     parser.add_argument("--nccl_port", type=int, default=28765,
                         help="the nccl_port to build a distributed environment for PyTorch")
+    parser.add_argument("--mode", type=str, default="",
+                        help="model inference mode, now only support 'int8kv' or '' default")
     args = parser.parse_args()
 
     assert args.max_req_input_len < args.max_req_total_len
@@ -168,7 +170,7 @@ def main():
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
     proc_router = mp.Process(target=start_router_process, args=(
-        args, router_port, detokenization_port, model_rpc_ports, pipe_router_writer))
+        args, router_port, detokenization_port, model_rpc_ports, args.mode, pipe_router_writer))
     proc_router.start()
     proc_detoken = mp.Process(target=start_detokenization_process, args=(
         args, detokenization_port, httpserver_port, pipe_detoken_writer))

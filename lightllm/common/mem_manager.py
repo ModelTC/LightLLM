@@ -7,6 +7,9 @@ class MemoryManager:
         self._mem_cum_sum = torch.empty((size,), dtype=torch.int32, device="cuda")
         self.indexes = torch.arange(0, size, dtype=torch.long, device="cuda")
         self.can_use_mem_size = size
+        self._init_buffers(size, dtype, head_num, head_dim, layer_num)
+    
+    def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.key_buffer = [torch.empty((size, head_num, head_dim), dtype=dtype, device="cuda") for _ in range(layer_num)]
         self.value_buffer = [torch.empty((size, head_num, head_dim), dtype=dtype, device="cuda") for _ in range(layer_num)]
     

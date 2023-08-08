@@ -225,12 +225,6 @@ class ModelRpcClient:
             return
         else:
             return
-        
-    def shutdown_rpc_process(self):
-        if self.rpc_server_process is not None:
-            self.rpc_server_process.kill()
-            self.rpc_server_process.join()
-        return
 
 
 def _init_env(port):
