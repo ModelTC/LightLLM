@@ -146,13 +146,21 @@ class ModelRpcClient:
         self.world_size = world_size
         self.use_rpc = self.world_size != 1
         if self.use_rpc:
-            self._init_model = rpyc.async_(self.model.init_model)
-            self._add_batch = rpyc.async_(self.model.add_batch)
-            self._prefill_batch = rpyc.async_(self.model.prefill_batch)
-            self._decode_batch = rpyc.async_(self.model.decode_batch)
-            self._filter_batch = rpyc.async_(self.model.filter_batch)
-            self._merge_batch = rpyc.async_(self.model.merge_batch)
-            self._remove_batch = rpyc.async_(self.model.remove_batch)
+            def async_wrap(f):
+                f = rpyc.async_(f)
+                async def _func(*args, **kwargs):
+                    ans = f(*args, **kwargs)
+                    await asyncio.to_thread(ans.wait)
+                    # raise if exception
+                    return ans.value
+                return _func
+            self._init_model = async_wrap(self.model.init_model)
+            self._add_batch = async_wrap(self.model.add_batch)
+            self._prefill_batch = async_wrap(self.model.prefill_batch)
+            self._decode_batch = async_wrap(self.model.decode_batch)
+            self._filter_batch = async_wrap(self.model.filter_batch)
+            self._merge_batch = async_wrap(self.model.merge_batch)
+            self._remove_batch = async_wrap(self.model.remove_batch)
         else:
             self._init_model = self.model.exposed_init_model
             self._add_batch = self.model.exposed_add_batch
@@ -164,9 +172,9 @@ class ModelRpcClient:
         return
 
     async def init_model(self, rank_id, world_size, weight_dir, max_total_token_num, load_way, mode):
-        ans = self._init_model(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+        ans : rpyc.AsyncResult = self._init_model(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
         if self.use_rpc:
-            await asyncio.to_thread(ans.wait)
+            await ans
             return
         else:
             return
@@ -174,7 +182,7 @@ class ModelRpcClient:
     async def init_batch(self, batch_id, reqs):
         ans = self._add_batch(batch_id, reqs, "fp16")
         if self.use_rpc:
-            await asyncio.to_thread(ans.wait)
+            await ans
             return
         else:
             return
@@ -182,23 +190,21 @@ class ModelRpcClient:
     async def prefill_batch(self, batch_id):
         ans = self._prefill_batch(batch_id)
         if self.use_rpc:
-            await asyncio.to_thread(ans.wait)
-            return ans.value
+            return await ans
         else:
             return ans
 
     async def decode_batch(self, batch_id):
         ans = self._decode_batch(batch_id)
         if self.use_rpc:
-            await asyncio.to_thread(ans.wait)
-            return ans.value
+            return await ans
         else:
             return ans
 
     async def filter_batch(self, batch_id, req_id_list):
         ans = self._filter_batch(batch_id, req_id_list)
         if self.use_rpc:
-            await asyncio.to_thread(ans.wait)
+            await ans
             return
         else:
             return 
@@ -206,7 +212,7 @@ class ModelRpcClient:
     async def merge_batch(self, batch_id1, batch_id2):
         ans = self._merge_batch(batch_id1, batch_id2)
         if self.use_rpc:
-            await asyncio.to_thread(ans.wait)
+            await ans
             return
         else:
             return
@@ -214,7 +220,7 @@ class ModelRpcClient:
     async def remove_batch(self, batch_id):
         ans = self._remove_batch(batch_id)
         if self.use_rpc:
-            await asyncio.to_thread(ans.wait)
+            await ans
             return
         else:
             return
@@ -230,7 +236,7 @@ def _init_env(port):
 async def start_model_process(port, world_size):
     # 单卡时不使用 rpc
     if world_size == 1:
-        return ModelRpcClient(ModelRpcServer(), world_size)
+        return None, ModelRpcClient(ModelRpcServer(), world_size)
     
     import multiprocessing
     proc = multiprocessing.Process(target=_init_env, args=(port,))
@@ -247,4 +253,5 @@ async def start_model_process(port, world_size):
     if repeat_count == 20:
         raise Exception("init rpc env error!")
 
-    return ModelRpcClient(con.root, world_size)
+    assert proc.is_alive()
+    return proc, ModelRpcClient(con.root, world_size)
