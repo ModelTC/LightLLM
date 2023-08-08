@@ -139,10 +139,13 @@ if __name__ == "__main__":
                         help="the max value for req input tokens num")
     parser.add_argument("--max_req_total_len", type=int, default=2048 + 1024,
                         help="the max value for req_input_len + req_output_len")
+    parser.add_argument("--nccl_port", type=int, default=28765,
+                        help="the nccl_port to build a distributed environment for PyTorch")
     args = parser.parse_args()
     
     assert args.max_req_input_len < args.max_req_total_len
     setting['max_req_total_len'] = args.max_req_total_len
+    setting['nccl_port'] = args.nccl_port
 
     if args.batch_max_tokens is None:
         batch_max_tokens = int(1 / 6 * args.max_total_token_num)
@@ -151,7 +154,7 @@ if __name__ == "__main__":
     else:
         assert args.batch_max_tokens >= args.max_req_total_len, "batch_max_tokens must >= max_req_total_len"
 
-    can_use_ports = alloc_can_use_network_port(num=3 + args.tp)
+    can_use_ports = alloc_can_use_network_port(num=3 + args.tp, used_nccl_port=args.nccl_port)
     router_port, detokenization_port, httpserver_port = can_use_ports[0:3]
     model_rpc_ports = can_use_ports[3:]
     

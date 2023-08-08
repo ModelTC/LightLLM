@@ -12,6 +12,7 @@ from lightllm.models.llama2.layer_infer.model import Llama2TpPartModel
 from lightllm.models.bloom.layer_infer.model import BloomTpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
+from lightllm.common.configs.config import setting
 from .post_process import sample
 
 class ModelRpcServer(rpyc.Service):
@@ -29,7 +30,7 @@ class ModelRpcServer(rpyc.Service):
         self.mode = mode
         self.cache = {}
 
-        dist.init_process_group('nccl', init_method='tcp://127.0.0.1:28765', rank=rank_id, world_size=world_size)
+        dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
         torch.cuda.set_device(rank_id)
 
         model_cfg, _ = PretrainedConfig.get_config_dict(
