@@ -57,10 +57,14 @@ class Llama2TpPartModel:
         self.init_to_get_rotary()
 
     def init_to_get_rotary(self, base=10000):
-        max_seq_len = self.config.get("max_position_embeddings", 2048)
+        rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
+        if "max_sequence_length" in self.config:
+            max_seq_len = self.config["max_sequence_length"]
+        else:
+            max_seq_len = self.config.get("max_position_embeddings", 2048) * rope_scaling_factor
         base = float(base)
         inv_freq = 1.0 / (base ** (torch.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32) / self.head_dim_))
-        t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32)
+        t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
         self._cos_cached = torch.cos(freqs).to(torch.float16).cuda()
