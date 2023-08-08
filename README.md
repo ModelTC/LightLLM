@@ -23,6 +23,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - Tensor Parallelism: utilizes tensor parallelism over multiple GPUs for faster inference.
 - [Token Attention](./docs/TokenAttention.md): implements token-wise's KV cache memory management mechanism, allowing for zero memory waste during inference.
 - High-performance Router: collaborates with Token Attention to meticulously manage the GPU memory of each token, thereby optimizing system throughput.
+- Int8KV Cache: This feature will increase the capacity of tokens to almost twice as much. only llama support.
  
 ## Supported Model List
 

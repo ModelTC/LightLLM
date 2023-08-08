@@ -9,6 +9,7 @@ from lightllm.models.llama.layer_weights.transformer_layer_weight import *
 from lightllm.models.llama.layer_infer.infer_struct import InferStateInfo
 from lightllm.models.llama.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.int8kv_mem_manager import INT8KVMemoryManager
 from lightllm.common.infer_utils import init_bloc
 
 class LlamaTpPartModel:
@@ -20,9 +21,14 @@ class LlamaTpPartModel:
             self.config = json.load(json_file)
 
         assert load_way == "HF", "llama only support HF format to load Now!"
-        assert mode == "", "future to support int8 int4 ..."
+        assert mode in ["", "int8kv"], "now support int8kv, future to support int8 int4 ..."
+
+        mem_dict = {
+            "" : MemoryManager,
+            "int8kv" : INT8KVMemoryManager
+        }
         
-        self.mem_manager = MemoryManager(max_total_token_num, 
+        self.mem_manager = mem_dict[mode](max_total_token_num, 
                                          dtype=torch.float16,
                                          head_num=self.config["num_attention_heads"] // world_size,
                                          head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],

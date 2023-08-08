@@ -220,10 +220,12 @@ class RouterManager:
     
     def clean_up(self):
         for model_rpc in self.model_rpcs:
-            model_rpc.shutdown_rpc_process()
+            model_rpc.rpc_server_process.kill()
+        for model_rpc in self.model_rpcs:
+            model_rpc.rpc_server_process.join()
         return
 
-def start_router_process(args, router_port, detokenization_port, model_rpc_ports, pipe_writer):
+def start_router_process(args, router_port, detokenization_port, model_rpc_ports, mode, pipe_writer):
     try:
         router = RouterManager(
             args.model_dir,
@@ -236,7 +238,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
             router_port=router_port,
             detokenization_port=detokenization_port,
             model_rpc_ports=model_rpc_ports,
-            mode="")
+            mode=mode)
     
         asyncio.run(router.wait_to_model_ready())
     except Exception as e:
