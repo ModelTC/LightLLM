@@ -10,6 +10,7 @@ from rpyc.utils.classic import obtain
 from lightllm.models.llama.layer_infer.model import LlamaTpPartModel
 from lightllm.models.llama2.layer_infer.model import Llama2TpPartModel
 from lightllm.models.bloom.layer_infer.model import BloomTpPartModel
+from lightllm.models.starcoder.layer_infer.model import StarcoderTpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.common.configs.config import setting
@@ -45,6 +46,8 @@ class ModelRpcServer(rpyc.Service):
                self.model = LlamaTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
            else:
                self.model = Llama2TpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+        elif self.model_type == 'gpt_bigcode':
+            self.model = StarcoderTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
         else:
             raise ValueError("Not supported model type! The current support model list is [bloom llama].")
         
