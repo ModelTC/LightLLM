@@ -37,16 +37,11 @@ class RouterManager:
         self.send_to_detokenization.connect(f"tcp://127.0.0.1:{detokenization_port}")
         self.model_rpc_ports = model_rpc_ports
 
-        self.model_procs = []
-    
-
     async def wait_to_model_ready(self):
         self.model_rpcs: List[ModelRpcClient] = []
         for rank_id in range(self.world_size):
-            proc_rpc_model, rpc_model = await start_model_process(port=self.model_rpc_ports[rank_id], world_size=self.world_size)
+            rpc_model = await start_model_process(port=self.model_rpc_ports[rank_id], world_size=self.world_size)
             self.model_rpcs.append(rpc_model)
-            if proc_rpc_model:
-                self.model_procs.append(proc_rpc_model)
 
         init_model_ret = []
         for rank_id in range(self.world_size):  # async init model process
@@ -222,14 +217,13 @@ class RouterManager:
                 self.send_to_detokenization.send_pyobj(abort_req)
             else:
                 assert False, f"Error Req Inf {recv_req}"
+    
+    def clean_up(self):
+        for model_rpc in self.model_rpcs:
+            model_rpc.shutdown_rpc_process()
+        return
 
-
-def start_router_process(args, router_port, detokenization_port, model_rpc_ports, pipe=None):
-    def clean_up(router: RouterManager):
-        for proc in router.model_procs:
-            proc.kill()
-        for proc in router.model_procs:
-            proc.join()
+def start_router_process(args, router_port, detokenization_port, model_rpc_ports, pipe_writer):
     try:
         router = RouterManager(
             args.model_dir,
@@ -246,19 +240,16 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
     
         asyncio.run(router.wait_to_model_ready())
     except Exception as e:
-        if pipe:
-            pipe.send(str(e))
-        clean_up(router)
+        pipe_writer.send(str(e))
+        router.clean_up()
         raise
 
-    if pipe:
-        pipe.send('ok')
+    pipe_writer.send('init ok')
     
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(router.loop_for_fwd())
     loop.run_until_complete(router.loop_for_netio_req())
-    clean_up(router)
     return
     
     

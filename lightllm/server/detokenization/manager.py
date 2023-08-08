@@ -60,16 +60,14 @@ class DeTokenizationManager:
                 pass
 
 
-def start_detokenization_process(args, detokenization_port, httpserver_port, pipe=None):
+def start_detokenization_process(args, detokenization_port, httpserver_port, pipe_writer):
     try:
         router = DeTokenizationManager(args.model_dir, args.tokenizer_mode,
                                        detokenization_port=detokenization_port, httpserver_port=httpserver_port)
     except Exception as e:
-        if pipe:
-            pipe.send(str(e))
+        pipe_writer.send(str(e))
         raise
-    if pipe:
-        pipe.send('ok')
+    pipe_writer.send('init ok')
     loop = asyncio.get_event_loop()
     loop.run_until_complete(router.handle_loop())
     return
