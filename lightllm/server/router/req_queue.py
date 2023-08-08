@@ -63,7 +63,6 @@ class ReqQueue:
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
-            # print("new batch:", new_batch)
             return new_batch
         else:
             return None

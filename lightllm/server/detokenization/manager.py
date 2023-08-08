@@ -58,14 +58,18 @@ class DeTokenizationManager:
                 print(f"detoken process has exception {str(e)}")
                 traceback.print_exc()
                 pass
-                
-                    
-                    
 
-def start_detokenization_process(args, detokenization_port, httpserver_port, load_state):
-    router = DeTokenizationManager(args.model_dir, args.tokenizer_mode, detokenization_port=detokenization_port, httpserver_port=httpserver_port)
-    with load_state.get_lock():
-        load_state.value += 1
+
+def start_detokenization_process(args, detokenization_port, httpserver_port, pipe=None):
+    try:
+        router = DeTokenizationManager(args.model_dir, args.tokenizer_mode,
+                                       detokenization_port=detokenization_port, httpserver_port=httpserver_port)
+    except Exception as e:
+        if pipe:
+            pipe.send(str(e))
+        raise
+    if pipe:
+        pipe.send('ok')
     loop = asyncio.get_event_loop()
     loop.run_until_complete(router.handle_loop())
     return

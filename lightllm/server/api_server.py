@@ -18,6 +18,7 @@
 
 import asyncio
 import uvloop
+import sys
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import argparse
 import json
@@ -113,16 +114,13 @@ async def generate_stream(request: Request) -> Response:
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
-            
-
-if __name__ == "__main__":
-
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model_dir", type=str, default=None,
                         help="the model weight dir path, the app will load config, weights and tokenizer from this dir")
-    parser.add_argument("--tokenizer_mode", type=str, default="slow", 
+    parser.add_argument("--tokenizer_mode", type=str, default="slow",
                         help="""tokenizer load mode, can be slow or auto, slow mode load fast but run slow, slow mode is good for debug and test, 
                         when you want to get best performance, try auto mode""")
     parser.add_argument("--max_total_token_num", type=int, default=6000,
@@ -135,14 +133,14 @@ if __name__ == "__main__":
                         help="the max size for forward requests in the same time")
     parser.add_argument("--tp", type=int, default=1,
                         help="model tp parral size, the default is 1")
-    parser.add_argument("--max_req_input_len", type=int, default=2048, 
+    parser.add_argument("--max_req_input_len", type=int, default=2048,
                         help="the max value for req input tokens num")
     parser.add_argument("--max_req_total_len", type=int, default=2048 + 1024,
                         help="the max value for req_input_len + req_output_len")
     parser.add_argument("--nccl_port", type=int, default=28765,
                         help="the nccl_port to build a distributed environment for PyTorch")
     args = parser.parse_args()
-    
+
     assert args.max_req_input_len < args.max_req_total_len
     setting['max_req_total_len'] = args.max_req_total_len
     setting['nccl_port'] = args.nccl_port
@@ -154,21 +152,43 @@ if __name__ == "__main__":
     else:
         assert args.batch_max_tokens >= args.max_req_total_len, "batch_max_tokens must >= max_req_total_len"
 
-    can_use_ports = alloc_can_use_network_port(num=3 + args.tp, used_nccl_port=args.nccl_port)
+    can_use_ports = alloc_can_use_network_port(
+        num=3 + args.tp, used_nccl_port=args.nccl_port)
     router_port, detokenization_port, httpserver_port = can_use_ports[0:3]
     model_rpc_ports = can_use_ports[3:]
-    
-    httpserver_manager = HttpServerManager(args.model_dir, 
-                                           args.tokenizer_mode, 
-                                           router_port=router_port, 
+
+    global httpserver_manager
+    httpserver_manager = HttpServerManager(args.model_dir,
+                                           args.tokenizer_mode,
+                                           router_port=router_port,
                                            httpserver_port=httpserver_port,
                                            total_token_num=args.max_total_token_num,
                                            max_req_input_len=args.max_req_input_len,
                                            max_req_total_len=args.max_req_total_len)
-    load_state = mp.Value('i', 0)
-    mp.Process(target=start_router_process, args=(args, router_port, detokenization_port, model_rpc_ports, load_state)).start()
-    mp.Process(target=start_detokenization_process, args=(args, detokenization_port, httpserver_port, load_state)).start()
-    while load_state.value != 2: # wait model ready
-        pass
+    pipe_router, pipe_router_child = mp.Pipe(duplex=False)
+    pipe_detoken, pipe_detoken_child = mp.Pipe(duplex=False)
+    proc_router = mp.Process(target=start_router_process, args=(
+        args, router_port, detokenization_port, model_rpc_ports, pipe_router_child))
+    proc_router.start()
+    proc_detoken = mp.Process(target=start_detokenization_process, args=(
+        args, detokenization_port, httpserver_port, pipe_detoken_child))
+    proc_detoken.start()
+
+    for item in [pipe_router, pipe_detoken]:
+        e = item.recv()
+        if e != 'ok':
+            print('subprocess failed')
+            print(e)
+            for p in [proc_router, proc_detoken]:
+                p.kill()
+            for p in [proc_router, proc_detoken]:
+                p.join()
+            sys.exit(1)
+    assert proc_router.is_alive() and proc_detoken.is_alive()
+
     uvicorn.run(app, host=args.host, port=args.port, log_level="debug",
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE, loop="uvloop")
+
+
+if __name__ == "__main__":
+    main()
