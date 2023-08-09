@@ -30,6 +30,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - [BLOOM](https://huggingface.co/bigscience/bloom)
 - [LLaMA](https://github.com/facebookresearch/llama) 
 - [LLaMA V2](https://huggingface.co/meta-llama)
+- [StarCoder](https://github.com/bigcode-project/starcoder)
 
 ## Get started
 

@@ -72,7 +72,7 @@ async def generate(request: Request) -> Response:
 
     assert final_output is not None
     ret = {"generated_text": ["".join(final_output)]}
-    return Response(content=json.dumps(ret).encode("utf-8"))
+    return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
 
 
 @app.post("/generate_stream")
@@ -102,7 +102,7 @@ async def generate_stream(request: Request) -> Response:
                          "special":False},
                          "generated_text":None,
                          "details":None}
-            yield ("data:"+ json.dumps(ret) + f"\n\n").encode("utf-8")
+            yield ("data:"+ json.dumps(ret, ensure_ascii=False) + f"\n\n").encode("utf-8")
 
     async def abort_request() -> None:
         await httpserver_manager.abort(request_id)
