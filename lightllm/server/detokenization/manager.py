@@ -45,8 +45,11 @@ class DeTokenizationManager:
                         req_out:ReqDetokenizationState = self.req_id_to_out[req_id]
                         req_out.output_ids.append(new_token_id)
                         out_text = decode_token(self.tokenizer, req_out, new_token_id, skip_special_tokens=True)
-                        new_text = out_text[len(req_out.output_str):]
-                        req_out.output_str = out_text
+                        if out_text.endswith(u'\ufffd'):
+                            new_text = ''
+                        else:
+                            new_text = out_text[len(req_out.output_str):]
+                            req_out.output_str = out_text
                         new_batch_str_out.reqs_infs.append((req_id, new_text, True if abort else finished, abort))
                         if finished or abort:
                             try:
