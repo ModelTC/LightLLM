@@ -31,6 +31,9 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - [LLaMA](https://github.com/facebookresearch/llama) 
 - [LLaMA V2](https://huggingface.co/meta-llama)
 - [StarCoder](https://github.com/bigcode-project/starcoder)
+- [Qwen-7b](https://github.com/QwenLM/Qwen-7B)  
+
+> When you start Qwen-7b, you need to set the parameter '--eos_id 151643'.
 
 ## Get started
 
