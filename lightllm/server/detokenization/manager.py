@@ -13,7 +13,7 @@ from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 
 class DeTokenizationManager:
     
-    def __init__(self, model_weightdir, tokenizor_mode, detokenization_port, httpserver_port):
+    def __init__(self, model_weightdir, tokenizor_mode, detokenization_port, httpserver_port, trust_remote_code):
         context = zmq.asyncio.Context(2)
         self.recv_from_router = context.socket(zmq.PULL)
         self.recv_from_router.bind(f"tcp://127.0.0.1:{detokenization_port}")
@@ -21,7 +21,7 @@ class DeTokenizationManager:
         self.send_to_httpserver = context.socket(zmq.PUSH)
         self.send_to_httpserver.connect(f"tcp://127.0.0.1:{httpserver_port}")
         
-        self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode)
+        self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code)
         self.req_id_to_out = {}
         
     async def handle_loop(self):
@@ -63,10 +63,10 @@ class DeTokenizationManager:
                 pass
 
 
-def start_detokenization_process(args, detokenization_port, httpserver_port, pipe_writer):
+def start_detokenization_process(args, detokenization_port, httpserver_port, pipe_writer, trust_remote_code):
     try:
         router = DeTokenizationManager(args.model_dir, args.tokenizer_mode,
-                                       detokenization_port=detokenization_port, httpserver_port=httpserver_port)
+                                       detokenization_port=detokenization_port, httpserver_port=httpserver_port, trust_remote_code=trust_remote_code)
     except Exception as e:
         pipe_writer.send(str(e))
         raise

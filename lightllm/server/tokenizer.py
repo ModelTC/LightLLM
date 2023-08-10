@@ -32,6 +32,7 @@ _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
 def get_tokenizer(
     tokenizer_name: str,
     tokenizer_mode: str = "auto",
+    trust_remote_code: bool = False,
     *args,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
@@ -60,13 +61,13 @@ def get_tokenizer(
         pass
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args,
                                                   **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments, using slow mode.
         # you can try pip install protobuf==3.20.0 to try repair 
         kwargs["use_fast"] = False
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, *args,
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args,
                                                   **kwargs)
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):

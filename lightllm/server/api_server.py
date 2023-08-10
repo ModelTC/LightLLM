@@ -141,6 +141,8 @@ def main():
                         help="the nccl_port to build a distributed environment for PyTorch")
     parser.add_argument("--mode", type=str, default="",
                         help="model inference mode, now only support 'int8kv' or '' default")
+    parser.add_argument("--trust_remote_code", action='store_true',
+                        help="Whether or not to allow for custom models defined on the Hub in their own modeling files.")
     args = parser.parse_args()
 
     assert args.max_req_input_len < args.max_req_total_len
@@ -166,14 +168,15 @@ def main():
                                            httpserver_port=httpserver_port,
                                            total_token_num=args.max_total_token_num,
                                            max_req_input_len=args.max_req_input_len,
-                                           max_req_total_len=args.max_req_total_len)
+                                           max_req_total_len=args.max_req_total_len,
+                                           trust_remote_code=args.trust_remote_code)
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
     proc_router = mp.Process(target=start_router_process, args=(
         args, router_port, detokenization_port, model_rpc_ports, args.mode, pipe_router_writer))
     proc_router.start()
     proc_detoken = mp.Process(target=start_detokenization_process, args=(
-        args, detokenization_port, httpserver_port, pipe_detoken_writer))
+        args, detokenization_port, httpserver_port, pipe_detoken_writer, args.trust_remote_code))
     proc_detoken.start()
     
     # wait load model ready

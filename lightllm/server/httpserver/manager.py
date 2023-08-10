@@ -7,7 +7,7 @@ from ..tokenizer import get_tokenizer
 from ..io_struct import BatchStrOut, AbortReq
 
 class HttpServerManager:
-    def __init__(self, model_weightdir, tokenizor_mode, router_port, httpserver_port, total_token_num, max_req_input_len, max_req_total_len):
+    def __init__(self, model_weightdir, tokenizor_mode, router_port, httpserver_port, total_token_num, max_req_input_len, max_req_total_len, trust_remote_code):
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"tcp://127.0.0.1:{router_port}")
@@ -15,7 +15,7 @@ class HttpServerManager:
         self.recv_from_detokenization = context.socket(zmq.PULL)
         self.recv_from_detokenization.bind(f"tcp://127.0.0.1:{httpserver_port}")
         
-        self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode)
+        self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code)
         
         self.req_id_to_out_inf = {}  # value type (out_str, finished, event)
         

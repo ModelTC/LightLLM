@@ -12,6 +12,7 @@ from lightllm.models.llama2.layer_infer.model import Llama2TpPartModel
 from lightllm.models.bloom.layer_infer.model import BloomTpPartModel
 from lightllm.models.starcoder.layer_infer.model import StarcoderTpPartModel
 from lightllm.models.qwen.layer_infer.model import QWenTpPartModel
+from lightllm.models.chatglm2.layer_infer.model import ChatGlm2TpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.common.configs.config import setting
@@ -51,6 +52,8 @@ class ModelRpcServer(rpyc.Service):
             self.model = StarcoderTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
         elif self.model_type == 'qwen':
             self.model = QWenTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+        elif self.model_type == 'chatglm':
+            self.model = ChatGlm2TpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
         else:
             raise ValueError("Not supported model type! The current support model list is [bloom llama].")
         
