@@ -242,7 +242,9 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
     
         asyncio.run(router.wait_to_model_ready())
     except Exception as e:
-        pipe_writer.send(str(e))
+        import traceback
+        err_str = '\n'.join(traceback.format_exception(e))
+        pipe_writer.send(err_str)
         router.clean_up()
         raise
 
@@ -253,11 +255,3 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
     loop.create_task(router.loop_for_fwd())
     loop.run_until_complete(router.loop_for_netio_req())
     return
-    
-    
-    
-    
-    
-    
-    
-    
