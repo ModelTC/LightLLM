@@ -12,6 +12,7 @@ from .req_queue import ReqQueue
 from rpyc.utils.classic import obtain
 from lightllm.utils.infer_utils import calculate_time
 from ..io_struct import BatchTokenIdOut, AbortReq
+from .stats import Stats
 
 class RouterManager:
 
@@ -38,12 +39,8 @@ class RouterManager:
         self.send_to_detokenization.connect(f"tcp://127.0.0.1:{detokenization_port}")
         self.model_rpc_ports = model_rpc_ports
 
-        self.log_stats = log_stats
-        self.log_stats_interval = log_stats_interval
-        self.last_log_time = 0.0
-        self.all_tokens = 0
-        self.prompt_tokens = 0
-        self.output_tokens = 0
+        self.stats_tool = Stats(log_stats, log_stats_interval)
+
 
     async def wait_to_model_ready(self):
         self.model_rpcs: List[ModelRpcClient] = []
@@ -90,7 +87,6 @@ class RouterManager:
 
     async def loop_for_fwd(self,):
         counter_count = 0
-        self.last_log_time = time.time()
         while True:
             await self._step()
             counter_count += 1
@@ -98,10 +94,11 @@ class RouterManager:
                 if counter_count % 50 == 0:
                     print("current batch size:", len(self.running_batch.reqs), "token used ratio:", self.running_batch.calcu_used_tokens() / self.max_total_token_num)
                     pass
+                self.stats_tool.print_stats()
                 
             if self.running_batch is None:
                 await asyncio.sleep(0.01)  # 10ms
-                
+
     async def _step(self):
         """
         事件处理循环
@@ -110,9 +107,7 @@ class RouterManager:
         if self.running_batch is None:
             new_batch = self.req_queue.generate_new_batch(self.running_batch)
             if new_batch is not None:
-                current_prompt_tokens = new_batch.input_tokens()
-                self.prompt_tokens += current_prompt_tokens
-                self.all_tokens += current_prompt_tokens
+                self.stats_tool.count_prompt_tokens(new_batch)
                 self.running_batch = new_batch
                 await self._prefill_batch(self.running_batch)
                 self._filter_runing_batch()
@@ -120,8 +115,7 @@ class RouterManager:
             return
 
         if self.has_wait_tokens < self.max_wait_tokens:
-            self.all_tokens = self.all_tokens + len(self.running_batch.reqs)
-            self.output_tokens = self.output_tokens + len(self.running_batch.reqs)
+            self.stats_tool.count_output_tokens(self.running_batch)
             await self._decode_batch(self.running_batch)
             self._filter_runing_batch()
             self.has_wait_tokens += 1
@@ -129,23 +123,18 @@ class RouterManager:
         else:
             new_mini_batch = self.req_queue.generate_new_batch(self.running_batch)
             if new_mini_batch is not None:
-                current_prompt_tokens = new_mini_batch.input_tokens()
-                self.prompt_tokens += current_prompt_tokens
-                self.all_tokens += current_prompt_tokens
+                self.stats_tool.count_prompt_tokens(new_mini_batch)
                 await self._prefill_batch(new_mini_batch)
                 if not new_mini_batch.is_clear():
                     await self._merge_batch(self.running_batch, new_mini_batch)
                     self.running_batch.merge(new_mini_batch)
                 self.has_wait_tokens = 0
             else:
-                self.all_tokens = self.all_tokens + len(self.running_batch.reqs)
-                self.output_tokens = self.output_tokens + len(self.running_batch.reqs)
+                self.stats_tool.count_output_tokens(self.running_batch)
                 await self._decode_batch(self.running_batch)
                 self._filter_runing_batch()
                 self.has_wait_tokens += 1
-
-        self._log_stats()
-
+        
         return
 
     async def _init_batch(self, batch: Batch):
@@ -225,21 +214,6 @@ class RouterManager:
     
         self.send_to_detokenization.send_pyobj(batch_out)
         return
-        
-    def _log_stats(self):
-        if not self.log_stats:
-            return
-
-        now = time.time()
-        if now - self.last_log_time > self.log_stats_interval:
-            print(f"Avg tokens(prompt+generate) throughput: {self.all_tokens/(now-self.last_log_time):8.3f} tokens/s\n"
-                  f"Avg prompt tokens throughput:           {self.prompt_tokens/(now-self.last_log_time):8.3f} tokens/s\n"
-                  f"Avg generate tokens throughput:         {self.output_tokens/(now-self.last_log_time):8.3f} tokens/s")
-            self.all_tokens = 0
-            self.output_tokens = 0
-            self.prompt_tokens = 0
-            self.last_log_time = now
-
 
     async def loop_for_netio_req(self):
         while True:
