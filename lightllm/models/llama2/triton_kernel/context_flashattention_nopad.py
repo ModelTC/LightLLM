@@ -154,7 +154,7 @@ elif triton.__version__ == "2.0.0":
         offs_d = tl.arange(0, BLOCK_DMODEL)
         offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
         off_q = (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs + cur_head * stride_qh + offs_d[None, :] * stride_qd
-        off_k = offs_n[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :] * stride_kd
+        off_k = offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
         off_v = offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
         q = tl.load(Q + off_q, mask=offs_m[:, None] < cur_batch_seq_len, other=0.0)
 
@@ -173,10 +173,10 @@ elif triton.__version__ == "2.0.0":
             start_n = tl.multiple_of(start_n, BLOCK_N)
             # -- compute qk ----
             k = tl.load(k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
-                        mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0)
+                        mask=(start_n + offs_n[None, :]) < cur_batch_seq_len, other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            qk += tl.dot(q, k, trans_b=True)
+            qk += tl.dot(q, k)
             qk *= sm_scale
             qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
 
