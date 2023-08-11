@@ -57,7 +57,10 @@ class Llama2TpPartModel:
         self.init_to_get_rotary()
 
     def init_to_get_rotary(self, base=10000):
-        rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
+        if self.config.get("rope_scaling", {}) is None:
+            rope_scaling_factor = 1.0
+        else:
+            rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
         if "max_sequence_length" in self.config:
             max_seq_len = self.config["max_sequence_length"]
         else:
