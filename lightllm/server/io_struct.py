@@ -53,6 +53,12 @@ class Batch:
         self.reqs = reqs
         self.id_to_reqs = {req.request_id: req for req in reqs}
 
+    def input_tokens(self):
+        batch_input_tokens = 0
+        for req in self.reqs:
+            batch_input_tokens += req.input_len
+        return batch_input_tokens
+
     def calcu_max_tokens(self):
         tokens = 0
         for req in self.reqs:

@@ -143,6 +143,10 @@ def main():
                         help="model inference mode, now only support 'int8kv' or '' default")
     parser.add_argument("--trust_remote_code", action='store_true',
                         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.")
+    parser.add_argument("--disable_log_stats", action='store_true',
+                        help="disable logging throughput stats.")
+    parser.add_argument("--log_stats_interval", type=int, default=10,
+                        help="log stats interval in second.")
     args = parser.parse_args()
 
     assert args.max_req_input_len < args.max_req_total_len
