@@ -11,6 +11,7 @@ from lightllm.models.llama.layer_infer.model import LlamaTpPartModel
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.common.int8kv_mem_manager import INT8KVMemoryManager
 from lightllm.common.infer_utils import init_bloc
+from lightllm.common.build_utils import repair_config
 
 class QWenTpPartModel(LlamaTpPartModel):
     def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=""):
@@ -20,10 +21,11 @@ class QWenTpPartModel(LlamaTpPartModel):
         with open(os.path.join(weight_dir, "config.json"), 'r') as json_file:
             self.config = json.load(json_file)
 
-        self.config["num_attention_heads"] = self.config["n_head"]
-        self.config["hidden_size"] = self.config["n_embd"]
-        self.config["num_hidden_layers"] = self.config["n_layer"]
-        self.config["rms_norm_eps"] = self.config["layer_norm_epsilon"]
+        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
+        repair_config(self.config, same_names=["hidden_size", "n_embd"])
+        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        repair_config(self.config, same_names=["rms_norm_eps", "layer_norm_epsilon"])
+        repair_config(self.config, same_names=["ffn_hidden_size", "intermediate_size"])
 
         assert load_way == "HF", "llama only support HF format to load Now!"
         assert mode in ["", "int8kv"], "now support int8kv, future to support int8 int4 ..."

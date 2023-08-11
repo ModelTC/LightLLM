@@ -50,9 +50,9 @@ class TransformerLayerWeight(BaseLayerWeight):
             qkv_bias = weights[f"transformer.h.{self.layer_num_}.attn.c_attn.bias"]
             split_size = qkv_bias.shape[0] // 3
             q_bias, k_bias, v_bias = torch.split(qkv_bias, split_size, dim=0)
-            self.q_bias_ = q_bias.contiguous().to(self.data_type_).cuda()
-            self.k_bias_ = k_bias.contiguous().to(self.data_type_).cuda()
-            self.v_bias_ = v_bias.contiguous().to(self.data_type_).cuda()
+            self.q_bias_ = q_bias[split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)].contiguous().to(self.data_type_).cuda()
+            self.k_bias_ = k_bias[split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)].contiguous().to(self.data_type_).cuda()
+            self.v_bias_ = v_bias[split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)].contiguous().to(self.data_type_).cuda()
 
         # attention output dense params
         if f"transformer.h.{self.layer_num_}.attn.c_proj.weight" in weights:
