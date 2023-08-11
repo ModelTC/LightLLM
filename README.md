@@ -34,7 +34,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - [Qwen-7b](https://github.com/QwenLM/Qwen-7B)
 - [ChatGLM2-6b](https://github.com/THUDM/ChatGLM2-6B)
 
-> When you start Qwen-7b, you need to set the parameter '--eos_id 151643'.
+> When you start Qwen-7b, you need to set the parameter '--eos_id 151643 --trust_remote_code'.
 
 > ChatGLM2 needs to set the parameter '--trust_remote_code'.
 

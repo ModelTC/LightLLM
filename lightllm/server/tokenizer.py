@@ -52,13 +52,6 @@ def get_tokenizer(
         # tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
         # tokenizer = convert_slow_tokenizer(tokenizer)
         # return tokenizer
-        
-    try:
-        model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
-        if model_cfg["model_type"] == "qwen":
-            kwargs['trust_remote_code'] = True
-    except:
-        pass
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args,
