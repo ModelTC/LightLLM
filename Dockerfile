@@ -34,13 +34,6 @@ RUN case ${TARGETPLATFORM} in \
     esac && \
     /opt/conda/bin/conda clean -ya
 
-
-WORKDIR /usr/src
-
-COPY . /lightllm
-RUN pip install -r /lightllm/requirements.txt --no-cache-dir && \
-    pip install -e /lightllm --no-cache-dir
-
 # workaround
 RUN mkdir ~/cuda-nvcc && cd ~/cuda-nvcc && \
     curl -fsSL -o package.tar.bz2 https://conda.anaconda.org/nvidia/label/cuda-12.1.1/linux-64/cuda-nvcc-12.1.105-0.tar.bz2 && \
@@ -50,3 +43,9 @@ RUN mkdir ~/cuda-nvcc && cd ~/cuda-nvcc && \
     cp bin/ptxas /usr/local/cuda/bin/ptxas && \
     curl -fsSL -o /usr/local/cuda/include/cuda.h https://raw.githubusercontent.com/openai/triton/d1ce4c495052a1ac06302213cae8eb5532a67259/python/triton/third_party/cuda/include/cuda.h \
     && rm ~/cuda-nvcc -rf
+
+WORKDIR /root
+
+COPY . /lightllm
+RUN pip install -r /lightllm/requirements.txt --no-cache-dir && \
+    pip install -e /lightllm --no-cache-dir

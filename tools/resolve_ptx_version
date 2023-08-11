@@ -5,7 +5,7 @@ set -e
 
 mkdir -p $HOME/.triton/
 
-[ -e $HOME/.triton/resolve_ptx_version.so ] || (echo '
+[ $HOME/.triton/resolve_ptx_version.so -nt $0 ] || (echo '
 #include <stdexcept>
 namespace triton {
 namespace driver {
