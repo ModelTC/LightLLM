@@ -19,17 +19,31 @@ group_container.add_argument(
     action="store_true",
     help="default not to keep the container",
 )
+group_container.add_argument(
+    "--shm-size",
+    type=str,
+    required=False,
+    help="default to half of the RAM size",
+)
 
 group_server = args.add_argument_group("server")
-group_server.add_argument("-m", "--model", type=str, required=True)
+group_server.add_argument(
+    "-m", "--model", type=str, required=True, help="path to model dir"
+)
 group_server.add_argument("-p", "--port", type=int, default=8080)
-group_server.add_argument("-n", "--num-nodes", type=int, default=1)
+group_server.add_argument(
+    "-n", "--num-proc", type=int, default=1, help="number of process/gpus"
+)
 group_server.add_argument("-mt", "--max-total-tokens", type=int, default=4096)
 args = args.parse_args()
 
 model_path = os.path.abspath(args.model)
+shm_size = (
+    args.shm_size
+    if args.shm_size
+    else (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2)
+)
 
-print(args)
 launch_args = [
     "docker",
     "run",
@@ -40,6 +54,8 @@ launch_args = [
     f"{args.port}:{args.port}",
     "-v",
     f"{model_path}:{model_path}",
+    "--shm-size",
+    str(shm_size),
 ]
 if args.name:
     launch_args.extend(["--name", args.name])
@@ -61,9 +77,10 @@ launch_args.extend(
         "--port",
         args.port,
         "--tp",
-        args.num_nodes,
+        args.num_proc,
     ]
 )
+
 launch_args = list(map(str, launch_args))
 print(f'launching: {" ".join(launch_args)}')
 os.execvp(launch_args[0], launch_args)

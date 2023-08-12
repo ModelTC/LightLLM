@@ -51,23 +51,38 @@ pip install -r requirements.txt
 
 ### Container
 
-A more convenient approach is to use the official Docker container:
+You can use the official Docker container to run the model more easily. To do this, follow these steps:
 
-~~~shell
-docker pull ghcr.io/modeltc/lightllm:main
-docker run -it --gpus all -p 8080:8080                  \
-           -v your_local_path:/data/                    \
-           ghcr.io/modeltc/lightllm:main /bin/bash
-~~~
+- Pull the container from the GitHub Container Registry:
 
-Or build the container locally:
+    ```shell
+    docker pull ghcr.io/modeltc/lightllm:main
+    ```
 
-~~~shell
-docker build -t <image_name> .
-docker run -it --gpus all -p 8080:8080                  \
-           -v your_local_path:/data/                    \
-           <image_name> /bin/bash
-~~~
+- Run the container with GPU support and port mapping:
+
+    ```shell
+    docker run -it --gpus all -p 8080:8080                  \
+            -v your_local_path:/data/                       \
+            ghcr.io/modeltc/lightllm:main /bin/bash
+    ```
+
+- Alternatively, you can build the container yourself:
+
+    ```shell
+    docker build -t <image_name> .
+    docker run -it --gpus all -p 8080:8080                  \
+            -v your_local_path:/data/                       \
+            <image_name> /bin/bash
+    ```
+
+- You can also use a helper script to launch both the container and the server:
+
+    ```shell
+    python tools/quick_launch_docker.py --help
+    ```
+
+- Note: If you use multiple GPUs, you may need to increase the shared memory size by adding `--shm-size` to the `docker run` command.
 
 ### Installation
 
