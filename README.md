@@ -41,6 +41,8 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 > ChatGLM2 needs to set the parameter '--trust_remote_code'.
 > Baichuan needs to set the parameter '--trust_remote_code'.
 
+> Baichuan needs to set the parameter '--trust_remote_code'.
+
 ## Get started
 
 ### Requirements
