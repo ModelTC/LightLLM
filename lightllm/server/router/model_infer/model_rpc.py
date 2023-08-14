@@ -43,7 +43,7 @@ class ModelRpcServer(rpyc.Service):
         self.model_type = model_cfg["model_type"]
         if self.model_type == "bloom":
             self.model = BloomTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-        elif self.model_type == 'llama':
+        elif self.model_type in ['llama', "baichuan"]:
            if "num_key_value_heads" not in model_cfg.keys():
                self.model = LlamaTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
            else:
