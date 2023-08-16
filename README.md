@@ -10,6 +10,7 @@
 [![docs](https://img.shields.io/badge/docs-latest-blue)](https://github.com/ModelTC/lightllm/blob/main/docs/TokenAttention.md)
 [![Docker](https://github.com/ModelTC/lightllm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/ModelTC/lightllm/actions/workflows/docker-publish.yml)
 [![stars](https://img.shields.io/github/stars/ModelTC/lightllm?style=social)](https://github.com/ModelTC/lightllm)
+[![Discord Banner](https://discordapp.com/api/guilds/1139835312592392214/widget.png?style=shield)](https://discord.gg/WzzfwVSguU)
 [![license](https://img.shields.io/github/license/ModelTC/lightllm)](https://github.com/ModelTC/lightllm/blob/main/LICENSE)
 </div>
 
@@ -191,6 +192,10 @@ python test_llama.py
     - consider resolving this by running the command `pip install protobuf==3.20.0`.
 - `error   : PTX .version 7.4 does not support .target sm_89`
     - launch with `bash tools/resolve_ptx_version python -m lightllm.server.api_server ... `
+
+## Community
+
+For further information and discussion, [join our discord server](https://discord.gg/WzzfwVSguU).
 
 ## License
 
