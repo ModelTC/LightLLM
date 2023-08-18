@@ -2,7 +2,7 @@ import re
 import torch
 from typing import List
 from lightllm.server.router.model_infer.infer_batch import InferBatch
-from lightllm.common.triton_kernel.apply_penalty import apply_penalty
+from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 
 def sample(logits, batch:InferBatch):
     logits = logits.contiguous()

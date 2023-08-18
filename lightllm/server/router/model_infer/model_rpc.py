@@ -1,18 +1,21 @@
 import asyncio
 import rpyc
 import torch
+import traceback
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.server.router.model_infer.infer_batch import InferBatch
 from rpyc.utils.classic import obtain
 
-from lightllm.models.llama.layer_infer.model import LlamaTpPartModel
-from lightllm.models.llama2.layer_infer.model import Llama2TpPartModel
-from lightllm.models.bloom.layer_infer.model import BloomTpPartModel
-from lightllm.models.starcoder.layer_infer.model import StarcoderTpPartModel
-from lightllm.models.qwen.layer_infer.model import QWenTpPartModel
-from lightllm.models.chatglm2.layer_infer.model import ChatGlm2TpPartModel
+from lightllm.models.bloom.model import BloomTpPartModel
+from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama2.model import Llama2TpPartModel
+from lightllm.models.starcoder.model import StarcoderTpPartModel
+from lightllm.models.qwen.model import QWenTpPartModel
+from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
+from lightllm.models.baichuan13b.model import Baichuan13bTpPartModel
+from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.common.configs.config import setting
@@ -40,22 +43,34 @@ class ModelRpcServer(rpyc.Service):
             weight_dir
         )
 
-        self.model_type = model_cfg["model_type"]
-        if self.model_type == "bloom":
-            self.model = BloomTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-        elif self.model_type in ['llama', "baichuan"]:
-           if "num_key_value_heads" not in model_cfg.keys():
-               self.model = LlamaTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-           else:
-               self.model = Llama2TpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-        elif self.model_type == 'gpt_bigcode':
-            self.model = StarcoderTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-        elif self.model_type == 'qwen':
-            self.model = QWenTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-        elif self.model_type == 'chatglm':
-            self.model = ChatGlm2TpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-        else:
-            raise ValueError("Not supported model type! The current support model list is [bloom llama].")
+        try:
+            self.model_type = model_cfg["model_type"]
+            if self.model_type == "bloom":
+                self.model = BloomTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+            elif self.model_type == "llama":
+                if "num_key_value_heads" in model_cfg.keys():
+                    self.model = Llama2TpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+                else:
+                    self.model = LlamaTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+            elif self.model_type == "qwen":
+                self.model = QWenTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+            elif self.model_type == "baichuan":
+                if model_cfg['hidden_size'] == 4096:
+                    self.model = Baichuan7bTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+                elif model_cfg["hidden_size"] == 5120:
+                    self.model = Baichuan13bTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+                else:
+                    raise Exception('can not support baichuan format')
+            elif self.model_type == 'gpt_bigcode':
+                self.model = StarcoderTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+            elif self.model_type == 'chatglm':
+                self.model = ChatGlm2TpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+            else:
+                raise Exception(f"can not support {self.model_type} now")
+        except Exception as e:
+            print("#" * 16)
+            print("load model error:", str(e), e, type(e))
+            raise e
         
         set_random_seed(2147483647)
         return

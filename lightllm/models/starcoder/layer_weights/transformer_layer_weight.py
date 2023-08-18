@@ -1,30 +1,28 @@
 import torch
 import math
 import numpy as np
-from .base_layer_weight import BaseLayerWeight
+from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
 
 
-class TransformerLayerWeight(BaseLayerWeight):
+class StarcoderTransformerLayerWeight(BloomTransformerLayerWeight):
     def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=""):
-        self.layer_num_ = layer_num
-        self.tp_rank_ = tp_rank
-        self.world_size_ = world_size
-        self.data_type_ = data_type
-        self.mode = mode
-        self.network_config = network_config
+        super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
         assert network_config["num_attention_heads"] % self.world_size_ == 0
+    
+    def init_static_params(self):
+        pass
 
-    def load_hf_weights(self, weights):
+    def _load_qkvo_weights(self, weights):
         # input layernorm params
         if f"transformer.h.{self.layer_num_}.ln_1.weight" in weights:
-            self.input_layernorm_weight_ = weights[f"transformer.h.{self.layer_num_}.ln_1.weight"].to(self.data_type_).cuda()
+            self.att_norm_weight_ = weights[f"transformer.h.{self.layer_num_}.ln_1.weight"].to(self.data_type_).cuda()
 
         if f"transformer.h.{self.layer_num_}.ln_1.bias" in weights:
-            self.input_layernorm_bias_ = weights[f"transformer.h.{self.layer_num_}.ln_1.bias"].to(self.data_type_).cuda()
+            self.att_norm_bias_ = weights[f"transformer.h.{self.layer_num_}.ln_1.bias"].to(self.data_type_).cuda()
 
         # attention params
-        n_embed = self.network_config["hidden_size"]
-        head_dim = self.network_config["hidden_size"] // self.network_config["num_attention_heads"]
+        n_embed = self.network_config_["hidden_size"]
+        head_dim = self.network_config_["hidden_size"] // self.network_config_["num_attention_heads"]
         split_n_embed = n_embed // self.world_size_
         if f"transformer.h.{self.layer_num_}.attn.c_attn.weight" in weights:
             self.qkv_weight_ = weights[f"transformer.h.{self.layer_num_}.attn.c_attn.weight"].transpose(0, 1).contiguous().to(self.data_type_)
@@ -46,24 +44,25 @@ class TransformerLayerWeight(BaseLayerWeight):
 
         # attention output dense params
         if f"transformer.h.{self.layer_num_}.attn.c_proj.weight" in weights:
-            self.att_out_dense_weight_ = weights[f"transformer.h.{self.layer_num_}.attn.c_proj.weight"][:,
+            self.o_weight_ = weights[f"transformer.h.{self.layer_num_}.attn.c_proj.weight"][:,
                                                                                                             split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)]
-            self.att_out_dense_weight_ = self.att_out_dense_weight_.transpose(0, 1).contiguous().to(self.data_type_)
-            self.att_out_dense_weight_ = self.att_out_dense_weight_.cuda()
+            self.o_weight_ = self.o_weight_.transpose(0, 1).contiguous().to(self.data_type_)
+            self.o_weight_ = self.o_weight_.cuda()
 
         if f"transformer.h.{self.layer_num_}.attn.c_proj.bias" in weights:
-            self.att_out_dense_bias_ = weights[f"transformer.h.{self.layer_num_}.attn.c_proj.bias"].to(self.data_type_)
-            self.att_out_dense_bias_ = self.att_out_dense_bias_.cuda()
+            self.o_bias_ = weights[f"transformer.h.{self.layer_num_}.attn.c_proj.bias"].to(self.data_type_)
+            self.o_bias_ = self.o_bias_.cuda()
 
-
+    def _load_ffn_weights(self, weights):
         if f"transformer.h.{self.layer_num_}.ln_2.weight" in weights:
-            self.post_attention_layernorm_weight_ = weights[f"transformer.h.{self.layer_num_}.ln_2.weight"].to(
+            self.ffn_norm_weight_ = weights[f"transformer.h.{self.layer_num_}.ln_2.weight"].to(
                 self.data_type_).cuda()
         if f"transformer.h.{self.layer_num_}.ln_2.bias" in weights:
-            self.post_attention_layernorm_bias_ = weights[f"transformer.h.{self.layer_num_}.ln_2.bias"].to(
+            self.ffn_norm_bias_ = weights[f"transformer.h.{self.layer_num_}.ln_2.bias"].to(
                 self.data_type_).cuda()
 
         # ffn params
+        n_embed = self.network_config_["hidden_size"]
         intermediate_size = n_embed * 4
         split_inter_size = intermediate_size // self.world_size_
         if f"transformer.h.{self.layer_num_}.mlp.c_fc.weight" in weights:

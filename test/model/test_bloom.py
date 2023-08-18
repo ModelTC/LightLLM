@@ -7,7 +7,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 class TestBloomInfer(unittest.TestCase):
 
     def test_bloom_infer(self):
-        from lightllm.models.bloom.layer_infer.model import BloomTpPartModel
+        from lightllm.models.bloom.model import BloomTpPartModel
         test_model_inference(world_size=8, 
                              model_dir="/path/bloom-7b", 
                              model_class=BloomTpPartModel, 
