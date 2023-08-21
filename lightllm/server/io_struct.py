@@ -77,7 +77,7 @@ class Batch:
             if req.output_ids[-1] == eos_id and req.sample_params.ignore_eos == False:
                 req.has_generate_finished = True
                 has_new_finish = True
-            if len(req.output_ids) >= req.max_output_len:
+            if len(req.output_ids) >= req.max_output_len or req.aborted:
                 req.has_generate_finished = True
                 has_new_finish = True
         return has_new_finish
