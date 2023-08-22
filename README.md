@@ -37,12 +37,15 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - [ChatGLM2-6b](https://github.com/THUDM/ChatGLM2-6B)
 - [Baichuan-7b](https://github.com/baichuan-inc/Baichuan-7B)
 - [Baichuan-13b](https://github.com/baichuan-inc/Baichuan-13B)
+- [InternLM-7b](https://github.com/InternLM/InternLM)
 
 > When you start Qwen-7b, you need to set the parameter '--eos_id 151643 --trust_remote_code'.
 
 > ChatGLM2 needs to set the parameter '--trust_remote_code'.
 
 > Baichuan needs to set the parameter '--trust_remote_code'.
+
+> InternLM needs to set the parameter '--trust_remote_code'.
 
 ## Get started
 

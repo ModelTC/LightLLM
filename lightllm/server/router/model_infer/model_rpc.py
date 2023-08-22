@@ -16,6 +16,7 @@ from lightllm.models.qwen.model import QWenTpPartModel
 from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
 from lightllm.models.baichuan13b.model import Baichuan13bTpPartModel
 from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
+from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.common.configs.config import setting
@@ -65,6 +66,8 @@ class ModelRpcServer(rpyc.Service):
                 self.model = StarcoderTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
             elif self.model_type == 'chatglm':
                 self.model = ChatGlm2TpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+            elif self.model_type == 'internlm':
+                self.model = InternlmTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:
