@@ -72,6 +72,18 @@ class LlamaTpPartModel(TpPartBaseModel):
         else:
             max_seq_len = self.config.get("max_position_embeddings", 2048) * rope_scaling_factor
         base = float(base)
+
+        # NTK
+        try:
+            ntk_alpha = float(os.environ.get("LIGHTLLM_NTK_ALPHA", 1))
+            assert ntk_alpha >= 1
+            if ntk_alpha > 1:
+                print(f"Note: NTK enabled, alpha set to {ntk_alpha}")
+            max_seq_len *= ntk_alpha
+            base = base * (ntk_alpha ** (self.head_dim_ / (self.head_dim_-2))) #Base change formula
+        except:
+            pass
+
         inv_freq = 1.0 / (base ** (torch.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32) / self.head_dim_))
         t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
