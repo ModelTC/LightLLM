@@ -1,4 +1,5 @@
 import asyncio
+import numpy
 import rpyc
 import torch
 import traceback
@@ -144,11 +145,12 @@ class ModelRpcServer(rpyc.Service):
         # assert False, f"{kwargs}"
 
         logits = self.model.forward(**kwargs)
-        next_token_ids = sample(logits, batch)
+        next_token_ids, next_token_probs = sample(logits, batch)
+        next_token_ids = next_token_ids.detach().cpu().numpy()
+        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
         output_dict = {}
         new_input_ids = []        
-        next_token_ids = next_token_ids.detach().cpu().numpy()
-        for i, (r, all_input_ids, next_token_id) in enumerate(zip(batch.requests, batch.all_input_ids, next_token_ids)):
+        for i, (r, all_input_ids, next_token_id, next_token_logprob) in enumerate(zip(batch.requests, batch.all_input_ids, next_token_ids, next_token_logprobs)):
             # all_input_ids_tensor = torch.tensor(all_input_ids, dtype=torch.long, device="cuda")
             all_input_ids.append(int(next_token_id))
             # all_input_ids_tensor = None
@@ -156,7 +158,11 @@ class ModelRpcServer(rpyc.Service):
             batch.all_input_ids[i] = all_input_ids
             batch.input_lengths[i] += 1
             batch.out_token_id_counts[i][next_token_id] += 1
-            output_dict[r['request_id']] = int(next_token_id)
+            metadata = {
+                'id': int(next_token_id),
+                'logprob': float(next_token_logprob),
+            }
+            output_dict[r['request_id']] = (int(next_token_id), metadata)
         
         batch.input_ids = torch.tensor(new_input_ids, dtype=torch.long).cuda()
         batch.nopad_b_start_loc = batch.nopad_b_start_loc + torch.arange(0, len(batch), dtype=torch.int32, device="cuda")

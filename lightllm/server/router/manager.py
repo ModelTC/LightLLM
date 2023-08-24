@@ -201,16 +201,17 @@ class RouterManager:
             return
     
     def _add_token_id_to_req(self, batch: Batch, req_ans):
-        for req_id, new_token_id in req_ans.items():
+        for req_id, (new_token_id, new_gen_metadata) in req_ans.items():
             req = batch.id_to_reqs[req_id]
             req.output_ids.append(new_token_id)
+            req.output_metadata_list.append(new_gen_metadata)
         return
         
     def _send_to_detokenization_proc(self, batch: Batch, req_ans):
         batch_out = BatchTokenIdOut()
-        for req_id, new_token_id in req_ans.items():
+        for req_id, (new_token_id, new_gen_metadata) in req_ans.items():
             req = batch.id_to_reqs[req_id]
-            batch_out.reqs_infs.append((req_id, new_token_id, req.has_generate_finished, req.aborted))
+            batch_out.reqs_infs.append((req_id, new_token_id, new_gen_metadata, req.has_generate_finished, req.aborted))
     
         self.send_to_detokenization.send_pyobj(batch_out)
         return

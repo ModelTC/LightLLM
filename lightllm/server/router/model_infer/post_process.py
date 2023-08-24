@@ -15,8 +15,9 @@ def sample(logits, batch:InferBatch):
     sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
     
     batch_next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
+    batch_next_token_probs = torch.gather(probs_sort, dim=1, index=sampled_index)
     
-    return batch_next_token_ids.view(-1)
+    return batch_next_token_ids.view(-1), batch_next_token_probs.view(-1)
 
 def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor):    
     probs_sort, probs_idx = probs.sort(dim=-1, descending=True)

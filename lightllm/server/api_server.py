@@ -63,7 +63,7 @@ async def generate(request: Request) -> Response:
 
     # Non-streaming case
     final_output = []
-    async for request_output in results_generator:
+    async for request_output, _ in results_generator:
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await httpserver_manager.abort(request_id)
@@ -94,11 +94,11 @@ async def generate_stream(request: Request) -> Response:
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output in results_generator:
+        async for request_output, metadata in results_generator:
             ret = {"token":{
-                         "id": None, 
+                         "id": metadata.get('id', None),
                          "text":request_output,
-                         "logprob":None,
+                         "logprob":metadata.get('logprob', None),
                          "special":False},
                          "generated_text":None,
                          "details":None}

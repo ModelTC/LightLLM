@@ -39,18 +39,19 @@ class DeTokenizationManager:
                         
                 if isinstance(recv_obj, BatchTokenIdOut):
                     new_batch_str_out = BatchStrOut()
-                    for req_id, new_token_id, finished, abort in recv_obj.reqs_infs:
+                    for req_id, new_token_id, new_gen_metadata, finished, abort in recv_obj.reqs_infs:
                         if req_id not in self.req_id_to_out:
                             continue
                         req_out:ReqDetokenizationState = self.req_id_to_out[req_id]
                         req_out.output_ids.append(new_token_id)
+                        req_out.gen_metadata.update(new_gen_metadata)
                         out_text = decode_token(self.tokenizer, req_out, new_token_id, skip_special_tokens=True)
                         if out_text.endswith(u'\ufffd'):
                             new_text = ''
                         else:
                             new_text = out_text[len(req_out.output_str):]
                             req_out.output_str = out_text
-                        new_batch_str_out.reqs_infs.append((req_id, new_text, True if abort else finished, abort))
+                        new_batch_str_out.reqs_infs.append((req_id, new_text, new_gen_metadata, True if abort else finished, abort))
                         if finished or abort:
                             try:
                                 del self.req_id_to_out[req_id]

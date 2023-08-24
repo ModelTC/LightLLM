@@ -11,6 +11,7 @@ class Req:
         self.max_output_len = sample_params.max_new_tokens
         self.sample_params = sample_params
         self.output_ids = []
+        self.output_metadata_list = []
         self.has_generate_finished = False
         self.aborted = False
 
@@ -22,6 +23,8 @@ class Req:
 
     def to_req_detokenization_state(self):
         out = ReqDetokenizationState(self.request_id, self.prompt_ids, self.max_output_len, self.sample_params.ignore_eos)
+        if self.output_metadata_list:
+            out.gen_metadata.update(self.output_metadata_list[-1])
         return out
 
     def __repr__(self):
@@ -46,6 +49,7 @@ class ReqDetokenizationState:
         self.current_sub_text = []
         self.max_output_len = max_output_len
         self.ignore_eos = ignore_eos
+        self.gen_metadata = {}
 
 class Batch:
     def __init__(self, batch_id, reqs: List[Req]):
@@ -105,11 +109,11 @@ class Batch:
         
 class BatchTokenIdOut:
     def __init__(self):
-        self.reqs_infs: List[Tuple[str, int, bool, bool]] = []  # [req_id, new_token_id, finished_state, abort_state]
+        self.reqs_infs: List[Tuple[str, int, Dict, bool, bool]] = []  # [req_id, new_token_id, gen_metadata, finished_state, abort_state]
 
 class BatchStrOut:
     def __init__(self):
-        self.reqs_infs: List[Tuple[str, int, bool, bool]] = [] # [req_id, token_str, finished_state, abort_state]
+        self.reqs_infs: List[Tuple[str, str, Dict, bool, bool]] = [] # [req_id, token_str, gen_metadata, finished_state, abort_state]
         
 class AbortReq:
     def __init__(self, req_id):

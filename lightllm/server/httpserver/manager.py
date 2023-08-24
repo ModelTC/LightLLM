@@ -17,7 +17,7 @@ class HttpServerManager:
         
         self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code)
         
-        self.req_id_to_out_inf = {}  # value type (out_str, finished, event)
+        self.req_id_to_out_inf = {}  # value type (out_str, metadata, finished, event)
         
         self.total_token_num = total_token_num
         self.max_req_input_len = max_req_input_len
@@ -36,17 +36,17 @@ class HttpServerManager:
         
         self.send_to_router.send_pyobj((prompt_ids, sampling_params, request_id))
         event = asyncio.Event()
-        self.req_id_to_out_inf[request_id] =("", False, event)
+        self.req_id_to_out_inf[request_id] =("", {}, False, event)
         while True:
             try:
                 await asyncio.wait_for(event.wait(), timeout=5)
             except asyncio.TimeoutError:
                 pass
             event.clear()
-            out_str, finished, _ = self.req_id_to_out_inf[request_id]
-            if out_str != "":
-                self.req_id_to_out_inf[request_id] = ("", finished, event)
-                yield out_str
+            out_str, metadata, finished, _ = self.req_id_to_out_inf[request_id]
+            if len(metadata) != 0:
+                self.req_id_to_out_inf[request_id] = ("", {}, finished, event)
+                yield out_str, metadata
             if finished:
                 try:
                     del self.req_id_to_out_inf[request_id]
@@ -68,11 +68,11 @@ class HttpServerManager:
         while True:
             recv_ans:BatchStrOut = await self.recv_from_detokenization.recv_pyobj()
             assert isinstance(recv_ans, BatchStrOut), f"error recv type {type(recv_ans)}"
-            for req_id, text, finished, abort in recv_ans.reqs_infs:
+            for req_id, text, metadata, finished, abort in recv_ans.reqs_infs:
                 try:
                     if not abort:
-                        _, _, event = self.req_id_to_out_inf[req_id]
-                        self.req_id_to_out_inf[req_id] = (text, finished, event)
+                        _, _, _, event = self.req_id_to_out_inf[req_id]
+                        self.req_id_to_out_inf[req_id] = (text, metadata, finished, event)
                         event.set()
                     else:
                         del self.req_id_to_out_inf[req_id]
