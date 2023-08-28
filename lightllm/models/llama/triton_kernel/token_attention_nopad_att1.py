@@ -61,9 +61,8 @@ def token_att_fwd(q, k, att_out, B_Loc, B_Start_Loc, B_Seqlen, max_input_len):
 
     grid = (batch, head_num, triton.cdiv(max_input_len, BLOCK))
 
-    num_warps = 4 if Lk <= 64 else 8
-    num_warps = 2
-
+    num_warps = 4
+    
     _fwd_kernel_token_att1[grid](
         q, k, sm_scale, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,
         att_out,
