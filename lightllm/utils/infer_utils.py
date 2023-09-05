@@ -21,10 +21,14 @@ def mark_cost_time(func_name):
                 ans = func(*args, **kwargs)
                 torch.cuda.synchronize()
                 return ans
+
         return time_func
+
     return inner_func
 
+
 time_mark = {}
+
 
 def mark_start(key):
     torch.cuda.synchronize()
@@ -32,13 +36,14 @@ def mark_start(key):
     time_mark[key] = time.time()
     return
 
+
 def mark_end(key, print_min_cost=0.0):
     torch.cuda.synchronize()
     global time_mark
     cost_time = (time.time() - time_mark[key]) * 1000
     if cost_time > print_min_cost:
         print(f"cost {key}:", cost_time)
-        
+
 
 def calculate_time(show=False, min_cost_ms=0.0):
     def wrapper(func):
@@ -53,16 +58,18 @@ def calculate_time(show=False, min_cost_ms=0.0):
                 if cost_time > min_cost_ms:
                     print(f"Function {func.__name__} took {cost_time} ms to run.")
             return result
+
         return inner_func
+
     return wrapper
 
 
 def set_random_seed(seed: int) -> None:
     import random
+
     random.seed(seed)
     import numpy as np
+
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-        
-        
