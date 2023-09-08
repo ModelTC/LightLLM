@@ -62,16 +62,22 @@ class LlamaTpPartModel(TpPartBaseModel):
         return
 
 
-    def _init_to_get_rotary(self, base=10000):
+    def _init_to_get_rotary(self, default_base=10000.0):
         if self.config.get("rope_scaling", {}) is None:
             rope_scaling_factor = 1.0
         else:
             rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
+
+        base = self.config.get("rope_theta", float(default_base))
+
         if "max_sequence_length" in self.config:
             max_seq_len = self.config["max_sequence_length"]
         else:
-            max_seq_len = self.config.get("max_position_embeddings", 2048) * rope_scaling_factor
-        base = float(base)
+            max_position_embeddings = self.config.get(
+                "max_position_embeddings",
+                2048 if base <= 10000.0 + 1e-5 else 16384
+            )
+            max_seq_len = max_position_embeddings * rope_scaling_factor
 
         # NTK
         try:
