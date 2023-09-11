@@ -17,17 +17,23 @@
 # limitations under the License.
 
 import asyncio
+import time
+
 import uvloop
 import sys
+
+from .build_prompt import build_prompt
+
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import argparse
 import json
+from http import HTTPStatus
 import uuid
 import multiprocessing as mp
 from typing import AsyncGenerator
 
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse, JSONResponse
 import uvicorn
 from .sampling_params import SamplingParams
 from .httpserver.manager import HttpServerManager
@@ -36,12 +42,21 @@ from .router.manager import start_router_process
 
 from lightllm.utils.net_utils import alloc_can_use_network_port
 from lightllm.common.configs.config import setting
+from .api_models import ChatCompletionRequest, UsageInfo, ChatMessage, ChatCompletionResponseChoice, \
+    ChatCompletionResponse, DeltaMessage, ChatCompletionStreamResponse, ChatCompletionStreamResponseChoice
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 
 app = FastAPI()
 
 isFirst = True
+
+
+def create_error_response(status_code: HTTPStatus,
+                          message: str) -> JSONResponse:
+    return JSONResponse({
+        "message": message
+    }, status_code=status_code.value)
 
 
 @app.post("/generate")
@@ -111,6 +126,115 @@ async def generate_stream(request: Request) -> Response:
     # Abort the request if the client disconnects.
     background_tasks.add_task(abort_request)
     
+    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+
+
+@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
+    global isFirst
+    if isFirst:
+        loop = asyncio.get_event_loop()
+        loop.create_task(httpserver_manager.handle_loop())
+        isFirst = False
+
+    if request.logit_bias is not None:
+        return create_error_response(HTTPStatus.BAD_REQUEST,
+                                     "The logit_bias parameter is not currently supported")
+
+    if request.n > 1:
+        return create_error_response(HTTPStatus.BAD_REQUEST,
+                                     "The n parameter currently only supports 1")
+
+    if request.function_call != 'none':
+        return create_error_response(HTTPStatus.BAD_REQUEST,
+                                     "The function call feature is not supported")
+
+    if request.stop is not None:
+        return create_error_response(HTTPStatus.BAD_REQUEST,
+                                     "The stop parameter is not currently supported")
+
+    created_time = int(time.time())
+    prompt = await build_prompt(request)
+    sampling_params = SamplingParams(
+        do_sample=request.do_sample,
+        presence_penalty=request.presence_penalty,
+        frequency_penalty=request.frequency_penalty,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        top_k=request.top_k,
+        ignore_eos=request.ignore_eos,
+        max_new_tokens=request.max_tokens,
+    )
+    sampling_params.verify()
+
+    request_id = f"chatcmpl-{uuid.uuid4().hex}"
+    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
+
+    # Non-streaming case
+    if not request.stream:
+        final_output = []
+        prompt_tokens = -1
+        completion_tokens = 0
+        async for request_output, metadata in results_generator:
+            if await raw_request.is_disconnected():
+                # Abort the request if the client disconnects.
+                await httpserver_manager.abort(request_id)
+                return Response(status_code=499)
+            completion_tokens += 1
+            if prompt_tokens == -1:
+                prompt_tokens = metadata['prompt_tokens']
+            final_output.append(request_output)
+
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens
+        )
+        chat_message = ChatMessage(
+            role="assistant",
+            content="".join(final_output)
+        )
+        choice = ChatCompletionResponseChoice(
+            index=0,
+            message=chat_message
+        )
+        resp = ChatCompletionResponse(
+            id=request_id,
+            created=created_time,
+            model=request.model,
+            choices=[choice],
+            usage=usage
+        )
+        return resp
+
+    # Streaming case
+    async def stream_results() -> AsyncGenerator[bytes, None]:
+        async for request_output, metadata in results_generator:
+            delta_message = DeltaMessage(
+                role='assistant',
+                content=request_output
+            )
+
+            stream_choice = ChatCompletionStreamResponseChoice(
+                index=0,
+                delta=delta_message
+            )
+
+            stream_resp = ChatCompletionStreamResponse(
+                id=request_id,
+                created=created_time,
+                model=request.model,
+                choices=[stream_choice],
+            )
+            yield ("data: " + stream_resp.json(ensure_ascii=False) + f"\n\n").encode("utf-8")
+
+    async def abort_request() -> None:
+        await httpserver_manager.abort(request_id)
+
+    background_tasks = BackgroundTasks()
+    # Abort the request if the client disconnects.
+    background_tasks.add_task(abort_request)
+
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
