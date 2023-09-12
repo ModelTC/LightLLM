@@ -11,6 +11,7 @@ from rpyc.utils.classic import obtain
 
 from lightllm.models.bloom.model import BloomTpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama_quantized.model import LlamaTpPartModelQuantized
 from lightllm.models.llama2.model import Llama2TpPartModel
 from lightllm.models.starcoder.model import StarcoderTpPartModel
 from lightllm.models.qwen.model import QWenTpPartModel
@@ -53,7 +54,10 @@ class ModelRpcServer(rpyc.Service):
                 if "num_key_value_heads" in model_cfg.keys():
                     self.model = Llama2TpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
                 else:
-                    self.model = LlamaTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+                    if 'int8weight' in mode or 'int4weight' in mode:
+                        self.model = LlamaTpPartModelQuantized(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+                    else:
+                        self.model = LlamaTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
             elif self.model_type == "qwen":
                 self.model = QWenTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
             elif self.model_type == "baichuan":

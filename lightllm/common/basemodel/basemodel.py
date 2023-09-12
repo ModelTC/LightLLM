@@ -23,7 +23,7 @@ class TpPartBaseModel:
     # infer state class
     infer_state_class = InferStateInfo
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=""):
+    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
         self.weight_dir_ = weight_dir
@@ -58,9 +58,8 @@ class TpPartBaseModel:
     
     def _verify_params(self):
         assert self.load_way == "HF", "only support HF format weights"
-        assert self.mode == "", "future to support int8 int4 ..."
-        return 
-    
+        return
+
     def _init_weights(self):
         self.pre_post_weight = self.pre_and_post_weight_class(self.tp_rank_, self.world_size_, torch.float16, network_config=self.config, mode=self.mode)
         self.trans_layers_weight = [

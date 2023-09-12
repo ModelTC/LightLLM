@@ -2,12 +2,13 @@ import torch
     
 
 class MemoryManager:
-    def __init__(self, size, dtype, head_num, head_dim, layer_num):
+    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False):
         self.mem_state = torch.ones((size,), dtype=torch.bool, device="cuda")
         self._mem_cum_sum = torch.empty((size,), dtype=torch.int32, device="cuda")
         self.indexes = torch.arange(0, size, dtype=torch.long, device="cuda")
         self.can_use_mem_size = size
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
+        self.always_copy = always_copy
     
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.key_buffer = [torch.empty((size, head_num, head_dim), dtype=dtype, device="cuda") for _ in range(layer_num)]
@@ -28,6 +29,8 @@ class MemoryManager:
     
     @torch.no_grad()
     def alloc_contiguous(self, need_size):
+        if self.always_copy:
+            return None
         if need_size > self.can_use_mem_size:
             print(f'warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}')
             return None

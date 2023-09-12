@@ -16,7 +16,7 @@ from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 class ChatGLM2TransformerLayerInfer(Llama2TransformerLayerInfer):
     """
     """
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=""):
+    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
         return
 

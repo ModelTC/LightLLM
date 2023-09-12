@@ -25,8 +25,11 @@ class LlamaTpPartModel(TpPartBaseModel):
 
     # infer state class
     infer_state_class = LlamaInferStateInfo
+    
+    # Mem manager class
+    memory_manager_class = MemoryManager
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=""):
+    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
         super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode)
         return
     
@@ -38,21 +41,20 @@ class LlamaTpPartModel(TpPartBaseModel):
     
     def _verify_params(self):
         assert self.load_way == "HF", "llama only support HF format to load Now!"
-        assert self.mode in ["", "int8kv"], "now support int8kv, future to support int8 int4 ..."
-        return
-    
+
     def _init_mem_manager(self):
         mem_dict = {
-            "" : MemoryManager,
             "int8kv" : INT8KVMemoryManager
         }
-        
-        self.mem_manager = mem_dict[self.mode](self.max_total_token_num, 
-                                         dtype=torch.float16,
-                                         head_num=self.config["num_attention_heads"] // self.world_size_,
-                                         head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
-                                         layer_num=self.config["num_hidden_layers"])
-        return    
+        for _mode in self.mode:
+            if _mode in mem_dict:
+                print("Model using mode", _mode)
+                self.memory_manager_class = mem_dict[_mode]
+        self.mem_manager = self.memory_manager_class(self.max_total_token_num, 
+                                                     dtype=torch.float16,
+                                                     head_num=self.config["num_attention_heads"] // self.world_size_,
+                                                     head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
+                                                     layer_num=self.config["num_hidden_layers"])
 
     def _init_custom(self):
         """

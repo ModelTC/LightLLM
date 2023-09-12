@@ -5,7 +5,7 @@ from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTr
 
 
 class ChatGLM2TransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=""):
+    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
         assert network_config["num_attention_heads"] % self.world_size_ == 0
 

@@ -263,8 +263,8 @@ def main():
                         help="the max value for req_input_len + req_output_len")
     parser.add_argument("--nccl_port", type=int, default=28765,
                         help="the nccl_port to build a distributed environment for PyTorch")
-    parser.add_argument("--mode", type=str, default="",
-                        help="model inference mode, now only support 'int8kv' or '' default")
+    parser.add_argument("--mode", type=str, default=[], nargs='+',
+                        help="Model mode: [int8kv] [int8weight | int4weight]")
     parser.add_argument("--trust_remote_code", action='store_true',
                         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.")
     parser.add_argument("--disable_log_stats", action='store_true',

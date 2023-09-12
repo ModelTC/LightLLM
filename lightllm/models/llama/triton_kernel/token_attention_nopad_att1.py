@@ -116,7 +116,7 @@ def _fwd_kernel_token_att1_int8(
         k = tl.load(K + off_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
         off_ks = k_loc[:, None] * stride_ksbs + cur_head * stride_ksh
         k_scale = tl.load(K_scale + off_ks, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
-        att_value = tl.sum(q[None, :] * k * k_scale[:, None], 1)
+        att_value = tl.sum(q[None, :] * k * k_scale, 1)
         att_value *= sm_scale
         off_o = cur_head * att_stride_h + (cur_batch_in_all_start_index + offs_n) * att_stride_bs
         tl.store(Att_Out + off_o, att_value, mask=offs_n_new < cur_batch_end_index)

@@ -6,7 +6,7 @@ from lightllm.models.baichuan7b.layer_weights.transformer_layer_weight import Ba
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
 
 class BaiChuan13bTransformerLayerWeight(BaiChuan7bTransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=""):
+    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
         return
     

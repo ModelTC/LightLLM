@@ -16,7 +16,7 @@ class Llama2TpPartModel(LlamaTpPartModel):
     # infer class
     transformer_layer_infer_class = Llama2TransformerLayerInfer
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=""):
+    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
         super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode)
     
 
@@ -28,21 +28,16 @@ class Llama2TpPartModel(LlamaTpPartModel):
     
     def _verify_params(self):
         assert self.load_way == "HF", "llama only support HF format to load Now!"
-        assert self.mode == "", "future to support int8 int4 ..."
         assert self.config["num_key_value_heads"] % self.world_size_ == 0
         assert self.config["num_attention_heads"] % self.world_size_ == 0
         return
-    
+
     def _init_mem_manager(self):
-        mem_dict = {
-            "" : MemoryManager,
-        }
-        
-        self.mem_manager = mem_dict[self.mode](self.max_total_token_num, 
-                                         dtype=torch.float16,
-                                         head_num=self.config["num_key_value_heads"] // self.world_size_,
-                                         head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
-                                         layer_num=self.config["num_hidden_layers"])
+        self.mem_manager = self.memory_manager_class(self.max_total_token_num, 
+                                                     dtype=torch.float16,
+                                                     head_num=self.config["num_key_value_heads"] // self.world_size_,
+                                                     head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
+                                                     layer_num=self.config["num_hidden_layers"])
         return
     
     def _init_some_value(self):

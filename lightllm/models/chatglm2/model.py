@@ -19,7 +19,7 @@ class ChatGlm2TpPartModel(Llama2TpPartModel):
     # infer class
     transformer_layer_infer_class = ChatGLM2TransformerLayerInfer
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=""):
+    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
         super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode)
     
     def _init_config(self):
@@ -34,15 +34,9 @@ class ChatGlm2TpPartModel(Llama2TpPartModel):
     
     def _verify_params(self):
         assert self.load_way == "HF", "chatGLM2 only support HF format to load Now!"
-        assert self.mode == "", "future to support int8 int4 ..."
-        return
-    
+
     def _init_mem_manager(self):
-        mem_dict = {
-            "" : MemoryManager,
-        }
-        
-        self.mem_manager = mem_dict[self.mode](self.max_total_token_num, 
+        self.mem_manager = MemoryManager(self.max_total_token_num, 
                                          dtype=torch.float16,
                                          head_num=self.config["multi_query_group_num"],
                                          head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],

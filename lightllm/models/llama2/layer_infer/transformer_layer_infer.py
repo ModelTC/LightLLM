@@ -14,7 +14,7 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 
 class Llama2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=""):
+    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
         key_value_head_num_ = network_config["num_key_value_heads"]
         assert key_value_head_num_ % self.world_size_ == 0

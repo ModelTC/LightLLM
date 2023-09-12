@@ -5,7 +5,7 @@ from lightllm.common.basemodel import TransformerLayerWeight
 
 
 class LlamaTransformerLayerWeight(TransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=""):
+    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
         return
 

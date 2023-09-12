@@ -12,7 +12,7 @@ class QwenTransformerLayerInfer(LlamaTransformerLayerInfer):
     """
     """
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=""):
+    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
         return
     

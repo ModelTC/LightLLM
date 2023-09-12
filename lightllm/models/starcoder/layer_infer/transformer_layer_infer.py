@@ -19,7 +19,7 @@ from lightllm.models.llama2.triton_kernel.token_attention_nopad_reduceV import t
 class StarcoderTransformerLayerInfer(BloomTransformerLayerInfer):
     """
     """
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=""):
+    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
         self.tp_k_head_num_ = 1
         self.tp_v_head_num_ = 1
