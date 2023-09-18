@@ -4,11 +4,10 @@ import torch.distributed as dist
 import numpy as np
 from typing import Tuple
 
-from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.llama.layer_weights.transformer_layer_weight import  LlamaTransformerLayerWeight
+from lightllm.models.llama2.layer_infer.transformer_layer_infer import Llama2TransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 
-class LlamaPPlTransformerLayerInfer(LlamaTransformerLayerInfer):
+class Llama2PPlTransformerLayerInfer(Llama2TransformerLayerInfer):
     """
     """
 
@@ -26,14 +25,13 @@ class LlamaPPlTransformerLayerInfer(LlamaTransformerLayerInfer):
                                     mem_index,
                                     mem_manager.value_buffer[self.layer_num_],
                                     mem_manager.value_scale_buffer[self.layer_num_])
-        
+
     def _token_attention_kernel(self, q, infer_state:LlamaInferStateInfo, layer_weight)->torch.Tensor:
         batch_size = infer_state.batch_size
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
         o_tensor = torch.empty_like(q)
         
         from lightllm_ppl_kernel import group8_int8kv_decode_attention
-        # group_int8kv_decode_attention(at::Tensor o, at::Tensor q, at::Tensor k, at::Tensor k_s,  at::Tensor v,  at::Tensor v_s, at::Tensor b_loc, at::Tensor b_seq_len, int max_len_in_batch)
         group8_int8kv_decode_attention(o_tensor.view(calcu_shape1),
                                                           q.view(calcu_shape1),
                                                           infer_state.mem_manager.key_buffer[self.layer_num_],
