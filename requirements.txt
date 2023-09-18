@@ -64,7 +64,7 @@ toolz==0.12.0
 torch==2.0.0
 tqdm==4.65.0
 transformers==4.29.2
-triton==2.0.0.dev20221202
+triton==2.1.0
 typing_extensions==4.7.1
 urllib3==1.26.16
 uvicorn==0.19.0

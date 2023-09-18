@@ -42,8 +42,16 @@ from .router.manager import start_router_process
 
 from lightllm.utils.net_utils import alloc_can_use_network_port
 from lightllm.common.configs.config import setting
-from .api_models import ChatCompletionRequest, UsageInfo, ChatMessage, ChatCompletionResponseChoice, \
-    ChatCompletionResponse, DeltaMessage, ChatCompletionStreamResponse, ChatCompletionStreamResponseChoice
+from .api_models import (
+    ChatCompletionRequest,
+    UsageInfo,
+    ChatMessage,
+    ChatCompletionResponseChoice,
+    ChatCompletionResponse,
+    DeltaMessage,
+    ChatCompletionStreamResponse,
+    ChatCompletionStreamResponseChoice,
+)
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 
@@ -52,12 +60,14 @@ app = FastAPI()
 isFirst = True
 
 
-def create_error_response(status_code: HTTPStatus,
-                          message: str) -> JSONResponse:
-    return JSONResponse({
-        "message": message
-    }, status_code=status_code.value)
+def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
+    return JSONResponse({"message": message}, status_code=status_code.value)
 
+
+@app.get("/healthz")
+@app.get("/health")
+def healthcheck():
+    return "OK"
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
@@ -70,23 +80,35 @@ async def generate(request: Request) -> Response:
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
+    return_details = sample_params_dict.pop("return_details", False)
     sampling_params = SamplingParams(**sample_params_dict)
     sampling_params.verify()
-    
+
     request_id = uuid.uuid4().hex
     results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
 
     # Non-streaming case
     final_output = []
-    async for request_output, _ in results_generator:
+    count_output_tokens = 0
+    tokens = []
+    async for request_output, metadata, _ in results_generator:
+        count_output_tokens += 1
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await httpserver_manager.abort(request_id)
             return Response(status_code=499)
         final_output.append(request_output)
+        if return_details:
+            metadata["text"] = request_output
+            tokens.append(metadata)
 
     assert final_output is not None
-    ret = {"generated_text": ["".join(final_output)]}
+    ret = {
+        "generated_text": ["".join(final_output)],
+        "count_output_tokens": count_output_tokens,
+    }
+    if return_details:
+        ret["tokens"] = tokens
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
 
 
@@ -101,23 +123,31 @@ async def generate_stream(request: Request) -> Response:
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
+    return_details = sample_params_dict.pop("return_details", False)
     sampling_params = SamplingParams(**sample_params_dict)
     sampling_params.verify()
-    
+
     request_id = uuid.uuid4().hex
     results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output, metadata in results_generator:
-            ret = {"token":{
-                         "id": metadata.get('id', None),
-                         "text":request_output,
-                         "logprob":metadata.get('logprob', None),
-                         "special":False},
-                         "generated_text":None,
-                         "details":None}
-            yield ("data:"+ json.dumps(ret, ensure_ascii=False) + f"\n\n").encode("utf-8")
+        async for request_output, metadata, finished in results_generator:
+            ret = {
+                "token": {
+                    "id": metadata.get("id", None),
+                    "text": request_output,
+                    "logprob": metadata.get("logprob", None),
+                    "special": False
+                },
+                "generated_text": None,
+                "finished": finished,
+                "details": None
+            }
+
+            yield ("data:" + json.dumps(ret, ensure_ascii=False) + f"\n\n").encode(
+                "utf-8"
+            )
 
     async def abort_request() -> None:
         await httpserver_manager.abort(request_id)
@@ -125,12 +155,16 @@ async def generate_stream(request: Request) -> Response:
     background_tasks = BackgroundTasks()
     # Abort the request if the client disconnects.
     background_tasks.add_task(abort_request)
-    
-    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+
+    return StreamingResponse(
+        stream_results(), media_type="text/event-stream", background=background_tasks
+    )
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
+async def chat_completions(
+    request: ChatCompletionRequest, raw_request: Request
+) -> Response:
     global isFirst
     if isFirst:
         loop = asyncio.get_event_loop()
@@ -138,20 +172,25 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         isFirst = False
 
     if request.logit_bias is not None:
-        return create_error_response(HTTPStatus.BAD_REQUEST,
-                                     "The logit_bias parameter is not currently supported")
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The logit_bias parameter is not currently supported",
+        )
 
     if request.n > 1:
-        return create_error_response(HTTPStatus.BAD_REQUEST,
-                                     "The n parameter currently only supports 1")
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST, "The n parameter currently only supports 1"
+        )
 
-    if request.function_call != 'none':
-        return create_error_response(HTTPStatus.BAD_REQUEST,
-                                     "The function call feature is not supported")
+    if request.function_call != "none":
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST, "The function call feature is not supported"
+        )
 
     if request.stop is not None:
-        return create_error_response(HTTPStatus.BAD_REQUEST,
-                                     "The stop parameter is not currently supported")
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST, "The stop parameter is not currently supported"
+        )
 
     created_time = int(time.time())
     prompt = await build_prompt(request)
@@ -182,7 +221,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 return Response(status_code=499)
             completion_tokens += 1
             if prompt_tokens == -1:
-                prompt_tokens = metadata['prompt_tokens']
+                prompt_tokens = metadata["prompt_tokens"]
             final_output.append(request_output)
 
         usage = UsageInfo(
@@ -190,14 +229,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens
         )
-        chat_message = ChatMessage(
-            role="assistant",
-            content="".join(final_output)
-        )
-        choice = ChatCompletionResponseChoice(
-            index=0,
-            message=chat_message
-        )
+        chat_message = ChatMessage(role="assistant", content="".join(final_output))
+        choice = ChatCompletionResponseChoice(index=0, message=chat_message)
         resp = ChatCompletionResponse(
             id=request_id,
             created=created_time,
@@ -210,14 +243,10 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output, metadata in results_generator:
-            delta_message = DeltaMessage(
-                role='assistant',
-                content=request_output
-            )
+            delta_message = DeltaMessage(role="assistant", content=request_output)
 
             stream_choice = ChatCompletionStreamResponseChoice(
-                index=0,
-                delta=delta_message
+                index=0, delta=delta_message
             )
 
             stream_resp = ChatCompletionStreamResponse(
@@ -235,13 +264,16 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     # Abort the request if the client disconnects.
     background_tasks.add_task(abort_request)
 
-    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+    return StreamingResponse(
+        stream_results(), media_type="text/event-stream", background=background_tasks
+    )
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+
     parser.add_argument("--model_dir", type=str, default=None,
                         help="the model weight dir path, the app will load config, weights and tokenizer from this dir")
     parser.add_argument("--tokenizer_mode", type=str, default="slow",
@@ -271,42 +303,65 @@ def main():
                         help="disable logging throughput stats.")
     parser.add_argument("--log_stats_interval", type=int, default=10,
                         help="log stats interval in second.")
+    
     args = parser.parse_args()
 
     assert args.max_req_input_len < args.max_req_total_len
-    setting['max_req_total_len'] = args.max_req_total_len
-    setting['nccl_port'] = args.nccl_port
+    setting["max_req_total_len"] = args.max_req_total_len
+    setting["nccl_port"] = args.nccl_port
 
     if args.batch_max_tokens is None:
         batch_max_tokens = int(1 / 6 * args.max_total_token_num)
         batch_max_tokens = max(batch_max_tokens, args.max_req_total_len)
         args.batch_max_tokens = batch_max_tokens
     else:
-        assert args.batch_max_tokens >= args.max_req_total_len, "batch_max_tokens must >= max_req_total_len"
+        assert (
+            args.batch_max_tokens >= args.max_req_total_len
+        ), "batch_max_tokens must >= max_req_total_len"
 
     can_use_ports = alloc_can_use_network_port(
-        num=3 + args.tp, used_nccl_port=args.nccl_port)
+        num=3 + args.tp, used_nccl_port=args.nccl_port
+    )
     router_port, detokenization_port, httpserver_port = can_use_ports[0:3]
     model_rpc_ports = can_use_ports[3:]
 
     global httpserver_manager
-    httpserver_manager = HttpServerManager(args.model_dir,
-                                           args.tokenizer_mode,
-                                           router_port=router_port,
-                                           httpserver_port=httpserver_port,
-                                           total_token_num=args.max_total_token_num,
-                                           max_req_input_len=args.max_req_input_len,
-                                           max_req_total_len=args.max_req_total_len,
-                                           trust_remote_code=args.trust_remote_code)
+    httpserver_manager = HttpServerManager(
+        args.model_dir,
+        args.tokenizer_mode,
+        router_port=router_port,
+        httpserver_port=httpserver_port,
+        total_token_num=args.max_total_token_num,
+        max_req_input_len=args.max_req_input_len,
+        max_req_total_len=args.max_req_total_len,
+        trust_remote_code=args.trust_remote_code,
+    )
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
-    proc_router = mp.Process(target=start_router_process, args=(
-        args, router_port, detokenization_port, model_rpc_ports, args.mode, pipe_router_writer))
+    proc_router = mp.Process(
+        target=start_router_process,
+        args=(
+            args,
+            router_port,
+            detokenization_port,
+            model_rpc_ports,
+            args.mode,
+            pipe_router_writer,
+        ),
+    )
     proc_router.start()
-    proc_detoken = mp.Process(target=start_detokenization_process, args=(
-        args, detokenization_port, httpserver_port, pipe_detoken_writer, args.trust_remote_code))
+    proc_detoken = mp.Process(
+        target=start_detokenization_process,
+        args=(
+            args,
+            detokenization_port,
+            httpserver_port,
+            pipe_detoken_writer,
+            args.trust_remote_code,
+        ),
+    )
     proc_detoken.start()
-    
+
     # wait load model ready
     router_init_state = pipe_router_reader.recv()
     detoken_init_state = pipe_detoken_reader.recv()
@@ -314,13 +369,24 @@ def main():
     if router_init_state != "init ok" or detoken_init_state != "init ok":
         proc_router.kill()
         proc_detoken.kill()
-        print("router init state:", router_init_state, "detoken init state:", detoken_init_state)
+        print(
+            "router init state:",
+            router_init_state,
+            "detoken init state:",
+            detoken_init_state,
+        )
         sys.exit(1)
 
     assert proc_router.is_alive() and proc_detoken.is_alive()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="debug",
-                timeout_keep_alive=TIMEOUT_KEEP_ALIVE, loop="uvloop")
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="debug",
+        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+        loop="uvloop",
+    )
 
 
 if __name__ == "__main__":

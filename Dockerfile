@@ -11,26 +11,26 @@ ENV PATH=/opt/conda/bin:$PATH \
     CONDA_PREFIX=/opt/conda
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates \
-        libssl-dev \
-        curl \
-        g++ \
-        make \
-        git && \
-        rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    libssl-dev \
+    curl \
+    g++ \
+    make \
+    git && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN case ${TARGETPLATFORM} in \
-         "linux/arm64")  MAMBA_ARCH=aarch64  ;; \
-         *)              MAMBA_ARCH=x86_64   ;; \
+    "linux/arm64")  MAMBA_ARCH=aarch64  ;; \
+    *)              MAMBA_ARCH=x86_64   ;; \
     esac && \
     curl -fsSL -o ~/mambaforge.sh -v "https://github.com/conda-forge/miniforge/releases/download/${MAMBA_VERSION}/Mambaforge-${MAMBA_VERSION}-Linux-${MAMBA_ARCH}.sh" && \
     bash ~/mambaforge.sh -b -p /opt/conda && \
     rm ~/mambaforge.sh
 
 RUN case ${TARGETPLATFORM} in \
-         "linux/arm64")  exit 1 ;; \
-         *)              /opt/conda/bin/conda update -y conda &&  \
-                        /opt/conda/bin/conda install -c "${INSTALL_CHANNEL}" -c "${CUDA_CHANNEL}" -y "python=${PYTHON_VERSION}" pytorch==$PYTORCH_VERSION "pytorch-cuda=$(echo $CUDA_VERSION | cut -d'.' -f 1-2)" -c anaconda -c conda-forge ;; \
+    "linux/arm64")  exit 1 ;; \
+    *)              /opt/conda/bin/conda update -y conda &&  \
+    /opt/conda/bin/conda install -c "${INSTALL_CHANNEL}" -c "${CUDA_CHANNEL}" -y "python=${PYTHON_VERSION}" pytorch==$PYTORCH_VERSION "pytorch-cuda=$(echo $CUDA_VERSION | cut -d'.' -f 1-2)" -c anaconda -c conda-forge ;; \
     esac && \
     /opt/conda/bin/conda clean -ya
 
@@ -46,6 +46,8 @@ RUN mkdir ~/cuda-nvcc && cd ~/cuda-nvcc && \
 
 WORKDIR /root
 
+COPY ./requirements.txt /lightllm/requirements.txt
+RUN pip install -r /lightllm/requirements.txt --no-cache-dir
+
 COPY . /lightllm
-RUN pip install -r /lightllm/requirements.txt --no-cache-dir && \
-    pip install -e /lightllm --no-cache-dir
+RUN pip install -e /lightllm --no-cache-dir
