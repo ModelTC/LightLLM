@@ -53,6 +53,8 @@ class HttpServerManager:
             raise ValueError(
                 f"the req token total len + 1 (input len + output len + 1) is too long > max_total_token_num:{self.total_token_num}"
             )
+        
+        sampling_params.stop_sentences_to_token_ids(self.tokenizer)
 
         self.send_to_router.send_pyobj((prompt_ids, sampling_params, request_id))
         event = asyncio.Event()

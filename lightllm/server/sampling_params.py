@@ -15,7 +15,8 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,  # -1 is for all 
         ignore_eos: bool = False,
-        max_new_tokens: int = 16
+        max_new_tokens: int = 16,
+        stop_sequences: Optional[Union[str, List[str]]] = None  # 停止句子条件
     ) -> None:
         self.do_sample = do_sample
         self.presence_penalty = presence_penalty
@@ -25,6 +26,7 @@ class SamplingParams:
         self.top_k = top_k
         self.ignore_eos = ignore_eos
         self.max_new_tokens = max_new_tokens
+        self.stop_sequences = stop_sequences
         if self.do_sample == False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -47,7 +49,23 @@ class SamplingParams:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, got {self.top_k}.")
         if self.max_new_tokens < 1:
             raise ValueError(f"max_new_tokens must be at least 1 , got {self.max_new_tokens}.")
-        return 
+        return
+
+    def stop_sentences_to_token_ids(self, tokenizer):
+        if self.stop_sequences is None:
+            self.stop_sequences = []
+        else:
+            if isinstance(self.stop_sequences, str):
+                self.stop_sequences = [self.stop_sequences]
+            new_stop_sequences = []
+            for stop_str in self.stop_sequences:
+                stop_str_ids = tokenizer.encode(stop_str)
+                if stop_str_ids is not None and len(stop_str_ids) >= 1: # remove bos_token_id
+                    stop_str_ids = stop_str_ids[1:]
+                if len(stop_str_ids) > 0:
+                    new_stop_sequences.append(stop_str_ids)
+            self.stop_sequences = new_stop_sequences
+        return
     
     def to_dict(self):
         ret = {}

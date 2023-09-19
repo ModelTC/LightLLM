@@ -187,11 +187,6 @@ async def chat_completions(
             HTTPStatus.BAD_REQUEST, "The function call feature is not supported"
         )
 
-    if request.stop is not None:
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST, "The stop parameter is not currently supported"
-        )
-
     created_time = int(time.time())
     prompt = await build_prompt(request)
     sampling_params = SamplingParams(
@@ -203,6 +198,7 @@ async def chat_completions(
         top_k=request.top_k,
         ignore_eos=request.ignore_eos,
         max_new_tokens=request.max_tokens,
+        stop_sequences=request.stop
     )
     sampling_params.verify()
 

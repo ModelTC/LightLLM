@@ -26,6 +26,15 @@ class Req:
         if self.output_metadata_list:
             out.gen_metadata.update(self.output_metadata_list[-1])
         return out
+    
+    def stop_sequences_matched(self):
+        for stop_token_ids in self.sample_params.stop_sequences:
+            stop_len = len(stop_token_ids)
+            if stop_len > 0:
+                if len(self.output_ids) >= stop_len:
+                    if all(self.output_ids[-(stop_len - i)] == stop_token_ids[i] for i in range(stop_len)):
+                        return True
+        return False
 
     def __repr__(self):
         return (f"request_id(n={self.request_id}, "
@@ -78,6 +87,9 @@ class Batch:
     def mark_finished_req(self, eos_id):
         has_new_finish = False
         for req in self.reqs:
+            if req.stop_sequences_matched():
+                req.has_generate_finished = True
+                has_new_finish = True
             if req.output_ids[-1] == eos_id and req.sample_params.ignore_eos == False:
                 req.has_generate_finished = True
                 has_new_finish = True
