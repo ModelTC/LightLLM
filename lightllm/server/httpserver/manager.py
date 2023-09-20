@@ -42,7 +42,7 @@ class HttpServerManager:
         prompt_tokens = len(prompt_ids)
         if prompt_tokens > self.max_req_input_len:
             raise ValueError(
-                f"the input prompt token len is too long > {self.max_req_input_len}"
+                f"the input prompt token len {prompt_tokens} is too long > {self.max_req_input_len}"
             )
         req_total_len = prompt_tokens + sampling_params.max_new_tokens
         if req_total_len > self.max_req_total_len:
