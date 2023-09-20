@@ -50,7 +50,7 @@ class QWenTpPartModel(LlamaTpPartModel):
         total_seq_len_supported = self.config.get("max_position_embeddings", 8 * 1024)
         seq_len = self.config.get("seq_length", 2048)
 
-        cur_kv_seq_len = total_seq_len_supported // 2
+        cur_kv_seq_len = total_seq_len_supported
         context_value = math.log(cur_kv_seq_len / seq_len, 2) + 1
         ntk_alpha = 2 ** math.ceil(context_value) - 1
         ntk_alpha = max(ntk_alpha, 1)
