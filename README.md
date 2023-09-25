@@ -100,14 +100,14 @@ You can use the official Docker container to run the model more easily. To do th
 python setup.py install
 ~~~
 
- The code has been tested on a range of GPUs including A100, A800, 4090, and H800. If you are running the code on A100, A800, etc., we recommend using triton==2.0.0.dev20221202. If you are running the code on H800, etc., it is necessary to compile and install the source code of [triton==2.1.0](https://github.com/openai/triton/tree/main) from the GitHub repository. If the code doesn't work on other GPUs, try modifying the triton kernel used in model inference.
+ The code has been tested on a range of GPUs including A100, A800, 4090, and H800. If you are running the code on A100, A800, etc., we recommend using triton==2.0.0.dev20221202 or triton==2.1.0. If you are running the code on H800, etc., it is necessary to compile and install the source code of [triton==2.1.0](https://github.com/openai/triton/tree/main) from the GitHub repository. If the code doesn't work on other GPUs, try modifying the triton kernel used in model inference.
 - Install Triton Package
 
-use triton==2.0.0.dev20221202  (Not currently recommended for use)
+use triton==2.0.0.dev20221202
 ~~~shell
 pip install triton==2.0.0.dev20221202
 ~~~
-use triton==2.1.0  (Better performance and fewer bugs)
+use triton==2.1.0  (Better performance, but the code is under continuous development and may be unstable.)
 ~~~shell
 pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly
 ~~~
