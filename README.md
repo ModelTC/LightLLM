@@ -1,4 +1,4 @@
-<div align="center">
+![image](https://github.com/ModelTC/lightllm/assets/42648726/1c4d4830-e3bc-4b73-994c-57f22f56b843)<div align="center">
   <picture>
     <img alt="LightLLM" src="assets/lightllm.drawio.png" width=90%>
   </picture>
@@ -71,7 +71,7 @@ You can use the official Docker container to run the model more easily. To do th
 
     ```shell
     docker run -it --gpus all -p 8080:8080                  \
-            -v your_local_path:/data/                       \
+            --shm-size 1g -v your_local_path:/data/         \
             ghcr.io/modeltc/lightllm:main /bin/bash
     ```
 
@@ -80,7 +80,7 @@ You can use the official Docker container to run the model more easily. To do th
     ```shell
     docker build -t <image_name> .
     docker run -it --gpus all -p 8080:8080                  \
-            -v your_local_path:/data/                       \
+            --shm-size 1g -v your_local_path:/data/         \
             <image_name> /bin/bash
     ```
 
