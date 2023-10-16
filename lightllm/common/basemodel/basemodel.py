@@ -23,13 +23,15 @@ class TpPartBaseModel:
     # infer state class
     infer_state_class = InferStateInfo
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
+    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[], weight_dict=None, finetune_config=None):
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
         self.weight_dir_ = weight_dir
         self.max_total_token_num = max_total_token_num
         self.load_way = load_way
         self.mode = mode
+        self.weight_dict = weight_dict
+        self.finetune_config = finetune_config
 
         self._init_config()
         self._verify_must()
@@ -48,7 +50,8 @@ class TpPartBaseModel:
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
-
+        if self.finetune_config:
+            self.config['vocab_size'] = self.finetune_config.vocab_size
         return
     
     @final
@@ -70,7 +73,8 @@ class TpPartBaseModel:
             "fp16",
             weight_dir=self.weight_dir_,
             pre_post_layer=self.pre_post_weight,
-            transformer_layer_list=self.trans_layers_weight)
+            transformer_layer_list=self.trans_layers_weight,
+            weight_dict=self.weight_dict)
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
         return 

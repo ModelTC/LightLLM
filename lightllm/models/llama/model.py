@@ -6,6 +6,8 @@ from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInf
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from lightllm.models.llama.layer_weights.ds_load_utils import load_ds_weights
+from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.mem_manager import MemoryManager
@@ -29,8 +31,8 @@ class LlamaTpPartModel(TpPartBaseModel):
     # Mem manager class
     memory_manager_class = MemoryManager
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
-        super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode)
+    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[], weight_dict=None, finetune_config=None):
+        super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode, weight_dict, finetune_config)
         return
     
     def _init_config(self):
@@ -40,8 +42,9 @@ class LlamaTpPartModel(TpPartBaseModel):
         return 
     
     def _verify_params(self):
-        assert self.load_way == "HF", "llama only support HF format to load Now!"
-
+        assert self.load_way in ["HF", "DS"], "llama only supports HF and DS format to load Now!"
+        return
+    
     def _init_mem_manager(self):
         mem_dict = {
             "int8kv" : INT8KVMemoryManager
@@ -66,7 +69,33 @@ class LlamaTpPartModel(TpPartBaseModel):
             self._init_to_get_rotary()
         return
 
-    def _init_to_get_rotary(self, default_base=10000.0):
+    def _init_weights(self):
+        self.pre_post_weight = self.pre_and_post_weight_class(self.tp_rank_, self.world_size_, torch.float16, network_config=self.config, mode=self.mode)
+        self.trans_layers_weight = [
+            self.transformer_weight_class(i, self.tp_rank_, self.world_size_, torch.float16, network_config=self.config, mode=self.mode)
+            for i in range(self.config["n_layer"])
+        ]
+        if self.load_way == 'HF':
+            load_hf_weights(
+                "fp16",
+                weight_dir=self.weight_dir_,
+                pre_post_layer=self.pre_post_weight,
+                transformer_layer_list=self.trans_layers_weight,
+                weight_dict=self.weight_dict)
+        else:
+            load_ds_weights(
+                "fp16",
+                weight_dir=self.weight_dir_,
+                pre_post_layer=self.pre_post_weight,
+                transformer_layer_list=self.trans_layers_weight,
+                weight_dict=self.weight_dict,
+                prefix='model.layers.',
+                num_layer=self.config["n_layer"])
+        self.pre_post_weight.verify_load()
+        [weight.verify_load() for weight in self.trans_layers_weight]            
+        return 
+
+    def _init_to_get_rotary(self, default_base=10000):
         if self.config.get("rope_scaling", {}) is None:
             rope_scaling_factor = 1.0
         else:

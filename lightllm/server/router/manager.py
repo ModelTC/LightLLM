@@ -241,7 +241,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
     try:
         router = RouterManager(
             args.model_dir,
-            load_way="HF",
+            load_way=args.load_way,
             world_size=args.tp,
             max_total_token_num=args.max_total_token_num,
             batch_max_tokens=args.batch_max_tokens,

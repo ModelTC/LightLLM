@@ -275,6 +275,8 @@ def main():
     parser.add_argument("--tokenizer_mode", type=str, default="slow",
                         help="""tokenizer load mode, can be slow or auto, slow mode load fast but run slow, slow mode is good for debug and test, 
                         when you want to get best performance, try auto mode""")
+    parser.add_argument("--load_way", type=str, default="HF",
+                        help="the way of loading model weights, the default is HF(Huggingface format), llama also supports DS(Deepspeed)")
     parser.add_argument("--max_total_token_num", type=int, default=6000,
                         help="the total token nums the gpu and model can support, equals = max_batch * (input_len + output_len)")
     parser.add_argument("--batch_max_tokens", type=int, default=None,
