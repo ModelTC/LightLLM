@@ -4,14 +4,7 @@ setup(
     name="lightllm",
     version="1.0.0",
     packages=find_packages(
-        exclude=(
-            "build",
-            "include",
-            "test",
-            "dist",
-            "docs",
-            "benchmarks",
-            "lightllm.egg-info")
+        exclude=("build", "include", "test", "dist", "docs", "benchmarks", "lightllm.egg-info")
     ),
     author="model toolchain",
     author_email="",

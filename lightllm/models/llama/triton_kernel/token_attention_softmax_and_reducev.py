@@ -13,7 +13,7 @@ def _fwd_kernel(
     stride_vbs, stride_vh, stride_vd,
     stride_obs, stride_oh, stride_od,
     stride_b_loc_b, stride_b_loc_s,
-    other_kv_index,  # 避免读取到nan的数据
+    other_kv_index, # 避免读取到nan的数据
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -27,8 +27,7 @@ def _fwd_kernel(
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
     off_v = cur_head * stride_vh + offs_d[None, :] * stride_vd
-    off_b_loc = cur_batch * stride_b_loc_b + \
-        (max_input_len - cur_batch_seq_len) * stride_b_loc_s
+    off_b_loc = cur_batch * stride_b_loc_b + (max_input_len - cur_batch_seq_len) * stride_b_loc_s
 
     v_ptrs = V + off_v
 
@@ -38,16 +37,11 @@ def _fwd_kernel(
 
     for start_n in range(0, cur_batch_seq_len, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
-        v_index = tl.load(B_Loc +
-                          off_b_loc +
-                          (start_n +
-                           offs_n) *
-                          stride_b_loc_s, mask=(start_n +
-                                                offs_n) < cur_batch_seq_len, other=other_kv_index)
+        v_index = tl.load(B_Loc + off_b_loc + (start_n + offs_n) * stride_b_loc_s, mask=(start_n + offs_n) < cur_batch_seq_len, other=other_kv_index)
 
-        qk = tl.load(Logics + cur_head * stride_logic_h + (cur_batch_start_loc + start_n + offs_n) * stride_logic_bs,
+        qk = tl.load(Logics + cur_head * stride_logic_h + (cur_batch_start_loc + start_n + offs_n) * stride_logic_bs, 
                      mask=start_n + offs_n < cur_batch_seq_len, other=float("-inf"))
-
+    
         n_e_max = tl.maximum(tl.max(qk, 0), e_max)
         old_scale = tl.exp(e_max - n_e_max)
         p = tl.exp(qk - n_e_max)
@@ -64,8 +58,7 @@ def _fwd_kernel(
 
 
 @torch.no_grad()
-def token_softmax_reducev_fwd(
-        logics, v, o, b_loc, b_start_loc, b_seq_len, max_input_len, other_kv_index):
+def token_softmax_reducev_fwd(logics, v, o, b_loc, b_start_loc, b_seq_len, max_input_len, other_kv_index):
     BLOCK = 64
     batch, head = b_seq_len.shape[0], logics.shape[0]
     grid = (batch, head)

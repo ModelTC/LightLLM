@@ -10,8 +10,7 @@ from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import quantiz
 
 
 class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type,
-                 network_config, mode=[], group_size=128):
+    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[], group_size=128):
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
         quantize_func_dict = {
             'int8weight': quantize_int8,
@@ -35,15 +34,14 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             self.ffn_norm_weight_,
             self.gate_up_fused_weight,
             self.down_proj
-        ]
+            ]
         for i in range(len(weights)):
             assert weights[i] is not None, "index:" + str(i) + " " + errors
 
     def _load_qkvo_weights(self, weights):
         # input layernorm params
         if f"model.layers.{self.layer_num_}.input_layernorm.weight" in weights:
-            self.att_norm_weight_ = self._cuda(
-                weights[f"model.layers.{self.layer_num_}.input_layernorm.weight"])
+            self.att_norm_weight_ = self._cuda(weights[f"model.layers.{self.layer_num_}.input_layernorm.weight"])
 
         n_embed = self.network_config_["hidden_size"]
         split_n_embed = n_embed // self.world_size_
@@ -52,27 +50,23 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             q_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.q_proj.weight"][split_n_embed *
                                                                                            self.tp_rank_: split_n_embed * (self.tp_rank_ + 1), :]
             q_weight_ = q_weight_.transpose(0, 1).to(self.data_type_)
-
-            self.qkv_fused_weight = torch.empty(
-                n_embed, split_n_embed * 3, dtype=self.data_type_, device='cpu')
+            
+            self.qkv_fused_weight = torch.empty(n_embed, split_n_embed * 3, dtype=self.data_type_, device='cpu')
             self.qkv_fused_weight[:, :split_n_embed] = q_weight_
         if f"model.layers.{self.layer_num_}.self_attn.k_proj.weight" in weights:
             k_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.k_proj.weight"][split_n_embed *
                                                                                            self.tp_rank_: split_n_embed * (self.tp_rank_ + 1), :]
             k_weight_ = k_weight_.transpose(0, 1).to(self.data_type_)
-            self.qkv_fused_weight[:,
-                                  split_n_embed:split_n_embed * 2] = k_weight_
+            self.qkv_fused_weight[:, split_n_embed:split_n_embed * 2] = k_weight_
         if f"model.layers.{self.layer_num_}.self_attn.v_proj.weight" in weights:
             v_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.v_proj.weight"][split_n_embed *
                                                                                            self.tp_rank_: split_n_embed * (self.tp_rank_ + 1), :]
             v_weight_ = v_weight_.transpose(0, 1).to(self.data_type_)
-            self.qkv_fused_weight[:, split_n_embed *
-                                  2:split_n_embed * 3] = v_weight_
+            self.qkv_fused_weight[:, split_n_embed * 2:split_n_embed * 3] = v_weight_
             self.qkv_fused_weight, self.qkv_fused_weight_scale, self.qkv_fused_weight_zp = \
                 self.quantize_weight(self.qkv_fused_weight)
             self.qkv_fused_weight = self.qkv_fused_weight.cuda()
-            self.qkv_fused_weight_scale = self.qkv_fused_weight_scale.to(
-                self.data_type_).cuda()
+            self.qkv_fused_weight_scale = self.qkv_fused_weight_scale.to(self.data_type_).cuda()
             self.qkv_fused_weight_zp = self.qkv_fused_weight_zp.cuda() \
                 if self.qkv_fused_weight_zp is not None else None
 
@@ -83,16 +77,13 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             self.o_weight_, self.o_weight_scale_, self.o_weight_zp_ = \
                 self.quantize_weight(self.o_weight_.transpose(0, 1))
             self.o_weight_ = self.o_weight_.cuda()
-            self.o_weight_scale_ = self.o_weight_scale_.to(
-                self.data_type_).cuda()
-            self.o_weight_zp_ = self.o_weight_zp_.cuda(
-            ) if self.o_weight_zp_ is not None else None
-
+            self.o_weight_scale_ = self.o_weight_scale_.to(self.data_type_).cuda()
+            self.o_weight_zp_ = self.o_weight_zp_.cuda() if self.o_weight_zp_ is not None else None
+    
     def _load_ffn_weights(self, weights):
         if f"model.layers.{self.layer_num_}.post_attention_layernorm.weight" in weights:
-            self.ffn_norm_weight_ = self._cuda(
-                weights[f"model.layers.{self.layer_num_}.post_attention_layernorm.weight"])
-
+            self.ffn_norm_weight_ = self._cuda(weights[f"model.layers.{self.layer_num_}.post_attention_layernorm.weight"])
+    
         n_embed = self.network_config_["hidden_size"]
         inter_size = self.network_config_['intermediate_size']
         split_inter_size = inter_size // self.world_size_
@@ -101,20 +92,17 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             gate_proj = weights[f"model.layers.{self.layer_num_}.mlp.gate_proj.weight"][split_inter_size *
                                                                                         self.tp_rank_: split_inter_size * (self.tp_rank_ + 1), :]
             gate_proj = gate_proj.transpose(0, 1).to(self.data_type_)
-            self.gate_up_fused_weight = torch.empty(
-                n_embed, split_inter_size * 2, dtype=self.data_type_, device='cpu')
+            self.gate_up_fused_weight = torch.empty(n_embed, split_inter_size * 2, dtype=self.data_type_, device='cpu')
             self.gate_up_fused_weight[:, : split_inter_size] = gate_proj
         if f"model.layers.{self.layer_num_}.mlp.up_proj.weight" in weights:
             up_proj = weights[f"model.layers.{self.layer_num_}.mlp.up_proj.weight"][split_inter_size *
                                                                                     self.tp_rank_: split_inter_size * (self.tp_rank_ + 1), :]
             up_proj = up_proj.transpose(0, 1).to(self.data_type_)
-            self.gate_up_fused_weight[:,
-                                      split_inter_size: split_inter_size * 2] = up_proj
+            self.gate_up_fused_weight[:, split_inter_size : split_inter_size * 2] = up_proj
             self.gate_up_fused_weight, self.gate_up_fused_weight_scale, self.gate_up_fused_weight_zp = \
                 self.quantize_weight(self.gate_up_fused_weight)
             self.gate_up_fused_weight = self.gate_up_fused_weight.cuda()
-            self.gate_up_fused_weight_scale = self.gate_up_fused_weight_scale.to(
-                self.data_type_).cuda()
+            self.gate_up_fused_weight_scale = self.gate_up_fused_weight_scale.to(self.data_type_).cuda()
             self.gate_up_fused_weight_zp = self.gate_up_fused_weight_zp.cuda() \
                 if self.gate_up_fused_weight_zp is not None else None
 
@@ -124,7 +112,5 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             self.down_proj, self.down_proj_scale, self.down_proj_zp = \
                 self.quantize_weight(self.down_proj.transpose(0, 1))
             self.down_proj = self.down_proj.cuda()
-            self.down_proj_scale = self.down_proj_scale.to(
-                self.data_type_).cuda()
-            self.down_proj_zp = self.down_proj_zp.cuda(
-            ) if self.down_proj_zp is not None else None
+            self.down_proj_scale = self.down_proj_scale.to(self.data_type_).cuda()
+            self.down_proj_zp = self.down_proj_zp.cuda() if self.down_proj_zp is not None else None

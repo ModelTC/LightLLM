@@ -6,8 +6,6 @@ from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInf
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.models.llama.layer_weights.ds_load_utils import load_ds_weights
-from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.mem_manager import MemoryManager
@@ -27,43 +25,32 @@ class LlamaTpPartModel(TpPartBaseModel):
 
     # infer state class
     infer_state_class = LlamaInferStateInfo
-
+    
     # Mem manager class
     memory_manager_class = MemoryManager
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num,
-                 load_way="HF", mode=[], weight_dict=None, finetune_config=None):
-        super().__init__(
-    tp_rank,
-    world_size,
-    weight_dir,
-    max_total_token_num,
-    load_way,
-    mode,
-    weight_dict,
-     finetune_config)
+    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
+        super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode)
         return
-
+    
     def _init_config(self):
         super()._init_config()
         # rename key
         # repair_config()
-        return
-
+        return 
+    
     def _verify_params(self):
-        assert self.load_way in [
-    "HF", "DS"], "llama only support HF format to load Now!"
-        return
+        assert self.load_way == "HF", "llama only support HF format to load Now!"
 
     def _init_mem_manager(self):
         mem_dict = {
-            "int8kv": INT8KVMemoryManager
+            "int8kv" : INT8KVMemoryManager
         }
         for _mode in self.mode:
             if _mode in mem_dict:
                 print("Model using mode", _mode)
                 self.memory_manager_class = mem_dict[_mode]
-        self.mem_manager = self.memory_manager_class(self.max_total_token_num,
+        self.mem_manager = self.memory_manager_class(self.max_total_token_num, 
                                                      dtype=torch.float16,
                                                      head_num=self.config["num_attention_heads"] // self.world_size_,
                                                      head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
@@ -78,32 +65,6 @@ class LlamaTpPartModel(TpPartBaseModel):
         else:
             self._init_to_get_rotary()
         return
-
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(self.tp_rank_, self.world_size_, torch.float16, network_config=self.config, mode=self.mode)
-        self.trans_layers_weight = [
-            self.transformer_weight_class(i, self.tp_rank_, self.world_size_, torch.float16, network_config=self.config, mode=self.mode)
-            for i in range(self.config["n_layer"])
-        ]
-        if self.load_way == 'HF':
-            load_hf_weights(
-                "fp16",
-                weight_dir=self.weight_dir_,
-                pre_post_layer=self.pre_post_weight,
-                transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict)
-        else:
-            load_ds_weights(
-                "fp16",
-                weight_dir=self.weight_dir_,
-                pre_post_layer=self.pre_post_weight,
-                transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict,
-                prefix='model.layers.',
-                num_layer=self.config["n_layer"])
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]            
-        return 
 
     def _init_to_get_rotary(self, default_base=10000.0):
         if self.config.get("rope_scaling", {}) is None:
@@ -163,3 +124,4 @@ class LlamaTpPartModel(TpPartBaseModel):
             self._cos_cached[seq_loc_index:seq_loc_index + 1, :] = torch.cos(freqs).to(torch.float16).cuda()
             self._sin_cached[seq_loc_index:seq_loc_index + 1, :] = torch.sin(freqs).to(torch.float16).cuda()
         return
+

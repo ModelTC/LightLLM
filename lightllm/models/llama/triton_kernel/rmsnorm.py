@@ -49,8 +49,7 @@ def rmsnorm_forward(x, weight, eps):
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     # print("BLOCK_SIZE:", BLOCK_SIZE)
     if N > BLOCK_SIZE:
-        raise RuntimeError(
-            "This layer norm doesn't support feature dim >= 64KB.")
+        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
     # print(BLOCK_SIZE, num_warps, "block_size, numwarps")
@@ -75,10 +74,7 @@ def test_rms_norm(M, N, dtype, eps=1e-5, device='cuda'):
     x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device='cuda')
     # forward pass
     y_tri = rmsnorm_forward(x, weight, eps)
-    y_ref = torch_rms_norm(
-        x.to(
-            torch.float32), weight.to(
-            torch.float32), eps).to(dtype)
+    y_ref = torch_rms_norm(x.to(torch.float32), weight.to(torch.float32), eps).to(dtype)
 
     # compare
     print("type:", y_tri.dtype, y_ref.dtype)

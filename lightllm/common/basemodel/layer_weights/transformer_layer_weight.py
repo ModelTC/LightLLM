@@ -2,8 +2,7 @@ from .base_layer_weight import BaseLayerWeight
 
 
 class TransformerLayerWeight(BaseLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size,
-                 data_type, network_config, mode):
+    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode):
         self.layer_num_ = layer_num
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size

@@ -42,9 +42,9 @@ class InferBatch:
 
     all_input_ids: List[List[int]]
     input_lengths: List[int]
-
+    
     out_token_id_counts: List
-    sampling_param_list: List[InferSamplingParams]
+    sampling_param_list : List[InferSamplingParams]
 
     input_ids: torch.Tensor
 
@@ -57,25 +57,19 @@ class InferBatch:
 
     @classmethod
     @torch.no_grad()
-    def init_batch(cls, batch_id, requests, dtype: torch.dtype,
-                   device: torch.device, mem_manager: MemoryManager, vocab_size: int):
+    def init_batch(cls, batch_id, requests, dtype: torch.dtype, device: torch.device, mem_manager:MemoryManager, vocab_size: int):
 
         input_lengths = []
         all_input_ids = []
         requests_idx_mapping = {}
-
+        
         out_token_id_counts = []
         sampling_param_list = []
-
+        
         nopad_total_token_num = 0
         nopad_max_len_in_batch = 0
-        nopad_b_loc = torch.empty(
-            (len(requests),
-             setting['max_req_total_len'] + 12),
-            dtype=torch.long,
-            device='cuda')
-        nopad_b_start_loc = torch.zeros(
-            len(requests), dtype=torch.int32, device='cuda')
+        nopad_b_loc = torch.empty((len(requests), setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
+        nopad_b_start_loc = torch.zeros(len(requests), dtype=torch.int32, device='cuda')
         for i, r in enumerate(requests):
             # request id -> idx in list mapping
             requests_idx_mapping[r['request_id']] = i
@@ -91,14 +85,13 @@ class InferBatch:
             sampling_param = r["sampling_param"]
             sampling_param["vocab_size"] = vocab_size
             sampling_param_list.append(InferSamplingParams(**sampling_param))
-
+            
             nopad_total_token_num += input_length
             nopad_max_len_in_batch = max(nopad_max_len_in_batch, input_length)
-
-        nopad_b_seq_len = torch.tensor(
-            input_lengths, dtype=torch.int32, device="cuda")
-        nopad_b_start_loc[1:] = torch.cumsum(
-            nopad_b_seq_len, dim=0, dtype=torch.int32)[0:-1]
+            
+                
+        nopad_b_seq_len = torch.tensor(input_lengths, dtype=torch.int32, device="cuda")
+        nopad_b_start_loc[1:] = torch.cumsum(nopad_b_seq_len, dim=0, dtype=torch.int32)[0:-1]
         if len(requests) > 1:
             input_ids = np.concatenate(all_input_ids, dtype=np.int64)
         else:
@@ -123,17 +116,16 @@ class InferBatch:
             sampling_param_list=sampling_param_list,
             mem_manager=mem_manager,
         )
-
+    
     @torch.no_grad()
     def free_self(self):
         remove_index = []
         for idx in range(len(self)):
-            remove_index.append(self.nopad_b_loc[idx, (self.nopad_max_len_in_batch - 1) - (
-                self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
+            remove_index.append(self.nopad_b_loc[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
         remove_index = torch.cat(remove_index, dim=-1)
         self.mem_manager.free(remove_index)
         return
-
+        
     @torch.no_grad()
     def filter(self, request_ids: List[int]):
         if len(request_ids) == 0:
@@ -148,55 +140,42 @@ class InferBatch:
 
         nopad_total_token_num = 0
         nopad_max_len_in_batch = 0
-        nopad_b_loc = torch.empty(
-            (len(request_ids),
-             setting['max_req_total_len'] + 12),
-            dtype=torch.long,
-            device='cuda')
-        nopad_b_start_loc = torch.zeros(
-            len(request_ids), dtype=torch.int32, device='cuda')
-        nopad_b_seq_len = torch.zeros(
-            len(request_ids), dtype=torch.int32, device='cuda')
+        nopad_b_loc = torch.empty((len(request_ids), setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
+        nopad_b_start_loc = torch.zeros(len(request_ids), dtype=torch.int32, device='cuda')
+        nopad_b_seq_len = torch.zeros(len(request_ids), dtype=torch.int32, device='cuda')
 
         left_idx = []
         for i, request_id in enumerate(request_ids):
             idx = self.requests_idx_mapping[request_id]
             left_idx.append(idx)
-
+        
         left_idx_set = set(left_idx)
         remove_index = []
         for idx in range(len(self)):
             if idx not in left_idx_set:
-                remove_index.append(self.nopad_b_loc[idx, (self.nopad_max_len_in_batch - 1) - (
-                    self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
+                remove_index.append(self.nopad_b_loc[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
         remove_index = torch.cat(remove_index, dim=-1)
-
+   
         self.mem_manager.free(remove_index)
 
         nopad_max_len_in_batch = 0
         for i, request_id in enumerate(request_ids):
             idx = self.requests_idx_mapping[request_id]
             indices.append(idx)
-
+        
         nopad_b_seq_len[:] = self.nopad_b_seq_len[indices]
         nopad_max_len_in_batch = torch.max(nopad_b_seq_len).item()
-        nopad_b_start_loc[1:] = torch.cumsum(
-            nopad_b_seq_len, dim=0, dtype=torch.int32)[0:-1]
+        nopad_b_start_loc[1:] = torch.cumsum(nopad_b_seq_len, dim=0, dtype=torch.int32)[0:-1]
         nopad_total_token_num = torch.sum(nopad_b_seq_len).item()
-
-        nopad_b_loc[:, 0: (nopad_max_len_in_batch -
-                           1)] = self.nopad_b_loc[indices, (self.nopad_max_len_in_batch -
-                                                            1) -
-                                                  (nopad_max_len_in_batch -
-                                                   1): (self.nopad_max_len_in_batch -
-                                                        1)]
+        
+        nopad_b_loc[:, 0 : (nopad_max_len_in_batch - 1)] = self.nopad_b_loc[indices, (self.nopad_max_len_in_batch - 1) - (nopad_max_len_in_batch - 1): (self.nopad_max_len_in_batch - 1)]
         for i, request_id in enumerate(request_ids):
             idx = self.requests_idx_mapping[request_id]
             requests_idx_mapping[request_id] = i
             requests.append(self.requests[idx])
             all_input_ids.append(self.all_input_ids[idx])
             input_lengths.append(self.input_lengths[idx])
-
+        
         input_ids = self.input_ids[indices]
 
         return InferBatch(
@@ -211,10 +190,8 @@ class InferBatch:
             nopad_b_loc=nopad_b_loc,
             nopad_b_start_loc=nopad_b_start_loc,
             nopad_b_seq_len=nopad_b_seq_len,
-            out_token_id_counts=[self.out_token_id_counts[_i]
-                                 for _i in indices],
-            sampling_param_list=[self.sampling_param_list[_i]
-                                 for _i in indices],
+            out_token_id_counts=[self.out_token_id_counts[_i] for _i in indices],
+            sampling_param_list=[self.sampling_param_list[_i] for _i in indices],
             mem_manager=self.mem_manager
         )
 
@@ -228,24 +205,16 @@ class InferBatch:
         input_ids = batch1.input_ids.new_empty(new_batch_size)
         all_input_ids = []
         input_lengths = []
-        out_token_id_counts = []
-        sampling_param_list = []
+        out_token_id_counts=[]
+        sampling_param_list=[]
 
         cumulative_batch_size = 0
         nopad_total_token_num = batch1.nopad_total_token_num + batch2.nopad_total_token_num
-        nopad_max_len_in_batch = max(
-            batch1.nopad_max_len_in_batch,
-            batch2 .nopad_max_len_in_batch)
-
-        nopad_b_loc = torch.empty(
-            (new_batch_size,
-             setting['max_req_total_len'] + 12),
-            dtype=torch.long,
-            device='cuda')
-        nopad_b_start_loc = torch.zeros(
-            new_batch_size, dtype=torch.int32, device='cuda')
-        nopad_b_seq_len = torch.zeros(
-            new_batch_size, dtype=torch.int32, device='cuda')
+        nopad_max_len_in_batch = max(batch1.nopad_max_len_in_batch, batch2 .nopad_max_len_in_batch)
+        
+        nopad_b_loc = torch.empty((new_batch_size, setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
+        nopad_b_start_loc = torch.zeros(new_batch_size, dtype=torch.int32, device='cuda')
+        nopad_b_seq_len = torch.zeros(new_batch_size, dtype=torch.int32, device='cuda')
         nopad_start_loc_len_temp = 0
         batches = [batch1, batch2]
         for i, batch in enumerate(batches):
@@ -258,10 +227,8 @@ class InferBatch:
             end_index = cumulative_batch_size + len(batch)
             input_ids[start_index:end_index] = batch.input_ids
             nopad_b_seq_len[start_index: end_index] = batch.nopad_b_seq_len
-            nopad_b_start_loc[start_index: end_index] = batch.nopad_b_start_loc + \
-                nopad_start_loc_len_temp
-            nopad_start_loc_len_temp = nopad_b_start_loc[end_index -
-                                                         1] + nopad_b_seq_len[end_index - 1]
+            nopad_b_start_loc[start_index: end_index] = batch.nopad_b_start_loc + nopad_start_loc_len_temp
+            nopad_start_loc_len_temp = nopad_b_start_loc[end_index - 1] + nopad_b_seq_len[end_index - 1]
             nopad_b_loc[start_index: end_index, nopad_max_len_in_batch - batch.nopad_max_len_in_batch: nopad_max_len_in_batch -
                         1] = batch.nopad_b_loc[:, :batch.nopad_max_len_in_batch - 1]
 
@@ -272,12 +239,9 @@ class InferBatch:
             sampling_param_list.extend(batch.sampling_param_list)
             # Update
             cumulative_batch_size += len(batch)
-
+        
         nopad_b_loc[:, nopad_max_len_in_batch - 1] = nopad_total_token_num - \
-            new_batch_size + torch.arange(0,
-                                          new_batch_size,
-                                          dtype=torch.int32,
-                                          device='cuda')
+            new_batch_size + torch.arange(0, new_batch_size, dtype=torch.int32, device='cuda')
         return InferBatch(
             batch_id=batches[0].batch_id,
             requests=requests,
@@ -297,7 +261,8 @@ class InferBatch:
 
     def __len__(self):
         return len(self.requests)
-
+    
+    
     def get_post_sample_tensors(self):
         presence_penalties: List[float] = []
         frequency_penalties: List[float] = []
@@ -315,25 +280,20 @@ class InferBatch:
             temperatures.append(sample_param.temperature)
             top_ps.append(sample_param.top_p)
             top_ks.append(sample_param.top_k)
-
+            
             for token_id, count in id_to_count.items():
                 p_token_ids.append(token_id)
                 p_token_counts.append(count)
             p_seq_len.append(len(id_to_count))
             p_max_len_in_batch = max(p_max_len_in_batch, len(id_to_count))
-
-        presence_penalties = torch.tensor(
-            presence_penalties, dtype=torch.float, device="cuda")
-        frequency_penalties = torch.tensor(
-            frequency_penalties, dtype=torch.float, device="cuda")
-        temperatures = torch.tensor(
-            temperatures, dtype=torch.float, device="cuda")
+        
+        presence_penalties = torch.tensor(presence_penalties, dtype=torch.float, device="cuda")
+        frequency_penalties = torch.tensor(frequency_penalties, dtype=torch.float, device="cuda")
+        temperatures = torch.tensor(temperatures, dtype=torch.float, device="cuda")
         top_ps = torch.tensor(top_ps, dtype=torch.float, device="cuda")
         top_ks = torch.tensor(top_ks, dtype=torch.int32, device="cuda")
-        p_token_ids = torch.tensor(
-            p_token_ids, dtype=torch.int32, device="cuda")
-        p_token_counts = torch.tensor(
-            p_token_counts, dtype=torch.int32, device="cuda")
+        p_token_ids = torch.tensor(p_token_ids, dtype=torch.int32, device="cuda")
+        p_token_counts = torch.tensor(p_token_counts, dtype=torch.int32, device="cuda")
         p_seq_len = torch.tensor(p_seq_len, dtype=torch.int32, device="cuda")
         p_cumsum_seq_len = torch.cumsum(p_seq_len, dim=0, dtype=torch.int32)
         return presence_penalties, frequency_penalties, temperatures, top_ps, top_ks, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch

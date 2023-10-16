@@ -6,43 +6,28 @@ import triton.language as tl
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128},
-                      num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256},
-                      num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32},
-                      num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64},
-                      num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64},
-                      num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32},
-                      num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32},
-                      num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32},
-                      num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 256}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
     ],
     key=['K', 'N'],
 )
+
+
 @triton.jit
 def dequantize_kernel(
     # Pointers to matrices
@@ -80,17 +65,14 @@ def matmul_dequantize_int8(a, b, b_scale, out=None):
     # assert b.is_contiguous(), "Matrix B must be contiguous"
     M, K = a.shape
     K, N = b.shape
-    if out is None:
+    if out == None:
         # Allocates output.
         c = torch.empty((M, N), device=a.device, dtype=a.dtype)
     else:
         c = out
     fp_b = torch.empty((K, N), device=a.device, dtype=a.dtype)
-
-    def grid(META): return (
-        triton.cdiv(
-            K, META['BLOCK_SIZE_K']), triton.cdiv(
-            N, META['BLOCK_SIZE_N']),
+    grid = lambda META: (
+        triton.cdiv(K, META['BLOCK_SIZE_K']), triton.cdiv(N, META['BLOCK_SIZE_N']),
     )
     dequantize_kernel[grid](
         b, b_scale, fp_b,
@@ -155,24 +137,18 @@ def test_correct_int8(M=512, K=4096, N=4096):
     cos = torch.nn.CosineSimilarity(0)
     triton_output = matmul_dequantize_int8(a, int_b, b_scale)
     torch_output = torch.matmul(a, b)
-    print(f"triton_output={triton_output}")
+    print(f"triton_output={triton_output}")        
     print(f"torch_output={torch_output}")
-    print(
-        "Output cos ", cos(
-            triton_output.flatten().to(
-                torch.float32), torch_output.flatten().to(
-                torch.float32)))
+    print("Output cos ", cos(triton_output.flatten().to(torch.float32), torch_output.flatten().to(torch.float32)))
 
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
-        # Argument names to use as an x-axis for the plot
-        x_names=['M', 'N', 'K'],
+        x_names=['M', 'N', 'K'],  # Argument names to use as an x-axis for the plot
         x_vals=[32, 64, 128, 256] + [
             512 * i for i in range(1, 33)
         ],  # Different possible values for `x_name`
-        line_arg='provider',
-        # Argument name whose value corresponds to a different line in the plot
+        line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
         # Possible values for `line_arg`
         line_vals=['cublas', 'triton'],
         # Label name for the lines
@@ -180,27 +156,24 @@ def test_correct_int8(M=512, K=4096, N=4096):
         # Line styles
         styles=[('green', '-'), ('blue', '-')],
         ylabel="TFLOPS",  # Label name for the y-axis
-        plot_name="matmul-performance",
-        # Name for the plot, used also as a file name for saving the plot.
+        plot_name="matmul-performance",  # Name for the plot, used also as a file name for saving the plot.
         args={},
     )
 )
+
+
 def benchmark(M, N, K, provider):
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'cublas':
         a = torch.randn((M, K), device='cuda', dtype=torch.float16)
         b = torch.randn((K, N), device='cuda', dtype=torch.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: torch.matmul(a, b), quantiles=quantiles)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
     if provider == 'triton':
         a = torch.randn((M, K), device='cuda', dtype=torch.float16)
         b = torch.randn((K, N), device='cuda', dtype=torch.float16)
         intb, b_scale = quantize_int8(b)
-        ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: matmul_dequantize_int8(
-                a, intb, b_scale), quantiles=quantiles)
-
-    def perf(ms): return 2 * M * N * K * 1e-12 / (ms * 1e-3)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul_dequantize_int8(a, intb, b_scale), quantiles=quantiles)
+    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(min_ms), perf(max_ms)
 
 
@@ -228,7 +201,7 @@ if __name__ == "__main__":
 
     bs = 32
     hidden = 4096
-    inter = 11008
+    inter  = 11008
     prefill_len = 512
     decode_len = 1
     tp = 1

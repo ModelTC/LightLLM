@@ -10,3 +10,7 @@ class PreAndPostLayerWeight(BaseLayerWeight):
         self.mode = mode
         self.init_static_params()
         return
+    
+
+
+

@@ -19,32 +19,27 @@ class Req:
         return {"request_id": self.request_id,
                 "input_id": self.prompt_ids,
                 "output_len": self.max_output_len,
-                "sampling_param": self.sample_params.to_dict()}
+                "sampling_param": self.sample_params.to_dict() }
 
     def to_req_detokenization_state(self):
-        out = ReqDetokenizationState(
-            self.request_id,
-            self.prompt_ids,
-            self.max_output_len,
-            self.sample_params.ignore_eos)
+        out = ReqDetokenizationState(self.request_id, self.prompt_ids, self.max_output_len, self.sample_params.ignore_eos)
         if self.output_metadata_list:
             out.gen_metadata.update(self.output_metadata_list[-1])
         return out
-
+    
     def stop_sequences_matched(self):
         for stop_token_ids in self.sample_params.stop_sequences:
             stop_len = len(stop_token_ids)
             if stop_len > 0:
                 if len(self.output_ids) >= stop_len:
-                    if all(self.output_ids[-(stop_len - i)] ==
-                           stop_token_ids[i] for i in range(stop_len)):
+                    if all(self.output_ids[-(stop_len - i)] == stop_token_ids[i] for i in range(stop_len)):
                         return True
         return False
 
     def __repr__(self):
         return (f"request_id(n={self.request_id}, "
                 f"prompt_ids={self.prompt_ids}, ")
-
+        
 
 class ReqDetokenizationState:
     def __init__(
@@ -65,7 +60,6 @@ class ReqDetokenizationState:
         self.ignore_eos = ignore_eos
         self.gen_metadata = {}
 
-
 class Batch:
     def __init__(self, batch_id, reqs: List[Req]):
         self.batch_id = batch_id
@@ -83,7 +77,7 @@ class Batch:
         for req in self.reqs:
             tokens += req.input_len + req.max_output_len
         return tokens
-
+    
     def calcu_used_tokens(self):
         tokens = 0
         for req in self.reqs:
@@ -124,20 +118,16 @@ class Batch:
     def __repr__(self):
         return (f"batch_id={self.batch_id}, "
                 f"reqs={self.reqs}, ")
-
-
+        
 class BatchTokenIdOut:
     def __init__(self):
-        # [req_id, new_token_id, gen_metadata, finished_state, abort_state]
-        self.reqs_infs: List[Tuple[str, int, Dict, bool, bool]] = []
-
+        self.reqs_infs: List[Tuple[str, int, Dict, bool, bool]] = []  # [req_id, new_token_id, gen_metadata, finished_state, abort_state]
 
 class BatchStrOut:
     def __init__(self):
-        # [req_id, token_str, gen_metadata, finished_state, abort_state]
-        self.reqs_infs: List[Tuple[str, str, Dict, bool, bool]] = []
-
-
+        self.reqs_infs: List[Tuple[str, str, Dict, bool, bool]] = [] # [req_id, token_str, gen_metadata, finished_state, abort_state]
+        
 class AbortReq:
     def __init__(self, req_id):
         self.req_id = req_id
+        

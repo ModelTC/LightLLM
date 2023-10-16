@@ -1,6 +1,5 @@
 import time
 
-
 class Stats:
 
     def __init__(self, log_status, log_stats_interval) -> None:
@@ -11,14 +10,14 @@ class Stats:
         self.output_tokens = 0
         self.prompt_tokens = 0
         return
-
+    
     def count_prompt_tokens(self, run_batch):
         if self.log_stats:
             tokens = run_batch.input_tokens()
             self.prompt_tokens += tokens
             self.all_tokens += tokens
         return
-
+    
     def count_output_tokens(self, run_batch):
         if self.log_stats:
             tokens = len(run_batch.reqs)
@@ -40,3 +39,5 @@ class Stats:
             self.prompt_tokens = 0
             self.last_log_time = now
         return
+
+    

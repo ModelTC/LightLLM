@@ -6,8 +6,7 @@ import triton.language as tl
 
 @triton.jit
 def _fwd_kernel_token_att2(
-    # B_Start_Loc 保存的是如果连续存储时候的累加输入和
-    Prob, V, Out, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,
+    Prob, V, Out, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,  # B_Start_Loc 保存的是如果连续存储时候的累加输入和
     stride_b_loc_b, stride_b_loc_s,
     stride_ph, stride_pbs,
     stride_vbs, stride_vh, stride_vd,
@@ -18,7 +17,7 @@ def _fwd_kernel_token_att2(
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
-
+    
     cur_kv_head = cur_head // kv_group_num
 
     offs_n = tl.arange(0, BLOCK_N)
@@ -28,38 +27,16 @@ def _fwd_kernel_token_att2(
     cur_batch_end_index = cur_batch_seq_len
     cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
 
-    v_loc_off = cur_batch * stride_b_loc_b + \
-        (cur_batch_start_index + offs_n) * stride_b_loc_s
-    p_offs = cur_head * stride_ph + \
-        (cur_batch_in_all_start_index + offs_n) * stride_pbs
+    v_loc_off = cur_batch * stride_b_loc_b + (cur_batch_start_index + offs_n) * stride_b_loc_s
+    p_offs = cur_head * stride_ph + (cur_batch_in_all_start_index + offs_n) * stride_pbs
     v_offs = cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
 
     acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
     for start_n in range(0, cur_batch_seq_len, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
-        p_value = tl.load(
-            Prob +
-            p_offs +
-            start_n *
-            stride_b_loc_s,
-            mask=(
-                start_n +
-                offs_n) < cur_batch_seq_len,
-            other=0.0)
-        v_loc = tl.load(
-            B_Loc +
-            v_loc_off +
-            start_n *
-            stride_b_loc_s,
-            mask=(
-                start_n +
-                offs_n) < cur_batch_seq_len,
-            other=0.0)
-        v_value = tl.load(V +
-                          v_offs +
-                          v_loc[:, None] *
-                          stride_vbs, mask=(start_n +
-                                            offs_n[:, None]) < cur_batch_seq_len, other=0.0)
+        p_value = tl.load(Prob + p_offs + start_n * stride_b_loc_s, mask=(start_n + offs_n) < cur_batch_seq_len, other=0.0)
+        v_loc = tl.load(B_Loc + v_loc_off + start_n * stride_b_loc_s, mask=(start_n + offs_n) < cur_batch_seq_len, other=0.0)
+        v_value = tl.load(V + v_offs + v_loc[:, None] * stride_vbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0)
         acc += tl.sum(p_value[:, None] * v_value, 0)
 
     acc = acc.to(tl.float16)
@@ -79,7 +56,7 @@ def token_att_fwd2(prob, v, out, B_Loc, B_Start_Loc, B_Seqlen, max_input_len):
     grid = (batch, head)
     num_warps = 4
     dim = v.shape[-1]
-
+    
     kv_group_num = prob.shape[0] // v.shape[1]
 
     _fwd_kernel_token_att2[grid](
@@ -95,3 +72,4 @@ def token_att_fwd2(prob, v, out, B_Loc, B_Start_Loc, B_Seqlen, max_input_len):
         num_stages=1,
     )
     return
+
