@@ -12,7 +12,6 @@ class BaseLayerWeight:
         """
         pass
 
-
     def init_static_params(self):
         """
         design for some static init params, many model dont need do this.

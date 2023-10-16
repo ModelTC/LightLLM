@@ -26,9 +26,16 @@ class LlamaTpPartModelQuantized(LlamaTpPartModel):
     # Mem manager class
     memory_manager_class = partial(MemoryManager, always_copy=True)
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
+    def __init__(self, tp_rank, world_size, weight_dir,
+                 max_total_token_num, load_way="HF", mode=[]):
         self.init_mode(mode)
-        super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode)
+        super().__init__(
+            tp_rank,
+            world_size,
+            weight_dir,
+            max_total_token_num,
+            load_way,
+            mode)
 
     def init_mode(self, mode):
         self.q_group_size = 128
@@ -43,4 +50,6 @@ class LlamaTpPartModelQuantized(LlamaTpPartModel):
             if _mode in infer_class_dict:
                 self.transformer_layer_infer_class = infer_class_dict[_mode]
                 print("Model using mode", _mode)
-        self.transformer_weight_class = partial(LlamaTransformerLayerWeightQuantized, group_size=self.q_group_size)
+        self.transformer_weight_class = partial(
+            LlamaTransformerLayerWeightQuantized,
+            group_size=self.q_group_size)

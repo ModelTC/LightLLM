@@ -58,7 +58,7 @@ def get_tokenizer(
                                                   **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments, using slow mode.
-        # you can try pip install protobuf==3.20.0 to try repair 
+        # you can try pip install protobuf==3.20.0 to try repair
         kwargs["use_fast"] = False
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args,
                                                   **kwargs)
@@ -68,4 +68,3 @@ def get_tokenizer(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
     return tokenizer
-        

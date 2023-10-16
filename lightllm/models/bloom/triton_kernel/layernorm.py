@@ -85,7 +85,8 @@ def test_layer_norm(M, N, dtype, eps=1e-5, device='cuda'):
     x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device='cuda')
     # forward pass
     y_tri = layernorm_forward(x, weight, bias, eps)
-    y_ref = torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps).to(dtype)
+    y_ref = torch.nn.functional.layer_norm(
+        x, w_shape, weight, bias, eps).to(dtype)
 
     # compare
     print("type:", y_tri.dtype, y_ref.dtype)

@@ -62,8 +62,20 @@ def test1():
 
     dtype = torch.float16
 
-    Logics = torch.empty((H, B * N_CTX), dtype=dtype, device="cuda").normal_(mean=0.1, std=10)
-    ProbOut = torch.empty((H, B * N_CTX), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2)
+    Logics = torch.empty(
+        (H,
+         B * N_CTX),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.1,
+        std=10)
+    ProbOut = torch.empty(
+        (H,
+         B * N_CTX),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.4,
+        std=0.2)
 
     b_start_loc = torch.zeros((B,), dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros((B,), dtype=torch.int32, device="cuda")
@@ -88,8 +100,20 @@ def test2():
 
     dtype = torch.float16
 
-    Logics = torch.empty((H, B * N_CTX), dtype=dtype, device="cuda").normal_(mean=0.1, std=10)
-    ProbOut = torch.empty((H, B * N_CTX), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2)
+    Logics = torch.empty(
+        (H,
+         B * N_CTX),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.1,
+        std=10)
+    ProbOut = torch.empty(
+        (H,
+         B * N_CTX),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.4,
+        std=0.2)
     B = 4
     b_start_loc = torch.zeros((B,), dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros((B,), dtype=torch.int32, device="cuda")
@@ -107,7 +131,8 @@ def test2():
     start = 0
     for i in range(B):
         end = start + b_seq_len[i]
-        torch_o = Logics[:, start: end].reshape(H * 1, -1).softmax(-1).reshape(H, 1 * b_seq_len[i])
+        torch_o = Logics[:, start: end].reshape(
+            H * 1, -1).softmax(-1).reshape(H, 1 * b_seq_len[i])
         start = end
         torch_out.append(torch_o)
     torch_out = torch.cat(torch_out, dim=-1)

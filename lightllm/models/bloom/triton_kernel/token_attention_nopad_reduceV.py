@@ -24,16 +24,38 @@ def _fwd_kernel_token_att2(
     cur_batch_end_index = cur_batch_seq_len
     cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
 
-    v_loc_off = cur_batch * stride_b_loc_b + (cur_batch_start_index + offs_n) * stride_b_loc_s
-    p_offs = cur_head * stride_ph + (cur_batch_in_all_start_index + offs_n) * stride_pbs
+    v_loc_off = cur_batch * stride_b_loc_b + \
+        (cur_batch_start_index + offs_n) * stride_b_loc_s
+    p_offs = cur_head * stride_ph + \
+        (cur_batch_in_all_start_index + offs_n) * stride_pbs
     v_offs = cur_head * stride_vh + offs_d[None, :] * stride_vd
 
     acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
     for start_n in range(0, cur_batch_seq_len, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
-        p_value = tl.load(Prob + p_offs + start_n * stride_b_loc_s, mask=(start_n + offs_n) < cur_batch_seq_len, other=0.0)
-        v_loc = tl.load(B_Loc + v_loc_off + start_n * stride_b_loc_s, mask=(start_n + offs_n) < cur_batch_seq_len, other=0.0)
-        v_value = tl.load(V + v_offs + v_loc[:, None] * stride_vbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0)
+        p_value = tl.load(
+            Prob +
+            p_offs +
+            start_n *
+            stride_b_loc_s,
+            mask=(
+                start_n +
+                offs_n) < cur_batch_seq_len,
+            other=0.0)
+        v_loc = tl.load(
+            B_Loc +
+            v_loc_off +
+            start_n *
+            stride_b_loc_s,
+            mask=(
+                start_n +
+                offs_n) < cur_batch_seq_len,
+            other=0.0)
+        v_value = tl.load(V +
+                          v_offs +
+                          v_loc[:, None] *
+                          stride_vbs, mask=(start_n +
+                                            offs_n[:, None]) < cur_batch_seq_len, other=0.0)
         acc += tl.sum(p_value[:, None] * v_value, 0)
 
     acc = acc.to(tl.float16)
@@ -84,7 +106,14 @@ def test1():
 
     dtype = torch.float16
 
-    V = torch.empty((B * N_CTX, H, D), dtype=dtype, device="cuda").normal_(mean=0.1, std=10)
+    V = torch.empty(
+        (B * N_CTX,
+         H,
+         D),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.1,
+        std=10)
     Prob = torch.empty((H, B * N_CTX), dtype=dtype, device="cuda").normal_(mean=0.4,
                                                                            std=0.2).reshape(H, B, N_CTX).softmax(-1).reshape(H, B * N_CTX)
     Out = torch.empty((B, H, D), dtype=dtype, device="cuda")
@@ -95,7 +124,8 @@ def test1():
     for i in range(B):
         b_start_loc[i] = i * N_CTX
         b_seq_len[i] = N_CTX
-        b_loc[i] = i * N_CTX + torch.arange(0, N_CTX, dtype=torch.int32, device="cuda")
+        b_loc[i] = i * N_CTX + \
+            torch.arange(0, N_CTX, dtype=torch.int32, device="cuda")
 
     token_att_fwd2(Prob, V, Out, b_loc, b_start_loc, b_seq_len, N_CTX)
     torch_out = torch_att(V, Prob, B, N_CTX, H, D)
@@ -113,8 +143,21 @@ def test2():
 
     dtype = torch.float16
 
-    V = torch.empty((B * N_CTX, H, D), dtype=dtype, device="cuda").normal_(mean=0.1, std=10)
-    Prob = torch.empty((H, B * N_CTX), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2)
+    V = torch.empty(
+        (B * N_CTX,
+         H,
+         D),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.1,
+        std=10)
+    Prob = torch.empty(
+        (H,
+         B * N_CTX),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.4,
+        std=0.2)
 
     B = 4
     Out = torch.empty((B, H, D), dtype=dtype, device="cuda")
@@ -130,7 +173,8 @@ def test2():
     for i in range(0, B):
         if i != 0:
             b_start_loc[i] = b_start_loc[i - 1] + b_seq_len[i - 1]
-        b_loc[i, N_CTX - b_seq_len[i]:] = b_start_loc[i] + torch.arange(0, b_seq_len[i], dtype=torch.int32, device="cuda")
+        b_loc[i, N_CTX - b_seq_len[i]:] = b_start_loc[i] + \
+            torch.arange(0, b_seq_len[i], dtype=torch.int32, device="cuda")
 
     start = 0
     for i in range(B):
@@ -144,7 +188,8 @@ def test2():
     start = 0
     for i in range(B):
         end = start + b_seq_len[i]
-        torch_o = torch_att(V[start:end], Prob[:, start:end], 1, b_seq_len[i], H, D)
+        torch_o = torch_att(
+            V[start:end], Prob[:, start:end], 1, b_seq_len[i], H, D)
         torch_out.append(torch_o)
         start = end
     torch_out = torch.cat(torch_out, dim=0).squeeze()

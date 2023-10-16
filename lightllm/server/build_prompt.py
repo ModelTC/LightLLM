@@ -49,7 +49,8 @@ async def build_prompt(request) -> str:
                 conv.append_message(conv.roles[1], message["content"])
             else:
                 raise ValueError(f"Unknown role: {msg_role}")
-        # Add a blank message for the assistant. Meaning it's the assistant's turn to talk.
+        # Add a blank message for the assistant. Meaning it's the assistant's
+        # turn to talk.
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 

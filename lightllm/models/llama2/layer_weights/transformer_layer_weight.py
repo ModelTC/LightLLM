@@ -5,19 +5,23 @@ from lightllm.common.basemodel import TransformerLayerWeight
 
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
+
 class Llama2TransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[]):
+    def __init__(self, layer_num, tp_rank, world_size,
+                 data_type, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
         return
-    
+
     def _load_qkvo_weights(self, weights):
         if f"model.layers.{self.layer_num_}.input_layernorm.weight" in weights:
-            self.att_norm_weight_ = self._cuda(weights[f"model.layers.{self.layer_num_}.input_layernorm.weight"])
+            self.att_norm_weight_ = self._cuda(
+                weights[f"model.layers.{self.layer_num_}.input_layernorm.weight"])
 
         # attention params
         n_embed = self.network_config_["hidden_size"]
         split_n_embed = n_embed // self.world_size_
-        split_key_value_embed = n_embed // self.network_config_["num_attention_heads"] * self.network_config_["num_key_value_heads"] // self.world_size_
+        split_key_value_embed = n_embed // self.network_config_[
+            "num_attention_heads"] * self.network_config_["num_key_value_heads"] // self.world_size_
         if f"model.layers.{self.layer_num_}.self_attn.q_proj.weight" in weights:
             self.q_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.q_proj.weight"][split_n_embed *
                                                                                                 self.tp_rank_: split_n_embed * (self.tp_rank_ + 1), :]
@@ -35,7 +39,6 @@ class Llama2TransformerLayerWeight(LlamaTransformerLayerWeight):
         # attention output dense params
         if f"model.layers.{self.layer_num_}.self_attn.o_proj.weight" in weights:
             self.o_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.o_proj.weight"][:,
-                                                                                                            split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)]
+                                                                                                split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)]
             self.o_weight_ = self._cuda(self.o_weight_.transpose(0, 1))
         return
-

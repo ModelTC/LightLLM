@@ -12,6 +12,14 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None,
     if transformer_layer_list is not None:
         assert transformer_layer_list[0].data_type_ == data_type, "type is not right"
     if weight_dict:
+        new_w = {}
+        for k, v in weight_dict.items():
+            if "transformer." in k:
+                new_w[k[len("transformer."):]] = v
+            else:
+                new_w[k] = v
+        del weight_dict
+        weight_dict = new_w
         if pre_post_layer is not None:
             pre_post_layer.load_hf_weights(weight_dict)
         if transformer_layer_list is not None:
@@ -33,6 +41,14 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None,
             weights = {k: weights.get_tensor(k) for k in weights.keys()}
         else:
             weights = torch.load(os.path.join(weight_dir, file_), 'cpu')
+        new_w = {}
+        for k, v in weights.items():
+            if "transformer." in k:
+                new_w[k[len("transformer."):]] = v
+            else:
+                new_w[k] = v
+        del weights
+        weights = new_w
         if pre_post_layer is not None:
             pre_post_layer.load_hf_weights(weights)
         if transformer_layer_list is not None:

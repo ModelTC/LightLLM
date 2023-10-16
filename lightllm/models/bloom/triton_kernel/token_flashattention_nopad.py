@@ -32,7 +32,8 @@ def _fwd_kernel(
     off_q = cur_batch * stride_qbs + cur_head * stride_qh + offs_d * stride_qd
     off_k = cur_head * stride_kh + offs_d[None, :] * stride_kd
     off_v = cur_head * stride_vh + offs_d[None, :] * stride_vd
-    off_b_loc = cur_batch * stride_b_loc_b + (max_input_len - cur_batch_seq_len) * stride_b_loc_s
+    off_b_loc = cur_batch * stride_b_loc_b + \
+        (max_input_len - cur_batch_seq_len) * stride_b_loc_s
 
     q = tl.load(Q + off_q)
 
@@ -48,8 +49,16 @@ def _fwd_kernel(
     for start_n in range(0, cur_batch_seq_len, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        k_index = tl.load(B_Loc + off_b_loc + (start_n + offs_n) * stride_b_loc_s, mask=(start_n + offs_n) < cur_batch_seq_len, other=0)
-        k = tl.load(k_ptrs + k_index[:, None] * stride_kbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0)
+        k_index = tl.load(B_Loc +
+                          off_b_loc +
+                          (start_n +
+                           offs_n) *
+                          stride_b_loc_s, mask=(start_n +
+                                                offs_n) < cur_batch_seq_len, other=0)
+        k = tl.load(k_ptrs +
+                    k_index[:, None] *
+                    stride_kbs, mask=(start_n +
+                                      offs_n[:, None]) < cur_batch_seq_len, other=0.0)
 
         qk = tl.zeros([BLOCK_N,], dtype=tl.float32)
         qk += tl.sum(q[None, :] * k, 1)
@@ -58,7 +67,12 @@ def _fwd_kernel(
         alibi_loc = cur_batch_seq_len - 1 - (start_n + offs_n)
         qk -= alibi_loc * alibi_m
 
-        qk = tl.where(cur_batch_seq_len > (start_n + offs_n), qk, float("-inf"))
+        qk = tl.where(
+            cur_batch_seq_len > (
+                start_n +
+                offs_n),
+            qk,
+            float("-inf"))
 
         m_ij = tl.max(qk, 0)
         p = tl.exp(qk - m_ij)
@@ -77,7 +91,10 @@ def _fwd_kernel(
         acc = acc * acc_scale
         # update acc
         v_index = k_index
-        v = tl.load(v_ptrs + v_index[:, None] * stride_vbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0)
+        v = tl.load(v_ptrs +
+                    v_index[:, None] *
+                    stride_vbs, mask=(start_n +
+                                      offs_n[:, None]) < cur_batch_seq_len, other=0.0)
         # print(p)
         acc += tl.sum(p[:, None] * v, 0)
 
@@ -123,13 +140,15 @@ def _fwd_kernel(
 #     return
 
 @torch.no_grad()
-def token_attention_fwd(q, k, v, o, alibi, b_loc, b_start_loc, b_seq_len, max_len_in_batch):
+def token_attention_fwd(q, k, v, o, alibi, b_loc,
+                        b_start_loc, b_seq_len, max_len_in_batch):
     head_num = k.shape[1]
     batch_size = b_seq_len.shape[0]
     calcu_shape1 = (batch_size, head_num, k.shape[2])
     total_token_num = k.shape[0]
 
-    att_m_tensor = torch.empty((head_num, total_token_num), dtype=q.dtype, device="cuda")
+    att_m_tensor = torch.empty(
+        (head_num, total_token_num), dtype=q.dtype, device="cuda")
 
     token_att_fwd(q.view(calcu_shape1),
                   k,
@@ -140,7 +159,12 @@ def token_attention_fwd(q, k, v, o, alibi, b_loc, b_start_loc, b_seq_len, max_le
                   b_seq_len,
                   max_len_in_batch)
     prob = torch.empty_like(att_m_tensor)
-    token_softmax_fwd(att_m_tensor, b_start_loc, b_seq_len, prob, max_len_in_batch)
+    token_softmax_fwd(
+        att_m_tensor,
+        b_start_loc,
+        b_seq_len,
+        prob,
+        max_len_in_batch)
     att_m_tensor = None
     token_att_fwd2(prob,
                    v,
@@ -170,10 +194,28 @@ def test():
 
     Z, H, N_CTX, D_HEAD = 22, 112 // 8, 2048, 128
     dtype = torch.float16
-    q = torch.empty((Z, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2)
-    k = torch.empty((Z * N_CTX, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2)
-    v = torch.empty((Z * N_CTX, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2)
-    o = torch.empty((Z, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2)
+    q = torch.empty(
+        (Z, H, D_HEAD), dtype=dtype, device="cuda").normal_(
+        mean=0.1, std=0.2)
+    k = torch.empty(
+        (Z * N_CTX,
+         H,
+         D_HEAD),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.4,
+        std=0.2)
+    v = torch.empty(
+        (Z * N_CTX,
+         H,
+         D_HEAD),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.3,
+        std=0.2)
+    o = torch.empty(
+        (Z, H, D_HEAD), dtype=dtype, device="cuda").normal_(
+        mean=0.3, std=0.2)
     alibi = torch.zeros((H,), dtype=torch.float32, device="cuda")
 
     max_input_len = N_CTX
@@ -188,7 +230,8 @@ def test():
     b_start_loc[3] = 3 * N_CTX
 
     for i in range(Z):
-        b_loc[i, :] = torch.arange(i * N_CTX, (i + 1) * N_CTX, dtype=torch.int32, device="cuda")
+        b_loc[i, :] = torch.arange(
+            i * N_CTX, (i + 1) * N_CTX, dtype=torch.int32, device="cuda")
 
     token_attention_fwd(q, k, v, o, alibi, b_loc, b_seq_len, max_input_len)
     import time

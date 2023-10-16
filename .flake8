@@ -1,0 +1,9 @@
+# This is an example .flake8 config, used when developing *Black* itself.
+# Keep in sync with setup.cfg which is used for source packages.
+
+[flake8]
+# W606: reserved keywords
+ignore = E203, E266, W503, F405, F403, W606, E731, C901, E701
+max-line-length = 120
+max-complexity = 18
+select = B,C,E,F,W,T4,B9

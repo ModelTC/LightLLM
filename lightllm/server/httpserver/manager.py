@@ -1,11 +1,11 @@
+from ..io_struct import BatchStrOut, AbortReq
+from ..tokenizer import get_tokenizer
 import zmq
 import zmq.asyncio
 import asyncio
 import uvloop
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from ..tokenizer import get_tokenizer
-from ..io_struct import BatchStrOut, AbortReq
 
 
 class HttpServerManager:
@@ -25,13 +25,15 @@ class HttpServerManager:
         self.send_to_router.connect(f"tcp://127.0.0.1:{router_port}")
 
         self.recv_from_detokenization = context.socket(zmq.PULL)
-        self.recv_from_detokenization.bind(f"tcp://127.0.0.1:{httpserver_port}")
+        self.recv_from_detokenization.bind(
+            f"tcp://127.0.0.1:{httpserver_port}")
 
         self.tokenizer = get_tokenizer(
             model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code
         )
 
-        self.req_id_to_out_inf = {}  # value type (out_str, metadata, finished, event)
+        # value type (out_str, metadata, finished, event)
+        self.req_id_to_out_inf = {}
 
         self.total_token_num = total_token_num
         self.max_req_input_len = max_req_input_len
@@ -53,10 +55,11 @@ class HttpServerManager:
             raise ValueError(
                 f"the req token total len + 1 (input len + output len + 1) is too long > max_total_token_num:{self.total_token_num}"
             )
-        
+
         sampling_params.stop_sentences_to_token_ids(self.tokenizer)
 
-        self.send_to_router.send_pyobj((prompt_ids, sampling_params, request_id))
+        self.send_to_router.send_pyobj(
+            (prompt_ids, sampling_params, request_id))
         event = asyncio.Event()
         self.req_id_to_out_inf[request_id] = ("", {}, False, event)
         while True:
@@ -73,7 +76,7 @@ class HttpServerManager:
             if finished:
                 try:
                     del self.req_id_to_out_inf[request_id]
-                except:
+                except BaseException:
                     pass
                 break
         return
@@ -83,7 +86,7 @@ class HttpServerManager:
         self.send_to_router.send_pyobj(abort_req)
         try:
             del self.req_id_to_out_inf[request_id]
-        except:
+        except BaseException:
             pass
         return
 
@@ -106,6 +109,6 @@ class HttpServerManager:
                         event.set()
                     else:
                         del self.req_id_to_out_inf[req_id]
-                except:
+                except BaseException:
                     pass
         return

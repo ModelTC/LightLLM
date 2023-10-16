@@ -7,7 +7,8 @@ import math
 
 @triton.jit
 def _fwd_kernel_token_att1(
-    Q, K, sm_scale, Alibi, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,  # B_Start_Loc 保存的是如果连续存储时候的累加输入和
+    # B_Start_Loc 保存的是如果连续存储时候的累加输入和
+    Q, K, sm_scale, Alibi, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,
     Att_Out,
     stride_b_loc_b, stride_b_loc_s,
     stride_qbs, stride_qh, stride_qd,
@@ -39,19 +40,35 @@ def _fwd_kernel_token_att1(
         alibi_m = tl.load(Alibi + cur_head)
         q = tl.load(Q + off_q + start_mark)
         offs_n_new = cur_batch_start_index + offs_n
-        k_loc = tl.load(B_Loc + stride_b_loc_b * cur_batch + stride_b_loc_s * offs_n_new, mask=offs_n_new < cur_batch_end_index, other=0)
-        off_k = k_loc[:, None] * stride_kbs + cur_head * stride_kh + offs_d[None, :] * stride_kd
-        k = tl.load(K + off_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
+        k_loc = tl.load(
+            B_Loc +
+            stride_b_loc_b *
+            cur_batch +
+            stride_b_loc_s *
+            offs_n_new,
+            mask=offs_n_new < cur_batch_end_index,
+            other=0)
+        off_k = k_loc[:, None] * stride_kbs + cur_head * \
+            stride_kh + offs_d[None, :] * stride_kd
+        k = tl.load(K + off_k,
+                    mask=offs_n_new[:,
+                                    None] < cur_batch_end_index,
+                    other=0.0)
         att_value = tl.sum(q[None, :] * k, 1)
         att_value *= sm_scale
         att_value -= alibi_m * (cur_batch_seq_len - 1 - offs_n)
-        off_o = cur_head * att_stride_h + (cur_batch_in_all_start_index + offs_n) * att_stride_bs
-        tl.store(Att_Out + off_o, att_value, mask=offs_n_new < cur_batch_end_index)
+        off_o = cur_head * att_stride_h + \
+            (cur_batch_in_all_start_index + offs_n) * att_stride_bs
+        tl.store(
+            Att_Out + off_o,
+            att_value,
+            mask=offs_n_new < cur_batch_end_index)
     return
 
 
 @torch.no_grad()
-def token_att_fwd(q, k, att_out, alibi, B_Loc, B_Start_Loc, B_Seqlen, max_input_len):
+def token_att_fwd(q, k, att_out, alibi, B_Loc,
+                  B_Start_Loc, B_Seqlen, max_input_len):
     BLOCK = 32
     # shape constraints
     Lq, Lk = q.shape[-1], k.shape[-1]
@@ -87,7 +104,8 @@ def torch_att(xq, xk, bs, seqlen, num_head, head_dim):
     keys = xk
     xq = xq.transpose(1, 2)
     keys = keys.transpose(1, 2)
-    scores = (torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(head_dim)).squeeze().transpose(0, 1).reshape(num_head, -1)
+    scores = (torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(head_dim)
+              ).squeeze().transpose(0, 1).reshape(num_head, -1)
     print("s  ", scores.shape)
     return scores
 
@@ -108,8 +126,17 @@ def test1():
 
     dtype = torch.float16
 
-    q = torch.empty((B, H, D), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2)
-    k = torch.empty((B * N_CTX, H, D), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2)
+    q = torch.empty(
+        (B, H, D), dtype=dtype, device="cuda").normal_(
+        mean=0.1, std=0.2)
+    k = torch.empty(
+        (B * N_CTX,
+         H,
+         D),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.1,
+        std=0.2)
     att_out = torch.empty((H, B * N_CTX), dtype=dtype, device="cuda")
 
     # print(att_out)
@@ -121,7 +148,8 @@ def test1():
     for i in range(B):
         b_start_loc[i] = i * N_CTX
         b_seq_len[i] = N_CTX
-        b_loc[i] = i * N_CTX + torch.arange(0, N_CTX, dtype=torch.int32, device="cuda")
+        b_loc[i] = i * N_CTX + \
+            torch.arange(0, N_CTX, dtype=torch.int32, device="cuda")
         print(b_loc[i])
 
     token_att_fwd(q, k, att_out, b_loc, b_start_loc, b_seq_len, N_CTX)
@@ -140,8 +168,17 @@ def test2():
 
     dtype = torch.float32
 
-    q = torch.empty((4, H, D), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2)
-    k = torch.empty((B * N_CTX, H, D), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2)
+    q = torch.empty(
+        (4, H, D), dtype=dtype, device="cuda").normal_(
+        mean=0.1, std=0.2)
+    k = torch.empty(
+        (B * N_CTX,
+         H,
+         D),
+        dtype=dtype,
+        device="cuda").normal_(
+        mean=0.1,
+        std=0.2)
     att_out = torch.empty((H, B * N_CTX), dtype=dtype, device="cuda")
 
     # print(att_out)
@@ -159,7 +196,8 @@ def test2():
     for i in range(0, B):
         if i != 0:
             b_start_loc[i] = b_start_loc[i - 1] + b_seq_len[i - 1]
-        b_loc[i, N_CTX - b_seq_len[i]:] = b_start_loc[i] + torch.arange(0, b_seq_len[i], dtype=torch.int32, device="cuda")
+        b_loc[i, N_CTX - b_seq_len[i]:] = b_start_loc[i] + \
+            torch.arange(0, b_seq_len[i], dtype=torch.int32, device="cuda")
     print(b_loc)
     print(b_start_loc)
     token_att_fwd(q, k, att_out, b_loc, b_start_loc, b_seq_len, N_CTX)

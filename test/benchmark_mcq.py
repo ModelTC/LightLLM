@@ -15,7 +15,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import os
+import socket
 import argparse
 import asyncio
 import json
@@ -31,10 +32,12 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
+QUESTION = {}
+
 
 def get_tokenizer(
     tokenizer_name: str,
-    tokenizer_mode: str = "auto",
+    tokenizer_mode: str = "slow",
     *args,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
@@ -43,8 +46,7 @@ def get_tokenizer(
         if kwargs.get("use_fast", False):
             raise ValueError(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
-        kwargs["use_fast"] = False
-
+        kwargs["use_fast"] = True
     if "llama" in tokenizer_name.lower() and kwargs.get("use_fast", True):
         pass
     try:
@@ -68,66 +70,36 @@ REQUEST_LATENCY: List[Tuple[int, int, float]] = []
 
 def sample_requests(
     dataset_path: str,
-    num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, int, int]]:
     # Load the dataset.
-    with open(dataset_path) as f:
-        dataset = json.load(f)
-    # Filter out the conversations with less than 2 turns.
-    dataset = [
-        data for data in dataset
-        if len(data["conversations"]) >= 2
-    ]
-    # Only keep the first two turns of each conversation.
-    dataset = [
-        (data["conversations"][0]["value"], data["conversations"][1]["value"])
-        for data in dataset
-    ]
+    data = []
+    with open(dataset_path, "r") as f:
+        questions = f.readlines()
+    gts = {}
+    for question in questions:
+        question = json.loads(question.strip())
+        file_name = question["file_name"].split(".")[0]
+        data.append(
+            (file_name,
+             question['question_id'],
+             question['instruction'],
+             question['answer']))
+        if file_name not in QUESTION:
+            QUESTION[file_name] = {}
+        QUESTION[file_name][question["question_id"]] = [question["answer"]]
 
     print("read data set finish")
-    # Tokenize the prompts and completions.
-    import random
-    dataset = random.sample(dataset, num_requests * 3)
-    prompts = [prompt for prompt, _ in dataset]
-    completions = [completion for _, completion in dataset]
-
-    prompt_token_ids = tokenizer(prompts).input_ids
-    completion_token_ids = tokenizer(completions).input_ids
-    tokenized_dataset = []
-    for i in range(len(dataset)):
-        output_len = len(completion_token_ids[i])
-        tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
-
-    # Filter out too long sequences.
-    filtered_dataset: List[Tuple[str, int, int]] = []
-    for prompt, prompt_token_ids, output_len in tokenized_dataset:
-        prompt_len = len(prompt_token_ids)
-        if prompt_len < 4 or output_len < 4:
-            # Prune too short sequences.
-            continue
-        if prompt_len > 1024 or prompt_len + output_len > 2048:
-            # Prune too long sequences.
-            continue
-        filtered_dataset.append((prompt, prompt_len, output_len))
-
-    # Sample the requests.
-    sampled_requests = random.sample(filtered_dataset, num_requests)
-    sum_len = 0
-    for e in sampled_requests:
-        sum_len += e[1] + e[2]
-    print("total tokens:", sum_len)
-    return sampled_requests
+    return data
 
 
 async def get_request(
-    input_requests: List[Tuple[str, int, int]],
+    input_requests: List[Tuple[str, str, str, str]],
     request_rate: float,
 ) -> AsyncGenerator[Tuple[str, int, int], None]:
     input_requests = iter(input_requests)
     for request in input_requests:
         yield request
-
         if request_rate == float("inf"):
             # If the request rate is infinity, then we don't need to wait.
             continue
@@ -138,25 +110,30 @@ async def get_request(
 
 
 async def send_request(
-    prompt: str,
-    prompt_len: int,
-    output_len: int
+    request: str,
+    output_len: int,
+    port: int,
 ) -> None:
     request_start_time = time.time()
     headers = {'Content-Type': 'application/json'}
     headers = {"User-Agent": "Benchmark Client"}
-    url = 'http://localhost:8000/generate'
-
+    file_name, question_id, inputs, answer = request
+    prompt = f"<系统> <对话历史> <知识> <最新问题> 用户：给出以下问题的答案:\n{inputs} SenseChat："
+    print(prompt)
+    # prompt=  "[Round {}]\n\n问：{}\n\n答：".format(1, inputs)
+    url = f'http://localhost:{port}/generate'
     data = {
         'inputs': prompt,
         'parameters': {
             'do_sample': False,
             'ignore_eos': True,
             'max_new_tokens': output_len,
+            # 'do_sample':True,
+            # 'top_p':0.8,
+            # 'temperature':0.8
             # 'temperature': 0.1,
         }
     }
-
     timeout = aiohttp.ClientTimeout(total=3 * 3600)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
@@ -166,26 +143,36 @@ async def send_request(
                     chunks.append(chunk)
             output = b"".join(chunks).decode("utf-8")
             output = json.loads(output)
-
+            QUESTION[file_name][question_id].append(
+                output["generated_text"][0])
             if "error" not in output:
                 break
-
-    request_end_time = time.time()
-    request_latency = request_end_time - request_start_time
-    REQUEST_LATENCY.append((prompt_len, output_len, request_latency))
 
 
 async def benchmark(
     input_requests: List[Tuple[str, int, int]],
     request_rate: float,
+    port: int,
 ) -> None:
     tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
-        prompt, prompt_len, output_len = request
-        task = asyncio.create_task(send_request(prompt,
-                                                prompt_len, output_len))
+        task = asyncio.create_task(send_request(request, 1, port))
         tasks.append(task)
     await asyncio.gather(*tasks)
+
+
+def IsOpen(ip, port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    index = 1
+    try:
+        s.connect((ip, int(port)))
+        s.shutdown(2)
+
+        print('successfully launch model')
+        return True
+    except BaseException:
+        time.sleep(10)
+        return False
 
 
 def main(args: argparse.Namespace):
@@ -193,29 +180,19 @@ def main(args: argparse.Namespace):
     random.seed(args.seed)
     np.random.seed(args.seed)
     tokenizer = get_tokenizer(args.tokenizer, "slow")
-    input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
+    input_requests = sample_requests(args.dataset, tokenizer)
 
     benchmark_start_time = time.time()
-    asyncio.run(benchmark(input_requests, args.request_rate))
-    benchmark_end_time = time.time()
-    benchmark_time = benchmark_end_time - benchmark_start_time
-    print(f"Total time: {benchmark_time:.2f} s")
-    print(f"Throughput: {args.num_prompts / benchmark_time:.2f} requests/s")
-
-    # Compute the latency statistics.
-    avg_latency = np.mean([latency for _, _, latency in REQUEST_LATENCY])
-    print(f"Average latency: {avg_latency:.2f} s")
-    avg_per_token_latency = np.mean([
-        latency / (prompt_len + output_len)
-        for prompt_len, output_len, latency in REQUEST_LATENCY
-    ])
-    print(f"Average latency per token: {avg_per_token_latency:.2f} s")
-    avg_per_output_token_latency = np.mean([
-        latency / output_len
-        for _, output_len, latency in REQUEST_LATENCY
-    ])
-    print("Average latency per output token: "
-          f"{avg_per_output_token_latency:.2f} s")
+    asyncio.run(benchmark(input_requests, args.request_rate, args.port))
+    rights, alls = 0, 0
+    for file_name in QUESTION:
+        for idx in QUESTION[file_name]:
+            alls += 1
+            if QUESTION[file_name][idx][0] == QUESTION[file_name][idx][1]:
+                rights += 1
+    print(QUESTION)
+    score = rights / alls
+    print("score: {}".format(score))
 
 
 if __name__ == "__main__":
@@ -230,8 +207,8 @@ if __name__ == "__main__":
                              "then all the requests are sent at time 0. "
                              "Otherwise, we use Poisson process to synthesize "
                              "the request arrival times.")
-    parser.add_argument("--num-prompts", type=int, default=1000,
-                        help="Number of prompts to process.")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="port number")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     main(args)

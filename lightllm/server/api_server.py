@@ -16,32 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
-import time
-import torch
-import uvloop
-import sys
-
-from .build_prompt import build_prompt
-
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-import argparse
-import json
-from http import HTTPStatus
-import uuid
-import multiprocessing as mp
-from typing import AsyncGenerator
-
-from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import Response, StreamingResponse, JSONResponse
-import uvicorn
-from .sampling_params import SamplingParams
-from .httpserver.manager import HttpServerManager
-from .detokenization.manager import start_detokenization_process
-from .router.manager import start_router_process
-
-from lightllm.utils.net_utils import alloc_can_use_network_port
-from lightllm.common.configs.config import setting
 from .api_models import (
     ChatCompletionRequest,
     UsageInfo,
@@ -52,6 +26,31 @@ from .api_models import (
     ChatCompletionStreamResponse,
     ChatCompletionStreamResponseChoice,
 )
+from lightllm.common.configs.config import setting
+from lightllm.utils.net_utils import alloc_can_use_network_port
+from .router.manager import start_router_process
+from .detokenization.manager import start_detokenization_process
+from .httpserver.manager import HttpServerManager
+from .sampling_params import SamplingParams
+import uvicorn
+from fastapi.responses import Response, StreamingResponse, JSONResponse
+from fastapi import BackgroundTasks, FastAPI, Request
+from typing import AsyncGenerator
+import multiprocessing as mp
+import uuid
+from http import HTTPStatus
+import json
+import argparse
+import asyncio
+import time
+import torch
+import uvloop
+import sys
+
+from .build_prompt import build_prompt
+
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 
@@ -60,7 +59,8 @@ app = FastAPI()
 isFirst = True
 
 
-def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
+def create_error_response(status_code: HTTPStatus,
+                          message: str) -> JSONResponse:
     return JSONResponse({"message": message}, status_code=status_code.value)
 
 
@@ -68,6 +68,7 @@ def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse
 @app.get("/health")
 def healthcheck():
     return "OK"
+
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
@@ -85,7 +86,8 @@ async def generate(request: Request) -> Response:
     sampling_params.verify()
 
     request_id = uuid.uuid4().hex
-    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
+    results_generator = httpserver_manager.generate(
+        prompt, sampling_params, request_id)
 
     # Non-streaming case
     final_output = []
@@ -109,7 +111,8 @@ async def generate(request: Request) -> Response:
     }
     if return_details:
         ret["tokens"] = tokens
-    return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
+    return Response(content=json.dumps(
+        ret, ensure_ascii=False).encode("utf-8"))
 
 
 @app.post("/generate_stream")
@@ -128,7 +131,8 @@ async def generate_stream(request: Request) -> Response:
     sampling_params.verify()
 
     request_id = uuid.uuid4().hex
-    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
+    results_generator = httpserver_manager.generate(
+        prompt, sampling_params, request_id)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -203,7 +207,8 @@ async def chat_completions(
     sampling_params.verify()
 
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
-    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
+    results_generator = httpserver_manager.generate(
+        prompt, sampling_params, request_id)
 
     # Non-streaming case
     if not request.stream:
@@ -225,7 +230,9 @@ async def chat_completions(
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens
         )
-        chat_message = ChatMessage(role="assistant", content="".join(final_output))
+        chat_message = ChatMessage(
+            role="assistant",
+            content="".join(final_output))
         choice = ChatCompletionResponseChoice(index=0, message=chat_message)
         resp = ChatCompletionResponse(
             id=request_id,
@@ -239,7 +246,8 @@ async def chat_completions(
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output, metadata in results_generator:
-            delta_message = DeltaMessage(role="assistant", content=request_output)
+            delta_message = DeltaMessage(
+                role="assistant", content=request_output)
 
             stream_choice = ChatCompletionStreamResponseChoice(
                 index=0, delta=delta_message
@@ -273,8 +281,10 @@ def main():
     parser.add_argument("--model_dir", type=str, default=None,
                         help="the model weight dir path, the app will load config, weights and tokenizer from this dir")
     parser.add_argument("--tokenizer_mode", type=str, default="slow",
-                        help="""tokenizer load mode, can be slow or auto, slow mode load fast but run slow, slow mode is good for debug and test, 
+                        help="""tokenizer load mode, can be slow or auto, slow mode load fast but run slow, slow mode is good for debug and test,
                         when you want to get best performance, try auto mode""")
+    parser.add_argument("--load_way", type=str, default="HF",
+                        help="the way of loading model weights, the default is HF(Huggingface format), llama also supports DS(Deepspeed)")
     parser.add_argument("--max_total_token_num", type=int, default=6000,
                         help="the total token nums the gpu and model can support, equals = max_batch * (input_len + output_len)")
     parser.add_argument("--batch_max_tokens", type=int, default=None,
@@ -299,7 +309,7 @@ def main():
                         help="disable logging throughput stats.")
     parser.add_argument("--log_stats_interval", type=int, default=10,
                         help="log stats interval in second.")
-    
+
     args = parser.parse_args()
 
     assert args.max_req_input_len < args.max_req_total_len
@@ -386,5 +396,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # torch.multiprocessing.set_start_method('spawn'), # this code will not be ok for settings to fork to subprocess
+    # torch.multiprocessing.set_start_method('spawn'), # this code will not be
+    # ok for settings to fork to subprocess
     main()

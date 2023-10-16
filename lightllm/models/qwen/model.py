@@ -20,34 +20,50 @@ class QWenTpPartModel(LlamaTpPartModel):
     # infer class
     transformer_layer_infer_class = QwenTransformerLayerInfer
 
-    # infer state class
-    infer_state_class = QwenInferStateInfo
+    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num,
+                 load_way="HF", mode=[], weight_dict=None, finetune_config=None):
+        super().__init__(
+            tp_rank,
+            world_size,
+            weight_dir,
+            max_total_token_num,
+            load_way,
+            mode,
+            weight_dict,
+            finetune_config)
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
-        super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode)
-    
     def _init_config(self):
         super()._init_config()
         # rename key
         # repair_config()
-        repair_config(self.config, same_names=["ffn_hidden_size", "intermediate_size"])
-        repair_config(self.config, same_names=["rms_norm_eps", "layer_norm_epsilon"])
-        return 
-    
+        repair_config(
+            self.config,
+            same_names=[
+                "ffn_hidden_size",
+                "intermediate_size"])
+        repair_config(
+            self.config,
+            same_names=[
+                "rms_norm_eps",
+                "layer_norm_epsilon"])
+        return
+
     def _init_custom(self):
         """
         init qwen dynamic_ntk and logn_attn
         """
-        if self.config.get("use_dynamic_ntk", False) and self.config.get("use_logn_attn", False):
+        if self.config.get("use_dynamic_ntk", False) and self.config.get(
+                "use_logn_attn", False):
             self._init_qwen_dynamic_ntk()
             self._init_qwen_logn_attn()
         else:
             super()._init_custom()
             self.logn_tensor = None
         return
-    
+
     def _init_qwen_dynamic_ntk(self):
-        total_seq_len_supported = self.config.get("max_position_embeddings", 8 * 1024)
+        total_seq_len_supported = self.config.get(
+            "max_position_embeddings", 8 * 1024)
         seq_len = self.config.get("seq_length", 2048)
 
         cur_kv_seq_len = total_seq_len_supported
@@ -60,20 +76,29 @@ class QWenTpPartModel(LlamaTpPartModel):
         inv_freq = 1.0 / (
             base
             ** (
-                torch.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32)
+                torch.arange(
+                    0,
+                    self.head_dim_,
+                    2,
+                    device="cpu",
+                    dtype=torch.float32)
                 / self.head_dim_
             )
         )
 
-        t = torch.arange(total_seq_len_supported + 64 * 1024, device="cpu", dtype=torch.float32)
+        t = torch.arange(
+            total_seq_len_supported + 64 * 1024,
+            device="cpu",
+            dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
 
         self._cos_cached = torch.cos(freqs).to(torch.float16).cuda()
         self._sin_cached = torch.sin(freqs).to(torch.float16).cuda()
         return
-    
+
     def _init_qwen_logn_attn(self):
-        total_seq_len_supported = self.config.get("max_position_embeddings", 8 * 1024)
+        total_seq_len_supported = self.config.get(
+            "max_position_embeddings", 8 * 1024)
         seq_len = self.config.get("seq_length", 2048)
         logn_list = [
             math.log(i, seq_len) if i > seq_len else 1
