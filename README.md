@@ -1,4 +1,4 @@
-![image](https://github.com/ModelTC/lightllm/assets/42648726/1c4d4830-e3bc-4b73-994c-57f22f56b843)<div align="center">
+<div align="center">
   <picture>
     <img alt="LightLLM" src="assets/lightllm.drawio.png" width=90%>
   </picture>
