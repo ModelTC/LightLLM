@@ -210,7 +210,7 @@ async def chat_completions(
         final_output = []
         prompt_tokens = -1
         completion_tokens = 0
-        async for request_output, metadata in results_generator:
+        async for request_output, metadata, _ in results_generator:
             if await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
                 await httpserver_manager.abort(request_id)
@@ -238,7 +238,7 @@ async def chat_completions(
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output, metadata in results_generator:
+        async for request_output, metadata, _ in results_generator:
             delta_message = DeltaMessage(role="assistant", content=request_output)
 
             stream_choice = ChatCompletionStreamResponseChoice(
