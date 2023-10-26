@@ -27,7 +27,6 @@ class QwenTransformerLayerWeight(TransformerLayerWeight):
             self.k_weight_ = self._cuda(self.k_weight_.transpose(0, 1))
             self.v_weight_ = v_weights[split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1), :]
             self.v_weight_ = self._cuda(self.v_weight_.transpose(0, 1))
-            self.v_weight_ = self.v_weight_.cuda()
         
         if f"transformer.h.{self.layer_num_}.attn.c_attn.bias" in weights:
             qkv_bias = weights[f"transformer.h.{self.layer_num_}.attn.c_attn.bias"]
