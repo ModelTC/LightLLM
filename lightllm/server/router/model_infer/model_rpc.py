@@ -16,6 +16,7 @@ from lightllm.models.llama_ppl.model import LlamaPPlTpPartModel
 from lightllm.models.llama2_ppl.model import Llama2PPlTpPartModel
 from lightllm.models.llama2.model import Llama2TpPartModel
 from lightllm.models.starcoder.model import StarcoderTpPartModel
+from lightllm.models.starcoder_quantized.model import StarcoderTpPartModelQuantized
 from lightllm.models.starcoder_ppl.model import StarcoderPPlTpPartModel
 from lightllm.models.qwen.model import QWenTpPartModel
 from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
@@ -78,7 +79,10 @@ class ModelRpcServer(rpyc.Service):
                     raise Exception('can not support baichuan format')
             elif self.model_type == 'gpt_bigcode':
                 if "ppl" not in mode:
-                    self.model = StarcoderTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+                    if 'int8weight' in mode or 'int4weight' in mode:
+                        self.model = StarcoderTpPartModelQuantized(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+                    else:
+                        self.model = StarcoderTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
                 else:
                     self.model = StarcoderPPlTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
             elif self.model_type == 'chatglm':

@@ -24,6 +24,9 @@ class StarcoderTpPartModel(BloomTpPartModel):
     transformer_layer_infer_class = StarcoderTransformerLayerInfer
     infer_state_class = StarcoderInferStateInfo
 
+    # Mem manager class
+    memory_manager_class = MemoryManager
+
     def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[], weight_dict=None, finetune_config=None):
         super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode, weight_dict, finetune_config)
     
@@ -39,7 +42,7 @@ class StarcoderTpPartModel(BloomTpPartModel):
         assert self.load_way == "HF", "StarCoder only support HF format to load Now!"
 
     def _init_mem_manager(self):
-        self.mem_manager = MemoryManager(self.max_total_token_num, 
+        self.mem_manager = self.memory_manager_class(self.max_total_token_num,
                                          dtype=torch.float16,
                                          head_num=self.config["num_key_value_heads"],
                                          head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
