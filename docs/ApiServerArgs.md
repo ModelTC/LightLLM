@@ -18,7 +18,7 @@ the model weight dir path, the server will load config, weights and tokenizer fr
 
 #### --tokenizer_mode
 default is "slow",  
-tokenizer load mode, can be "slow" or "auto", "slow" mode always load fast but run slow, "slow" mode is good for debug and test, when you want to get best performance, please use "auto" mode.
+tokenizer load mode, which can be "slow" or "auto", "slow" mode always loads fast but runs slow, "slow" mode is good for debugging and testing, when you want to get best performance, please use "auto" mode.
 
 #### --max_total_token_num
 

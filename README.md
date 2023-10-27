@@ -185,7 +185,7 @@ cd test
 python benchmark_serving.py --tokenizer /path/llama-7b --dataset /path/ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 2000 --request-rate 200
 ~~~
 
-The performance comparisons results are presented below:
+The performance comparison results are presented below:
 
 | vLLM                                                 | LightLLM                                              |
 | ---------------------------------------------------- | ----------------------------------------------------- |
