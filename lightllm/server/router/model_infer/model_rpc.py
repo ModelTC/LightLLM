@@ -21,6 +21,7 @@ from lightllm.models.starcoder_ppl.model import StarcoderPPlTpPartModel
 from lightllm.models.qwen.model import QWenTpPartModel
 from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
 from lightllm.models.baichuan13b.model import Baichuan13bTpPartModel
+from lightllm.models.baichuan2_7b.model import Baichuan2_7bTpPartModel
 from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
 from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.utils.infer_utils import set_random_seed
@@ -72,7 +73,10 @@ class ModelRpcServer(rpyc.Service):
                 self.model = QWenTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
             elif self.model_type == "baichuan":
                 if model_cfg['hidden_size'] == 4096:
-                    self.model = Baichuan7bTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+                    if model_cfg['architectures'][0] == 'BaichuanForCausalLM':
+                        self.model = Baichuan2_7bTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
+                    else:
+                        self.model = Baichuan7bTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
                 elif model_cfg["hidden_size"] == 5120:
                     self.model = Baichuan13bTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
                 else:
