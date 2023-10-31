@@ -294,7 +294,12 @@ def main():
     parser.add_argument("--nccl_port", type=int, default=28765,
                         help="the nccl_port to build a distributed environment for PyTorch")
     parser.add_argument("--mode", type=str, default=[], nargs='+',
-                        help="Model mode: [int8kv] [int8weight | int4weight]")
+                        help="""Model mode: [int8kv] [int8weight | int4weight] [flashdecoding] [ppl], 
+                        flashdecoding mode is for long context, current support llama llama2 qwen;
+                        int8kv mode use int8 to store kv cache, can increase token capacity;
+                        int8weight and int4weight mode use int8 and int4 to store weights;
+                        ppl mode is to use some model that use ppl fast kernel.
+                        you need to read source code to make sure the supported detail mode for all models""")
     parser.add_argument("--trust_remote_code", action='store_true',
                         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.")
     parser.add_argument("--disable_log_stats", action='store_true',

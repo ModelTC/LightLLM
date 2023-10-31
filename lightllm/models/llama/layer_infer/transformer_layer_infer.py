@@ -31,7 +31,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self.head_dim_ = network_config["hidden_size"] // network_config["num_attention_heads"]
         self.embed_dim_ = network_config["hidden_size"]
         return
-
     
     def _att_norm(self, input, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight)->torch.Tensor:
         return rmsnorm_forward(input, weight=layer_weight.att_norm_weight_, eps=self.eps_)
@@ -178,8 +177,17 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         prob = None
         return o_tensor
     
+    def _token_decode_attention_flashdecoding(self, q, infer_state: LlamaInferStateInfo):
+        from lightllm.models.llama.triton_kernel.flash_decoding import token_decode_attention_flash_decoding
+        cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
+        cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
+        return token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v)
+    
     def _token_decode_attention_mode(self, q, infer_state: LlamaInferStateInfo):
         if "int8kv" in self.mode:
             return self._token_decode_attention_int8kv(q, infer_state)
         else:
-            return self._token_decode_attention_normal(q, infer_state)
+            if "flashdecoding" in self.mode:
+                return self._token_decode_attention_flashdecoding(q, infer_state)
+            else:
+                return self._token_decode_attention_normal(q, infer_state)
