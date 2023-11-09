@@ -7,6 +7,7 @@ from functools import partial
 from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.common.basemodel.triton_kernel.quantize_gemm_int8 import quantize_int8
 from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import quantize_int4
+from lightllm.common.basemodel.cuda_kernel.lmdeploy_wquant import quantize_int4_lmdeploy
 
 
 class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
@@ -23,6 +24,12 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
                 if _mode.startswith('g'):
                     self.int4_q_group_size = int(_mode[1:])
             self.quantize_weight = partial(quantize_int4, group_size=self.int4_q_group_size, tp_rank=self.tp_rank_)
+        if "lmdeploy_int4weight" in self.mode:
+            self.int4_q_group_size = 128
+            for _mode in self.mode:
+                if _mode.startswith('g'):
+                    self.int4_q_group_size = int(_mode[1:])
+            self.quantize_weight = partial(quantize_int4_lmdeploy, group_size=self.int4_q_group_size, tp_rank=self.tp_rank_)
         
 
     def load_hf_weights(self, weights):
