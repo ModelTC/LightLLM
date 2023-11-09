@@ -51,14 +51,17 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _post_cache_kv(self, cache_k, cache_v, infer_state:InferStateInfo, layer_weight):
         mem_manager = infer_state.mem_manager
         if infer_state.is_prefill:
-            destindex_copy_kv(cache_k, infer_state.prefill_mem_index, mem_manager.key_buffer[self.layer_num_])
-            destindex_copy_kv(cache_v, infer_state.prefill_mem_index, mem_manager.value_buffer[self.layer_num_])
+            self._copy_kv_to_mem_cache(cache_k, cache_v, infer_state.prefill_mem_index, mem_manager)
             return
         else:
             if not infer_state.decode_is_contiguous:
-                destindex_copy_kv(cache_k, infer_state.decode_mem_index, mem_manager.key_buffer[self.layer_num_])
-                destindex_copy_kv(cache_v, infer_state.decode_mem_index, mem_manager.value_buffer[self.layer_num_])
+                self._copy_kv_to_mem_cache(cache_k, cache_v, infer_state.decode_mem_index, mem_manager)
                 return
+        return
+    
+    def _copy_kv_to_mem_cache(self, key_buffer, value_buffer, mem_index, mem_manager):
+        destindex_copy_kv(key_buffer, mem_index, mem_manager.key_buffer[self.layer_num_])
+        destindex_copy_kv(value_buffer, mem_index, mem_manager.value_buffer[self.layer_num_])
         return
     
     def _context_attention_kernel(self, q, k, v, infer_state:InferStateInfo, layer_weight)->torch.Tensor:

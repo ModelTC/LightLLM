@@ -64,10 +64,13 @@ class DeTokenizationManager:
                 pass
 
 
-def start_detokenization_process(args, detokenization_port, httpserver_port, pipe_writer, trust_remote_code):
+def start_detokenization_process(args, detokenization_port, httpserver_port, pipe_writer):
     try:
-        router = DeTokenizationManager(args.model_dir, args.tokenizer_mode,
-                                       detokenization_port=detokenization_port, httpserver_port=httpserver_port, trust_remote_code=trust_remote_code)
+        router = DeTokenizationManager(args.model_dir, 
+                                       args.tokenizer_mode,
+                                       detokenization_port=detokenization_port, 
+                                       httpserver_port=httpserver_port, 
+                                       trust_remote_code=args.trust_remote_code)
     except Exception as e:
         pipe_writer.send(str(e))
         raise

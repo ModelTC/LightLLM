@@ -4,10 +4,10 @@ import triton.language as tl
 
 @triton.jit
 def _fwd_kernel_flash_decode_stage1(
-    Q, K, V, sm_scale, B_Loc, B_Seqlen, batch_size, max_input_len,
+    Q, K, V, sm_scale, Req_to_tokens, B_req_idx, B_Seqlen,
     Mid_O, # [batch, head, seq_block_num, head_dim]
     Mid_O_LogExpSum, #[batch, head, seq_block_num]
-    stride_b_loc_b, stride_b_loc_s,
+    stride_req_to_tokens_b, stride_req_to_tokens_s,
     stride_qbs, stride_qh, stride_qd,
     stride_kbs, stride_kh, stride_kd,
     stride_vbs, stride_vh, stride_vd,
@@ -25,8 +25,9 @@ def _fwd_kernel_flash_decode_stage1(
 
     offs_d = tl.arange(0, BLOCK_DMODEL)
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
-    cur_batch_start_index = max_input_len - cur_batch_seq_len + seq_start_block * BLOCK_SEQ
-    cur_batch_end_index = tl.minimum(max_input_len, cur_batch_start_index + BLOCK_SEQ)
+    cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
+    cur_batch_start_index = seq_start_block * BLOCK_SEQ
+    cur_batch_end_index = tl.minimum(cur_batch_seq_len, cur_batch_start_index + BLOCK_SEQ)
 
     off_q = cur_batch * stride_qbs + cur_head * stride_qh + offs_d
     
@@ -42,7 +43,7 @@ def _fwd_kernel_flash_decode_stage1(
 
     for start_n in range(0, block_n_size, 1):
         offs_n_new = start_n * BLOCK_N + offs_n
-        k_loc = tl.load(B_Loc + stride_b_loc_b * cur_batch +  offs_n_new, mask=offs_n_new < cur_batch_end_index, other=0)
+        k_loc = tl.load(Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx +  offs_n_new, mask=offs_n_new < cur_batch_end_index, other=0)
         off_k = k_loc[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :]
         k = tl.load(K + off_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
         att_value = tl.sum(q[None, :] * k, 1)
@@ -71,7 +72,7 @@ def _fwd_kernel_flash_decode_stage1(
 
 
 @torch.no_grad()
-def flash_decode_stage1(q, k, v, B_Loc, B_Seqlen, max_len_in_batch, mid_out, mid_out_logsumexp, block_seq):
+def flash_decode_stage1(q, k, v, Req_to_tokens, B_req_idx, B_Seqlen, max_len_in_batch, mid_out, mid_out_logsumexp, block_seq):
     BLOCK_SEQ = block_seq
     BLOCK_N = 16
     assert BLOCK_SEQ % BLOCK_N == 0
@@ -80,15 +81,15 @@ def flash_decode_stage1(q, k, v, B_Loc, B_Seqlen, max_len_in_batch, mid_out, mid
     assert Lq == Lk
     assert Lk in {16, 32, 64, 128}
     sm_scale = 1.0 / (Lk ** 0.5)
-    batch, head_num = B_Loc.shape[0], q.shape[1]
+    batch, head_num = B_req_idx.shape[0], q.shape[1]
     grid = (batch, head_num, triton.cdiv(max_len_in_batch, BLOCK_SEQ))
     gqa_group_size = q.shape[1] // k.shape[1]
     
     _fwd_kernel_flash_decode_stage1[grid](
-        q, k, v, sm_scale, B_Loc, B_Seqlen, batch, max_len_in_batch,
+        q, k, v, sm_scale, Req_to_tokens, B_req_idx, B_Seqlen,
         mid_out,
         mid_out_logsumexp,
-        B_Loc.stride(0), B_Loc.stride(1),
+        Req_to_tokens.stride(0), Req_to_tokens.stride(1),
         q.stride(0), q.stride(1), q.stride(2),
         k.stride(0), k.stride(1), k.stride(2),
         v.stride(0), v.stride(1), v.stride(2),

@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from lightllm.common.basemodel import InferStateInfo
+from lightllm.common.req_manager import ReqManager
 
 class LlamaInferStateInfo(InferStateInfo):
     def __init__(self):
@@ -15,7 +16,8 @@ class LlamaInferStateInfo(InferStateInfo):
             total_token_num,
             max_len_in_batch,
             input_ids : torch.Tensor,
-            b_loc : torch.Tensor,
+            req_to_token_indexes: torch.Tensor,
+            b_req_idx : torch.Tensor,
             b_start_loc : torch.Tensor,
             b_seq_len : torch.Tensor,
             is_prefill):
@@ -27,7 +29,9 @@ class LlamaInferStateInfo(InferStateInfo):
             self.position_sin = torch.index_select(model._sin_cached, 0, position_ids).view(position_ids.shape[0], -1)
             position_ids = None
         else:
-            self.position_cos = torch.index_select(model._cos_cached, 0, b_seq_len - 1).view(b_seq_len.shape[0], -1)
-            self.position_sin = torch.index_select(model._sin_cached, 0, b_seq_len - 1).view(b_seq_len.shape[0], -1)
-            self.other_kv_index = b_loc[0, max_len_in_batch - 1].item()
+            position_ids = b_seq_len - 1
+            self.position_cos = torch.index_select(model._cos_cached, 0, position_ids).view(b_seq_len.shape[0], -1)
+            self.position_sin = torch.index_select(model._sin_cached, 0, position_ids).view(b_seq_len.shape[0], -1)
+            self.other_kv_index = req_to_token_indexes[b_req_idx[0], position_ids[0]].item()
+            # b_loc[0, max_len_in_batch - 1].item()
         return

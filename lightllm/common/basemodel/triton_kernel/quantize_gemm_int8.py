@@ -220,7 +220,7 @@ def matmul_int8(a, a_scale, b, b_scale, out=None):
     return c
 
 
-def quantize_int8(weight, axis=0):
+def quantize_int8(weight, axis=0, tp_rank=0):
     # Weight shape: [H1, H2]
     # Scale shape: [H2]
     scale = weight.abs().amax(axis, keepdim=True) / 127.
@@ -229,7 +229,7 @@ def quantize_int8(weight, axis=0):
     if axis == 0:
         weight = weight.t().contiguous().t()
     scale = scale.squeeze(axis)
-    return weight, scale, None
+    return weight.contiguous().cuda(tp_rank), scale.contiguous().cuda(tp_rank)
 
 
 def test_correct_int8(M=32, N=4096, K=4096):
@@ -238,7 +238,7 @@ def test_correct_int8(M=32, N=4096, K=4096):
     int_a, scale_a = quantize_int8_perrow(a)
     cos = torch.nn.CosineSimilarity(0)
     print("Quantization cos", cos((int_a * scale_a.unsqueeze(1)).flatten().to(torch.float32), a.flatten().to(torch.float32)))
-    int_b, scale_b, _ = quantize_int8(b, axis=0)
+    int_b, scale_b = quantize_int8(b, axis=0)
     triton_output = matmul_int8(int_a, scale_a, int_b, scale_b)
     torch_output = torch.matmul(a, b)
     print(f"triton_output={triton_output}")
@@ -254,7 +254,7 @@ def test_int8(M, K, N):
     torch.manual_seed(0)
     a = torch.randn((M, K), device='cuda', dtype=torch.float16)
     b = torch.randn((K, N), device='cuda', dtype=torch.float16).contiguous()
-    int_b, scale_b, _ = quantize_int8(b, axis=0)
+    int_b, scale_b = quantize_int8(b, axis=0)
     for _ in range(10):
         # int_a, a_scale = quantize_int8(a, 1)
         int_a, a_scale = quantize_int8_perrow(a)
@@ -322,14 +322,14 @@ def benchmark(M, provider):
     if provider == 'triton-i8':
         a = torch.randn((M, K), device='cuda', dtype=torch.float16).to(torch.int8).contiguous()
         b = torch.randn((K, N), device='cuda', dtype=torch.float16).to(torch.int8).contiguous()
-        int_a, a_scale, _ = quantize_int8(a, axis=1)
-        int_b, b_scale, _ = quantize_int8(b, axis=0)
+        int_a, a_scale = quantize_int8(a, axis=1)
+        int_b, b_scale = quantize_int8(b, axis=0)
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul_int8(int_a, a_scale, int_b, b_scale), quantiles=quantiles)
         perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     if provider == 'triton-quant-i8':
         a = torch.randn((M, K), device='cuda', dtype=torch.float16).to(torch.int8).contiguous()
         b = torch.randn((K, N), device='cuda', dtype=torch.float16).to(torch.int8).contiguous()
-        int_b, b_scale, _ = quantize_int8(b, axis=0)
+        int_b, b_scale = quantize_int8(b, axis=0)
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul_quantize_int8(a, int_b, b_scale), quantiles=quantiles)
         perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     if provider == 'quant-perrow':

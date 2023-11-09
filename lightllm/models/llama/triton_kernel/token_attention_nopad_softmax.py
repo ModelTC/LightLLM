@@ -1,5 +1,4 @@
 import torch
-
 import triton
 import triton.language as tl
 
@@ -31,7 +30,6 @@ def _fwd_kernel_token_softmax(
              * stride_prob_bs, softmax_output, mask=col_offsets < cur_batch_seq_len)
     return
 
-
 @torch.no_grad()
 def token_softmax_fwd(Logics, B_Start_Loc, B_Seqlen, Prob_Out, max_input_len):
     BLOCK_SIZE = triton.next_power_of_2(max_input_len)
@@ -52,7 +50,6 @@ def token_softmax_fwd(Logics, B_Start_Loc, B_Seqlen, Prob_Out, max_input_len):
         BLOCK_SIZE=BLOCK_SIZE,
     )
     return
-
 
 def test1():
 

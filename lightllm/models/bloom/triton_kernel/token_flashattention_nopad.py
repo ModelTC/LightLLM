@@ -123,7 +123,7 @@ def _fwd_kernel(
 #     return
 
 @torch.no_grad()
-def token_attention_fwd(q, k, v, o, alibi, b_loc, b_start_loc, b_seq_len, max_len_in_batch):
+def token_attention_fwd(q, k, v, o, alibi, req_to_tokens, b_req_idx, b_start_loc, b_seq_len, max_len_in_batch):
     head_num = k.shape[1]
     batch_size = b_seq_len.shape[0]
     calcu_shape1 = (batch_size, head_num, k.shape[2])
@@ -135,7 +135,8 @@ def token_attention_fwd(q, k, v, o, alibi, b_loc, b_start_loc, b_seq_len, max_le
                   k,
                   att_m_tensor,
                   alibi,
-                  b_loc,
+                  req_to_tokens, 
+                  b_req_idx,
                   b_start_loc,
                   b_seq_len,
                   max_len_in_batch)
@@ -145,10 +146,10 @@ def token_attention_fwd(q, k, v, o, alibi, b_loc, b_start_loc, b_seq_len, max_le
     token_att_fwd2(prob,
                    v,
                    o.view(calcu_shape1),
-                   b_loc,
+                   req_to_tokens, 
+                   b_req_idx,
                    b_start_loc,
-                   b_seq_len,
-                   max_len_in_batch)
+                   b_seq_len)
     prob = None
     return
 
@@ -163,48 +164,3 @@ def torch_att(xq, xk, xv, bs, seqlen, num_head, head_dim):
     prob = prob.view(bs, seqlen, num_head, 1)
 
     return torch.sum(prob * xv, dim=1, keepdim=False)
-
-
-def test():
-    import torch
-
-    Z, H, N_CTX, D_HEAD = 22, 112 // 8, 2048, 128
-    dtype = torch.float16
-    q = torch.empty((Z, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2)
-    k = torch.empty((Z * N_CTX, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2)
-    v = torch.empty((Z * N_CTX, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2)
-    o = torch.empty((Z, H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2)
-    alibi = torch.zeros((H,), dtype=torch.float32, device="cuda")
-
-    max_input_len = N_CTX
-    b_start_loc = torch.zeros((Z,), dtype=torch.int32, device="cuda")
-    b_loc = torch.zeros((Z, N_CTX), dtype=torch.int32, device="cuda")
-    b_seq_len = torch.ones((Z,), dtype=torch.int32, device="cuda")
-
-    b_seq_len[:] = N_CTX
-    b_start_loc[0] = 0
-    b_start_loc[1] = N_CTX
-    b_start_loc[2] = 2 * N_CTX
-    b_start_loc[3] = 3 * N_CTX
-
-    for i in range(Z):
-        b_loc[i, :] = torch.arange(i * N_CTX, (i + 1) * N_CTX, dtype=torch.int32, device="cuda")
-
-    token_attention_fwd(q, k, v, o, alibi, b_loc, b_seq_len, max_input_len)
-    import time
-    torch.cuda.synchronize()
-    start = time.time()
-    token_attention_fwd(q, k, v, o, alibi, b_loc, b_seq_len, max_input_len)
-    torch.cuda.synchronize()
-    print("cost time:", (time.time() - start) * 1000)
-
-    torch_att(q, k, v, Z, N_CTX, H, D_HEAD)
-    torch.cuda.synchronize()
-    start = time.time()
-    torch_out = torch_att(q, k, v, Z, N_CTX, H, D_HEAD)
-    torch.cuda.synchronize()
-    print("cost time:", (time.time() - start) * 1000)
-
-    print("max ", torch.max(torch.abs(torch_out - o)))
-    print("mean ", torch.mean(torch.abs(torch_out - o)))
-    assert torch.allclose(torch_out, o, atol=1e-2, rtol=0)

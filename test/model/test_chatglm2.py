@@ -13,7 +13,8 @@ class TestChatglm2Infer(unittest.TestCase):
                              model_class=ChatGlm2TpPartModel, 
                              batch_size=20, 
                              input_len=1024, 
-                             output_len=1024)
+                             output_len=1024,
+                             mode=[])
         return
 
 

@@ -1,6 +1,15 @@
 from .sampling_params import SamplingParams
 from typing import Dict, List, Optional, Tuple
 import asyncio
+import enum
+
+class ReqRunStatus(enum.Enum):
+    WAIT_IN_QUEUE = 0 # 在队列中等待
+    RUNNING = 1 # 运行
+    PAUSED_AND_KVKEEP = 2 # 暂停保留KV
+    PAUSED_AND_OFFLOAD = 3 # 暂停卸载KV
+    RERUNNING_FROM_KVKEEP = 4 # 从暂停中恢复
+    RERUNNING_FROM_OFFLOAD = 5 # 从卸载KV中恢复
 
 
 class Req:
@@ -14,6 +23,8 @@ class Req:
         self.output_metadata_list = []
         self.has_generate_finished = False
         self.aborted = False
+        self.req_status = ReqRunStatus.WAIT_IN_QUEUE
+        self.offload_kv_len = None # 卸载的kv长度
 
     def to_rpc_obj(self):
         return {"request_id": self.request_id,
@@ -39,7 +50,49 @@ class Req:
     def __repr__(self):
         return (f"request_id(n={self.request_id}, "
                 f"prompt_ids={self.prompt_ids}, ")
+    
+    def get_tuple_tokens(self, is_busy, router_max_new_token_len):
+        if self.sample_params.ignore_eos:
+            cur_max_new_token_len = self.max_output_len
+        elif is_busy:
+            cur_max_new_token_len = self.max_output_len
+        else:
+            cur_max_new_token_len = min(self.max_output_len, router_max_new_token_len) 
         
+        if self.req_status == ReqRunStatus.RUNNING:
+            return (self.input_len + len(self.output_ids), max(0, cur_max_new_token_len - len(self.output_ids) - 1))
+        elif self.req_status == ReqRunStatus.WAIT_IN_QUEUE:
+            return (self.input_len + 1,  max(0, cur_max_new_token_len - 1 - 1))
+        elif self.req_status == ReqRunStatus.PAUSED_AND_KVKEEP:
+            return (self.input_len + len(self.output_ids), max(0, cur_max_new_token_len - len(self.output_ids) - 1))
+        elif self.req_status == ReqRunStatus.PAUSED_AND_OFFLOAD:
+            return (self.input_len + len(self.output_ids), max(0, cur_max_new_token_len - len(self.output_ids) - 1))
+        else:
+            assert False, "error state"
+    
+    def get_prefill_need_tokens(self):
+        if self.req_status == ReqRunStatus.WAIT_IN_QUEUE:
+            return self.input_len
+        elif self.req_status == ReqRunStatus.RUNNING:
+            return 0
+        elif self.req_status == ReqRunStatus.PAUSED_AND_KVKEEP:
+            return 0
+        elif self.req_status == ReqRunStatus.PAUSED_AND_OFFLOAD:
+            return self.offload_kv_len
+        else:
+            assert False, "error state"
+
+    def get_used_tokens(self):
+        if self.req_status == ReqRunStatus.RUNNING:
+            return self.input_len + len(self.output_ids) - 1
+        if self.req_status == ReqRunStatus.PAUSED_AND_OFFLOAD:
+            return self.input_len + len(self.output_ids) - 1 - self.offload_kv_len
+        elif self.req_status == ReqRunStatus.PAUSED_AND_KVKEEP:
+            return self.input_len + len(self.output_ids) - 1
+        elif self.req_status == ReqRunStatus.WAIT_IN_QUEUE:
+            return 0
+        else:
+            assert False, "error state"
 
 class ReqDetokenizationState:
     def __init__(
@@ -65,6 +118,8 @@ class Batch:
         self.batch_id = batch_id
         self.reqs = reqs
         self.id_to_reqs = {req.request_id: req for req in reqs}
+        self.batch_used_tokens = 0
+        self.recalcu_batch_used_tokens()
 
     def input_tokens(self):
         batch_input_tokens = 0
@@ -77,34 +132,37 @@ class Batch:
         for req in self.reqs:
             tokens += req.input_len + req.max_output_len
         return tokens
-    
-    def calcu_used_tokens(self):
-        tokens = 0
-        for req in self.reqs:
-            tokens += req.input_len + len(req.output_ids)
-        return tokens
 
-    def mark_finished_req(self, eos_id):
-        has_new_finish = False
+    def mark_and_get_finished_req(self, eos_id):
+        finished_reqs, unfinished_req = [], []
         for req in self.reqs:
             if req.stop_sequences_matched():
                 req.has_generate_finished = True
-                has_new_finish = True
             if req.output_ids[-1] == eos_id and req.sample_params.ignore_eos == False:
                 req.has_generate_finished = True
-                has_new_finish = True
             if len(req.output_ids) >= req.max_output_len or req.aborted:
                 req.has_generate_finished = True
-                has_new_finish = True
-        return has_new_finish
 
-    def filter_finished(self):
-        unfinished_req = []
-        for req in self.reqs:
-            if not req.has_generate_finished:
+            if req.has_generate_finished:
+                finished_reqs.append(req)
+            else:
                 unfinished_req.append(req)
-        self.reqs = unfinished_req
-        self.id_to_reqs = {req.request_id: req for req in self.reqs}
+    
+        return finished_reqs, unfinished_req
+    
+    def filter_out_finished_req(self, finished_reqs, unfinished_req):
+        # update batch
+        if len(finished_reqs) != 0:
+            self.reqs = unfinished_req
+            self.id_to_reqs = {req.request_id: req for req in unfinished_req}
+        return
+    
+    def pop_req(self, req_id):
+        self.reqs = [req for req in self.reqs if req.request_id != req_id]
+        req = self.id_to_reqs[req_id]
+        self.id_to_reqs.pop(req_id)
+        self.batch_used_tokens -= req.get_used_tokens()
+        return
 
     def is_clear(self):
         return len(self.reqs) == 0
@@ -113,8 +171,27 @@ class Batch:
         for _req in mini_batch.reqs:
             self.reqs.append(_req)
         self.id_to_reqs = {req.request_id: req for req in self.reqs}
+        self.batch_used_tokens += mini_batch.batch_used_tokens
         return
-
+    
+    def recalcu_batch_used_tokens(self):
+        total_tokens = 0
+        for req in self.reqs:
+            total_tokens += req.get_used_tokens()
+        self.batch_used_tokens = total_tokens
+        return self.batch_used_tokens
+    
+    def update_req_status_to_running(self):
+        """
+        当prefill完之后, 将所有请求的状态修改为 RUNNING, 这个函数只会在prefill之后进行调用,
+        修改状态后，再调用 recalcu_batch_used_tokens 才能得到正常的值
+        """
+        for req in self.reqs:
+            req.req_status = ReqRunStatus.RUNNING
+            req.offload_kv_len = 0
+        self.recalcu_batch_used_tokens()
+        return
+    
     def __repr__(self):
         return (f"batch_id={self.batch_id}, "
                 f"reqs={self.reqs}, ")

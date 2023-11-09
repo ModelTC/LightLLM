@@ -10,13 +10,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 class TestStarcoderInfer(unittest.TestCase):
 
     def test_starcoder_infer(self):
-        from lightllm.models.starcoder_quantized.model import StarcoderTpPartModelQuantized
+        from lightllm.models.starcoder_wquant.model import StarcoderTpPartModelWQuant
         test_model_inference(world_size=1,
-                             model_dir="/data/wanzihao/092001_3p/",
-                             model_class=partial(StarcoderTpPartModelQuantized, mode=['int8weight']),
+                             model_dir="/path/xxxx",
+                             model_class=StarcoderTpPartModelWQuant,
                              batch_size=2,
                              input_len=10,
-                             output_len=10)
+                             output_len=10,
+                             mode=["triton_int8weight"])
         return
 
 

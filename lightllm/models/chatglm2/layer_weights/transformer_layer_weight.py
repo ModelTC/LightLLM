@@ -20,8 +20,8 @@ class ChatGLM2TransformerLayerWeight(LlamaTransformerLayerWeight):
                    self.v_bias_,
                    self.o_weight_,
                    self.ffn_norm_weight_,
-                   self.ffn_1_weight_,
-                   self.ffn_2_weight_,
+                   self.gate_up_proj,
+                   self.down_proj,
                    ]
         for i in range(len(weights)):
             assert weights[i] is not None, "index:" + str(i) + " " + errors
@@ -30,53 +30,63 @@ class ChatGLM2TransformerLayerWeight(LlamaTransformerLayerWeight):
     def _load_qkvo_weights(self, weights):
         # input layernorm params
         if f"transformer.encoder.layers.{self.layer_num_}.input_layernorm.weight" in weights:
-            self.att_norm_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.input_layernorm.weight"].to(self.data_type_).cuda()
+            self.att_norm_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.input_layernorm.weight"]
+            self.att_norm_weight_ = self._cuda(self.att_norm_weight_)
 
         # attention params
         n_embed = self.network_config_["hidden_size"]
         head_dim = self.network_config_["hidden_size"] // self.network_config_["num_attention_heads"]
         multi_query_group_num = self.network_config_["multi_query_group_num"]
+        tp_kv_head_dim = multi_query_group_num // self.world_size_ * head_dim
         split_n_embed = n_embed // self.world_size_
         if f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.weight" in weights:
-            self.qkv_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.weight"].transpose(0, 1).contiguous().to(self.data_type_)
-            self.q_weight_ = self.qkv_weight_[:, :n_embed][:, split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)]
-            self.q_weight_ = self.q_weight_.cuda()
-            self.k_weight_ = self.qkv_weight_[:, n_embed:n_embed + head_dim * multi_query_group_num]
-            self.k_weight_ = self.k_weight_.cuda()
+            qkv_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.weight"].transpose(0, 1).contiguous().to(self.data_type_)
+            self.q_weight_ = qkv_weight_[:, :n_embed][:, split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)]
+            self.q_weight_ = self._cuda(self.q_weight_)
+            self.k_weight_ = qkv_weight_[:, n_embed:n_embed + head_dim * multi_query_group_num]
+            self.k_weight_ = self._cuda(self.k_weight_[:, tp_kv_head_dim * self.tp_rank_ : tp_kv_head_dim * (self.tp_rank_ + 1)])
 
-            self.v_weight_ = self.qkv_weight_[:, n_embed + multi_query_group_num * head_dim : n_embed + 2 * multi_query_group_num * head_dim]
-            self.v_weight_ = self.v_weight_.cuda()
+            self.v_weight_ = qkv_weight_[:, n_embed + multi_query_group_num * head_dim : n_embed + 2 * multi_query_group_num * head_dim]
+            self.v_weight_ = self._cuda(self.v_weight_[:, tp_kv_head_dim * self.tp_rank_ : tp_kv_head_dim * (self.tp_rank_ + 1)])
 
         if f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.bias" in weights:
 
-            self.qkv_bias_ = weights[f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.bias"].to(self.data_type_)
-            self.q_bias_ = self.qkv_bias_[:n_embed].cuda()[split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)]
-            self.k_bias_ = self.qkv_bias_[n_embed : n_embed + head_dim * multi_query_group_num].cuda()
-            self.v_bias_ = self.qkv_bias_[n_embed + multi_query_group_num * head_dim : n_embed + 2 * multi_query_group_num * head_dim].cuda()
+            qkv_bias_ = weights[f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.bias"].to(self.data_type_)
+            self.q_bias_ = qkv_bias_[:n_embed][split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)]
+            self.q_bias_ = self._cuda(self.q_bias_)
+            self.k_bias_ = qkv_bias_[n_embed : n_embed + head_dim * multi_query_group_num]
+            self.k_bias_ = self._cuda(self.k_bias_[tp_kv_head_dim * self.tp_rank_ : tp_kv_head_dim * (self.tp_rank_ + 1)])
+            self.v_bias_ = qkv_bias_[n_embed + multi_query_group_num * head_dim : n_embed + 2 * multi_query_group_num * head_dim]
+            self.v_bias_ = self._cuda(self.v_bias_[tp_kv_head_dim * self.tp_rank_ : tp_kv_head_dim * (self.tp_rank_ + 1)])
 
         # attention output dense params
         if f"transformer.encoder.layers.{self.layer_num_}.self_attention.dense.weight" in weights:
-            self.o_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.self_attention.dense.weight"][:,
-                                                                                                            split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)]
-            self.o_weight_ = self.o_weight_.transpose(0, 1).contiguous().to(self.data_type_)
-            self.o_weight_ = self.o_weight_.cuda()
+            self.o_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.self_attention.dense.weight"]
+            self.o_weight_ = self.o_weight_[:,split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)]
+            self.o_weight_ = self.o_weight_.transpose(0, 1)
+            self.o_weight_ = self._cuda(self.o_weight_)
 
     def _load_ffn_weights(self, weights):
         if f"transformer.encoder.layers.{self.layer_num_}.post_attention_layernorm.weight" in weights:
-            self.ffn_norm_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.post_attention_layernorm.weight"].to(
-                self.data_type_).cuda()
+            self.ffn_norm_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.post_attention_layernorm.weight"]
+            self.ffn_norm_weight_ = self._cuda(self.ffn_norm_weight_)
 
         # ffn params
-        intermediate_size =self.network_config_['ffn_hidden_size'] * 2
-        split_inter_size = intermediate_size // self.world_size_
+        ffn_hidden_size = self.network_config_['ffn_hidden_size']
+        split_inter_size = ffn_hidden_size // self.world_size_
         if f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_h_to_4h.weight" in weights:
-            self.ffn_1_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_h_to_4h.weight"].to(self.data_type_)
-            self.ffn_1_weight_ = self.ffn_1_weight_[split_inter_size * self.tp_rank_: split_inter_size *
-                                                    (self.tp_rank_ + 1), :].transpose(0, 1).contiguous().cuda()
-        split_inter_size = split_inter_size // 2    
-        if f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_4h_to_h.weight" in weights:
-            self.ffn_2_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_4h_to_h.weight"].to(self.data_type_)
-            self.ffn_2_weight_ = self.ffn_2_weight_[:, split_inter_size *
-                                                    self.tp_rank_: split_inter_size * (self.tp_rank_ + 1)].transpose(0, 1).contiguous().cuda()
+            tweights = weights[f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_h_to_4h.weight"].to(self.data_type_)
+            gate_proj = tweights[:ffn_hidden_size, :]
+            gate_proj = gate_proj[split_inter_size * self.tp_rank_: split_inter_size * (self.tp_rank_ + 1), :]
+            
+            up_proj = tweights[ffn_hidden_size : 2 * ffn_hidden_size, :]
+            up_proj = up_proj[split_inter_size * self.tp_rank_: split_inter_size * (self.tp_rank_ + 1), :]
 
+            gate_up_proj = torch.cat([gate_proj, up_proj], dim=0).transpose(0, 1)
+            self.gate_up_proj = self._cuda(gate_up_proj)
+        
+        if f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_4h_to_h.weight" in weights:
+            self.down_proj = weights[f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_4h_to_h.weight"].to(self.data_type_)
+            self.down_proj = self.down_proj[:, split_inter_size * self.tp_rank_: split_inter_size * (self.tp_rank_ + 1)].transpose(0, 1)
+            self.down_proj = self._cuda(self.down_proj)
         return

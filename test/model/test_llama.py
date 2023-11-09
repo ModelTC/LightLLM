@@ -13,7 +13,8 @@ class TestLlamaInfer(unittest.TestCase):
                              model_class=LlamaTpPartModel, 
                              batch_size=20, 
                              input_len=1024, 
-                             output_len=1024)
+                             output_len=1024,
+                             mode=[])
         return
 
 

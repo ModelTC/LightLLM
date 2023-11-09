@@ -8,13 +8,14 @@ class InferStateInfo:
     def __init__(self):
         self.batch_size = None
         self.total_token_num = None
-        self.b_loc = None
+        self.b_req_idx = None
         self.b_start_loc = None
         self.b_seq_len = None
         self.max_len_in_batch = None
         self.is_prefill = None
         
         self.mem_manager = None
+        self.req_manager = None
         
         self.prefill_mem_index = None
         self.prefill_key_buffer = None
@@ -33,7 +34,8 @@ class InferStateInfo:
             total_token_num,
             max_len_in_batch,
             input_ids : torch.Tensor,
-            b_loc : torch.Tensor,
+            req_to_token_indexes: torch.Tensor,
+            b_req_idx : torch.Tensor,
             b_start_loc : torch.Tensor,
             b_seq_len : torch.Tensor,
             is_prefill):

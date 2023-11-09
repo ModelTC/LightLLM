@@ -6,6 +6,7 @@ from .layer_infer.pre_layer_infer import PreLayerInfer
 from .layer_infer.post_layer_infer import PostLayerInfer
 from .layer_infer.transformer_layer_infer import TransformerLayerInfer
 from .layer_infer.template.transformer_layer_infer_template import TransformerLayerInferTpl
+from .layer_infer.template.transformer_layer_infer_template_wquant import TransformerLayerInferWeightQuantTpl
 from .layer_infer.template.pre_layer_infer_template import PreLayerInferTpl
 from .layer_infer.template.post_layer_infer_template import PostLayerInferTpl
 from .infer_struct import InferStateInfo
@@ -24,5 +25,6 @@ __all__ = [
     "InferStateInfo",
     "TpPartBaseModel",
     "PreLayerInferTpl",
-    "PostLayerInferTpl"
+    "PostLayerInferTpl",
+    "TransformerLayerInferWeightQuantTpl"
 ]

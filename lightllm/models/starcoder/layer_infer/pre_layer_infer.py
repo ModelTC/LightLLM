@@ -4,11 +4,9 @@ import torch.distributed as dist
 import numpy as np
 
 from lightllm.models.starcoder.layer_weights.pre_and_post_layer_weight import PreAndPostLayerWeight
-from lightllm.models.starcoder.layer_infer.infer_struct import StarcoderInferStateInfo
+from lightllm.models.starcoder.infer_struct import StarcoderInferStateInfo
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.common.basemodel import PreLayerInfer
-
-torch.backends.cudnn.enabled = True
 
 
 class StarcoderPreLayerInfer(PreLayerInfer):

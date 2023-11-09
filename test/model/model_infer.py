@@ -2,11 +2,22 @@ import numpy as np
 from multiprocessing import Queue
 import multiprocessing
 
-def test_model_inference(world_size, model_dir, model_class, batch_size, input_len, output_len):
+def test_model_inference(world_size, model_dir, model_class, batch_size, input_len, output_len, mode):
     ans_queue = Queue()
     workers = []
     for rank_id in range(world_size):
-        proc = multiprocessing.Process(target=tppart_model_infer, args=(rank_id, world_size, ans_queue, model_dir, model_class, batch_size, input_len, output_len))
+        model_kvargs = {
+            "tp_rank": rank_id,
+            "world_size": world_size,
+            "weight_dir": model_dir,
+            "max_total_token_num":batch_size * (input_len + output_len),
+            "load_way": "HF",
+            "mode": mode,
+            "max_req_num": batch_size,
+            "max_seq_length": (input_len + output_len)
+        }
+        
+        proc = multiprocessing.Process(target=tppart_model_infer, args=(model_class, model_kvargs, batch_size, input_len, output_len, ans_queue))
         proc.start()
         workers.append(proc)
 
@@ -19,9 +30,12 @@ def test_model_inference(world_size, model_dir, model_class, batch_size, input_l
     return 
 
 
-def tppart_model_infer(rank_id, world_size, ans_queue, model_dir, model_class, batch_size, input_len, output_len):
+def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_len, ans_queue):
     import torch
     import torch.distributed as dist
+    rank_id = model_kvargs["tp_rank"]
+    world_size = model_kvargs["world_size"]
+
     dist.init_process_group('nccl', init_method='tcp://127.0.0.1:28765', rank=rank_id, world_size=world_size)
     torch.cuda.set_device(rank_id)
 
@@ -29,21 +43,16 @@ def tppart_model_infer(rank_id, world_size, ans_queue, model_dir, model_class, b
     dist.barrier()
     torch.cuda.empty_cache()
 
-    model_part = model_class(dist.get_rank(), 
-                             dist.get_world_size(), 
-                             max_total_token_num= batch_size * (input_len + output_len), 
-                             weight_dir=model_dir, 
-                             load_way="HF")
+    model_part = model_class(model_kvargs)
     # warm up
     test_data = np.vstack([np.arange(5, input_len + 5) for _ in range(batch_size)])
     test_data = test_data.reshape(-1)
     test_data = torch.from_numpy(test_data).cuda()
 
-    b_loc = torch.zeros(batch_size, input_len + output_len, dtype=torch.long, device="cuda")
+    b_req_idx = model_part.req_manager.alloc(batch_size)
     b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     for i in range(batch_size):
-        b_loc[i, 0:input_len] = i * input_len + torch.arange(0, input_len, dtype=torch.int32, device="cuda")
         b_start_loc[i] = i * input_len
         b_seq_len[i] = input_len
 
@@ -52,7 +61,7 @@ def tppart_model_infer(rank_id, world_size, ans_queue, model_dir, model_class, b
                                 total_token_num, 
                                 input_len, 
                                 test_data,
-                                b_loc,
+                                b_req_idx,
                                 b_start_loc,
                                 b_seq_len,
                                 is_prefill=True)
@@ -61,23 +70,23 @@ def tppart_model_infer(rank_id, world_size, ans_queue, model_dir, model_class, b
     predict_ids = predict_ids.detach().cpu().numpy()
 
     for i in range(output_len):
-        b_loc[:, input_len + i] = total_token_num + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
         b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
         total_token_num += batch_size
         b_seq_len += 1
         logics = model_part.forward(batch_size, total_token_num, input_len + i + 1, torch.from_numpy(
-            predict_ids).cuda().reshape(-1), b_loc, b_start_loc, b_seq_len, is_prefill=False)
+            predict_ids).cuda().reshape(-1), b_req_idx, b_start_loc, b_seq_len, is_prefill=False)
         prob_out = torch.softmax(logics, dim=-1)
         predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
         predict_ids = predict_ids.detach().cpu().numpy()
+
+    model_part.mem_manager.free_all()
+    model_part.req_manager.free_all()
     
-    max_len_in_batch = input_len + output_len
-    for i in range(batch_size):
-        model_part.mem_manager.free(b_loc[i, max_len_in_batch - b_seq_len[i]:max_len_in_batch])
     if rank_id == 0:
         print("can use mem size:", model_part.mem_manager.can_use_mem_size)
+        print("can use req size:", model_part.req_manager.can_use_req_size)
         
-    b_loc = None
+    b_req_idx = None
     b_start_loc = None
     b_seq_len = None
     
@@ -88,7 +97,7 @@ def tppart_model_infer(rank_id, world_size, ans_queue, model_dir, model_class, b
 
     prefill_start_time = time.time()
 
-    b_loc = torch.zeros(batch_size, input_len + output_len, dtype=torch.long, device="cuda")
+    b_req_idx = model_part.req_manager.alloc(batch_size)
     b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     for i in range(batch_size):
@@ -97,7 +106,7 @@ def tppart_model_infer(rank_id, world_size, ans_queue, model_dir, model_class, b
 
     total_token_num = batch_size * input_len
     logics = model_part.forward(batch_size, total_token_num, input_len, test_data,
-                                                 b_loc, b_start_loc, b_seq_len, is_prefill=True)
+                                                 b_req_idx, b_start_loc, b_seq_len, is_prefill=True)
     prob_out = torch.softmax(logics, dim=-1)
     predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
     predict_ids = predict_ids.detach().cpu().numpy()
@@ -114,7 +123,7 @@ def tppart_model_infer(rank_id, world_size, ans_queue, model_dir, model_class, b
         b_seq_len += 1
 
         logics = model_part.forward(batch_size, total_token_num, input_len + i + 1, torch.from_numpy(
-            predict_ids).cuda().reshape(-1), b_loc, b_start_loc, b_seq_len, is_prefill=False)
+            predict_ids).cuda().reshape(-1), b_req_idx, b_start_loc, b_seq_len, is_prefill=False)
         prob_out = torch.softmax(logics, dim=-1)
         predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
         predict_ids = predict_ids.detach().cpu().numpy()

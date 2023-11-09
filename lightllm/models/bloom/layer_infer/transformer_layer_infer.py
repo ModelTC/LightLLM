@@ -69,7 +69,8 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
                             infer_state.mem_manager.value_buffer[self.layer_num_],
                             o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
                             layer_weight.tp_alibi,
-                            infer_state.b_loc,
+                            infer_state.req_manager.req_to_token_indexs,
+                            infer_state.b_req_idx,
                             infer_state.b_start_loc,
                             infer_state.b_seq_len,
                             infer_state.max_len_in_batch)

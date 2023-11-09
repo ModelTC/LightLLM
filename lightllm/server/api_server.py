@@ -39,9 +39,10 @@ from .sampling_params import SamplingParams
 from .httpserver.manager import HttpServerManager
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
+from .req_id_generator import ReqIDGenerator
 
 from lightllm.utils.net_utils import alloc_can_use_network_port
-from lightllm.common.configs.config import setting
+
 from .api_models import (
     ChatCompletionRequest,
     UsageInfo,
@@ -55,6 +56,7 @@ from .api_models import (
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 
+g_id_gen = ReqIDGenerator()
 app = FastAPI()
 
 isFirst = True
@@ -83,8 +85,8 @@ async def generate(request: Request) -> Response:
     return_details = sample_params_dict.pop("return_details", False)
     sampling_params = SamplingParams(**sample_params_dict)
     sampling_params.verify()
-
-    request_id = uuid.uuid4().hex
+    
+    request_id = g_id_gen.generate_id()
     results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
 
     # Non-streaming case
@@ -127,7 +129,7 @@ async def generate_stream(request: Request) -> Response:
     sampling_params = SamplingParams(**sample_params_dict)
     sampling_params.verify()
 
-    request_id = uuid.uuid4().hex
+    request_id = g_id_gen.generate_id()
     results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
 
     # Streaming case
@@ -294,11 +296,12 @@ def main():
     parser.add_argument("--nccl_port", type=int, default=28765,
                         help="the nccl_port to build a distributed environment for PyTorch")
     parser.add_argument("--mode", type=str, default=[], nargs='+',
-                        help="""Model mode: [int8kv] [int8weight | int4weight] [flashdecoding] [ppl], 
-                        flashdecoding mode is for long context, current support llama llama2 qwen;
-                        int8kv mode use int8 to store kv cache, can increase token capacity;
-                        int8weight and int4weight mode use int8 and int4 to store weights;
-                        ppl mode is to use some model that use ppl fast kernel.
+                        help="""Model mode: [triton_int8kv | ppl_int8kv | triton_flashdecoding] 
+                        [triton_int8weight | triton_int4weight], 
+                        triton_flashdecoding mode is for long context, current support llama llama2 qwen;
+                        triton_int8kv mode use int8 to store kv cache, can increase token capacity, use triton kernel;
+                        ppl_int8kv mode use int8 to store kv cache, and use ppl fast kernel;
+                        triton_int8weight and triton_int4weight mode use int8 and int4 to store weights;
                         you need to read source code to make sure the supported detail mode for all models""")
     parser.add_argument("--trust_remote_code", action='store_true',
                         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.")
@@ -306,12 +309,15 @@ def main():
                         help="disable logging throughput stats.")
     parser.add_argument("--log_stats_interval", type=int, default=10,
                         help="log stats interval in second.")
+    parser.add_argument("--router_token_ratio", type=float, default=0.0,
+                        help="token ratio to control router dispatch")
+    parser.add_argument("--router_max_new_token_len", type=int, default=1024,
+                        help="the request max new token len for router")
     
     args = parser.parse_args()
 
     assert args.max_req_input_len < args.max_req_total_len
-    setting["max_req_total_len"] = args.max_req_total_len
-    setting["nccl_port"] = args.nccl_port
+    assert args.max_req_total_len <= args.max_total_token_num
 
     if args.batch_max_tokens is None:
         batch_max_tokens = int(1 / 6 * args.max_total_token_num)
@@ -348,7 +354,6 @@ def main():
             router_port,
             detokenization_port,
             model_rpc_ports,
-            args.mode,
             pipe_router_writer,
         ),
     )
@@ -360,7 +365,6 @@ def main():
             detokenization_port,
             httpserver_port,
             pipe_detoken_writer,
-            args.trust_remote_code,
         ),
     )
     proc_detoken.start()
@@ -393,5 +397,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # torch.multiprocessing.set_start_method('spawn'), # this code will not be ok for settings to fork to subprocess
+    torch.multiprocessing.set_start_method('spawn'), # this code will not be ok for settings to fork to subprocess
     main()

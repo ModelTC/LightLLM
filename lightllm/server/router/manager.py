@@ -11,23 +11,31 @@ from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import ReqQueue
 from rpyc.utils.classic import obtain
 from lightllm.utils.infer_utils import calculate_time
-from ..io_struct import BatchTokenIdOut, AbortReq
+from ..io_struct import BatchTokenIdOut, AbortReq, ReqRunStatus
 from .stats import Stats
+from .pause_strategy import Fcfs, select_paused_reqs
+
 
 class RouterManager:
 
-    def __init__(self, weightdir, load_way, world_size, max_total_token_num, batch_max_tokens, running_max_req_size, eos_id, 
-                 router_port, detokenization_port, model_rpc_ports, mode=[], log_stats=True, log_stats_interval=10):
-        self.model_weightdir = weightdir
-        self.world_size = world_size
-        self.load_way = load_way
-        self.mode = mode
-        self.max_total_token_num = max_total_token_num
+    def __init__(self, args, router_port, detokenization_port, model_rpc_ports):
+        self.args = args
+        self.model_weightdir = args.model_dir
+        self.world_size = args.tp
+        self.load_way = args.load_way
+        self.mode = args.mode
+        self.max_total_token_num = args.max_total_token_num
 
-        self.req_queue = ReqQueue(max_total_token_num, batch_max_tokens, running_max_req_size)
+        self.req_queue = ReqQueue(args.max_total_token_num, 
+                                  args.batch_max_tokens,
+                                  args.running_max_req_size,
+                                  args.router_token_ratio,
+                                  args.router_max_new_token_len)
+        
+        self.pause_strategy = Fcfs()
 
         self.running_batch: Batch = None
-        self.eos_id = eos_id
+        self.eos_id = args.eos_id
         self.has_wait_tokens = 0
         self.max_wait_tokens = 10
         
@@ -39,7 +47,7 @@ class RouterManager:
         self.send_to_detokenization.connect(f"tcp://127.0.0.1:{detokenization_port}")
         self.model_rpc_ports = model_rpc_ports
 
-        self.stats_tool = Stats(log_stats, log_stats_interval)
+        self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
 
 
     async def wait_to_model_ready(self):
@@ -50,14 +58,18 @@ class RouterManager:
 
         init_model_ret = []
         for rank_id in range(self.world_size):  # async init model process
-            init_model_ret.append(
-                self.model_rpcs[rank_id].init_model(
-                    rank_id,
-                    self.world_size,
-                    self.model_weightdir,
-                    self.max_total_token_num,
-                    self.load_way,
-                    self.mode))
+            kvargs = {
+                "rank_id" : rank_id,
+                "world_size" : self.world_size,
+                "weight_dir" : self.model_weightdir,
+                "load_way" : self.load_way,
+                "max_total_token_num" : self.max_total_token_num,
+                "mode" : self.mode,
+                "max_req_num" : self.args.running_max_req_size + 8,
+                "max_seq_length" : self.args.max_req_total_len + 8, # 留一点余量
+                "nccl_port" : self.args.nccl_port
+            }
+            init_model_ret.append(self.model_rpcs[rank_id].init_model(kvargs))
 
         await asyncio.gather(*init_model_ret)
         return
@@ -92,7 +104,8 @@ class RouterManager:
             counter_count += 1
             if self.running_batch is not None:
                 if counter_count % 50 == 0:
-                    print("current batch size:", len(self.running_batch.reqs), "token used ratio:", self.running_batch.calcu_used_tokens() / self.max_total_token_num)
+                    token_ratio = (self.running_batch.batch_used_tokens + self.req_queue.pause_req_used_tokens) / self.max_total_token_num
+                    print("current batch size:", len(self.running_batch.reqs), "paused req num:", len(self.req_queue.pause_req_dict), "token used ratio:", token_ratio)
                     pass
                 self.stats_tool.print_stats()
                 
@@ -104,6 +117,7 @@ class RouterManager:
         事件处理循环
         """
         # 删除所有已经 finished 的 req
+        # 当前无运行请求时
         if self.running_batch is None:
             new_batch = self.req_queue.generate_new_batch(self.running_batch)
             if new_batch is not None:
@@ -114,13 +128,8 @@ class RouterManager:
                 self.has_wait_tokens = 0
             return
 
-        if self.has_wait_tokens < self.max_wait_tokens:
-            self.stats_tool.count_output_tokens(self.running_batch)
-            await self._decode_batch(self.running_batch)
-            self._filter_runing_batch()
-            self.has_wait_tokens += 1
-            return
-        else:
+        # 有运行请求，但是已经到了可以调度新的请求合并推理的时机
+        if self.has_wait_tokens >= self.max_wait_tokens:
             new_mini_batch = self.req_queue.generate_new_batch(self.running_batch)
             if new_mini_batch is not None:
                 self.stats_tool.count_prompt_tokens(new_mini_batch)
@@ -129,12 +138,23 @@ class RouterManager:
                     await self._merge_batch(self.running_batch, new_mini_batch)
                     self.running_batch.merge(new_mini_batch)
                 self.has_wait_tokens = 0
-            else:
-                self.stats_tool.count_output_tokens(self.running_batch)
-                await self._decode_batch(self.running_batch)
-                self._filter_runing_batch()
-                self.has_wait_tokens += 1
-        
+                return
+
+        # 正常 decode 阶段， 如果可以直接decode就直接decode，否则通过暂停策略暂停一些请求
+        # 释放一些管理的 token
+        if self._can_decode(self.running_batch):
+            self.stats_tool.count_output_tokens(self.running_batch)
+            await self._decode_batch(self.running_batch)
+            self._filter_runing_batch()
+            self.has_wait_tokens += 1
+            return
+        else:
+            # pause strategy
+            paused_reqs = select_paused_reqs(self.running_batch, self.pause_strategy, self.req_queue, self.max_total_token_num)
+            await self._pause_reqs(self.running_batch, paused_reqs)
+            print("pasued req num:", len(self.req_queue.pause_req_dict))
+            self.has_wait_tokens = 0
+            return
         return
 
     async def _init_batch(self, batch: Batch):
@@ -143,7 +163,7 @@ class RouterManager:
         await asyncio.gather(*rets)
         return
 
-    async def _prefill_batch(self, batch):
+    async def _prefill_batch(self, batch:Batch):
         await self._init_batch(batch)
         rets = [self.model_rpcs[tp_rank].prefill_batch(batch.batch_id) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
@@ -152,12 +172,18 @@ class RouterManager:
         else:
             req_to_out_token_id = ans[0]
         self._add_token_id_to_req(batch, req_to_out_token_id)
-        has_new_finished_req = batch.mark_finished_req(self.eos_id)
+        finished_reqs, unfinished_reqs = batch.mark_and_get_finished_req(self.eos_id)
         self._send_to_detokenization_proc(batch, req_to_out_token_id)
-        await self._handle_finish_req(batch, has_new_finished_req)
+        batch.filter_out_finished_req(finished_reqs, unfinished_reqs)
+        await self._handle_finish_req(batch, finished_reqs)
+        # prefill 完成以后，将batch中所有保留的请求的状态标记为 RUNNING， 并重新更新其token消耗量
+        # 必须先调用状态更新，后进行token使用量的计算
+        batch.update_req_status_to_running()
+        # batch.recalcu_batch_used_tokens()
         return
 
     async def _decode_batch(self, batch:Batch):
+        old_req_num = len(batch.reqs)
         rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
         if self.world_size != 1:
@@ -165,14 +191,21 @@ class RouterManager:
         else:
             req_to_out_token_id = ans[0]
         self._add_token_id_to_req(batch, req_to_out_token_id)
-        has_new_finished_req = batch.mark_finished_req(self.eos_id)
+        finished_reqs, unfinished_reqs = batch.mark_and_get_finished_req(self.eos_id)
         self._send_to_detokenization_proc(batch, req_to_out_token_id)
-        await self._handle_finish_req(batch, has_new_finished_req)
+        batch.filter_out_finished_req(finished_reqs, unfinished_reqs)
+        await self._handle_finish_req(batch, finished_reqs)
+
+        # decode 之后, 更新 batch 的 token 使用量的统计
+        if len(finished_reqs) != 0:
+            batch.batch_used_tokens += old_req_num - sum([req.input_len + len(req.output_ids) - 1 for req in finished_reqs])
+        else:
+            batch.batch_used_tokens += old_req_num
         return
 
-    async def _filter_batch(self, batch: Batch):
+    async def _filter_batch(self, batch: Batch, finished_req_ids: List):
         req_id_list = [r.request_id for r in batch.reqs]
-        rets = [self.model_rpcs[tp_rank].filter_batch(batch.batch_id, req_id_list) for tp_rank in range(self.world_size)]
+        rets = [self.model_rpcs[tp_rank].filter_batch(batch.batch_id, req_id_list, finished_req_ids) for tp_rank in range(self.world_size)]
         await asyncio.gather(*rets)
         return
 
@@ -185,14 +218,20 @@ class RouterManager:
         rets = [self.model_rpcs[tp_rank].remove_batch(batch.batch_id) for tp_rank in range(self.world_size)]
         await asyncio.gather(*rets)
         return
+    
+    async def _pause_reqs(self, batch: Batch, pasue_reqs):
+        pasue_reqs_info = [(r.request_id, r.req_status, r.offload_kv_len) for r in pasue_reqs]
+        rets = [self.model_rpcs[tp_rank].pause_reqs(batch.batch_id, pasue_reqs_info) for tp_rank in range(self.world_size)]
+        await asyncio.gather(*rets)
+        return
 
-    async def _handle_finish_req(self, batch: Batch, has_new_finished_req):
-        if has_new_finished_req:
-            batch.filter_finished()
+    async def _handle_finish_req(self, batch: Batch, finished_reqs):
+        if len(finished_reqs) != 0:
+            finished_req_ids = [req.request_id for req in finished_reqs]
             if batch.is_clear():
                 await self._remove_batch(batch)
             else:
-                await self._filter_batch(batch)
+                await self._filter_batch(batch, finished_req_ids)
         return
 
     def _filter_runing_batch(self):
@@ -206,6 +245,10 @@ class RouterManager:
             req.output_ids.append(new_token_id)
             req.output_metadata_list.append(new_gen_metadata)
         return
+        
+    def _can_decode(self, batch: Batch):
+        remaining_tokens = self.max_total_token_num - batch.batch_used_tokens - self.req_queue.pause_req_used_tokens
+        return len(batch.reqs) <= remaining_tokens
         
     def _send_to_detokenization_proc(self, batch: Batch, req_ans):
         batch_out = BatchTokenIdOut()
@@ -237,22 +280,13 @@ class RouterManager:
             model_rpc.rpc_server_process.join()
         return
 
-def start_router_process(args, router_port, detokenization_port, model_rpc_ports, mode, pipe_writer):
+def start_router_process(args, router_port, detokenization_port, model_rpc_ports, pipe_writer):
     try:
         router = RouterManager(
-            args.model_dir,
-            load_way=args.load_way,
-            world_size=args.tp,
-            max_total_token_num=args.max_total_token_num,
-            batch_max_tokens=args.batch_max_tokens,
-            running_max_req_size=args.running_max_req_size,
-            eos_id=args.eos_id,
+            args,
             router_port=router_port,
             detokenization_port=detokenization_port,
-            model_rpc_ports=model_rpc_ports,
-            mode=mode,
-            log_stats = not args.disable_log_stats,
-            log_stats_interval = args.log_stats_interval)
+            model_rpc_ports=model_rpc_ports)
     
         asyncio.run(router.wait_to_model_ready())
     except Exception as e:

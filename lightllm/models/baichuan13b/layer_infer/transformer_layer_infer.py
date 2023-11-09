@@ -2,6 +2,7 @@ import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
+from functools import partial
 
 from lightllm.models.baichuan13b.layer_weights.transformer_layer_weight import BaiChuan13bTransformerLayerWeight
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
@@ -13,6 +14,15 @@ class Baichuan13bTransformerLayerInfer(LlamaTransformerLayerInfer):
     """
     def __init__(self, layer_num, tp_rank, world_size, network_config, mode):
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+        self._bind_func()
+        return
+    
+    def _bind_func(self):
+        """
+        baichuan13b only support normal mode.  
+        """
+        self._context_attention_kernel = partial(BloomTransformerLayerInfer._context_attention_kernel, self)
+        self._token_attention_kernel = partial(BloomTransformerLayerInfer._token_attention_kernel, self)
         return
     
     def _get_qkv(self, input, cache_k, cache_v, infer_state, layer_weight: BaiChuan13bTransformerLayerWeight) -> torch.Tensor:
@@ -23,8 +33,3 @@ class Baichuan13bTransformerLayerInfer(LlamaTransformerLayerInfer):
                     out=cache_v.view(-1, self.tp_v_head_num_ * self.head_dim_))
         return q
     
-    def _context_attention_kernel(self, q, k, v, infer_state, layer_weight: BaiChuan13bTransformerLayerWeight) -> torch.Tensor:
-        return BloomTransformerLayerInfer._context_attention_kernel(self, q, k, v, infer_state, layer_weight)
-
-    def _token_attention_kernel(self, q, infer_state, layer_weight) -> torch.Tensor:
-        return BloomTransformerLayerInfer._token_attention_kernel(self, q, infer_state, layer_weight)

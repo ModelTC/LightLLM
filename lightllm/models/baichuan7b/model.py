@@ -9,12 +9,6 @@ class Baichuan7bTpPartModel(LlamaTpPartModel):
     # weight class
     transformer_weight_class = BaiChuan7bTransformerLayerWeight
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[], weight_dict=None, finetune_config=None):
-        super().__init__(tp_rank, world_size, weight_dir, max_total_token_num, load_way, mode, weight_dict, finetune_config)
+    def __init__(self, kvargs):
+        super().__init__(kvargs)
     
-
-    def _init_config(self):
-        super()._init_config()
-        # rename key
-        # repair_config()
-        return 
