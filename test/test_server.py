@@ -35,7 +35,7 @@ for i in range(1):
 
 time.sleep(2)
 
-for i in range(100):
+for i in range(20):
     data = {
         'inputs': 'San Francisco is a',
         'parameters': {

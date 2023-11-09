@@ -35,7 +35,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     
     def _bind_func(self):
         if "ppl_int8kv" in self.mode:
-            self._token_attention_kernel = self._copy_kv_to_mem_cache_ppl_int8kv
+            self._token_attention_kernel = self._token_decode_attention_ppl_int8kv
             self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_ppl_int8kv
         elif "triton_int8kv" in self.mode:
             self._token_attention_kernel = self._token_decode_attention_int8kv
