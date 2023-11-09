@@ -208,7 +208,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
         o_tensor = torch.empty_like(q)
 
-        from lightllm_kernel import group8_int8kv_decode_attention
+        from lightllm_ppl_kernel import group8_int8kv_decode_attention
         # group_int8kv_decode_attention(at::Tensor o, at::Tensor q, at::Tensor k, at::Tensor k_s,  at::Tensor v,  at::Tensor v_s, at::Tensor b_loc, at::Tensor b_seq_len, int max_len_in_batch)
         group8_int8kv_decode_attention(o_tensor.view(calcu_shape1),
                                                           q.view(calcu_shape1),
