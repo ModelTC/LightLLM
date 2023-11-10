@@ -6,22 +6,12 @@ from functools import partial
 from lightllm.common.basemodel.triton_kernel.quantize_gemm_int8 import quantize_int8
 from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import quantize_int4
 from lightllm.common.basemodel import TransformerLayerWeight
-
+from lightllm.models.llama_wquant.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeightQuantized
 class StarcoderTransformerLayerWeightQuantized(TransformerLayerWeight):
     def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
         assert network_config["num_attention_heads"] % self.world_size_ == 0
-        self.init_quant_mode()
-    
-    def init_quant_mode(self):
-        if "int8weight" in self.mode:
-            self.quantize_weight = partial(quantize_int8, tp_rank=self.tp_rank_)
-        if "int4weight" in self.mode:
-            self.int4_q_group_size = 128
-            for _mode in self.mode:
-                if _mode.startswith('g'):
-                    self.int4_q_group_size = int(_mode[1:])
-            self.quantize_weight = partial(quantize_int4, group_size=self.int4_q_group_size, tp_rank=self.tp_rank_)
+        LlamaTransformerLayerWeightQuantized.init_quant_mode(self)
         return
     
     def load_hf_weights(self, weights):

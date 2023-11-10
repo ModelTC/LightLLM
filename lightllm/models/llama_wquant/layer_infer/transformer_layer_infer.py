@@ -38,28 +38,42 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
         return
     
     def _bind_func(self):
+        self._bind_norm()
+        self._bind_matmul()        
+        self._bind_attention()
+        return
+    
+    def _bind_norm(self):
         self._att_norm = partial(LlamaTransformerLayerInfer._att_norm, self)
         self._ffn_norm = partial(LlamaTransformerLayerInfer._ffn_norm, self)
-
+    
+    def _bind_matmul(self):
         if "triton_int8weight" in self.mode:
-            self._wquant_matmul_for_qkv = self._wquant_matmul_triton_int8weight_only_quant
-            self._wquant_matmul_for_o = self._wquant_matmul_triton_int8weight_only_quant
-            self._wquant_matmul_for_ffn_up = self._wquant_matmul_triton_int8weight_only_quant
-            self._wquant_matmul_for_ffn_down = self._wquant_matmul_triton_int8weight_only_quant
+            func = partial(LlamaTransformerLayerInferWquant._wquant_matmul_triton_int8weight_only_quant, self)
+            self._wquant_matmul_for_qkv = func
+            self._wquant_matmul_for_o = func
+            self._wquant_matmul_for_ffn_up = func
+            self._wquant_matmul_for_ffn_down = func
+            if self.tp_rank_ == 0 and self.layer_num_ == 0:
+                print("model use triton_int8weight kernel")
         elif "triton_int4weight" in self.mode:
-            self._wquant_matmul_for_qkv = self._wquant_matmul_triton_int4weight_only_quant
-            self._wquant_matmul_for_o = self._wquant_matmul_triton_int4weight_only_quant
-            self._wquant_matmul_for_ffn_up = self._wquant_matmul_triton_int4weight_only_quant
-            self._wquant_matmul_for_ffn_down = self._wquant_matmul_triton_int4weight_only_quant
+            func = partial(LlamaTransformerLayerInferWquant._wquant_matmul_triton_int4weight_only_quant, self)
+            self._wquant_matmul_for_qkv = func
+            self._wquant_matmul_for_o = func
+            self._wquant_matmul_for_ffn_up = func
+            self._wquant_matmul_for_ffn_down = func
+            if self.tp_rank_ == 0 and self.layer_num_ == 0:
+                print("model use triton_int4weight kernel")
         elif "lmdeploy_int4weight" in self.mode:
-            self._wquant_matmul_for_qkv = self._wquant_matmul_lmdeploy_int4weight_only_quant
-            self._wquant_matmul_for_o = self._wquant_matmul_lmdeploy_int4weight_only_quant
-            self._wquant_matmul_for_ffn_up = self._wquant_matmul_lmdeploy_int4weight_only_quant
-            self._wquant_matmul_for_ffn_down = self._wquant_matmul_lmdeploy_int4weight_only_quant
+            func = partial(LlamaTransformerLayerInferWquant._wquant_matmul_lmdeploy_int4weight_only_quant, self)
+            self._wquant_matmul_for_qkv = func
+            self._wquant_matmul_for_o = func
+            self._wquant_matmul_for_ffn_up = func
+            self._wquant_matmul_for_ffn_down = func
+            if self.tp_rank_ == 0 and self.layer_num_ == 0:
+                print("model use lmdeploy_int4weight kernel")
         else:
             raise Exception(f"error mode {self.mode}")
-        
-        self._bind_attention()
         return
     
     def _bind_attention(self):
@@ -117,28 +131,43 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
         return ffn2_out
     
     def _wquant_matmul_triton_int8weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
-        assert bias is None and has_act == False
+        assert has_act == False
         if is_prefill:
             qweight, scale = quant_weight_params
-            return matmul_dequantize_int8(input, qweight, scale, out=out)
+            out = matmul_dequantize_int8(input, qweight, scale, out=out)
         else:
             qweight, scale = quant_weight_params
-            return matmul_quantize_int8(input, qweight, scale, out=out)
+            out = matmul_quantize_int8(input, qweight, scale, out=out)
+        if bias is None:
+            return out
+        else:
+            out.add_(bias)
+            return out
         
     def _wquant_matmul_triton_int4weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
-        assert bias is None and has_act == False
+        assert has_act == False
         if is_prefill:
             qweight, scale, zeros, int4_q_group_size = quant_weight_params
-            return matmul_dequantize_int4_s1(input, qweight, scale, zeros, int4_q_group_size, out=out)
+            out = matmul_dequantize_int4_s1(input, qweight, scale, zeros, int4_q_group_size, out=out)
         else:
             qweight, scale, zeros, int4_q_group_size = quant_weight_params
-            return matmul_dequantize_int4_gptq(input, qweight, scale, zeros, int4_q_group_size, output=out)
+            out = matmul_dequantize_int4_gptq(input, qweight, scale, zeros, int4_q_group_size, output=out)
+        if bias is None:
+            return out
+        else:
+            out.add_(bias)
+            return out
     
     def _wquant_matmul_lmdeploy_int4weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
-        assert bias is None and has_act == False
+        assert has_act == False
         if is_prefill:
             qweight, scale_zeros, int4_q_group_size = quant_weight_params
-            return matmul_dequantize_int4_lmdeploy(input, qweight, scale_zeros, int4_q_group_size)
+            out = matmul_dequantize_int4_lmdeploy(input, qweight, scale_zeros, int4_q_group_size)
         else:
             qweight, scale_zeros, int4_q_group_size = quant_weight_params
-            return matmul_dequantize_int4_lmdeploy(input, qweight, scale_zeros, int4_q_group_size)
+            out =  matmul_dequantize_int4_lmdeploy(input, qweight, scale_zeros, int4_q_group_size)
+        if bias is None:
+            return out
+        else:
+            out.add_(bias)
+            return out

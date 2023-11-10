@@ -45,7 +45,7 @@ class QwenTransformerLayerWeight(TransformerLayerWeight):
         if f"transformer.h.{self.layer_num_}.ln_2.weight" in weights:
             self.ffn_norm_weight_ = self._cuda(weights[f"transformer.h.{self.layer_num_}.ln_2.weight"])
         # ffn params
-        inter_size = self.network_config_['ffn_hidden_size'] // 2
+        inter_size = self.network_config_['intermediate_size'] // 2
         split_inter_size = inter_size // self.world_size_
 
         if f"transformer.h.{self.layer_num_}.mlp.w1.weight" in weights:

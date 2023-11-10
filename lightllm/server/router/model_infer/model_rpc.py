@@ -15,6 +15,7 @@ from lightllm.models.llama_wquant.model import LlamaTpPartModelWQuant
 from lightllm.models.starcoder.model import StarcoderTpPartModel
 from lightllm.models.starcoder_wquant.model import StarcoderTpPartModelWQuant
 from lightllm.models.qwen.model import QWenTpPartModel
+from lightllm.models.qwen_wquant.model import QWenTpPartModelWQuant
 from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
 from lightllm.models.baichuan13b.model import Baichuan13bTpPartModel
 from lightllm.models.baichuan2_7b.model import Baichuan2_7bTpPartModel
@@ -76,7 +77,10 @@ class ModelRpcServer(rpyc.Service):
                 else:
                     self.model = LlamaTpPartModel(model_kvargs)
             elif self.model_type == "qwen":
-                self.model = QWenTpPartModel(model_kvargs)
+                if any('int8weight' in mode_ or 'int4weight' in mode_ for mode_ in self.mode):
+                    self.model = QWenTpPartModelWQuant(model_kvargs)
+                else:
+                    self.model = QWenTpPartModel(model_kvargs)
             elif self.model_type == "baichuan":
                 if model_cfg['hidden_size'] == 4096:
                     if model_cfg['architectures'][0] == 'BaichuanForCausalLM':

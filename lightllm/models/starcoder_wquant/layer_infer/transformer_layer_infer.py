@@ -16,6 +16,7 @@ from lightllm.models.starcoder.infer_struct import StarcoderInferStateInfo
 from lightllm.common.basemodel import TransformerLayerInferWeightQuantTpl
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+from lightllm.models.llama_wquant.layer_infer.transformer_layer_infer import LlamaTransformerLayerInferWquant
 
 
 class StarcoderTransformerLayerInferWQuant(TransformerLayerInferWeightQuantTpl):
@@ -36,36 +37,9 @@ class StarcoderTransformerLayerInferWQuant(TransformerLayerInferWeightQuantTpl):
     def _bind_func(self):
         self._att_norm = partial(BloomTransformerLayerInfer._att_norm, self)
         self._ffn_norm = partial(BloomTransformerLayerInfer._ffn_norm, self)
-        if "triton_int8weight" in self.mode:
-            self._wquant_matmul_for_qkv = self._wquant_matmul_triton_int8weight_only_quant
-            self._wquant_matmul_for_o = self._wquant_matmul_triton_int8weight_only_quant
-            self._wquant_matmul_for_ffn_up = self._wquant_matmul_triton_int8weight_only_quant
-            self._wquant_matmul_for_ffn_down = self._wquant_matmul_triton_int8weight_only_quant
-        elif "triton_int4weight" in self.mode:
-            self._wquant_matmul_for_qkv = self._wquant_matmul_triton_int4weight_only_quant
-            self._wquant_matmul_for_o = self._wquant_matmul_triton_int4weight_only_quant
-            self._wquant_matmul_for_ffn_up = self._wquant_matmul_triton_int4weight_only_quant
-            self._wquant_matmul_for_ffn_down = self._wquant_matmul_triton_int4weight_only_quant
-        else:
-            raise Exception(f"error mode {self.mode}")
-        
-        self._bind_attention()
-        return
-    
-    def _bind_attention(self):
-        self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
-        if "ppl_int8kv" in self.mode:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_ppl_int8kv, self)
-        elif "triton_int8kv" in self.mode:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_int8kv, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_int8kv, self)
-        elif "triton_flashdecoding" in self.mode:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_flashdecoding, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)   
-        else:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_normal, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+
+        LlamaTransformerLayerInferWquant._bind_matmul(self)
+        LlamaTransformerLayerInferWquant._bind_attention(self)
         return
 
     def _get_qkv(self, input, cache_k, cache_v, infer_state: StarcoderInferStateInfo, layer_weight: StarcoderTransformerLayerWeightQuantized) -> torch.Tensor:
@@ -103,29 +77,3 @@ class StarcoderTransformerLayerInferWQuant(TransformerLayerInferWeightQuantTpl):
                                                     bias=layer_weight.ffn_2_bias_)
         gelu_out = None
         return ffn2_out
-    
-    def _wquant_matmul_triton_int8weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
-        assert has_act == False
-        if is_prefill:
-            qweight, scale = quant_weight_params
-            ans = matmul_dequantize_int8(input, qweight, scale, out=out)
-            ans.add_(bias)
-            return ans
-        else:
-            qweight, scale = quant_weight_params
-            ans = matmul_quantize_int8(input, qweight, scale, out=out)
-            ans.add_(bias)
-            return ans
-       
-    def _wquant_matmul_triton_int4weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
-        assert has_act == False
-        if is_prefill:
-            qweight, scale, zeros, int4_q_group_size = quant_weight_params
-            ans = matmul_dequantize_int4_s1(input, qweight, scale, zeros, int4_q_group_size, out=out)
-            ans.add_(bias)
-            return ans
-        else:
-            qweight, scale, zeros, int4_q_group_size = quant_weight_params
-            ans = matmul_dequantize_int4_gptq(input, qweight, scale, zeros, int4_q_group_size, output=out)
-            ans.add_(bias)
-            return ans

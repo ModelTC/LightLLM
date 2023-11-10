@@ -111,7 +111,7 @@ def matmul4_kernel(
         b = (b >> shifter[:, None]) & 0xF  # Extract the 4-bit values
         b = b * scales[None, :] - zeros[None, :]  # Scale and shift
         # print("data type", a, b)
-        accumulator += tl.dot(a, b)
+        accumulator += tl.dot(a, b.to(tl.float16))
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += (BLOCK_SIZE_K // infearure_per_bits) * stride_bk  
     c = accumulator.to(tl.float16)  
