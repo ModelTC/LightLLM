@@ -49,7 +49,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
     test_data = test_data.reshape(-1)
     test_data = torch.from_numpy(test_data).cuda()
 
-    b_req_idx = model_part.req_manager.alloc(batch_size)
+    b_req_idx = model_part.req_manager.alloc(batch_size).int()
     b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     for i in range(batch_size):
@@ -97,7 +97,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
 
     prefill_start_time = time.time()
 
-    b_req_idx = model_part.req_manager.alloc(batch_size)
+    b_req_idx = model_part.req_manager.alloc(batch_size).int()
     b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     for i in range(batch_size):
