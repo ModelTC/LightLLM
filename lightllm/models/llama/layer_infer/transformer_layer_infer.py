@@ -146,8 +146,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                         infer_state.req_manager.req_to_token_indexs,
                         infer_state.b_req_idx,
                         infer_state.b_start_loc,
-                        infer_state.b_seq_len,
-                        infer_state.max_len_in_batch)
+                        infer_state.b_seq_len)
             prob = None
             return o_tensor
         elif triton.__version__ >= "2.1.0":
