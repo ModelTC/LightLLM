@@ -7,9 +7,9 @@ from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 
 def sample(logits, req_ids):
     logits = logits.contiguous()
-    presence_penalties, frequency_penalties, temperatures, top_ps, top_ks, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch = _get_post_sample_tensors(req_ids)
-    
-    apply_penalty(logits, presence_penalties, frequency_penalties, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch) 
+    presence_penalties, frequency_penalties, repetition_penalties, temperatures, top_ps, top_ks, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch = _get_post_sample_tensors(req_ids)
+
+    apply_penalty(logits, presence_penalties, frequency_penalties, repetition_penalties, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch) 
     logits.div_(temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
     probs_sort, probs_idx = _top_p_top_k(probs, top_ps, top_ks)
@@ -33,6 +33,7 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
 def _get_post_sample_tensors(req_ids):
     presence_penalties: List[float] = []
     frequency_penalties: List[float] = []
+    repetition_penalties: List[float] = []
     temperatures: List[float] = []
     top_ps: List[float] = []
     top_ks: List[int] = []
@@ -46,6 +47,7 @@ def _get_post_sample_tensors(req_ids):
         sample_param = req_obj.sampling_param
         presence_penalties.append(sample_param.presence_penalty)
         frequency_penalties.append(sample_param.frequency_penalty)
+        repetition_penalties.append(sample_param.repetition_penalty)
         temperatures.append(sample_param.temperature)
         top_ps.append(sample_param.top_p)
         top_ks.append(sample_param.top_k)
@@ -58,6 +60,7 @@ def _get_post_sample_tensors(req_ids):
     
     presence_penalties = torch.tensor(presence_penalties, dtype=torch.float, device="cuda")
     frequency_penalties = torch.tensor(frequency_penalties, dtype=torch.float, device="cuda")
+    repetition_penalties = torch.tensor(repetition_penalties, dtype=torch.float, device="cuda")
     temperatures = torch.tensor(temperatures, dtype=torch.float, device="cuda")
     top_ps = torch.tensor(top_ps, dtype=torch.float, device="cuda")
     top_ks = torch.tensor(top_ks, dtype=torch.int32, device="cuda")
@@ -65,4 +68,4 @@ def _get_post_sample_tensors(req_ids):
     p_token_counts = torch.tensor(p_token_counts, dtype=torch.int32, device="cuda")
     p_seq_len = torch.tensor(p_seq_len, dtype=torch.int32, device="cuda")
     p_cumsum_seq_len = torch.cumsum(p_seq_len, dim=0, dtype=torch.int32)
-    return presence_penalties, frequency_penalties, temperatures, top_ps, top_ks, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch
+    return presence_penalties, frequency_penalties, repetition_penalties, temperatures, top_ps, top_ks, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch

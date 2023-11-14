@@ -11,6 +11,7 @@ class SamplingParams:
         do_sample: bool = False,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
+        repetition_penalty: float = 1.0,
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,  # -1 is for all 
@@ -21,6 +22,7 @@ class SamplingParams:
         self.do_sample = do_sample
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty
+        self.repetition_penalty = repetition_penalty
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
@@ -41,6 +43,8 @@ class SamplingParams:
             raise ValueError(f"presence_penalty must >= 0.0, got {self.presence_penalty}")
         if self.frequency_penalty < 0.0:
             raise ValueError(f"frequency_penalty must >= 0.0, got {self.frequency_penalty}")
+        if self.repetition_penalty < 1.0:
+            raise ValueError(f"repetition_penalty must >= 1.0, got {self.repetition_penalty}")
         if self.temperature <= 0.0:
             raise ValueError(f"temperature must > 0.0, got {self.temperature}")
         if self.top_p <= 0.0 or self.top_p > 1.0:
@@ -72,6 +76,7 @@ class SamplingParams:
         ret["do_sample"] = self.do_sample
         ret["presence_penalty"] = self.presence_penalty
         ret["frequency_penalty"] = self.frequency_penalty
+        ret["repetition_penalty"] = self.repetition_penalty
         ret["temperature"] = self.temperature
         ret["top_p"] = self.top_p
         ret["top_k"] = self.top_k
