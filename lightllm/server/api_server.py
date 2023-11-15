@@ -297,11 +297,11 @@ def main():
                         help="the nccl_port to build a distributed environment for PyTorch")
     parser.add_argument("--mode", type=str, default=[], nargs='+',
                         help="""Model mode: [triton_int8kv | ppl_int8kv | triton_flashdecoding] 
-                        [triton_int8weight | triton_int4weight | lmdeploy_int4weight], 
+                        [triton_int8weight | triton_int4weight | lmdeploy_int4weight | ppl_int4weight], 
                         triton_flashdecoding mode is for long context, current support llama llama2 qwen;
                         triton_int8kv mode use int8 to store kv cache, can increase token capacity, use triton kernel;
                         ppl_int8kv mode use int8 to store kv cache, and use ppl fast kernel;
-                        triton_int8weight and triton_int4weight or lmdeploy_int4weight mode use int8 and int4 to store weights;
+                        triton_int8weight and triton_int4weight and lmdeploy_int4weight or ppl_int4weight mode use int8 and int4 to store weights;
                         you need to read source code to make sure the supported detail mode for all models""")
     parser.add_argument("--trust_remote_code", action='store_true',
                         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.")

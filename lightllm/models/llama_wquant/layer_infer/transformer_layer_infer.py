@@ -16,6 +16,7 @@ from lightllm.common.basemodel.triton_kernel.quantize_gemm_int8 import matmul_qu
 from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int8 import matmul_dequantize_int8
 from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import matmul_dequantize_int4_s1, matmul_dequantize_int4_s2, matmul_dequantize_int4_gptq
 from lightllm.common.basemodel.cuda_kernel.lmdeploy_wquant import matmul_dequantize_int4_lmdeploy
+from lightllm.common.basemodel.cuda_kernel.ppl_wquant import matmul_dequantize_int4_ppl
 from lightllm.utils.infer_utils import mark_cost_time
 
  
@@ -72,6 +73,14 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
             self._wquant_matmul_for_ffn_down = func
             if self.tp_rank_ == 0 and self.layer_num_ == 0:
                 print("model use lmdeploy_int4weight kernel")
+        elif "ppl_int4weight" in self.mode:
+            func = partial(LlamaTransformerLayerInferWquant._wquant_matmul_ppl_int4weight_only_quant, self)
+            self._wquant_matmul_for_qkv = func
+            self._wquant_matmul_for_o = func
+            self._wquant_matmul_for_ffn_up = func
+            self._wquant_matmul_for_ffn_down = func
+            if self.tp_rank_ == 0 and self.layer_num_ == 0:
+                print("model use ppl_int4weight kernel")
         else:
             raise Exception(f"error mode {self.mode}")
         return
@@ -166,6 +175,20 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
         else:
             qweight, scale_zeros, int4_q_group_size = quant_weight_params
             out =  matmul_dequantize_int4_lmdeploy(input, qweight, scale_zeros, int4_q_group_size)
+        if bias is None:
+            return out
+        else:
+            out.add_(bias)
+            return out
+
+    def _wquant_matmul_ppl_int4weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
+        assert has_act == False
+        if is_prefill:
+            qweight, qscale = quant_weight_params
+            out = matmul_dequantize_int4_ppl(input, qweight, qscale)
+        else:
+            qweight, qscale = quant_weight_params
+            out = matmul_dequantize_int4_ppl(input, qweight, qscale)
         if bias is None:
             return out
         else:
