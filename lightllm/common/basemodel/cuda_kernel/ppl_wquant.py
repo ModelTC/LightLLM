@@ -9,7 +9,7 @@ def quantize_int4_ppl(weight, group_size=128, tp_rank=8):
     """
     weight = weight.to(dtype=torch.float16).transpose(0, 1).contiguous().cuda(tp_rank)
     from lightllm_ppl_int4_kernel import WeightPreProcess_i4
-    qweight_new, q_scale = WeightPreProcess_i4(weight, group_size=group_size)
+    qweight_new, q_scale = WeightPreProcess_i4(weight, group_size)
     return qweight_new, q_scale
 
 def matmul_dequantize_int4_ppl(
