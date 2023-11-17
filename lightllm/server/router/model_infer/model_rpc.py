@@ -19,6 +19,7 @@ from lightllm.models.qwen_wquant.model import QWenTpPartModelWQuant
 from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
 from lightllm.models.baichuan13b.model import Baichuan13bTpPartModel
 from lightllm.models.baichuan2_7b.model import Baichuan2_7bTpPartModel
+from lightllm.models.baichuan2_13b.model import Baichuan2_13bTpPartModel
 from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
 from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.models.yi.model import YiTpPartModel
@@ -88,7 +89,10 @@ class ModelRpcServer(rpyc.Service):
                     else:
                         self.model = Baichuan7bTpPartModel(model_kvargs)
                 elif model_cfg["hidden_size"] == 5120:
-                    self.model = Baichuan13bTpPartModel(model_kvargs)
+                    if model_cfg['architectures'][0] == 'BaichuanForCausalLM':
+                        self.model = Baichuan2_13bTpPartModel(model_kvargs)
+                    else:
+                        self.model = Baichuan13bTpPartModel(model_kvargs)
                 else:
                     raise Exception('can not support baichuan format')
             elif self.model_type == 'gpt_bigcode':
