@@ -34,8 +34,8 @@ model_to_class_and_path = {
     "chatglm2-6b" : (ChatGlm2TpPartModel, os.path.join(base_dir, ""))
 }
 
-def test_all_setting(model_name, mode, log_dir, world_sizes, in_out_lens, batch_sizes):
-    log_dir = os.path.join(log_dir, str(model_name))
+def test_all_setting(gpu_name, model_name, mode, log_dir, world_sizes, in_out_lens, batch_sizes):
+    log_dir = os.path.join(log_dir, gpu_name, str(model_name))
     os.makedirs(log_dir, exist_ok=True)
 
     model_class, model_path = model_to_class_and_path[model_name]
@@ -90,10 +90,13 @@ def test_all_setting(model_name, mode, log_dir, world_sizes, in_out_lens, batch_
     md_file.close()
 
 
+gpu_name = "A800"
 in_out_lens = [(128, 128), (256, 256)] # in_out_lens 中的数据必须以从短到长的顺序排列，否则可能有问题。
 batch_sizes = [1, 2] # batch_sizes 中的数字也必须从小到大排列。
 
-test_all_setting("llama-7b", 
+
+test_all_setting(gpu_name,
+                 "llama-7b", 
                  mode=["triton_int8weight", "ppl_int8kv"], # mode 为 【】 为普通 fp16 的格式。
                  log_dir="./", 
                  world_sizes=[1], 
