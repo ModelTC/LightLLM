@@ -313,6 +313,10 @@ def main():
                         help="token ratio to control router dispatch")
     parser.add_argument("--router_max_new_token_len", type=int, default=1024,
                         help="the request max new token len for router")
+    parser.add_argument("--no_skipping_special_tokens", action="store_true",
+                        help="whether to skip special tokens when decoding")
+    parser.add_argument("--no_spaces_between_special_tokens", action="store_true",
+                        help="whether to add spaces between special tokens when decoding")
     
     args = parser.parse_args()
 
