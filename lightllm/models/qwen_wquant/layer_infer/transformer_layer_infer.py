@@ -20,7 +20,7 @@ class QwenTransformerLayerInferWQuant(LlamaTransformerLayerInferWquant):
     def _get_qkv(self, input, cache_k, cache_v, infer_state: QwenInferStateInfo, layer_weight: QwenTransformerLayerWeightQuantized):
         qkv_output = self._wquant_matmul_for_qkv(input.view(-1, self.embed_dim_), 
                                                     quant_weight_params=layer_weight.qkv_weight_,
-                                                    is_prefill=infer_state.is_prefill,
+                                                    infer_state=infer_state,
                                                     bias=layer_weight.qkv_bias_)
         
         tp_k_head_dim = self.tp_k_head_num_ * self.head_dim_

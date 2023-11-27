@@ -44,7 +44,8 @@ def select_paused_reqs(batch: Batch, strategy: Strategy, req_queue: ReqQueue, ma
     batch.pop_req(pause_req.request_id)
 
     pause_req.req_status = ReqRunStatus.PAUSED_AND_OFFLOAD
-    pause_req.offload_kv_len = pause_req.input_len + len(pause_req.output_ids) - 1
+    pause_req.cur_kv_len = 0
+    
     req_queue.back_to_wait_list([pause_req])
 
     return [pause_req]

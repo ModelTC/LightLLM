@@ -32,7 +32,7 @@ class ChatGLM2TransformerLayerInfer(LlamaTransformerLayerInfer):
         rotary_emb_fwd(cache_k, infer_state.position_cos, infer_state.position_sin)
         torch.addmm(layer_weight.v_bias_, input_emb.view(-1, self.embed_dim_), layer_weight.v_weight_, beta=1.0, alpha=1.0,
                     out=cache_v.view(-1, self.tp_v_head_num_ * self.head_dim_))
-        return q
+        return q, cache_k, cache_v
 
     def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: ChatGLM2TransformerLayerWeight):
 

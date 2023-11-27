@@ -31,5 +31,5 @@ class Baichuan13bTransformerLayerInfer(LlamaTransformerLayerInfer):
                     out=cache_k.view(-1, self.tp_k_head_num_ * self.head_dim_))
         torch.mm(input.view(-1, self.embed_dim_), layer_weight.v_weight_,
                     out=cache_v.view(-1, self.tp_v_head_num_ * self.head_dim_))
-        return q
+        return q, cache_k, cache_v
     

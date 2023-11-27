@@ -6,6 +6,7 @@ import collections
 from dataclasses import dataclass, field
 from typing import List, Dict
 from lightllm.common.req_manager import ReqManager
+from lightllm.common.mem_manager import MemoryManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.io_struct import ReqRunStatus
 
@@ -41,22 +42,26 @@ class InferReq:
 
     def __init__(
         self,
+        r_id,
         input_token_ids=[],
         out_token_id_count={},
         sampling_param=None,
         req_idx=-1,
-        seq_len=0,
         prompt_len=0,
-        req_status:ReqRunStatus=ReqRunStatus.RUNNING,
+        req_status=None,
+        prompt_cache_len=None,
+        prompt_cache_req_id=None,
     ) -> None:
+        self.r_id = r_id
         self.out_token_id_count = out_token_id_count
         self.sampling_param = sampling_param
         self.req_idx = req_idx
-        self.seq_len = seq_len
         self.prompt_len = prompt_len
-        self.offload_kv_len = None
         self.input_token_ids = input_token_ids
         self.req_status = req_status
+        self.cur_kv_len = 0 # 当前已经占用掉 token 现存的 kv len 长度
+        self.prompt_cache_len = prompt_cache_len # 可以复用的一些公共 prompt 头对应的 kv cache 长度， prompt cache 目前只会在 splitfuse 模式下使用
+        self.prompt_cache_req_id = prompt_cache_req_id # 对应的可复用的请求的 id，方便初始化的时候，将其 kv cache 复制到当前请求中
         return
 
 
@@ -86,24 +91,42 @@ class InferBatch:
                 # postprocessor
                 sampling_param = r["sampling_param"]
                 sampling_param["vocab_size"] = vocab_size
-                requests_mapping[r_id] = InferReq(input_token_ids=tokenized_input,
-                                                    out_token_id_count=collections.defaultdict(int), 
-                                                    sampling_param=InferSamplingParams(**sampling_param), 
-                                                    req_idx=nopad_b_req_idx[index], 
-                                                    seq_len=input_length,
-                                                    prompt_len=input_length,
-                                                    req_status=ReqRunStatus.RUNNING)
+                assert r['req_status'] == ReqRunStatus.WAIT_IN_QUEUE
+                r_obj = InferReq(r_id, 
+                                input_token_ids=tokenized_input,
+                                out_token_id_count=collections.defaultdict(int), 
+                                sampling_param=InferSamplingParams(**sampling_param), 
+                                req_idx=nopad_b_req_idx[index], 
+                                prompt_len=input_length,
+                                req_status=r['req_status'],
+                                prompt_cache_len=r['prompt_cache_len'],
+                                prompt_cache_req_id=r['prompt_cache_req_id'])
+                requests_mapping[r_id] = r_obj
                 index += 1
             else:
                 if requests_mapping[r_id].req_status == ReqRunStatus.PAUSED_AND_OFFLOAD:
-                    requests_mapping[r_id].req_status = ReqRunStatus.RERUNNING_FROM_OFFLOAD
+                    r_obj : InferReq = requests_mapping[r_id]
+                    r_obj.req_status = ReqRunStatus.RERUNNING_FROM_OFFLOAD
                 elif requests_mapping[r_id].req_status == ReqRunStatus.PAUSED_AND_KVKEEP:
-                    requests_mapping[r_id].req_status = ReqRunStatus.RERUNNING_FROM_KVKEEP
+                    r_obj : InferReq = requests_mapping[r_id]
+                    r_obj.req_status = ReqRunStatus.RERUNNING_FROM_KVKEEP
                 else:
                     assert False, f"should not exist {requests_mapping[r_id].req_status}"
             
             request_ids.append(r_id)
+
+            # 如果是具有 prompt_cache 的使用特性则需要进行提前的填充和恢复操作。
+            if r_obj.req_status in [ReqRunStatus.RERUNNING_FROM_OFFLOAD, ReqRunStatus.WAIT_IN_QUEUE]:
+                if r_obj.prompt_cache_len != 0: # 有利用prompt_cache_len
+                    prompt_cache_req_obj : InferReq = requests_mapping[r_obj.prompt_cache_req_id]
+                    prompt_kv_tokens = req_manager.req_to_token_indexs[prompt_cache_req_obj.req_idx, 0:r_obj.prompt_cache_len]
+                    mem_manager : MemoryManager = req_manager.mem_manager
+                    mem_manager.add_refs(prompt_kv_tokens.long()) # 加 refs
+                    req_manager.req_to_token_indexs[r_obj.req_idx, 0:r_obj.prompt_cache_len] = prompt_kv_tokens
+                    r_obj.cur_kv_len = r_obj.prompt_cache_len
             
+            # 初始化之后 所有请求状态置换为 RUNNING 状态
+            r_obj.req_status = ReqRunStatus.RUNNING
 
         return cls(
             batch_id=batch_id,
@@ -116,9 +139,9 @@ class InferBatch:
         free_req_index = []
         free_token_index = []
         for request_id in self.request_ids:
-            req = requests_mapping.pop(request_id)
+            req : InferReq = requests_mapping.pop(request_id)
             free_req_index.append(req.req_idx)
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][:req.seq_len - 1])
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][:req.cur_kv_len])
             
         free_token_index = torch.cat(free_token_index, dim=-1)
         self.req_manager.free(free_req_index, free_token_index)
@@ -142,9 +165,9 @@ class InferBatch:
         free_req_index = []
         free_token_index = []
         for request_id in finished_request_ids:
-            req = requests_mapping.pop(request_id)
+            req : InferReq = requests_mapping.pop(request_id)
             free_req_index.append(req.req_idx)
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][:req.seq_len - 1])
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][:req.cur_kv_len])
         free_token_index = torch.cat(free_token_index, dim=-1)
         self.req_manager.free(free_req_index, free_token_index)
         
@@ -156,13 +179,14 @@ class InferBatch:
 
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List[str]):
-        for request_id, pause_way, offload_kv_len in pause_reqs:
-            req = requests_mapping[request_id]
+        for request_id, pause_way in pause_reqs:
+            req : InferReq = requests_mapping[request_id]
             req.req_status = pause_way
             self.request_ids.remove(request_id)
             if pause_way == ReqRunStatus.PAUSED_AND_OFFLOAD:
-                self.req_manager.free_token(self.req_manager.req_to_token_indexs[req.req_idx][:offload_kv_len])
-                req.offload_kv_len = offload_kv_len
+                # 现在只支持全卸载一个请求的所有 kv 了
+                self.req_manager.free_token(self.req_manager.req_to_token_indexs[req.req_idx][:req.cur_kv_len])
+                req.cur_kv_len = 0
         return self
 
     @classmethod

@@ -45,7 +45,7 @@ class StarcoderTransformerLayerInferWQuant(TransformerLayerInferWeightQuantTpl):
     def _get_qkv(self, input, cache_k, cache_v, infer_state: StarcoderInferStateInfo, layer_weight: StarcoderTransformerLayerWeightQuantized) -> torch.Tensor:
         qkv_output = self._wquant_matmul_for_qkv(input.view(-1, self.embed_dim_), 
                                                  layer_weight.qkv_weight_, 
-                                                 infer_state.is_prefill,
+                                                 infer_state=infer_state,
                                                  bias=layer_weight.qkv_bias_)
         tp_k_head_dim = self.tp_k_head_num_ * self.head_dim_
         q = qkv_output[:, : -2 * tp_k_head_dim]
@@ -59,21 +59,21 @@ class StarcoderTransformerLayerInferWQuant(TransformerLayerInferWeightQuantTpl):
     def _get_o(self, input, infer_state: StarcoderInferStateInfo, layer_weight: StarcoderTransformerLayerWeightQuantized) -> torch.Tensor:
         o_output =self._wquant_matmul_for_o(input.view(-1, self.embed_dim_),
                                             layer_weight.o_weight_,
-                                            infer_state.is_prefill,
+                                            infer_state=infer_state,
                                             bias=layer_weight.o_bias_)
         return o_output
 
     def _ffn(self, input, infer_state:StarcoderInferStateInfo, layer_weight: StarcoderTransformerLayerWeightQuantized)->torch.Tensor:
         ffn1_out = self._wquant_matmul_for_ffn_up(input.view(-1, self.embed_dim_),
                                                   layer_weight.ffn_1_weight_,
-                                                  infer_state.is_prefill,
+                                                  infer_state=infer_state,
                                                   bias=layer_weight.ffn_1_bias_)
         input = None
         gelu_out = torch.nn.functional.gelu(ffn1_out, approximate='tanh')
         ffn1_out = None
         ffn2_out = self._wquant_matmul_for_ffn_down(gelu_out, 
                                                     layer_weight.ffn_2_weight_,
-                                                    infer_state.is_prefill,
+                                                    infer_state=infer_state,
                                                     bias=layer_weight.ffn_2_bias_)
         gelu_out = None
         return ffn2_out

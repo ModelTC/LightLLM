@@ -318,19 +318,39 @@ def main():
     parser.add_argument("--no_spaces_between_special_tokens", action="store_true",
                         help="whether to add spaces between special tokens when decoding")
     
+    parser.add_argument("--splitfuse_mode", action='store_true',
+                    help="use splitfuse mode")
+    parser.add_argument("--splitfuse_block_size", type=int, default=256,
+                    help="splitfuse block size")    
+    parser.add_argument("--prompt_cache_strs", type=str, default=[], nargs='+',
+                        help="""prompt cache strs""")
+    
     args = parser.parse_args()
+
+    # 非splitfuse 模式，不支持 prompt cache 特性
+    if not args.splitfuse_mode:
+        assert len(args.prompt_cache_strs) == 0
 
     assert args.max_req_input_len < args.max_req_total_len
     assert args.max_req_total_len <= args.max_total_token_num
-
-    if args.batch_max_tokens is None:
-        batch_max_tokens = int(1 / 6 * args.max_total_token_num)
-        batch_max_tokens = max(batch_max_tokens, args.max_req_total_len)
-        args.batch_max_tokens = batch_max_tokens
+    
+    if not args.splitfuse_mode:
+        # 普通模式下
+        if args.batch_max_tokens is None:
+            batch_max_tokens = int(1 / 6 * args.max_total_token_num)
+            batch_max_tokens = max(batch_max_tokens, args.max_req_total_len)
+            args.batch_max_tokens = batch_max_tokens
+        else:
+            assert (
+                args.batch_max_tokens >= args.max_req_total_len
+            ), "batch_max_tokens must >= max_req_total_len"
     else:
-        assert (
-            args.batch_max_tokens >= args.max_req_total_len
-        ), "batch_max_tokens must >= max_req_total_len"
+        # splitfuse 模式下
+        # assert args.batch_max_tokens is not None, "need to set by yourself"
+        if args.batch_max_tokens is None:
+            batch_max_tokens = int(1 / 6 * args.max_total_token_num)
+            batch_max_tokens = max(batch_max_tokens, args.splitfuse_block_size)
+            args.batch_max_tokens = batch_max_tokens
 
     can_use_ports = alloc_can_use_network_port(
         num=3 + args.tp, used_nccl_port=args.nccl_port
@@ -340,14 +360,9 @@ def main():
 
     global httpserver_manager
     httpserver_manager = HttpServerManager(
-        args.model_dir,
-        args.tokenizer_mode,
+        args,
         router_port=router_port,
-        httpserver_port=httpserver_port,
-        total_token_num=args.max_total_token_num,
-        max_req_input_len=args.max_req_input_len,
-        max_req_total_len=args.max_req_total_len,
-        trust_remote_code=args.trust_remote_code,
+        httpserver_port=httpserver_port
     )
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)

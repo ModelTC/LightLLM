@@ -1,15 +1,18 @@
 import os
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import json
 import torch
 from typing import final
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.splitfuse_infer_struct import SplitFuseInferStateInfo
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
+from lightllm.common.basemodel.triton_kernel.splitfuse_copy_kv_index_to_req import splitfuse_copy_kv_index_to_req
 
 torch.backends.cudnn.enabled = True
 
@@ -25,6 +28,7 @@ class TpPartBaseModel:
 
     # infer state class
     infer_state_class = InferStateInfo
+    splitfuse_infer_state_class = SplitFuseInferStateInfo
 
     def __init__(self, kvargs):
         self.tp_rank_ = kvargs["tp_rank"]
@@ -157,15 +161,25 @@ class TpPartBaseModel:
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
-        infer_state.prefill_mem_index = self.mem_manager.alloc(infer_state.total_token_num)
-        infer_state.prefill_key_buffer = torch.empty((infer_state.total_token_num, self.tp_k_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
-        infer_state.prefill_value_buffer = torch.empty((infer_state.total_token_num, self.tp_v_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
-        init_req_to_token_indexes(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len,
-                                   max_len_in_batch, infer_state.prefill_mem_index)
 
-        infer_state.init_some_extra_state(self, batch_size, total_token_num, max_len_in_batch, 
-                                          input_ids, self.req_manager.req_to_token_indexs, b_req_idx,
-                                          b_start_loc, b_seq_len, True)
+        alloc_mem = self.mem_manager.alloc_contiguous(infer_state.total_token_num)
+        if alloc_mem is not None:
+            infer_state.mem_is_contiguous = True
+            infer_state.mem_index = alloc_mem[0]
+            infer_state.mem_start = alloc_mem[1]
+            infer_state.mem_end = alloc_mem[2]
+
+        else:
+            infer_state.mem_is_contiguous = False
+            alloc_mem = self.mem_manager.alloc(infer_state.total_token_num)
+            infer_state.mem_index = alloc_mem
+            infer_state.key_buffer = torch.empty((infer_state.total_token_num, self.tp_k_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
+            infer_state.value_buffer = torch.empty((infer_state.total_token_num, self.tp_v_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
+        
+        init_req_to_token_indexes(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len,
+                            max_len_in_batch, infer_state.mem_index)
+
+        infer_state.init_some_extra_state(self, input_ids)
         predict_logics = self._context_forward(input_ids, infer_state)
         return predict_logics
     
@@ -185,22 +199,94 @@ class TpPartBaseModel:
 
         alloc_mem = self.mem_manager.alloc_contiguous(batch_size)
         if alloc_mem is not None:
-            infer_state.decode_is_contiguous = True
-            infer_state.decode_mem_index = alloc_mem[0]
-            infer_state.decode_mem_start = alloc_mem[1]
-            infer_state.decode_mem_end = alloc_mem[2]
-            copy_kv_index_to_req(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len, infer_state.decode_mem_index)
+            infer_state.mem_is_contiguous = True
+            infer_state.mem_index = alloc_mem[0]
+            infer_state.mem_start = alloc_mem[1]
+            infer_state.mem_end = alloc_mem[2]
+            copy_kv_index_to_req(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len, infer_state.mem_index)
         else:
-            infer_state.decode_is_contiguous = False
+            infer_state.mem_is_contiguous = False
             alloc_mem = self.mem_manager.alloc(batch_size)
-            infer_state.decode_mem_index = alloc_mem
-            infer_state.decode_key_buffer = torch.empty((batch_size, self.tp_k_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
-            infer_state.decode_value_buffer = torch.empty((batch_size, self.tp_v_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
-            copy_kv_index_to_req(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len, infer_state.decode_mem_index)
+            infer_state.mem_index = alloc_mem
+            infer_state.key_buffer = torch.empty((batch_size, self.tp_k_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
+            infer_state.value_buffer = torch.empty((batch_size, self.tp_v_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
+            copy_kv_index_to_req(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len, infer_state.mem_index)
 
-        infer_state.init_some_extra_state(self, batch_size, total_token_num, max_len_in_batch, input_ids,
-                                          self.req_manager.req_to_token_indexs, b_req_idx, b_start_loc, b_seq_len, False)
+        infer_state.init_some_extra_state(self, input_ids)
         predict_logics = self._token_forward(input_ids, infer_state)
+        return predict_logics
+    
+    @torch.no_grad()
+    def splitfuse_forward(
+            self, 
+            input_ids,
+            decode_req_num,
+            decode_total_token_num,
+            decode_b_req_idx : torch.Tensor,
+            decode_b_start_loc : torch.Tensor,
+            decode_b_seq_len : torch.Tensor,
+            decode_max_len_in_batch,
+            
+            prefill_req_num,
+            prefill_b_req_idx : torch.Tensor,
+            prefill_b_split_start_loc : torch.Tensor,
+            prefill_b_split_seq_len : torch.Tensor,
+            prefill_max_split_seq_len_in_batch,
+            prefill_b_seq_len : torch.Tensor):
+         
+        infer_state = self.splitfuse_infer_state_class()
+        infer_state.batch_size = decode_req_num + prefill_req_num
+
+        infer_state.decode_req_num = decode_req_num
+        infer_state.decode_total_token_num = decode_total_token_num
+        infer_state.decode_b_req_idx = decode_b_req_idx
+        infer_state.decode_b_start_loc = decode_b_start_loc
+        infer_state.decode_b_seq_len = decode_b_seq_len
+        infer_state.decode_max_len_in_batch = decode_max_len_in_batch
+
+        infer_state.prefill_req_num = prefill_req_num
+        infer_state.prefill_b_req_idx = prefill_b_req_idx
+        infer_state.prefill_b_split_start_loc = prefill_b_split_start_loc
+        infer_state.prefill_b_split_seq_len = prefill_b_split_seq_len
+        infer_state.prefill_max_split_seq_len_in_batch = prefill_max_split_seq_len_in_batch
+        infer_state.prefill_b_seq_len = prefill_b_seq_len
+        # infer_state.event = [torch.cuda.Event() for _ in range(self.layers_num)]
+
+        infer_state.mem_manager = self.mem_manager
+        infer_state.req_manager = self.req_manager
+        
+        alloc_size = len(input_ids)
+        alloc_mem = self.mem_manager.alloc_contiguous(alloc_size)
+        if alloc_mem is not None:
+            infer_state.mem_is_contiguous = True
+            infer_state.mem_index = alloc_mem[0]
+            infer_state.mem_start = alloc_mem[1]
+            infer_state.mem_end = alloc_mem[2]
+        else:
+            infer_state.mem_is_contiguous = False
+            alloc_mem = self.mem_manager.alloc(alloc_size)
+            infer_state.mem_index = alloc_mem
+            infer_state.key_buffer = torch.empty((alloc_size, self.tp_k_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
+            infer_state.value_buffer = torch.empty((alloc_size, self.tp_v_head_num_, self.head_dim_), dtype=torch.float16, device="cuda")
+        
+        # decode 部分
+        if decode_req_num != 0:
+            copy_kv_index_to_req(self.req_manager.req_to_token_indexs,
+                                  decode_b_req_idx, 
+                                  decode_b_seq_len, 
+                                  infer_state.mem_index[0:decode_req_num])
+        
+        # split prefill 部分
+        if prefill_req_num != 0:
+            splitfuse_copy_kv_index_to_req(self.req_manager.req_to_token_indexs,
+                                            prefill_b_req_idx, 
+                                            prefill_b_split_seq_len,
+                                            prefill_b_seq_len, 
+                                            infer_state.mem_index[decode_req_num:])
+        
+        infer_state.init_some_extra_state(self, input_ids)
+        infer_state.create_inner_decode_infer_status()
+        predict_logics = self._splitfuse_forward(input_ids, infer_state)
         return predict_logics
     
     @final
@@ -220,3 +306,14 @@ class TpPartBaseModel:
             input_embs = self.layers_infer[i].token_forward(input_embs, infer_state, self.trans_layers_weight[i])
         predict_logics = self.post_infer.token_forward(input_embs, infer_state, self.pre_post_weight, return_logics=True)
         return predict_logics
+    
+    @final
+    def _splitfuse_forward(self, input_ids, infer_state: SplitFuseInferStateInfo):
+        cuda_input_ids = input_ids
+        input_embs = self.pre_infer.splitfuse_forward(cuda_input_ids, infer_state, self.pre_post_weight)
+        for i in range(self.layers_num):
+            input_embs = self.layers_infer[i].splitfuse_forward(input_embs, infer_state, self.trans_layers_weight[i])
+        predict_logics = self.post_infer.splitfuse_forward(input_embs, infer_state, self.pre_post_weight, return_logics=True)
+        return predict_logics
+
+    

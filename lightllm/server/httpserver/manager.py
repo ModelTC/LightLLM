@@ -7,42 +7,60 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from ..tokenizer import get_tokenizer
 from ..io_struct import BatchStrOut, AbortReq
 
-class ReqStatus:
-    def __init__(self, req_id) -> None:
-        self.req_id = req_id
-        self.lock = asyncio.Lock()
-        self.event = asyncio.Event()
-        self.out_token_info_list = []
-
 class HttpServerManager:
     def __init__(
         self,
-        model_weightdir,
-        tokenizor_mode,
+        args,
         router_port,
-        httpserver_port,
-        total_token_num,
-        max_req_input_len,
-        max_req_total_len,
-        trust_remote_code,
+        httpserver_port
     ):
+        self.args = args
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"tcp://127.0.0.1:{router_port}")
 
         self.recv_from_detokenization = context.socket(zmq.PULL)
         self.recv_from_detokenization.bind(f"tcp://127.0.0.1:{httpserver_port}")
-
+        
         self.tokenizer = get_tokenizer(
-            model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code
+            args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code
         )
 
         self.req_id_to_out_inf = {}  # value type (out_str, metadata, finished, event)
 
-        self.total_token_num = total_token_num
-        self.max_req_input_len = max_req_input_len
-        self.max_req_total_len = max_req_total_len
+        self.total_token_num = args.max_total_token_num
+        self.max_req_input_len = args.max_req_input_len
+        self.max_req_total_len = args.max_req_total_len
 
+        self._init_prompt_cache()
+        return
+    
+    def _init_prompt_cache(self):
+        """
+        初始化 prompt cache 特性, 这个地方的id 分配要于 router 中 的id 分配对齐
+        """
+        self.prompt_cache_reqs = []
+        # 初始化 prompt cahce， 然后初始化请求队列
+        if self.args.splitfuse_mode:
+            id = -1 # id 从 -1， -2， .... 避免和正常的 id 占用
+            for prompt_cache_str in self.args.prompt_cache_strs:
+                prompt_ids = self.tokenizer.encode(prompt_cache_str)
+                self.prompt_cache_reqs.append((id, prompt_ids))
+                id -= 1
+        return
+    
+    def _find_prompt_cache_req(self, token_ids):
+        prompt_cache_len = 0
+        prompt_cache_req_id = None
+        for (req_id, prompt_ids) in self.prompt_cache_reqs:
+            prompt_len = len(prompt_ids)
+            if len(token_ids) > prompt_len:
+                if token_ids[0 : prompt_len] == prompt_ids:
+                    prompt_cache_len = prompt_len
+                    prompt_cache_req_id = req_id
+                    break
+        return prompt_cache_len, prompt_cache_req_id
+    
     async def generate(self, prompt, sampling_params, request_id):
         prompt_ids = self.tokenizer.encode(prompt)
         prompt_tokens = len(prompt_ids)
@@ -66,7 +84,10 @@ class HttpServerManager:
         event = req_status.event
         self.req_id_to_out_inf[request_id] = req_status
 
-        self.send_to_router.send_pyobj((prompt_ids, sampling_params, request_id))
+        # 寻找是否有可用的prompt cache 可用
+        prompt_cache_len, prompt_cache_req_id = self._find_prompt_cache_req(prompt_ids)
+
+        self.send_to_router.send_pyobj((prompt_ids, sampling_params, request_id, prompt_cache_len, prompt_cache_req_id))
   
         while True:
             try:
@@ -119,3 +140,10 @@ class HttpServerManager:
                 except:
                     pass
         return
+
+class ReqStatus:
+    def __init__(self, req_id) -> None:
+        self.req_id = req_id
+        self.lock = asyncio.Lock()
+        self.event = asyncio.Event()
+        self.out_token_info_list = []

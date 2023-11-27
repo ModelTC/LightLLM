@@ -10,6 +10,7 @@ from .layer_infer.template.transformer_layer_infer_template_wquant import Transf
 from .layer_infer.template.pre_layer_infer_template import PreLayerInferTpl
 from .layer_infer.template.post_layer_infer_template import PostLayerInferTpl
 from .infer_struct import InferStateInfo
+from .splitfuse_infer_struct import SplitFuseInferStateInfo
 from .basemodel import TpPartBaseModel
 
 
@@ -26,5 +27,6 @@ __all__ = [
     "TpPartBaseModel",
     "PreLayerInferTpl",
     "PostLayerInferTpl",
-    "TransformerLayerInferWeightQuantTpl"
+    "TransformerLayerInferWeightQuantTpl",
+    "SplitFuseInferStateInfo"
 ]

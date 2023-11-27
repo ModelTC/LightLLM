@@ -23,7 +23,7 @@ class InternlmTransformerLayerInfer(LlamaTransformerLayerInfer):
         rotary_emb_fwd(cache_k, infer_state.position_cos, infer_state.position_sin)
         torch.addmm(layer_weight.v_bias_, input.view(-1, self.embed_dim_), layer_weight.v_weight_, beta=1.0,
                     alpha=1.0, out=cache_v.view(-1, self.tp_v_head_num_ * self.head_dim_))
-        return q
+        return q, cache_k, cache_v
 
     def _get_o(self, input, infer_state:LlamaInferStateInfo, layer_weight:InternlmTransformerLayerWeight)->torch.Tensor:
         o_tensor = torch.addmm(layer_weight.o_bias_, input.view(-1, self.tp_o_head_num_ * self.head_dim_), layer_weight.o_weight_, beta=1.0 / self.world_size_)

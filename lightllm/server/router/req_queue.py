@@ -3,22 +3,29 @@ import asyncio
 import numpy as np
 from typing import List
 from ..io_struct import Batch, Req
-from lightllm.utils.infer_utils import  calculate_time
+from lightllm.utils.infer_utils import calculate_time
 from lightllm.server.io_struct import Req
 from lightllm.server.io_struct import ReqRunStatus
 
 class ReqQueue:
 
-    def __init__(self, max_total_tokens, batch_max_tokens, running_max_req_size, router_token_ratio, router_max_new_token_len) -> None:
-        self.max_total_tokens = max_total_tokens
-        assert batch_max_tokens is not None
-        self.batch_max_tokens = batch_max_tokens
-        self.running_max_req_size = running_max_req_size
+    def __init__(self, args, prompt_cache_used_tokens, prompt_cache_req_num) -> None:
+        self.max_total_tokens = args.max_total_token_num
+        assert args.batch_max_tokens is not None
+        self.batch_max_tokens = args.batch_max_tokens
+        self.running_max_req_size = args.running_max_req_size
         self.waiting_req_list: List[Req] = []
-        self.router_token_ratio = router_token_ratio
-        self.router_max_new_token_len = router_max_new_token_len
+        self.router_token_ratio = args.router_token_ratio
+        self.router_max_new_token_len = args.router_max_new_token_len
         self.pause_req_dict = {} # 用于保存队列中被暂停的请求，暂停原因为 ReqRunStatus.PAUSED_AND_KVKEEP  ReqRunStatus.PAUSED_AND_OFFLOAD
         self.pause_req_used_tokens = 0
+
+        self.is_splitfuse_mode = args.splitfuse_mode
+        self.splitfuse_block_size = args.splitfuse_block_size
+
+        # 当使用 prompt cache 特性时的维护变量
+        self.prompt_cache_used_tokens = prompt_cache_used_tokens
+        self.prompt_cache_req_num = prompt_cache_req_num
         
     def append(self, req):
         self.waiting_req_list.append(req)
@@ -55,28 +62,45 @@ class ReqQueue:
         if req.req_status in [ReqRunStatus.PAUSED_AND_KVKEEP, ReqRunStatus.PAUSED_AND_OFFLOAD]:
             self.cache_pause_reqs_used_tokens -= req.get_used_tokens()
             self.cache_pause_reqs_num -= 1
-        if need_max_token_num < self.max_total_tokens - self.cache_pause_reqs_used_tokens and len(self.cache_len_list) + self.cache_pause_reqs_num <= self.running_max_req_size:
+
+        ok_token_num = need_max_token_num < self.max_total_tokens - self.cache_pause_reqs_used_tokens - self.prompt_cache_used_tokens
+        ok_req_num = len(self.cache_len_list) + self.cache_pause_reqs_num + self.prompt_cache_req_num <= self.running_max_req_size
+
+        if ok_token_num and ok_req_num:
             return True
         else:
             return False
     
     #@calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch:Batch):
+
         # 如果当前已经被调度的请求数量超过了上限，直接不调度新的请求了。
-        if current_batch is not None and len(current_batch.reqs) + len(self.pause_req_dict) >= self.running_max_req_size:
+        exist_req_num = self.prompt_cache_req_num
+        exist_req_num += 0 if current_batch is None else len(current_batch.reqs)
+        exist_req_num += len(self.pause_req_dict)
+        req_is_full = exist_req_num >= self.running_max_req_size
+        if req_is_full:
             return None
         
         # 计算当前所有的token使用量，包括当前使用和暂停的
-        cur_all_used_tokens = 0 if current_batch is None else current_batch.recalcu_batch_used_tokens()
-        cur_all_used_tokens += self.recalcu_pause_req_used_tokens()
+        cur_all_used_tokens = 0 if current_batch is None else current_batch.batch_used_tokens
+        cur_all_used_tokens += self.recalcu_pause_req_used_tokens() + self.prompt_cache_used_tokens
         
         # 判断当前服务是否处于token使用率过高的状态，过高的情况下，调度要偏向保守
         cur_token_ratio = cur_all_used_tokens / self.max_total_tokens
         is_busy = cur_token_ratio >= self.router_token_ratio
+
+        # 得到当前batch 往前 decode 一次，需要的token量，在 splitfuse 模式下才有用，因为splitfuse
+        # 模式下 类似prefill 和 deocde 是在一起进行的，所以需要合并考虑。
+        # 普通模式是 先prefill 后 decode，所以只考虑prefill的时候 token使用量不要超过限制。
+        if not self.is_splitfuse_mode:
+            cur_batch_decode_need_tokens = 0
+        else:
+            cur_batch_decode_need_tokens = 0 if current_batch is None else current_batch.batch_decode_need_tokens
         
         self._init_cache_list(current_batch, is_busy)
         can_run_list = []
-        new_batch_prefill_need_tokens = 0
+        new_batch_first_router_need_tokens = 0 # 主要是对 prefill 或者 splitfuse 大块计算时候的限制
         aborted_count = 0
         for req in self.waiting_req_list:
             if req.aborted and req.req_status == ReqRunStatus.WAIT_IN_QUEUE: 
@@ -84,10 +108,10 @@ class ReqQueue:
                 # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token的泄漏
                 aborted_count += 1
                 continue
-            req_prefill_need_tokens = req.get_prefill_need_tokens()
-            if self._can_add_new_req(req, is_busy) and new_batch_prefill_need_tokens + req_prefill_need_tokens <= self.batch_max_tokens:
+            req_first_router_need_tokens = req.get_first_router_need_tokens()
+            if self._can_add_new_req(req, is_busy) and cur_batch_decode_need_tokens + new_batch_first_router_need_tokens + req_first_router_need_tokens <= self.batch_max_tokens:
                 can_run_list.append(req)
-                new_batch_prefill_need_tokens += req_prefill_need_tokens
+                new_batch_first_router_need_tokens += req_first_router_need_tokens
                 if req.req_status in [ReqRunStatus.PAUSED_AND_KVKEEP, ReqRunStatus.PAUSED_AND_OFFLOAD]:
                     self.pause_req_dict.pop(req.request_id)
             else:

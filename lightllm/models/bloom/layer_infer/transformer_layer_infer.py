@@ -48,10 +48,10 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
                     alpha=1.0, out=cache_k.view(-1, self.tp_k_head_num_ * self.head_dim_))
         torch.addmm(layer_weight.v_bias_, input.view(-1, self.embed_dim_), layer_weight.v_weight_, beta=1.0,
                     alpha=1.0, out=cache_v.view(-1, self.tp_v_head_num_ * self.head_dim_))
-        return q
+        return q, cache_k, cache_v
     
-    def _context_attention_kernel(self, q, k, v, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
-        o_tensor = torch.empty_like(q)
+    def _context_attention_kernel(self, q, k, v, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None)->torch.Tensor:
+        o_tensor =  torch.empty_like(q) if out is None else out
         context_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
                               k.view(-1, self.tp_k_head_num_, self.head_dim_),
                               v.view(-1, self.tp_v_head_num_, self.head_dim_),
@@ -62,8 +62,8 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
                               infer_state.max_len_in_batch)
         return o_tensor
     
-    def _token_attention_kernel(self, q, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
-        o_tensor = torch.empty_like(q)
+    def _token_attention_kernel(self, q, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None)->torch.Tensor:
+        o_tensor =  torch.empty_like(q) if out is None else out
         token_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
                             infer_state.mem_manager.key_buffer[self.layer_num_],
                             infer_state.mem_manager.value_buffer[self.layer_num_],
@@ -73,7 +73,8 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
                             infer_state.b_req_idx,
                             infer_state.b_start_loc,
                             infer_state.b_seq_len,
-                            infer_state.max_len_in_batch)
+                            infer_state.max_len_in_batch,
+                            infer_state.total_token_num)
         return o_tensor
     
     def _get_o(self, input, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:

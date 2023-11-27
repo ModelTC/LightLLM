@@ -1,6 +1,6 @@
 import torch
 
-def token_decode_attention_flash_decoding(q, infer_state, q_head_num, head_dim, cache_k, cache_v):
+def token_decode_attention_flash_decoding(q, infer_state, q_head_num, head_dim, cache_k, cache_v, out=None):
     BLOCK_SEQ = 256
     batch_size = infer_state.batch_size
     max_len_in_batch = infer_state.max_len_in_batch
@@ -9,7 +9,7 @@ def token_decode_attention_flash_decoding(q, infer_state, q_head_num, head_dim, 
     from .flash_decoding_stage1 import flash_decode_stage1
     from .flash_decoding_stage2 import flash_decode_stage2
 
-    o_tensor = torch.empty_like(q)
+    o_tensor = torch.empty_like(q) if out is None else out
     
     if getattr(infer_state, 'mid_o', None) is None:
         infer_state.mid_o = torch.empty([batch_size, 

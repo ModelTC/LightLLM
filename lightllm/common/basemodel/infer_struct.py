@@ -1,4 +1,6 @@
 import torch
+from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.req_manager import ReqManager
 
 class InferStateInfo:
     """
@@ -14,29 +16,18 @@ class InferStateInfo:
         self.max_len_in_batch = None
         self.is_prefill = None
         
-        self.mem_manager = None
-        self.req_manager = None
+        self.mem_manager: MemoryManager = None
+        self.req_manager: ReqManager = None
         
-        self.prefill_mem_index = None
-        self.prefill_key_buffer = None
-        self.prefill_value_buffer = None
-        
-        self.decode_is_contiguous = None
-        self.decode_mem_start = None 
-        self.decode_mem_end = None
-        self.decode_mem_index = None
-        self.decode_key_buffer = None 
-        self.decode_value_buffer = None
+        self.mem_is_contiguous = None
+        self.mem_index = None
+        self.mem_start = None 
+        self.mem_end = None
+        self.key_buffer = None
+        self.value_buffer = None
+
+        self.is_splitfuse = False
     
-    def init_some_extra_state(self, 
-            model, 
-            batch_size, 
-            total_token_num,
-            max_len_in_batch,
-            input_ids : torch.Tensor,
-            req_to_token_indexes: torch.Tensor,
-            b_req_idx : torch.Tensor,
-            b_start_loc : torch.Tensor,
-            b_seq_len : torch.Tensor,
-            is_prefill):
+
+    def init_some_extra_state(self, model, input_ids : torch.Tensor):
         pass

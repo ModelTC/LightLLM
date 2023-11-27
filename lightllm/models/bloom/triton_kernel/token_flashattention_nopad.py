@@ -123,11 +123,10 @@ def _fwd_kernel(
 #     return
 
 @torch.no_grad()
-def token_attention_fwd(q, k, v, o, alibi, req_to_tokens, b_req_idx, b_start_loc, b_seq_len, max_len_in_batch):
+def token_attention_fwd(q, k, v, o, alibi, req_to_tokens, b_req_idx, b_start_loc, b_seq_len, max_len_in_batch, total_token_num):
     head_num = k.shape[1]
     batch_size = b_seq_len.shape[0]
     calcu_shape1 = (batch_size, head_num, k.shape[2])
-    total_token_num = k.shape[0]
 
     att_m_tensor = torch.empty((head_num, total_token_num), dtype=q.dtype, device="cuda")
 

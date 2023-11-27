@@ -2,12 +2,11 @@ import re
 import torch
 from typing import List
 from lightllm.server.router.model_infer.infer_batch import InferBatch
-from lightllm.server.router.model_infer.infer_batch import requests_mapping
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 
-def sample(logits, req_ids):
+def sample(logits, reqs):
     logits = logits.contiguous()
-    presence_penalties, frequency_penalties, repetition_penalties, temperatures, top_ps, top_ks, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch = _get_post_sample_tensors(req_ids)
+    presence_penalties, frequency_penalties, repetition_penalties, temperatures, top_ps, top_ks, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch = _get_post_sample_tensors(reqs)
 
     apply_penalty(logits, presence_penalties, frequency_penalties, repetition_penalties, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch) 
     logits.div_(temperatures.view((-1, 1)))
@@ -30,7 +29,7 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
 
     return probs_sort, probs_idx
 
-def _get_post_sample_tensors(req_ids):
+def _get_post_sample_tensors(reqs):
     presence_penalties: List[float] = []
     frequency_penalties: List[float] = []
     repetition_penalties: List[float] = []
@@ -41,8 +40,7 @@ def _get_post_sample_tensors(req_ids):
     p_token_counts: List[int] = []
     p_seq_len: List[int] = [0,]
     p_max_len_in_batch: int = 0
-    for i, request_id in enumerate(req_ids):
-        req_obj = requests_mapping[request_id]
+    for i, req_obj in enumerate(reqs):
         id_to_count = req_obj.out_token_id_count
         sample_param = req_obj.sampling_param
         presence_penalties.append(sample_param.presence_penalty)

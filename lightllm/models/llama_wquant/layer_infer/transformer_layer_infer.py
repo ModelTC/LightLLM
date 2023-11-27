@@ -99,12 +99,15 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
         else:
             self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_normal, self)
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+        
+        # bind splitfuse attention
+        self._splitfuse_attention_kernel = partial(LlamaTransformerLayerInfer._splitfuse_attention_kernel, self)
         return
 
     def _get_qkv(self, input, cache_k, cache_v, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized):
         qkv_output = self._wquant_matmul_for_qkv(input.view(-1, self.embed_dim_), 
                                                     quant_weight_params=layer_weight.qkv_weight_,
-                                                    is_prefill=infer_state.is_prefill)
+                                                    infer_state=infer_state)
         
         tp_k_head_dim = self.tp_k_head_num_ * self.head_dim_
         q = qkv_output[:, : -2 * tp_k_head_dim]
@@ -120,13 +123,13 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
     def _get_o(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized) -> torch.Tensor:
         o_tensor = self._wquant_matmul_for_o(input, 
                                              quant_weight_params=layer_weight.o_weight_,
-                                             is_prefill=infer_state.is_prefill)
+                                             infer_state=infer_state)
         return o_tensor
 
     def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized) -> torch.Tensor:
         gate_up_output = self._wquant_matmul_for_ffn_up(input.view(-1, self.embed_dim_),
                                                         quant_weight_params=layer_weight.gate_up_proj,
-                                                        is_prefill=infer_state.is_prefill)
+                                                        infer_state=infer_state)
         input = None
         tp_inter_dim = self.inter_dim_ // self.world_size_
         gate_up_output = gate_up_output.view(-1, 2, tp_inter_dim)
@@ -135,13 +138,13 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
         gate_up_output = None
         ffn2_out = self._wquant_matmul_for_ffn_down(ffn1_out, 
                                                     quant_weight_params=layer_weight.down_proj,
-                                                    is_prefill=infer_state.is_prefill)
+                                                    infer_state=infer_state)
         ffn1_out = None
         return ffn2_out
     
-    def _wquant_matmul_triton_int8weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
+    def _wquant_matmul_triton_int8weight_only_quant(self, input, quant_weight_params, infer_state: LlamaInferStateInfo, out=None, bias=None, has_act=False):
         assert has_act == False
-        if is_prefill:
+        if not infer_state.is_splitfuse and infer_state.is_prefill:
             qweight, scale = quant_weight_params
             out = matmul_dequantize_int8(input, qweight, scale, out=out)
         else:
@@ -153,9 +156,9 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
             out.add_(bias)
             return out
         
-    def _wquant_matmul_triton_int4weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
+    def _wquant_matmul_triton_int4weight_only_quant(self, input, quant_weight_params, infer_state: LlamaInferStateInfo, out=None, bias=None, has_act=False):
         assert has_act == False
-        if is_prefill:
+        if not infer_state.is_splitfuse and infer_state.is_prefill:
             qweight, scale, zeros, int4_q_group_size = quant_weight_params
             out = matmul_dequantize_int4_s1(input, qweight, scale, zeros, int4_q_group_size, out=out)
         else:
@@ -167,28 +170,20 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
             out.add_(bias)
             return out
     
-    def _wquant_matmul_lmdeploy_int4weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
+    def _wquant_matmul_lmdeploy_int4weight_only_quant(self, input, quant_weight_params, infer_state: LlamaInferStateInfo, out=None, bias=None, has_act=False):
         assert has_act == False
-        if is_prefill:
-            qweight, scale_zeros, int4_q_group_size = quant_weight_params
-            out = matmul_dequantize_int4_lmdeploy(input, qweight, scale_zeros, int4_q_group_size)
-        else:
-            qweight, scale_zeros, int4_q_group_size = quant_weight_params
-            out =  matmul_dequantize_int4_lmdeploy(input, qweight, scale_zeros, int4_q_group_size)
+        qweight, scale_zeros, int4_q_group_size = quant_weight_params
+        out =  matmul_dequantize_int4_lmdeploy(input, qweight, scale_zeros, int4_q_group_size)
         if bias is None:
             return out
         else:
             out.add_(bias)
             return out
 
-    def _wquant_matmul_ppl_int4weight_only_quant(self, input, quant_weight_params, is_prefill, out=None, bias=None, has_act=False):
+    def _wquant_matmul_ppl_int4weight_only_quant(self, input, quant_weight_params, infer_state: LlamaInferStateInfo, out=None, bias=None, has_act=False):
         assert has_act == False
-        if is_prefill:
-            qweight, qscale = quant_weight_params
-            out = matmul_dequantize_int4_ppl(input, qweight, qscale)
-        else:
-            qweight, qscale = quant_weight_params
-            out = matmul_dequantize_int4_ppl(input, qweight, qscale)
+        qweight, qscale = quant_weight_params
+        out = matmul_dequantize_int4_ppl(input, qweight, qscale)
         if bias is None:
             return out
         else:
