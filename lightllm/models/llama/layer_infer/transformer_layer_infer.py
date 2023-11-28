@@ -33,9 +33,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self.head_dim_ = network_config["hidden_size"] // network_config["num_attention_heads"]
         self.embed_dim_ = network_config["hidden_size"]
         self._bind_func()
-
-        # 开启 test 模式，用于一些刚添加的新特性的实验性使用，后续成熟后移除
-        self.use_test_mode = "test" in self.mode
         return
     
     def _bind_func(self):
@@ -160,7 +157,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
         
         # 对 gqa模型进行推理优化的代码
-        if self.tp_q_head_num_ // self.tp_k_head_num_ >= 8 and self.use_test_mode:
+        if self.tp_q_head_num_ // self.tp_k_head_num_ >= 8 and "test" in self.mode:
             from ..triton_kernel.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
             o_tensor = torch.empty_like(q) if out is None else out
             gqa_decode_attention_fwd(
