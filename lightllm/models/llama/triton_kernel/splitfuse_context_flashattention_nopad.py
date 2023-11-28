@@ -55,7 +55,7 @@ def _fwd_kernel(
 
     block_mask = tl.where(start_m * BLOCK_M < cur_batch_q_split_seq_len, 1, 0)
 
-    for start_n in range(0, block_mask * (start_m + 1) * BLOCK_M, BLOCK_N):
+    for start_n in range(0, block_mask * (cur_batch_seq_start + (start_m + 1) * BLOCK_M), BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         kv_loc = tl.load(Req_to_tokens + cur_batch_req_idx * stride_req_to_tokens_b + start_n + offs_n, mask=(start_n + offs_n) < cur_batch_seq_len, other=0)
