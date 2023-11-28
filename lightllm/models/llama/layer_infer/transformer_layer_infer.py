@@ -33,6 +33,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self.head_dim_ = network_config["hidden_size"] // network_config["num_attention_heads"]
         self.embed_dim_ = network_config["hidden_size"]
         self._bind_func()
+
+        # 开启 test 模式，用于一些刚添加的新特性的实验性使用，后续成熟后移除
+        self.use_test_mode = "test" in self.mode
         return
     
     def _bind_func(self):
@@ -155,6 +158,21 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         total_token_num = infer_state.total_token_num
         batch_size = infer_state.batch_size
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
+        
+        # 对 gqa模型进行推理优化的代码
+        if self.tp_q_head_num_ // self.tp_k_head_num_ >= 8 and self.use_test_mode:
+            from ..triton_kernel.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
+            o_tensor = torch.empty_like(q) if out is None else out
+            gqa_decode_attention_fwd(
+                      q.view(calcu_shape1),
+                      infer_state.mem_manager.key_buffer[self.layer_num_],
+                      infer_state.mem_manager.value_buffer[self.layer_num_],
+                      o_tensor.view(calcu_shape1),
+                      infer_state.req_manager.req_to_token_indexs,
+                      infer_state.b_req_idx,
+                      infer_state.b_seq_len)
+            return o_tensor
+        
         att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
 
         token_att_fwd(q.view(calcu_shape1),
