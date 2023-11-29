@@ -99,7 +99,7 @@ def gqa_decode_attention_fwd(q, k, v, o, req_to_tokens, b_req_idx, b_seq_len):
     if triton.__version__ == "2.0.0":
         raise Exception("triton version is not right")
 
-    BLOCK = 128
+    BLOCK = 32
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
@@ -112,7 +112,7 @@ def gqa_decode_attention_fwd(q, k, v, o, req_to_tokens, b_req_idx, b_seq_len):
     
     grid = (batch, kv_head_num)
 
-    num_warps = 4 if Lk <= 64 else 8
+    num_warps = 4 # if Lk <= 64 else 8
     _fwd_kernel[grid](
         q, k, v, sm_scale, 
         req_to_tokens,
@@ -129,7 +129,7 @@ def gqa_decode_attention_fwd(q, k, v, o, req_to_tokens, b_req_idx, b_seq_len):
         BLOCK_DMODEL=Lk,
         BLOCK_N=BLOCK,
         num_warps=num_warps,
-        num_stages=1
+        num_stages=2
     )
     return
 

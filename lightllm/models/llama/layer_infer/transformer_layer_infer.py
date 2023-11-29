@@ -243,11 +243,18 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return o_tensor
     
     def _token_decode_attention_flashdecoding(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
-        from lightllm.models.llama.triton_kernel.flash_decoding import token_decode_attention_flash_decoding
-        cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
-        cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
-        return token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out)
-    
+        # 对 gqa 模型进行推理优化的代码
+        if self.tp_q_head_num_ // self.tp_k_head_num_ >= 8 and "test" in self.mode:
+            from ..triton_kernel.gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
+            cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
+            cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
+            return gqa_token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out)
+        else:
+            from lightllm.models.llama.triton_kernel.flash_decoding import token_decode_attention_flash_decoding
+            cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
+            cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
+            return token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out)
+        
     def _token_decode_attention_ppl_int8kv(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
         batch_size = infer_state.batch_size
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
