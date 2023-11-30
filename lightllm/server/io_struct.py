@@ -80,14 +80,15 @@ class NormalReq(Req):
         """
         普通continues batch调度模式, 先prefill 后 decode 的估计方式 的实现
         """
+        has_out_len = len(self.output_ids)
         if self.sample_params.ignore_eos:
             cur_max_new_token_len = self.max_output_len
         elif is_busy:
             cur_max_new_token_len = self.max_output_len
         else:
-            cur_max_new_token_len = min(self.max_output_len, router_max_new_token_len) 
-        
-        has_out_len = len(self.output_ids)
+            # 用当前输出长度的 1.1 倍作为预估输出长度的另一个参考量，用于更新估计的最大输出长度量
+            # 后续会更新为更合理的统计条件概率估计方式 to do
+            cur_max_new_token_len = min(self.max_output_len, max(int(1.1 * has_out_len), router_max_new_token_len))
 
         if self.req_status == ReqRunStatus.RUNNING:
             return (self.input_len + has_out_len - self.prompt_cache_len, max(0, cur_max_new_token_len - has_out_len - 1))
@@ -127,14 +128,13 @@ class SplitFuseReq(Req):
         """
         splitfuse 调度模式的实现
         """
+        has_out_len = len(self.output_ids)
         if self.sample_params.ignore_eos:
             cur_max_new_token_len = self.max_output_len
         elif is_busy:
             cur_max_new_token_len = self.max_output_len
         else:
-            cur_max_new_token_len = min(self.max_output_len, router_max_new_token_len) 
-        
-        has_out_len = len(self.output_ids) 
+            cur_max_new_token_len = min(self.max_output_len, max(int(1.1 * has_out_len), router_max_new_token_len))
 
         if self.req_status == ReqRunStatus.RUNNING or self.req_status == ReqRunStatus.PAUSED_AND_KVKEEP:
             return (self.input_len + has_out_len - self.prompt_cache_len, 
