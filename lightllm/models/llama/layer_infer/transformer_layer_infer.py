@@ -39,6 +39,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         if "ppl_int8kv" in self.mode:
             self._token_attention_kernel = self._token_decode_attention_ppl_int8kv
             self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_ppl_int8kv
+        elif "ppl_fp16" in self.mode:
+            self._token_attention_kernel = self._token_decode_attention_ppl_fp16
+            self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_normal
         elif "triton_int8kv" in self.mode:
             self._token_attention_kernel = self._token_decode_attention_int8kv
             self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_int8kv
@@ -272,5 +275,23 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                                                           infer_state.b_req_idx,
                                                           infer_state.b_seq_len,
                                                           infer_state.max_len_in_batch)
+           
+        return o_tensor
+    
+    def _token_decode_attention_ppl_fp16(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
+        batch_size = infer_state.batch_size
+        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
+        o_tensor = torch.empty_like(q) if out is None else out
+        from lightllm_ppl_fp16_kernel import fp16_decode_attention
+        # group_int8kv_decode_attention(at::Tensor o, at::Tensor q, at::Tensor k, at::Tensor k_s,  at::Tensor v,  at::Tensor v_s, at::Tensor b_loc, at::Tensor b_seq_len, int max_len_in_batch)
+        fp16_decode_attention(o_tensor.view(calcu_shape1),
+                            1.0 / (self.head_dim_**0.5),
+                            q.view(calcu_shape1),
+                            infer_state.mem_manager.key_buffer[self.layer_num_],
+                            infer_state.mem_manager.value_buffer[self.layer_num_],
+                            infer_state.req_manager.req_to_token_indexs,
+                            infer_state.b_req_idx,
+                            infer_state.b_seq_len,
+                            infer_state.max_len_in_batch)
            
         return o_tensor
