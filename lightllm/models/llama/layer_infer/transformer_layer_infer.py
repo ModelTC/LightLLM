@@ -3,6 +3,7 @@ import torch.functional as F
 import torch.distributed as dist
 import numpy as np
 from typing import Tuple
+from functools import partial
 import triton
 
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
@@ -36,23 +37,43 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return
     
     def _bind_func(self):
-        if "ppl_int8kv" in self.mode:
-            self._token_attention_kernel = self._token_decode_attention_ppl_int8kv
-            self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_ppl_int8kv
-        elif "ppl_fp16" in self.mode:
-            self._token_attention_kernel = self._token_decode_attention_ppl_fp16
-            self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_normal
-        elif "triton_int8kv" in self.mode:
-            self._token_attention_kernel = self._token_decode_attention_int8kv
-            self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_int8kv
-        elif "triton_flashdecoding" in self.mode:
-            self._token_attention_kernel = self._token_decode_attention_flashdecoding
-            self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_normal   
-        else:
-            self._token_attention_kernel = self._token_decode_attention_normal
-            self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_normal   
+        self._bind_norm()
+        self._bind_attention()
         return
     
+    def _bind_norm(self):
+        self._att_norm = partial(LlamaTransformerLayerInfer._att_norm, self)
+        self._ffn_norm = partial(LlamaTransformerLayerInfer._ffn_norm, self)
+        return
+    
+    def _bind_attention(self):
+        self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
+        if "ppl_int8kv" in self.mode:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_ppl_int8kv, self)
+        elif "ppl_fp16" in self.mode:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_ppl_fp16, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+        elif "triton_int8kv" in self.mode:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_int8kv, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_int8kv, self)
+        elif "triton_flashdecoding" in self.mode:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_flashdecoding, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+        elif "triton_gqa_attention" in self.mode:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_gqa_attention_normal, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+        elif "triton_gqa_flashdecoding" in self.mode:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_gqa_flashdecoding, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+        else:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_normal, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+        
+        # bind splitfuse attention
+        self._splitfuse_attention_kernel = partial(LlamaTransformerLayerInfer._splitfuse_attention_kernel, self)
+        return
+
     def _att_norm(self, input, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight)->torch.Tensor:
         return rmsnorm_forward(input, weight=layer_weight.att_norm_weight_, eps=self.eps_)
     
@@ -159,20 +180,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         batch_size = infer_state.batch_size
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
         
-        # 对 gqa模型进行推理优化的代码
-        if self.tp_q_head_num_ // self.tp_k_head_num_ >= 8 and "test" in self.mode:
-            from ..triton_kernel.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
-            o_tensor = torch.empty_like(q) if out is None else out
-            gqa_decode_attention_fwd(
-                      q.view(calcu_shape1),
-                      infer_state.mem_manager.key_buffer[self.layer_num_],
-                      infer_state.mem_manager.value_buffer[self.layer_num_],
-                      o_tensor.view(calcu_shape1),
-                      infer_state.req_manager.req_to_token_indexs,
-                      infer_state.b_req_idx,
-                      infer_state.b_seq_len)
-            return o_tensor
-        
         att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
 
         token_att_fwd(q.view(calcu_shape1),
@@ -212,6 +219,22 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             return o_tensor
         else:
             raise Exception("not support triton version")
+    
+    def _token_decode_gqa_attention_normal(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
+        batch_size = infer_state.batch_size
+        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
+        # 对 gqa模型进行推理优化的代码
+        from ..triton_kernel.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
+        o_tensor = torch.empty_like(q) if out is None else out
+        gqa_decode_attention_fwd(
+                    q.view(calcu_shape1),
+                    infer_state.mem_manager.key_buffer[self.layer_num_],
+                    infer_state.mem_manager.value_buffer[self.layer_num_],
+                    o_tensor.view(calcu_shape1),
+                    infer_state.req_manager.req_to_token_indexs,
+                    infer_state.b_req_idx,
+                    infer_state.b_seq_len)
+        return o_tensor
 
     def _token_decode_attention_int8kv(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
         total_token_num = infer_state.total_token_num
@@ -246,17 +269,17 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return o_tensor
     
     def _token_decode_attention_flashdecoding(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
+        from lightllm.models.llama.triton_kernel.flash_decoding import token_decode_attention_flash_decoding
+        cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
+        cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
+        return token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out)
+    
+    def _token_decode_attention_gqa_flashdecoding(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
         # 对 gqa 模型进行推理优化的代码
-        if self.tp_q_head_num_ // self.tp_k_head_num_ >= 8 and "test" in self.mode:
-            from ..triton_kernel.gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
-            cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
-            cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
-            return gqa_token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out)
-        else:
-            from lightllm.models.llama.triton_kernel.flash_decoding import token_decode_attention_flash_decoding
-            cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
-            cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
-            return token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out)
+        from ..triton_kernel.gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
+        cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
+        cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
+        return gqa_token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out)
         
     def _token_decode_attention_ppl_int8kv(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
         batch_size = infer_state.batch_size

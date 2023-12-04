@@ -39,14 +39,10 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
         return
     
     def _bind_func(self):
-        self._bind_norm()
-        self._bind_matmul()        
-        self._bind_attention()
+        self._bind_matmul()
+        LlamaTransformerLayerInfer._bind_norm(self)
+        LlamaTransformerLayerInfer._bind_attention(self)
         return
-    
-    def _bind_norm(self):
-        self._att_norm = partial(LlamaTransformerLayerInfer._att_norm, self)
-        self._ffn_norm = partial(LlamaTransformerLayerInfer._ffn_norm, self)
     
     def _bind_matmul(self):
         if "triton_int8weight" in self.mode:
@@ -83,25 +79,6 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
                 print("model use ppl_int4weight kernel")
         else:
             raise Exception(f"error mode {self.mode}")
-        return
-    
-    def _bind_attention(self):
-        self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
-        if "ppl_int8kv" in self.mode:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_ppl_int8kv, self)
-        elif "triton_int8kv" in self.mode:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_int8kv, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_int8kv, self)
-        elif "triton_flashdecoding" in self.mode:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_flashdecoding, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)   
-        else:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_normal, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-        
-        # bind splitfuse attention
-        self._splitfuse_attention_kernel = partial(LlamaTransformerLayerInfer._splitfuse_attention_kernel, self)
         return
 
     def _get_qkv(self, input, cache_k, cache_v, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized):

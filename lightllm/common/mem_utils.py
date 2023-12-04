@@ -3,6 +3,7 @@ from lightllm.common.int8kv_mem_manager import INT8KVMemoryManager
 from lightllm.common.ppl_int8kv_mem_manager import PPLINT8KVMemoryManager
 
 def select_mem_manager_class(mode):
+    print(f"mode setting params: {mode}")
     if "ppl_int8kv" in mode:
         memory_manager_class = PPLINT8KVMemoryManager
         print("Model kv cache using mode ppl int8kv")
