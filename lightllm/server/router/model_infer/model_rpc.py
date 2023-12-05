@@ -22,6 +22,7 @@ from lightllm.models.baichuan2_7b.model import Baichuan2_7bTpPartModel
 from lightllm.models.baichuan2_13b.model import Baichuan2_13bTpPartModel
 from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
 from lightllm.models.internlm.model import InternlmTpPartModel
+from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
 from lightllm.models.yi.model import YiTpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
@@ -106,7 +107,10 @@ class ModelRpcServer(rpyc.Service):
             elif self.model_type == 'chatglm':
                 self.model = ChatGlm2TpPartModel(model_kvargs)
             elif self.model_type == 'internlm':
-                self.model = InternlmTpPartModel(model_kvargs)
+                if any('int8weight' in mode_ or 'int4weight' in mode_ for mode_ in self.mode):
+                    self.model = InternlmTpPartModelWQuant(model_kvargs)
+                else:
+                    self.model = InternlmTpPartModel(model_kvargs)
             elif self.model_type == "Yi":
                 self.model = YiTpPartModel(model_kvargs)
             else:
