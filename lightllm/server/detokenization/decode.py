@@ -21,7 +21,7 @@ def decode_token(
         output_text = tokenizer.convert_tokens_to_string(req.output_tokens)
         return output_text
 
-    if skip_special_tokens and new_token in tokenizer.all_special_ids:
+    if skip_special_tokens and new_token_id in tokenizer.all_special_ids:
         return req.output_str
 
     sep = " " if spaces_between_special_tokens else ""
