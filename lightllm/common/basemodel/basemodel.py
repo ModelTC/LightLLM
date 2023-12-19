@@ -41,6 +41,7 @@ class TpPartBaseModel:
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
+        self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
 
         self._init_config()
         self._verify_must()
@@ -150,6 +151,7 @@ class TpPartBaseModel:
     def _prefill(self, batch_size, total_token_num, max_len_in_batch, input_ids, b_req_idx, b_start_loc, b_seq_len):
         infer_state = self.infer_state_class()
         infer_state.is_prefill = True
+        infer_state.return_all_prompt_logprobs = self.return_all_prompt_logprobs
         infer_state.batch_size = batch_size
         infer_state.total_token_num = total_token_num
         infer_state.max_len_in_batch = max_len_in_batch

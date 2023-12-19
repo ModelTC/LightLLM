@@ -1,6 +1,6 @@
 import torch
 from ..post_layer_infer import PostLayerInfer
-
+from typing import Tuple
 
 class PostLayerInferTpl(PostLayerInfer):
     """
@@ -13,4 +13,8 @@ class PostLayerInferTpl(PostLayerInfer):
         return
     
     def _norm(self, input, infer_state, layer_weight)->torch.Tensor:
+        raise Exception("need to impl")
+    
+
+    def _slice_get_last_input(self, input, infer_state)->Tuple[torch.Tensor, int]:
         raise Exception("need to impl")

@@ -27,7 +27,7 @@ class InferStateInfo:
         self.value_buffer = None
 
         self.is_splitfuse = False
-    
+        self.return_all_prompt_logprobs = False
 
     def init_some_extra_state(self, model, input_ids : torch.Tensor):
         pass

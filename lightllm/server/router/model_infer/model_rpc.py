@@ -49,6 +49,7 @@ class ModelRpcServer(rpyc.Service):
         self.mode = kvargs["mode"]
         self.is_splitfuse_mode = kvargs.get("is_splitfuse_mode", False)
         self.splitfuse_block_size = kvargs.get("splitfuse_block_size", None)
+        self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
 
         self.cache = {}
 
@@ -70,7 +71,8 @@ class ModelRpcServer(rpyc.Service):
             "load_way": self.load_way,
             "mode": self.mode,
             "max_req_num": kvargs.get("max_req_num", 1000),
-            "max_seq_length": kvargs.get("max_seq_length", 1024 * 5)
+            "max_seq_length": kvargs.get("max_seq_length", 1024 * 5),
+            "return_all_prompt_logprobs": self.return_all_prompt_logprobs
         }
 
         try:
@@ -198,6 +200,10 @@ class ModelRpcServer(rpyc.Service):
     
     # @calculate_time(show=True, min_cost_ms=150)
     def forward(self, batch_id, is_prefill):
+        # special code for return all prompt_logprobs
+        if self.return_all_prompt_logprobs and is_prefill:
+            return self._prefill_to_return_all_prompt_logprobs(batch_id)
+        
         output_dict = {}
         batch: InferBatch = self.cache.pop(batch_id)
         if is_prefill:
@@ -228,6 +234,59 @@ class ModelRpcServer(rpyc.Service):
         self.cache[batch.batch_id] = batch
         return output_dict
     
+    @torch.no_grad()
+    def _prefill_to_return_all_prompt_logprobs(self, batch_id):
+        output_dict = {}
+        batch: InferBatch = self.cache.pop(batch_id)
+        kwargs, run_reqs, not_run_reqs = prepare_prefill_inputs(batch)
+        
+        if len(run_reqs) >= 1:
+            prompt_all_logits = self.model.forward(**kwargs)
+            input_ids = kwargs["input_ids"]
+            b_start_loc = kwargs["b_start_loc"]
+            b_seq_len = kwargs["b_seq_len"]            
+            last_index = torch.cumsum(b_seq_len, dim=0, dtype=torch.long) - 1
+            logits = prompt_all_logits[last_index, :]
+
+            next_token_ids, next_token_probs = sample(logits, run_reqs)
+            next_token_ids = next_token_ids.detach().cpu().numpy()
+            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+            
+            b_start_loc = b_start_loc.cpu().numpy()
+            b_seq_len = b_seq_len.cpu().numpy()
+            for req_obj, next_token_id, next_token_logprob, start_loc, seq_len in zip(run_reqs, next_token_ids, next_token_logprobs, b_start_loc, b_seq_len):
+                # prefill and decode is same
+                req_obj.cur_kv_len = len(req_obj.input_token_ids)
+                req_obj.input_token_ids.append(next_token_id)
+                req_obj.out_token_id_count[next_token_id] += 1
+                metadata = {
+                    'id': int(next_token_id),
+                    'logprob': float(next_token_logprob),
+                }
+
+                cur_ids: torch.Tensor = input_ids[start_loc : start_loc + seq_len]
+                cur_logits = prompt_all_logits[start_loc : start_loc + seq_len]
+                cur_logprobs = torch.log_softmax(cur_logits, dim=-1, dtype=torch.float)[0:-1, :]
+                cur_logprobs = torch.gather(cur_logprobs, dim=1, index=cur_ids[1:].view(-1, 1)).detach().cpu().numpy()
+
+                cur_ids = cur_ids.cpu().numpy()
+                all_prompts = []
+                for index in range(len(cur_ids) - 1):
+                    tmp_dict = {
+                        int(cur_ids[index + 1]) : float(cur_logprobs[index, 0])
+                    }
+                    all_prompts.append([int(cur_ids[index]), tmp_dict])
+
+                metadata["prompt_logprobs"] = all_prompts
+                metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
+                output_dict[req_obj.r_id] = (req_obj.req_status, req_obj.cur_kv_len, int(next_token_id), metadata) # 状态， cur_kv_len, token_id, metadata
+
+        for req_obj in not_run_reqs:
+            output_dict[req_obj.r_id] = (req_obj.req_status, req_obj.cur_kv_len, None, None) # 状态， cur_kv_len, token_id, metadata
+
+        self.cache[batch.batch_id] = batch
+        return output_dict
+
     # @calculate_time(show=True, min_cost_ms=200)
     def splitfuse_forward(self, batch_id):
         output_dict = {}

@@ -71,7 +71,8 @@ class RouterManager:
                 "max_seq_length" : self.args.max_req_total_len + 8, # 留一点余量
                 "nccl_port" : self.args.nccl_port,
                 "is_splitfuse_mode" : self.is_splitfuse_mode,
-                "splitfuse_block_size" : self.splitfuse_block_size
+                "splitfuse_block_size" : self.splitfuse_block_size,
+                "return_all_prompt_logprobs" : self.args.return_all_prompt_logprobs
             }
             init_model_ret.append(self.model_rpcs[rank_id].init_model(kvargs))
 

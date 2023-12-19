@@ -93,12 +93,27 @@ async def generate(request: Request) -> Response:
     final_output = []
     count_output_tokens = 0
     tokens = []
+    prompt_logprobs = None
+    prompt_token_ids = None
+    is_first_metadata = True
     async for request_output, metadata, _ in results_generator:
-        count_output_tokens += 1
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await httpserver_manager.abort(request_id)
             return Response(status_code=499)
+        
+        # when set "--return_all_prompt_logprobs", the first token metadata will contains
+        # prompt_logprobs and prompt_token_ids
+        if is_first_metadata:
+            prompt_logprobs = metadata.get("prompt_logprobs", None)
+            prompt_token_ids = metadata.get("prompt_token_ids", None)
+            if prompt_logprobs is not None:
+                del metadata["prompt_logprobs"]
+            if prompt_token_ids is not None:
+                del metadata["prompt_token_ids"]
+            is_first_metadata = False
+
+        count_output_tokens += 1
         final_output.append(request_output)
         if return_details:
             metadata["text"] = request_output
@@ -111,6 +126,10 @@ async def generate(request: Request) -> Response:
     }
     if return_details:
         ret["tokens"] = tokens
+    if prompt_token_ids is not None:
+        ret["prompt_token_ids"] = prompt_token_ids
+    if prompt_logprobs is not None:
+        ret["prompt_logprobs"] = prompt_logprobs
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
 
 
@@ -312,10 +331,12 @@ def main():
                         help="disable logging throughput stats.")
     parser.add_argument("--log_stats_interval", type=int, default=10,
                         help="log stats interval in second.")
+    
     parser.add_argument("--router_token_ratio", type=float, default=0.0,
                         help="token ratio to control router dispatch")
     parser.add_argument("--router_max_new_token_len", type=int, default=1024,
                         help="the request max new token len for router")
+    
     parser.add_argument("--no_skipping_special_tokens", action="store_true",
                         help="whether to skip special tokens when decoding")
     parser.add_argument("--no_spaces_between_special_tokens", action="store_true",
@@ -327,6 +348,9 @@ def main():
                     help="splitfuse block size")    
     parser.add_argument("--prompt_cache_strs", type=str, default=[], nargs='+',
                         help="""prompt cache strs""")
+    
+    parser.add_argument("--return_all_prompt_logprobs", action="store_true",
+                        help="return all prompt tokens logprobs")
     
     args = parser.parse_args()
 

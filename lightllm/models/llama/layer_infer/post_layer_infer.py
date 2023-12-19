@@ -25,34 +25,50 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     
     def _norm(self, input, infer_state, layer_weight:LlamaPreAndPostLayerWeight) -> torch.Tensor:
         return rmsnorm_forward(input, layer_weight.final_norm_weight_, eps=self.eps_)
+    
+    def _slice_get_last_input(self, input_embdings, infer_state: LlamaInferStateInfo):
+        if infer_state.is_splitfuse:
+            # for SplitFuse
+            batch_size = infer_state.batch_size
+            last_input = torch.empty((batch_size, self.embed_dim_), device=input_embdings.device, dtype=torch.float16)
+            tmp_ = torch.cat([torch.ones(infer_state.decode_req_num, dtype=torch.int32, device="cuda"), infer_state.prefill_b_split_seq_len], dim=0)
+            last_index = torch.cumsum(tmp_, dim=0, dtype=torch.long) - 1
+            last_input[:, :] = input_embdings[last_index, :]
+            return last_input, batch_size
+        
+        if not infer_state.is_splitfuse and infer_state.is_prefill and not infer_state.return_all_prompt_logprobs:
+            batch_size = infer_state.batch_size
+            last_input = torch.empty((batch_size, self.embed_dim_), device=input_embdings.device, dtype=torch.float16)
+            last_index = torch.cumsum(infer_state.b_seq_len, dim=0, dtype=torch.long) - 1
+            last_input[:, :] = input_embdings[last_index, :]
+            return last_input, batch_size
+
+        if not infer_state.is_splitfuse and infer_state.is_prefill and infer_state.return_all_prompt_logprobs:
+            total_tokens = infer_state.total_token_num
+            return input_embdings, total_tokens
+        
+        if not infer_state.is_splitfuse and not infer_state.is_prefill:
+            batch_size = infer_state.batch_size
+            return input_embdings[-batch_size:, :], batch_size
+        
+        assert False, "Error State"
+
 
     def soft_max(self, data):
         return torch.softmax(data.permute(1, 0).float(), dim=-1)
 
     def token_forward(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight, return_logics=False):
-        batch_size = infer_state.batch_size
-        last_input = torch.empty((batch_size, self.embed_dim_), device=input_embdings.device, dtype=torch.float16)
-        if not infer_state.is_splitfuse:
-            if infer_state.is_prefill:
-                last_index = torch.cumsum(infer_state.b_seq_len, dim=0, dtype=torch.long) - 1
-                last_input[:, :] = input_embdings[last_index, :]
-            else:
-                last_input[:, :] = input_embdings[-batch_size:, :]
-        else:
-            # for SplitFuse
-            tmp_ = torch.cat([torch.ones(infer_state.decode_req_num, dtype=torch.int32, device="cuda"), infer_state.prefill_b_split_seq_len], dim=0)
-            last_index = torch.cumsum(tmp_, dim=0, dtype=torch.long) - 1
-            last_input[:, :] = input_embdings[last_index, :]
-
+        last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
         input_embdings = None
         last_input = self._norm(last_input, infer_state, layer_weight)
-        last_input = rearrange(last_input, "batch embed_dim -> embed_dim batch").contiguous().reshape(-1, batch_size)
+        last_input = rearrange(last_input, "batch embed_dim -> embed_dim batch").contiguous().reshape(-1, token_num)
         logic_batch = torch.mm(layer_weight.lm_head_weight_, last_input)
+
         last_input = None
         if self.world_size_ == 1:
             gather_data = logic_batch
         else:
-            gather_data = torch.empty((self.vocab_size_, batch_size), device=logic_batch.device, dtype=torch.float16)
+            gather_data = torch.empty((self.vocab_size_, token_num), device=logic_batch.device, dtype=torch.float16)
             split_size = self.vocab_size_ // self.world_size_
             dist.all_gather([gather_data[i * split_size: (i + 1) * split_size, :]
                             for i in range(self.world_size_)], logic_batch, group=None, async_op=False)
