@@ -106,8 +106,7 @@ def splitfuse_context_attention_fwd(q, k, v, o,
                                     prefill_b_split_start_loc,
                                     prefill_b_split_seq_len,
                                     prefill_b_seq_len, 
-                                    prefill_max_split_seq_len_in_batch,
-                                    cuda_stream):
+                                    prefill_max_split_seq_len_in_batch):
     if triton.__version__ == "2.0.0":
         raise Exception("triton version is not right")
 
@@ -142,8 +141,7 @@ def splitfuse_context_attention_fwd(q, k, v, o,
         BLOCK_DMODEL=Lk,
         BLOCK_N=BLOCK,
         num_warps=num_warps,
-        num_stages=1,
-        stream=cuda_stream, 
+        num_stages=1
     )
     return
 

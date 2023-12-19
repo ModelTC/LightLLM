@@ -113,18 +113,19 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         if infer_state.prefill_req_num > 0:
             infer_state.parrall_stream.wait_event(infer_state.start_event)
             # infer_state.start_event.wait(infer_state.parrall_stream)
-            splitfuse_context_attention_fwd(q[infer_state.decode_req_num:, :].view(calcu_shape1),
-                                            infer_state.mem_manager.key_buffer[self.layer_num_],
-                                            infer_state.mem_manager.value_buffer[self.layer_num_],
-                                            o_tensor[infer_state.decode_req_num:, :].view(calcu_shape1),
-                                            infer_state.prefill_req_num,
-                                            infer_state.req_manager.req_to_token_indexs,
-                                            infer_state.prefill_b_req_idx,
-                                            infer_state.prefill_b_split_start_loc,
-                                            infer_state.prefill_b_split_seq_len,
-                                            infer_state.prefill_b_seq_len,
-                                            infer_state.prefill_max_split_seq_len_in_batch,
-                                            infer_state.parrall_stream.cuda_stream)
+            with torch.cuda.stream(infer_state.parrall_stream):
+                # assert torch.cuda.current_stream().cuda_stream == infer_state.parrall_stream.cuda_stream
+                splitfuse_context_attention_fwd(q[infer_state.decode_req_num:, :].view(calcu_shape1),
+                                                infer_state.mem_manager.key_buffer[self.layer_num_],
+                                                infer_state.mem_manager.value_buffer[self.layer_num_],
+                                                o_tensor[infer_state.decode_req_num:, :].view(calcu_shape1),
+                                                infer_state.prefill_req_num,
+                                                infer_state.req_manager.req_to_token_indexs,
+                                                infer_state.prefill_b_req_idx,
+                                                infer_state.prefill_b_split_start_loc,
+                                                infer_state.prefill_b_split_seq_len,
+                                                infer_state.prefill_b_seq_len,
+                                                infer_state.prefill_max_split_seq_len_in_batch)
             infer_state.end_event.record(infer_state.parrall_stream)
             torch.cuda.default_stream().wait_event(infer_state.end_event)
             # infer_state.event.wait(torch.cuda.default_stream())
