@@ -7,7 +7,9 @@ from lightllm.models.chatglm2.layer_weights.transformer_layer_weight import Chat
 from lightllm.models.chatglm2.layer_weights.pre_and_post_layer_weight import ChatGLM2PreAndPostLayerWeight
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.build_utils import repair_config
+from lightllm.utils.log_utils import init_logger
 
+logger = init_logger(__name__)
 
 class ChatGlm2TpPartModel(LlamaTpPartModel):
     # Please use the fast tokenizer from:
@@ -58,7 +60,7 @@ class ChatGlm2TpPartModel(LlamaTpPartModel):
             ntk_alpha = float(os.environ.get("LIGHTLLM_NTK_ALPHA", 1))
             assert ntk_alpha >= 1
             if ntk_alpha > 1:
-                print(f"Note: NTK enabled, alpha set to {ntk_alpha}")
+                logger.info(f"Note: NTK enabled, alpha set to {ntk_alpha}")
             max_seq_len *= ntk_alpha
             base = base * (ntk_alpha ** (self.head_dim_ / (self.head_dim_-2))) #Base change formula
         except:

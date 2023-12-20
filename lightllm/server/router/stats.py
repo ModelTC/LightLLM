@@ -1,4 +1,7 @@
 import time
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 class Stats:
 
@@ -31,9 +34,9 @@ class Stats:
 
         now = time.time()
         if now - self.last_log_time > self.log_stats_interval:
-            print(f"Avg tokens(prompt+generate) throughput: {self.all_tokens/(now-self.last_log_time):8.3f} tokens/s\n"
-                  f"Avg prompt tokens throughput:           {self.prompt_tokens/(now-self.last_log_time):8.3f} tokens/s\n"
-                  f"Avg generate tokens throughput:         {self.output_tokens/(now-self.last_log_time):8.3f} tokens/s")
+            logger.debug(f"Avg tokens(prompt+generate) throughput: {self.all_tokens/(now-self.last_log_time):8.3f} tokens/s\n"
+                         f"Avg prompt tokens throughput:           {self.prompt_tokens/(now-self.last_log_time):8.3f} tokens/s\n"
+                         f"Avg generate tokens throughput:         {self.output_tokens/(now-self.last_log_time):8.3f} tokens/s")
             self.all_tokens = 0
             self.output_tokens = 0
             self.prompt_tokens = 0

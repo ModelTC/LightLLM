@@ -36,9 +36,6 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 import uvicorn
 from .sampling_params import SamplingParams
-from .httpserver.manager import HttpServerManager
-from .detokenization.manager import start_detokenization_process
-from .router.manager import start_router_process
 from .req_id_generator import ReqIDGenerator
 
 from lightllm.utils.net_utils import alloc_can_use_network_port
@@ -385,6 +382,7 @@ def main():
     router_port, detokenization_port, httpserver_port = can_use_ports[0:3]
     model_rpc_ports = can_use_ports[3:]
 
+    from .httpserver.manager import HttpServerManager
     global httpserver_manager
     httpserver_manager = HttpServerManager(
         args,
@@ -393,6 +391,8 @@ def main():
     )
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
+
+    from .router.manager import start_router_process
     proc_router = mp.Process(
         target=start_router_process,
         args=(
@@ -404,6 +404,8 @@ def main():
         ),
     )
     proc_router.start()
+    
+    from .detokenization.manager import start_detokenization_process
     proc_detoken = mp.Process(
         target=start_detokenization_process,
         args=(
@@ -419,14 +421,17 @@ def main():
     router_init_state = pipe_router_reader.recv()
     detoken_init_state = pipe_detoken_reader.recv()
 
+    from lightllm.utils.log_utils import init_logger
+    logger = init_logger(__name__)
+
     if router_init_state != "init ok" or detoken_init_state != "init ok":
         proc_router.kill()
         proc_detoken.kill()
-        print(
-            "router init state:",
-            router_init_state,
-            "detoken init state:",
-            detoken_init_state,
+        logger.error(
+            "router init state: " + 
+            str(router_init_state) + 
+            " detoken init state: " + 
+            str(detoken_init_state)
         )
         sys.exit(1)
 

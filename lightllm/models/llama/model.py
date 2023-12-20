@@ -13,7 +13,9 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.splitfuse_infer_struct import LlamaSplitFuseInferStateInfo
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.mem_utils import select_mem_manager_class
+from lightllm.utils.log_utils import init_logger
 
+logger = init_logger(__name__)
 
 class LlamaTpPartModel(TpPartBaseModel):
     # weight class
@@ -117,7 +119,7 @@ class LlamaTpPartModel(TpPartBaseModel):
             ntk_alpha = float(os.environ.get("LIGHTLLM_NTK_ALPHA", 1))
             assert ntk_alpha >= 1
             if ntk_alpha > 1:
-                print(f"Note: NTK enabled, alpha set to {ntk_alpha}")
+                logger.info(f"Note: NTK enabled, alpha set to {ntk_alpha}")
             max_seq_len *= ntk_alpha
             base = base * (ntk_alpha ** (self.head_dim_ / (self.head_dim_-2))) #Base change formula
         except:

@@ -10,6 +10,9 @@ from ..tokenizer import get_tokenizer
 import traceback
 
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 class DeTokenizationManager:
     def __init__(
@@ -78,7 +81,7 @@ class DeTokenizationManager:
                                 pass
                     self.send_to_httpserver.send_pyobj(new_batch_str_out)
             except Exception as e:
-                print(f"detoken process has exception {str(e)}")
+                logger.error(f"detoken process has exception {str(e)}")
                 traceback.print_exc()
                 pass
 

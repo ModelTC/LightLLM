@@ -32,6 +32,8 @@ from .post_process import sample
 from .infer_batch import requests_mapping
 from .infer_batch import InferReq
 from lightllm.server.io_struct import ReqRunStatus
+from lightllm.utils.log_utils import init_logger
+
 
 class ModelRpcServer(rpyc.Service):
 
@@ -52,6 +54,7 @@ class ModelRpcServer(rpyc.Service):
         self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
 
         self.cache = {}
+        self.logger = init_logger(__name__)
 
         weight_dir = kvargs["weight_dir"]
         max_total_token_num = kvargs["max_total_token_num"]
@@ -121,8 +124,7 @@ class ModelRpcServer(rpyc.Service):
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:
-            print("#" * 16)
-            print("load model error:", str(e), e, type(e))
+            self.logger.error(f"load model error: {str(e)} {e} {type(e)}")
             import traceback
             traceback.print_exc()
             raise e

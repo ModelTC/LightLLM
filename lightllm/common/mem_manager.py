@@ -1,4 +1,7 @@
 import torch
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
     
 
 class MemoryManager:
@@ -27,7 +30,7 @@ class MemoryManager:
     @torch.no_grad()
     def alloc(self, need_size):
         if need_size > self.can_use_mem_size:
-            print(f'warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}')
+            logger.warn(f'warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}')
             return None
         can_use_index = torch.nonzero(self.mem_state == 0).view(-1)
         select_index = can_use_index[0 : need_size]
@@ -39,14 +42,14 @@ class MemoryManager:
         if self.always_copy:
             return None
         if need_size > self.can_use_mem_size:
-            print(f'warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}')
+            logger.warn(f'warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}')
             return None
         
         can_use_index = torch.nonzero(self.mem_state == 0).view(-1)
         can_use_index_size = len(can_use_index)
         can_use_index = can_use_index[0 : can_use_index_size - need_size + 1][(can_use_index[need_size - 1: ] - can_use_index[0 : can_use_index_size - need_size + 1]) == need_size - 1]
         if can_use_index.shape[0] == 0:
-            # print(f'warn no enough cache to contiguous need_size {need_size} left_size {self.can_use_mem_size}')
+            logger.warn(f'warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}')
             return None
         start = can_use_index[0].item()
         end = start + need_size
@@ -64,7 +67,7 @@ class MemoryManager:
         free_index = free_index.long()
         self.decrease_refs(free_index)
         if self.can_use_mem_size == len(self.mem_state):
-            print(f"freed all gpu mem size {self.can_use_mem_size}")
+            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
         return
     
     @torch.no_grad()
