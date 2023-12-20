@@ -149,7 +149,7 @@ class RouterManager:
                     total_used_tokens = self.prompt_cache_used_tokens + self.running_batch.batch_used_tokens + self.req_queue.pause_req_used_tokens
                     token_ratio = total_used_tokens / self.max_total_token_num
                     logger.debug(
-                        f"current batch size: {len(self.running_batch.reqs)}) " 
+                        f"current batch size: {len(self.running_batch.reqs)} " 
                         f"paused req num: {len(self.req_queue.pause_req_dict)} "
                         f"token used ratio: {token_ratio} "
                     )
