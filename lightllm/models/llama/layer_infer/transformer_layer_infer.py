@@ -18,7 +18,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.splitfuse_infer_struct import SplitFuseInferStateInfo
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv, destindex_copy_quantize_kv
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.models.llama.triton_kernel.splitfuse_context_flashattention_nopad import splitfuse_context_attention_fwd
+from lightllm.models.llama.triton_kernel.splitfuse_context_flashattention_nopad import splitfuse_context_attention_fwd, splitfuse_context_attention_fwd_int8kv
 
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     """
@@ -71,7 +71,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         
         # bind splitfuse attention
-        self._splitfuse_attention_kernel = partial(LlamaTransformerLayerInfer._splitfuse_attention_kernel, self)
+        if "triton_int8kv" in self.mode:
+            self._splitfuse_attention_kernel = partial(LlamaTransformerLayerInfer._splitfuse_attention_kernel_int8kv, self)
+        else:
+            self._splitfuse_attention_kernel = partial(LlamaTransformerLayerInfer._splitfuse_attention_kernel, self)
         return
 
     def _att_norm(self, input, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight)->torch.Tensor:
@@ -133,6 +136,35 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             # assert torch.cuda.default_stream().cuda_stream != infer_state.parrall_stream.cuda_stream 
         return o_tensor
 
+    def _splitfuse_attention_kernel_int8kv(self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None) -> torch.Tensor:
+        o_tensor = torch.empty_like(q) if out is None else out
+        infer_state.start_event.record(torch.cuda.default_stream())
+        if infer_state.decode_req_num > 0:
+            self._token_attention_kernel(q[0 : infer_state.decode_req_num, :], 
+                                        infer_state.inner_decode_infer_status, 
+                                        layer_weight, 
+                                        out=o_tensor[0 : infer_state.decode_req_num, :])
+        calcu_shape1 = (-1, self.tp_q_head_num_, self.head_dim_)
+        if infer_state.prefill_req_num > 0:
+            infer_state.parrall_stream.wait_event(infer_state.start_event)
+            with torch.cuda.stream(infer_state.parrall_stream):
+                splitfuse_context_attention_fwd_int8kv(q[infer_state.decode_req_num:, :].view(calcu_shape1),
+                                                infer_state.mem_manager.key_buffer[self.layer_num_],
+                                                infer_state.mem_manager.key_scale_buffer[self.layer_num_],
+                                                infer_state.mem_manager.value_buffer[self.layer_num_],
+                                                infer_state.mem_manager.value_scale_buffer[self.layer_num_],
+                                                o_tensor[infer_state.decode_req_num:, :].view(calcu_shape1),
+                                                infer_state.prefill_req_num,
+                                                infer_state.req_manager.req_to_token_indexs,
+                                                infer_state.prefill_b_req_idx,
+                                                infer_state.prefill_b_split_start_loc,
+                                                infer_state.prefill_b_split_seq_len,
+                                                infer_state.prefill_b_seq_len,
+                                                infer_state.prefill_max_split_seq_len_in_batch)
+            infer_state.end_event.record(infer_state.parrall_stream)
+            torch.cuda.default_stream().wait_event(infer_state.end_event)
+        return o_tensor
+    
     def _get_o(self, input, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight)->torch.Tensor:
         o_tensor = torch.mm(input.view(-1, self.tp_o_head_num_ * self.head_dim_), layer_weight.o_weight_)
         return o_tensor
