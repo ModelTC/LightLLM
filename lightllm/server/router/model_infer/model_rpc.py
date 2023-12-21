@@ -12,6 +12,7 @@ from rpyc.utils.classic import obtain
 from lightllm.models.bloom.model import BloomTpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.llama_wquant.model import LlamaTpPartModelWQuant
+from lightllm.models.llama_awquant.model import LlamaTpPartModelAWQuant
 from lightllm.models.starcoder.model import StarcoderTpPartModel
 from lightllm.models.starcoder_wquant.model import StarcoderTpPartModelWQuant
 from lightllm.models.qwen.model import QWenTpPartModel
@@ -85,6 +86,8 @@ class ModelRpcServer(rpyc.Service):
             elif self.model_type == "llama":
                 if any('int8weight' in mode_ or 'int4weight' in mode_ for mode_ in self.mode):
                     self.model = LlamaTpPartModelWQuant(model_kvargs)
+                elif any('int8_activation_weight' in mode_ for mode_ in self.mode):
+                    self.model = LlamaTpPartModelAWQuant(model_kvargs)
                 else:
                     self.model = LlamaTpPartModel(model_kvargs)
             elif self.model_type == "qwen":
