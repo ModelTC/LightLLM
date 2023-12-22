@@ -38,7 +38,7 @@ class LlamaTransformerLayerInferAWquant(TransformerLayerInferActivationWeightQua
         self._bind_norm()
         self._bind_matmul()   
         self._bind_silu()     
-        self._bind_attention()
+        LlamaTransformerLayerInfer._bind_attention(self)
         return
     
     def _bind_norm(self):
@@ -67,22 +67,6 @@ class LlamaTransformerLayerInferAWquant(TransformerLayerInferActivationWeightQua
             self._awquant_silu = func
         else:
             raise Exception(f"error mode {self.mode}")
-        return
-    
-    def _bind_attention(self):
-        self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
-        if "ppl_int8kv" in self.mode:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_ppl_int8kv, self)
-        elif "triton_int8kv" in self.mode:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_int8kv, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_int8kv, self)
-        elif "triton_flashdecoding" in self.mode:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_flashdecoding, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)   
-        else:
-            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_normal, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         return
 
     def _get_qkv(self, input, cache_k, cache_v, token_scale, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerActivationWeightQuantized)->torch.Tensor:
