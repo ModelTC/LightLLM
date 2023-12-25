@@ -348,6 +348,11 @@ def main():
     
     parser.add_argument("--return_all_prompt_logprobs", action="store_true",
                         help="return all prompt tokens logprobs")
+    parser.add_argument("--long_truncation_mode", type=str, choices=[None, 'head', 'center'], default=None,
+                        help="""use to select the handle way when input token len > max_req_input_len.
+                        None : raise Exception 
+                        head : remove some head tokens to make input token len <= max_req_input_len
+                        center : remove some tokens in center loc to make input token len <= max_req_input_len""")
     
     args = parser.parse_args()
 

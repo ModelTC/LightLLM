@@ -64,10 +64,23 @@ class HttpServerManager:
     async def generate(self, prompt, sampling_params, request_id):
         prompt_ids = self.tokenizer.encode(prompt)
         prompt_tokens = len(prompt_ids)
+
         if prompt_tokens > self.max_req_input_len:
-            raise ValueError(
-                f"the input prompt token len {prompt_tokens} is too long > {self.max_req_input_len}"
-            )
+            # use long_truncation_mode to truncate long input len req.
+            if self.args.long_truncation_mode is None:
+                raise ValueError(
+                    f"the input prompt token len {prompt_tokens} is too long > {self.max_req_input_len}"
+                )
+            elif self.args.long_truncation_mode == "head":
+                prompt_ids = prompt_ids[-self.max_req_input_len:]
+                prompt_tokens = len(prompt_ids)
+            elif self.args.long_truncation_mode == "center":
+                prompt_ids = prompt_ids[0:self.max_req_input_len // 2] + prompt_ids[-(self.max_req_input_len - self.max_req_input_len // 2):]
+                prompt_tokens = len(prompt_ids)
+                assert prompt_tokens == self.max_req_input_len
+            else:
+                assert False, "error args"
+
         req_total_len = prompt_tokens + sampling_params.max_new_tokens
         if req_total_len > self.max_req_total_len:
             raise ValueError(
