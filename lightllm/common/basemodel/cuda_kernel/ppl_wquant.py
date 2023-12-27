@@ -28,4 +28,9 @@ def matmul_dequantize_int4_ppl(
         workspace = torch.empty(size=[33554432], dtype=torch.int8, device='cuda') # 32MB workspace
         matmul_dequantize_int4_ppl.__defaults__ = (128, workspace)
     from lightllm_ppl_int4_kernel import matmul_i4_fp16
+    from lightllm_ppl_int4_kernel import int4_weight_decode
+    BATCHSIZE = x.shape[0]
+    if BATCHSIZE >= 768:
+        weight = int4_weight_decode(qweight, scale_weight, group_size)
+        return torch.matmul(x, weight.transpose(0, 1))
     return matmul_i4_fp16(x, qweight, scale_weight, workspace, group_size)
