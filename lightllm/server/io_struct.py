@@ -1,4 +1,5 @@
 from .sampling_params import SamplingParams
+from .multimodal_params import MultimodalParams
 from typing import Dict, List, Optional, Tuple
 import asyncio
 import enum
@@ -13,12 +14,13 @@ class ReqRunStatus(enum.Enum):
 
 
 class Req:
-    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, prompt_cache_len=0, prompt_cache_req_id=None):
+    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams, prompt_cache_len=0, prompt_cache_req_id=None):
         self.request_id = request_id
         self.prompt_ids = prompt_ids
         self.input_len = len(prompt_ids)
         self.max_output_len = sample_params.max_new_tokens
         self.sample_params = sample_params
+        self.multimodal_params = multimodal_params
         self.output_ids = []
         self.output_metadata_list = []
         self.has_generate_finished = False
@@ -36,6 +38,7 @@ class Req:
                 "input_id": self.prompt_ids,
                 "output_len": self.max_output_len,
                 "sampling_param": self.sample_params.to_dict(),
+                "multimodal_params": self.multimodal_params.to_dict(),
                 "prompt_cache_len": self.prompt_cache_len,
                 "prompt_cache_req_id": self.prompt_cache_req_id,
                 "req_status": self.req_status}
@@ -72,8 +75,8 @@ class Req:
         raise Exception("need to impl")
 
 class NormalReq(Req):
-    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, prompt_cache_len=0, prompt_cache_req_id=None):
-        super().__init__(request_id, prompt_ids, sample_params, prompt_cache_len, prompt_cache_req_id)
+    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams, prompt_cache_len=0, prompt_cache_req_id=None):
+        super().__init__(request_id, prompt_ids, sample_params, multimodal_params, prompt_cache_len, prompt_cache_req_id)
         return
     
     def get_tuple_tokens(self, is_busy, router_max_new_token_len):
@@ -119,8 +122,8 @@ class NormalReq(Req):
             assert False, "error state"
 
 class SplitFuseReq(Req):
-    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, prompt_cache_len=0, prompt_cache_req_id=None, splitfuse_block_size=None):
-        super().__init__(request_id, prompt_ids, sample_params, prompt_cache_len, prompt_cache_req_id)
+    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams, prompt_cache_len=0, prompt_cache_req_id=None, splitfuse_block_size=None):
+        super().__init__(request_id, prompt_ids, sample_params, multimodal_params, prompt_cache_len, prompt_cache_req_id)
         self.splitfuse_block_size = splitfuse_block_size
         return
     

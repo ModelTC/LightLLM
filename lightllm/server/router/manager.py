@@ -8,6 +8,7 @@ import zmq.asyncio
 from typing import Dict, List, Optional
 from ..sampling_params import SamplingParams
 from ..io_struct import Req, NormalReq, SplitFuseReq, Batch
+from ..multimodal_params import MultimodalParams
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import ReqQueue
 from rpyc.utils.classic import obtain
@@ -113,15 +114,16 @@ class RouterManager:
         self,
         prompt_ids: List[int],
         sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
         request_id: str,
         prompt_cache_len, 
         prompt_cache_req_id
     ):  
         if self.is_splitfuse_mode:
-            req = SplitFuseReq(request_id, prompt_ids, sampling_params, 
+            req = SplitFuseReq(request_id, prompt_ids, sampling_params, multimodal_params, 
                                prompt_cache_len, prompt_cache_req_id, self.splitfuse_block_size)
         else:
-            req = NormalReq(request_id, prompt_ids, sampling_params, 
+            req = NormalReq(request_id, prompt_ids, sampling_params, multimodal_params, 
                             prompt_cache_len, prompt_cache_req_id)
         self.req_queue.append(req)
         self.send_to_detokenization.send_pyobj(req.to_req_detokenization_state())
@@ -349,9 +351,9 @@ class RouterManager:
     async def loop_for_netio_req(self):
         while True:
             recv_req = await self.recv_from_httpserver.recv_pyobj()
-            if isinstance(recv_req, tuple) and len(recv_req) == 5:
-                prompt_ids, sampling_params, request_id, prompt_cache_len, prompt_cache_req_id = recv_req
-                self.add_req(prompt_ids, sampling_params, request_id, prompt_cache_len, prompt_cache_req_id)
+            if isinstance(recv_req, tuple) and len(recv_req) == 6:
+                prompt_ids, sampling_params, multimodal_params, request_id, prompt_cache_len, prompt_cache_req_id = recv_req
+                self.add_req(prompt_ids, sampling_params, multimodal_params, request_id, prompt_cache_len, prompt_cache_req_id)
             elif isinstance(recv_req, AbortReq):
                 abort_req = recv_req
                 request_id = abort_req.req_id

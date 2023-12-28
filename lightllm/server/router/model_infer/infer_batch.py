@@ -51,10 +51,12 @@ class InferReq:
         req_status=None,
         prompt_cache_len=None,
         prompt_cache_req_id=None,
+        multimodal_params=None,
     ) -> None:
         self.r_id = r_id
         self.out_token_id_count = out_token_id_count
         self.sampling_param = sampling_param
+        self.multimodal_params = multimodal_params
         self.req_idx = req_idx
         self.prompt_len = prompt_len
         self.input_token_ids = input_token_ids
@@ -90,12 +92,14 @@ class InferBatch:
                 input_length = len(tokenized_input)
                 # postprocessor
                 sampling_param = r["sampling_param"]
+                multimodal_params = r["multimodal_params"]
                 sampling_param["vocab_size"] = vocab_size
                 assert r['req_status'] == ReqRunStatus.WAIT_IN_QUEUE
                 r_obj = InferReq(r_id, 
                                 input_token_ids=tokenized_input,
                                 out_token_id_count=collections.defaultdict(int), 
                                 sampling_param=InferSamplingParams(**sampling_param), 
+                                multimodal_params=multimodal_params,
                                 req_idx=nopad_b_req_idx[index], 
                                 prompt_len=input_length,
                                 req_status=r['req_status'],

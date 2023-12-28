@@ -27,6 +27,8 @@ from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
 from lightllm.models.yi.model import YiTpPartModel
 from lightllm.models.mistral.model import MistralTpPartModel
+from lightllm.models.llava.model import LlavaTpPartModel
+from lightllm.models.qwen_vl.model import QWenVLTpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from .pre_process import prepare_decode_inputs, prepare_prefill_inputs, splitfuse_prepare_decode_inputs
@@ -47,6 +49,7 @@ class ModelRpcServer(rpyc.Service):
             kvargs = obtain(kvargs)
             world_size = kvargs["world_size"]
 
+        self.is_multimodal = False
         self.tp_rank = kvargs["rank_id"]
         self.world_size = kvargs["world_size"]
         self.load_way = kvargs["load_way"]
@@ -92,7 +95,10 @@ class ModelRpcServer(rpyc.Service):
                 else:
                     self.model = LlamaTpPartModel(model_kvargs)
             elif self.model_type == "qwen":
-                if any('int8weight' in mode_ or 'int4weight' in mode_ for mode_ in self.mode):
+                if "visual" in model_cfg:
+                    self.model = QWenVLTpPartModel(model_kvargs)
+                    self.is_multimodal = True
+                elif any('int8weight' in mode_ or 'int4weight' in mode_ for mode_ in self.mode):
                     self.model = QWenTpPartModelWQuant(model_kvargs)
                 else:
                     self.model = QWenTpPartModel(model_kvargs)
@@ -127,6 +133,9 @@ class ModelRpcServer(rpyc.Service):
                 self.model = MistralTpPartModel(model_kvargs)
             elif self.model_type == "mixtral":
                 self.model = MixtralTpPartModel(model_kvargs)
+            elif self.model_type == "llava":
+                self.model = LlavaTpPartModel(model_kvargs)
+                self.is_multimodal = True
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:
@@ -215,7 +224,7 @@ class ModelRpcServer(rpyc.Service):
         output_dict = {}
         batch: InferBatch = self.cache.pop(batch_id)
         if is_prefill:
-            kwargs, run_reqs, not_run_reqs = prepare_prefill_inputs(batch)
+            kwargs, run_reqs, not_run_reqs = prepare_prefill_inputs(batch, self.is_multimodal)
         else:
             kwargs, run_reqs, not_run_reqs = prepare_decode_inputs(batch)
         

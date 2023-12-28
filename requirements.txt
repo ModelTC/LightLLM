@@ -73,3 +73,8 @@ uvloop==0.17.0
 wheel==0.40.0
 zstandard==0.19.0
 safetensors==0.3.1
+Pillow==10.1.0
+tiktoken==0.5.2
+matplotlib==3.8.2
+--extra-index-url https://download.pytorch.org/whl/cu118
+torchvision==0.15.1

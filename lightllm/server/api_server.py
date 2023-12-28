@@ -36,6 +36,12 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 import uvicorn
 from .sampling_params import SamplingParams
+from .multimodal_params import MultimodalParams
+from .httpserver.manager import HttpServerManager
+from .detokenization.manager import start_detokenization_process
+from .router.manager import start_router_process
+from .embed_cache.manager import start_cache_manager
+from .visualserver.manager import start_visual_process
 from .req_id_generator import ReqIDGenerator
 
 from lightllm.utils.net_utils import alloc_can_use_network_port
@@ -50,6 +56,9 @@ from .api_models import (
     ChatCompletionStreamResponse,
     ChatCompletionStreamResponseChoice,
 )
+
+from lightllm.utils.log_utils import init_logger
+logger = init_logger(__name__)
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 
@@ -82,9 +91,11 @@ async def generate(request: Request) -> Response:
     return_details = sample_params_dict.pop("return_details", False)
     sampling_params = SamplingParams(**sample_params_dict)
     sampling_params.verify()
-    
+    multimodal_params_dict = request_dict.get("multimodal_params", {})
+    multimodal_params = MultimodalParams(**multimodal_params_dict)
+
     request_id = g_id_gen.generate_id()
-    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
+    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id, multimodal_params)
 
     # Non-streaming case
     final_output = []
@@ -144,9 +155,11 @@ async def generate_stream(request: Request) -> Response:
     return_details = sample_params_dict.pop("return_details", False)
     sampling_params = SamplingParams(**sample_params_dict)
     sampling_params.verify()
+    multimodal_params_dict = request_dict.get("multimodal_params", {})
+    multimodal_params = MultimodalParams(**multimodal_params_dict)
 
     request_id = g_id_gen.generate_id()
-    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
+    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id, multimodal_params)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -219,9 +232,10 @@ async def chat_completions(
         stop_sequences=request.stop
     )
     sampling_params.verify()
+    multimodal_params = MultimodalParams(images=[])
 
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
-    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id)
+    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id, multimodal_params)
 
     # Non-streaming case
     if not request.stream:
@@ -345,7 +359,12 @@ def main():
                     help="splitfuse block size")    
     parser.add_argument("--prompt_cache_strs", type=str, default=[], nargs='+',
                         help="""prompt cache strs""")
-    
+    parser.add_argument("--enable_multimodal", action='store_true',
+                        help="Whether or not to allow to load additional multimodal models.")
+    parser.add_argument("--cache_capacity", type=int, default=200,
+                    help="cache server capacity for multimodal resources")
+    parser.add_argument("--cache_reserved_ratio", type=float, default=0.5,
+                    help="cache server reserved capacity ratio after clear")
     parser.add_argument("--return_all_prompt_logprobs", action="store_true",
                         help="return all prompt tokens logprobs")
     parser.add_argument("--long_truncation_mode", type=str, choices=[None, 'head', 'center'], default=None,
@@ -382,22 +401,46 @@ def main():
             args.batch_max_tokens = batch_max_tokens
 
     can_use_ports = alloc_can_use_network_port(
-        num=3 + args.tp, used_nccl_port=args.nccl_port
+        num=5 + args.tp, used_nccl_port=args.nccl_port
     )
-    router_port, detokenization_port, httpserver_port = can_use_ports[0:3]
-    model_rpc_ports = can_use_ports[3:]
+    router_port, detokenization_port, httpserver_port, visual_port, cache_port = can_use_ports[0:5]
+    model_rpc_ports = can_use_ports[5:]
+
+    if args.enable_multimodal:
+        pipe_cache_reader, pipe_cache_writer = mp.Pipe(duplex=False)
+        proc_cache = mp.Process(
+            target=start_cache_manager,
+            args=(
+                cache_port,
+                args.cache_capacity,
+                args.cache_reserved_ratio,
+                pipe_cache_writer,
+            ),
+        )
+        proc_cache.start()
+        # wait embed cache init ready
+        cache_init_state = pipe_cache_reader.recv()
+        if cache_init_state != 'init ok':
+            proc_cache.kill()
+            logger.error(
+                "cache init state:" +
+                str(cache_init_state)
+            )
+            sys.exit(1)
 
     from .httpserver.manager import HttpServerManager
     global httpserver_manager
     httpserver_manager = HttpServerManager(
         args,
         router_port=router_port,
-        httpserver_port=httpserver_port
+        cache_port=cache_port,
+        visual_port=visual_port,
+        httpserver_port=httpserver_port,
+        enable_multimodal=args.enable_multimodal,
     )
+
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
-
-    from .router.manager import start_router_process
     proc_router = mp.Process(
         target=start_router_process,
         args=(
@@ -426,9 +469,6 @@ def main():
     router_init_state = pipe_router_reader.recv()
     detoken_init_state = pipe_detoken_reader.recv()
 
-    from lightllm.utils.log_utils import init_logger
-    logger = init_logger(__name__)
-
     if router_init_state != "init ok" or detoken_init_state != "init ok":
         proc_router.kill()
         proc_detoken.kill()
@@ -441,6 +481,31 @@ def main():
         sys.exit(1)
 
     assert proc_router.is_alive() and proc_detoken.is_alive()
+
+    if args.enable_multimodal:
+        pipe_visual_reader, pipe_visual_writer = mp.Pipe(duplex=False)
+        proc_visual = mp.Process(
+            target=start_visual_process,
+            args=(
+                args,
+                router_port,
+                visual_port,
+                cache_port,
+                pipe_visual_writer
+            ),
+        )
+        proc_visual.start()
+        visual_init_state = pipe_visual_reader.recv()
+
+        if visual_init_state != "init ok":
+            proc_visual.kill()
+            logger.error(
+                "visual init state:" +
+                str(visual_init_state)
+            )
+            sys.exit(1)
+
+        assert proc_visual.is_alive()
 
     uvicorn.run(
         app,

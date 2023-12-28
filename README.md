@@ -41,6 +41,11 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - [Baichuan-13b](https://github.com/baichuan-inc/Baichuan-13B)
 - [InternLM-7b](https://github.com/InternLM/InternLM)
 - [Yi-34b](https://huggingface.co/01-ai/Yi-34B)  
+- [Qwen-VL](https://huggingface.co/Qwen/Qwen-VL)
+- [Qwen-VL-Chat](https://huggingface.co/Qwen/Qwen-VL-Chat)
+- [Llava-7b](https://huggingface.co/liuhaotian/llava-v1.5-7b)
+- [Llava-13b](https://huggingface.co/liuhaotian/llava-v1.5-13b)  
+- [Mixtral]()
 
 > When you start Qwen-7b, you need to set the parameter '--eos_id 151643 --trust_remote_code'.
 
@@ -163,6 +168,175 @@ if response.status_code == 200:
 else:
     print('Error:', response.status_code, response.text)
 ~~~
+
+### RUN Multimodal Models
+
+##### Run QWen-VL
+~~~shell
+python -m lightllm.server.api_server \
+    --host 0.0.0.0                 \
+    --port 8080                    \
+    --tp 1                         \
+    --max_total_token_num 12000    \
+    --trust_remote_code            \
+    --enable_multimodal            \
+    --cache_capacity 1000          \
+    --model_dir /path/of/Qwen-VL or /path/of/Qwen-VL-Chat
+~~~
+
+##### Run Llava
+~~~shell
+python -m lightllm.server.api_server \
+    --host 0.0.0.0                 \
+    --port 8080                    \
+    --tp 1                         \
+    --max_total_token_num 12000    \
+    --trust_remote_code            \
+    --enable_multimodal            \
+    --cache_capacity 1000          \
+    --model_dir /path/of/llava-v1.5-7b or /path/of/llava-v1.5-13b
+~~~
+
+##### Query From QWen-VL
+~~~python
+import time
+import requests
+import json
+import base64
+
+url = 'http://localhost:8080/generate'
+headers = {'Content-Type': 'application/json'}
+
+uri = "/local/path/of/image" # or "/http/path/of/image"
+if uri.startswith("http"):
+    images = [{"type": "url", "data": uri}]
+else:
+    with open(uri, 'rb') as fin:
+        b64 = base64.b64encode(fin.read()).decode("utf-8")
+    images=[{'type': "base64", "data": b64}]
+
+data = {
+    "inputs": "<img></img>Generate the caption in English with grounding:",
+    "parameters": {
+        "max_new_tokens": 200,
+        # The space before <|endoftext|> is important, the server will remove the first bos_token_id, but QWen tokenizer does not has bos_token_id
+        "stop_sequences": [" <|endoftext|>"],
+    },
+    "multimodal_params": {
+        "images": images,
+    }
+}
+
+response = requests.post(url, headers=headers, data=json.dumps(data))
+if response.status_code == 200:
+    print(response.json())
+else:
+    print('Error:', response.status_code, response.text)
+~~~
+
+##### Query From QWen-VL-Chat
+~~~python
+import json
+import requests
+import base64
+
+def run_once(query, uris):
+    images = []
+    for uri in uris:
+        if uri.startswith("http"):
+            images.append({"type": "url", "data": uri})
+        else:
+            with open(uri, 'rb') as fin:
+                b64 = base64.b64encode(fin.read()).decode("utf-8")
+            images.append({'type': "base64", "data": b64})
+
+    data = {
+        "inputs": query,
+        "parameters": {
+            "max_new_tokens": 200,
+            # The space before <|endoftext|> is important, the server will remove the first bos_token_id, but QWen tokenizer does not has bos_token_id
+            "stop_sequences": [" <|endoftext|>", " <|im_start|>", " <|im_end|>"],
+        },
+        "multimodal_params": {
+            "images": images,
+        }
+    }
+
+    # url = "http://127.0.0.1:8080/generate_stream"
+    url = "http://127.0.0.1:8080/generate"
+    headers = {'Content-Type': 'application/json'}
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+    if response.status_code == 200:
+        print(" + result: ({})".format(response.json()))
+    else:
+        print(' + error: {}, {}'.format(response.status_code, response.text))
+
+"""
+multi-img, multi-round:
+
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+<img></img>
+<img></img>
+上面两张图片分别是哪两个城市？请对它们进行对比。<|im_end|>
+<|im_start|>assistant
+根据提供的信息，两张图片分别是重庆和北京。<|im_end|>
+<|im_start|>user
+这两座城市分别在什么地方？<|im_end|>
+<|im_start|>assistant
+"""
+run_once(
+    uris = [
+        "assets/mm_tutorial/Chongqing.jpeg",
+        "assets/mm_tutorial/Beijing.jpeg",
+    ],
+    query = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<img></img>\n<img></img>\n上面两张图片分别是哪两个城市？请对它们进行对比。<|im_end|>\n<|im_start|>assistant\n根据提供的信息，两张图片分别是重庆和北京。<|im_end|>\n<|im_start|>user\n这两座城市分别在什么地方？<|im_end|>\n<|im_start|>assistant\n"
+)
+~~~
+
+##### Query From Llava
+~~~python
+import time
+import requests
+import json
+import base64
+
+url = 'http://localhost:8080/generate'
+headers = {'Content-Type': 'application/json'}
+
+uri = "/local/path/of/image" # or "/http/path/of/image"
+if uri.startswith("http"):
+    images = [{"type": "url", "data": uri}]
+else:
+    with open(uri, 'rb') as fin:
+        b64 = base64.b64encode(fin.read()).decode("utf-8")
+    images=[{'type': "base64", "data": b64}]
+
+data = {
+    "inputs": "A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions. USER: <image>\nPlease explain the picture. ASSISTANT:",
+    "parameters": {
+        "max_new_tokens": 200,
+    },
+    "multimodal_params": {
+        "images": images,
+    }
+}
+
+response = requests.post(url, headers=headers, data=json.dumps(data))
+if response.status_code == 200:
+    print(response.json())
+else:
+    print('Error:', response.status_code, response.text)
+~~~
+
+> Additional lanuch parameters: `--enable_multimodal`, `--cache_capacity`, larger `--cache_capacity` requires larger `shm-size`
+
+> Support `--tp > 1`, when `tp > 1`, visual model run on the gpu 0
+
+> The special image tag for Qwen-VL is `<img></img>` (`<image>` for Llava), the length of `data["multimodal_params"]["images"]` should be the same as the count of tags, The number can be 0, 1, 2, ...
+
+> Input images format: list for dict like `{'type': 'url'/'base64', 'data': xxx}`
 
 ## Performance
 

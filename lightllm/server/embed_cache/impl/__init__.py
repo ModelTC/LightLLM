@@ -1,0 +1,1 @@
+from . import naive_memory_cache

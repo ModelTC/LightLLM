@@ -2,22 +2,35 @@ import zmq
 import zmq.asyncio
 import asyncio
 import uvloop
+import rpyc
+import time
+import hashlib
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from ..tokenizer import get_tokenizer
 from ..io_struct import BatchStrOut, AbortReq
+from ..embed_cache.utils import get_shm_name_data, create_shm
 
 class HttpServerManager:
     def __init__(
         self,
         args,
         router_port,
-        httpserver_port
+        cache_port,
+        httpserver_port,
+        visual_port,
+        enable_multimodal,
     ):
         self.args = args
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"tcp://127.0.0.1:{router_port}")
+
+        self.enable_multimodal = enable_multimodal
+        if self.enable_multimodal:
+            self.cache_client = rpyc.connect("localhost", cache_port)
+            self.send_to_visual = context.socket(zmq.PUSH)
+            self.send_to_visual.connect(f"tcp://127.0.0.1:{visual_port}")
 
         self.recv_from_detokenization = context.socket(zmq.PULL)
         self.recv_from_detokenization.bind(f"tcp://127.0.0.1:{httpserver_port}")
@@ -60,9 +73,36 @@ class HttpServerManager:
                     prompt_cache_req_id = req_id
                     break
         return prompt_cache_len, prompt_cache_req_id
-    
-    async def generate(self, prompt, sampling_params, request_id):
+
+    # connect cache server, calculate md5, alloc resource, return uuid
+    async def _alloc_resource(self, data):
+        md5sum = hashlib.md5(data).hexdigest()
+        while True:
+            uid = self.cache_client.root.alloc(md5sum)
+            # hit or new
+            if uid:
+                if not self.cache_client.root.get_item_data(uid):
+                    create_shm(get_shm_name_data(uid), data)
+                    self.cache_client.root.set_item_data(uid)
+                return uid
+            # cache full
+            else:
+                await asyncio.sleep(0.1)
+
+    async def _alloc_multimodal_resources(self, multimodal_params):
+        for img in multimodal_params.images:
+            img.uuid = await self._alloc_resource(img.read())
+
+    async def _release_multimodal_resources(self, multimodal_params):
+        if multimodal_params is not None:
+            for img in multimodal_params.images:
+                if img.uuid is not None:
+                    self.cache_client.root.release(img.uuid)
+
+    async def generate(self, prompt, sampling_params, request_id, multimodal_params):
         prompt_ids = self.tokenizer.encode(prompt)
+        # special tokenizer for multimodal_params
+        prompt_ids = multimodal_params.after_tokenize(prompt_ids)
         prompt_tokens = len(prompt_ids)
 
         if prompt_tokens > self.max_req_input_len:
@@ -93,15 +133,19 @@ class HttpServerManager:
         
         sampling_params.stop_sentences_to_token_ids(self.tokenizer)
 
-        req_status = ReqStatus(request_id)
+        req_status = ReqStatus(request_id, multimodal_params)
         event = req_status.event
         self.req_id_to_out_inf[request_id] = req_status
 
         # 寻找是否有可用的prompt cache 可用
         prompt_cache_len, prompt_cache_req_id = self._find_prompt_cache_req(prompt_ids)
-
-        self.send_to_router.send_pyobj((prompt_ids, sampling_params, request_id, prompt_cache_len, prompt_cache_req_id))
   
+        if self.enable_multimodal:
+            await self._alloc_multimodal_resources(multimodal_params)
+            self.send_to_visual.send_pyobj((prompt_ids, sampling_params, multimodal_params, request_id, prompt_cache_len, prompt_cache_req_id))
+        else:
+            self.send_to_router.send_pyobj((prompt_ids, sampling_params, multimodal_params, request_id, prompt_cache_len, prompt_cache_req_id))
+
         while True:
             try:
                 await asyncio.wait_for(event.wait(), timeout=5)
@@ -120,6 +164,7 @@ class HttpServerManager:
                     if finished:
                         try:
                             del self.req_id_to_out_inf[request_id]
+                            await self._release_multimodal_resources(multimodal_params)
                         except:
                             pass
                         return
@@ -129,7 +174,11 @@ class HttpServerManager:
     async def abort(self, request_id):
         abort_req = AbortReq(req_id=request_id)
         self.send_to_router.send_pyobj(abort_req)
+        if self.enable_multimodal:
+            self.send_to_visual.send_pyobj(abort_req)
         try:
+            req = self.req_id_to_out_inf[request_id]
+            await self._release_multimodal_resources(req.multimodal_params)
             del self.req_id_to_out_inf[request_id]
         except:
             pass
@@ -155,8 +204,9 @@ class HttpServerManager:
         return
 
 class ReqStatus:
-    def __init__(self, req_id) -> None:
+    def __init__(self, req_id, multimodal_params) -> None:
         self.req_id = req_id
+        self.multimodal_params = multimodal_params
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
         self.out_token_info_list = []
