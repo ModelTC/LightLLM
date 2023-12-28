@@ -45,6 +45,7 @@ from .visualserver.manager import start_visual_process
 from .req_id_generator import ReqIDGenerator
 
 from lightllm.utils.net_utils import alloc_can_use_network_port
+from lightllm.utils.start_utils import start_submodule_processes
 
 from .api_models import (
     ChatCompletionRequest,
@@ -407,26 +408,8 @@ def main():
     model_rpc_ports = can_use_ports[5:]
 
     if args.enable_multimodal:
-        pipe_cache_reader, pipe_cache_writer = mp.Pipe(duplex=False)
-        proc_cache = mp.Process(
-            target=start_cache_manager,
-            args=(
-                cache_port,
-                args.cache_capacity,
-                args.cache_reserved_ratio,
-                pipe_cache_writer,
-            ),
-        )
-        proc_cache.start()
-        # wait embed cache init ready
-        cache_init_state = pipe_cache_reader.recv()
-        if cache_init_state != 'init ok':
-            proc_cache.kill()
-            logger.error(
-                "cache init state:" +
-                str(cache_init_state)
-            )
-            sys.exit(1)
+        start_submodule_processes(start_funcs=[start_cache_manager,],
+                                  start_args=[(cache_port, args.cache_capacity, args.cache_reserved_ratio)])
 
     from .httpserver.manager import HttpServerManager
     global httpserver_manager
@@ -438,74 +421,14 @@ def main():
         httpserver_port=httpserver_port,
         enable_multimodal=args.enable_multimodal,
     )
-
-    pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
-    pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
-    proc_router = mp.Process(
-        target=start_router_process,
-        args=(
-            args,
-            router_port,
-            detokenization_port,
-            model_rpc_ports,
-            pipe_router_writer,
-        ),
-    )
-    proc_router.start()
     
     from .detokenization.manager import start_detokenization_process
-    proc_detoken = mp.Process(
-        target=start_detokenization_process,
-        args=(
-            args,
-            detokenization_port,
-            httpserver_port,
-            pipe_detoken_writer,
-        ),
-    )
-    proc_detoken.start()
-
-    # wait load model ready
-    router_init_state = pipe_router_reader.recv()
-    detoken_init_state = pipe_detoken_reader.recv()
-
-    if router_init_state != "init ok" or detoken_init_state != "init ok":
-        proc_router.kill()
-        proc_detoken.kill()
-        logger.error(
-            "router init state: " + 
-            str(router_init_state) + 
-            " detoken init state: " + 
-            str(detoken_init_state)
-        )
-        sys.exit(1)
-
-    assert proc_router.is_alive() and proc_detoken.is_alive()
-
+    start_submodule_processes(start_funcs=[start_router_process, start_detokenization_process],
+                            start_args=[(args, router_port, detokenization_port, model_rpc_ports),
+                                        (args, detokenization_port, httpserver_port)])
     if args.enable_multimodal:
-        pipe_visual_reader, pipe_visual_writer = mp.Pipe(duplex=False)
-        proc_visual = mp.Process(
-            target=start_visual_process,
-            args=(
-                args,
-                router_port,
-                visual_port,
-                cache_port,
-                pipe_visual_writer
-            ),
-        )
-        proc_visual.start()
-        visual_init_state = pipe_visual_reader.recv()
-
-        if visual_init_state != "init ok":
-            proc_visual.kill()
-            logger.error(
-                "visual init state:" +
-                str(visual_init_state)
-            )
-            sys.exit(1)
-
-        assert proc_visual.is_alive()
+        start_submodule_processes(start_funcs=[start_visual_process,],
+                            start_args=[(args, router_port, visual_port, cache_port),])
 
     uvicorn.run(
         app,
