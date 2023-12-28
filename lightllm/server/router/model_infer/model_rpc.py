@@ -6,6 +6,7 @@ import traceback
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
+from lightllm.models.mixtral.model import MixtralTpPartModel
 from lightllm.server.router.model_infer.infer_batch import InferBatch
 from rpyc.utils.classic import obtain
 
@@ -124,6 +125,8 @@ class ModelRpcServer(rpyc.Service):
                 self.model = YiTpPartModel(model_kvargs)
             elif self.model_type == "mistral":
                 self.model = MistralTpPartModel(model_kvargs)
+            elif self.model_type == "mixtral":
+                self.model = MixtralTpPartModel(model_kvargs)
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:

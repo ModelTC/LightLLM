@@ -378,7 +378,9 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
         asyncio.run(router.wait_to_model_ready())
     except Exception as e:
         import traceback
-        err_str = '\n'.join(traceback.format_exception(e))
+        import sys
+        etype, evalue, tb = sys.exc_info()
+        err_str = '\n'.join(traceback.format_exception(etype, evalue, tb))
         pipe_writer.send(err_str)
         router.clean_up()
         raise

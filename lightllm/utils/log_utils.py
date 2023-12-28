@@ -88,5 +88,6 @@ def init_logger(name: str):
             _inference_log_file_handler[pid].setLevel(_LOG_LEVEL)
             _inference_log_file_handler[pid].setFormatter(NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT))
             _root_logger.addHandler(_inference_log_file_handler[pid])
+            logger.addHandler(_inference_log_file_handler[pid])
     logger.propagate = False
     return logger
