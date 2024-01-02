@@ -34,6 +34,8 @@ class MistralTpPartModel(TpPartBaseModel):
 
     def _init_config(self):
         super()._init_config()
+        if self.config["sliding_window"] == None:
+            self.config["sliding_window"] = self.max_total_token_num
         # rename key [SYM: to be confirmed]
         return
 
