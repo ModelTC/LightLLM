@@ -2,6 +2,7 @@ import os
 import json
 import torch
 import math
+import numpy as np
 
 from .layer_infer.transformer_layer_infer import QwenTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import QwenPreAndPostLayerWeight
@@ -45,31 +46,44 @@ class QWenTpPartModel(LlamaTpPartModel):
             super()._init_custom()
             self.logn_tensor = None
         return
-    
+
+    def _init_nkt_alpha(self, total_seq_len_supported):
+        self._ntk_to_id = {}
+        ntk_alphas = []
+        for seq_len in range(1, total_seq_len_supported + 1):
+            ntk_alpha = max(2 ** math.ceil(math.log(seq_len / 2048, 2) + 1), 1)
+            self._ntk_to_id[ntk_alpha] = len(self._ntk_to_id) - 1
+            ntk_alphas.append(ntk_alpha)
+        ntk_alphas = np.array(ntk_alphas, dtype=np.int32)
+        return np.unique(ntk_alphas)
+
     def _init_qwen_dynamic_ntk(self):
         total_seq_len_supported = self.config.get("max_position_embeddings", 8 * 1024)
         seq_len = self.config.get("seq_length", 2048)
 
-        cur_kv_seq_len = total_seq_len_supported
-        context_value = math.log(cur_kv_seq_len / seq_len, 2) + 1
-        ntk_alpha = 2 ** math.ceil(context_value) - 1
-        ntk_alpha = max(ntk_alpha, 1)
+        ntk_alphas = self._init_nkt_alpha(total_seq_len_supported)
+        self._cos_cached = []
+        self._sin_cached = []
 
-        base = self.config.get("rotary_emb_base", 10000)
-        base = base * ntk_alpha ** (self.head_dim_ / (self.head_dim_ - 2))
-        inv_freq = 1.0 / (
-            base
-            ** (
-                torch.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32)
-                / self.head_dim_
+        for ntk_alpha in ntk_alphas:
+
+            base = self.config.get("rotary_emb_base", 10000)
+            base = base * ntk_alpha ** (self.head_dim_ / (self.head_dim_ - 2))
+            inv_freq = 1.0 / (
+                base
+                ** (
+                    torch.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32)
+                    / self.head_dim_
+                )
             )
-        )
 
-        t = torch.arange(total_seq_len_supported + 64 * 1024, device="cpu", dtype=torch.float32)
-        freqs = torch.outer(t, inv_freq)
+            t = torch.arange(total_seq_len_supported + 64 * 1024, device="cpu", dtype=torch.float32)
+            freqs = torch.outer(t, inv_freq)
+            self._cos_cached.append(torch.cos(freqs).to(torch.float16).cuda())
+            self._sin_cached.append(torch.sin(freqs).to(torch.float16).cuda())
 
-        self._cos_cached = torch.cos(freqs).to(torch.float16).cuda()
-        self._sin_cached = torch.sin(freqs).to(torch.float16).cuda()
+        self._cos_cached = torch.stack(self._cos_cached, dim=0).contiguous()
+        self._sin_cached = torch.stack(self._sin_cached, dim=0).contiguous()
         return
     
     def _init_qwen_logn_attn(self):
