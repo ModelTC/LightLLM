@@ -5,6 +5,8 @@ import triton.language as tl
 import math
 import torch.nn.functional as F
 
+TESLA = 'Tesla' in torch.cuda.get_device_name(0)
+
 
 if triton.__version__ >= "2.1.0":
     @triton.jit
@@ -95,7 +97,7 @@ if triton.__version__ >= "2.1.0":
 
     @torch.no_grad()
     def context_attention_fwd(q, k, v, o, b_start_loc, b_seq_len, max_input_len):
-        BLOCK = 128
+        BLOCK = 128 if not TESLA else 64
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk and Lk == Lv
@@ -216,7 +218,7 @@ elif triton.__version__ == "2.0.0":
 
     @torch.no_grad()
     def context_attention_fwd(q, k, v, o, b_start_loc, b_seq_len, max_input_len):
-        BLOCK = 128
+        BLOCK = 128 if not TESLA else 64
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk and Lk == Lv
