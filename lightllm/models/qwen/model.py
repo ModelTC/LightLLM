@@ -48,13 +48,12 @@ class QWenTpPartModel(LlamaTpPartModel):
         return
 
     def _init_nkt_alpha(self, total_seq_len_supported):
-        self._ntk_to_id = {}
         ntk_alphas = []
         for seq_len in range(1, total_seq_len_supported + 1):
-            ntk_alpha = max(2 ** math.ceil(math.log(seq_len / 2048, 2) + 1), 1)
-            self._ntk_to_id[ntk_alpha] = len(self._ntk_to_id) - 1
+            ntk_alpha = max(2 ** math.ceil(math.log(seq_len / self.config.get("seq_length", 2048), 2) + 1), 1)
             ntk_alphas.append(ntk_alpha)
         ntk_alphas = np.array(ntk_alphas, dtype=np.int32)
+        self.max_ntk_alpha = math.ceil(math.log(ntk_alphas.max(), 2))
         return np.unique(ntk_alphas)
 
     def _init_qwen_dynamic_ntk(self):
