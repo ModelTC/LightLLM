@@ -75,23 +75,27 @@ class HttpServerManager:
         return prompt_cache_len, prompt_cache_req_id
 
     # connect cache server, calculate md5, alloc resource, return uuid
-    async def _alloc_resource(self, data):
+    async def _alloc_resource(self, data, num):
         md5sum = hashlib.md5(data).hexdigest()
         while True:
-            uid = self.cache_client.root.alloc(md5sum)
+            record = self.cache_client.root.alloc(md5sum, num)
             # hit or new
-            if uid:
+            if record:
+                uid = record["id"]
                 if not self.cache_client.root.get_item_data(uid):
                     create_shm(get_shm_name_data(uid), data)
                     self.cache_client.root.set_item_data(uid)
-                return uid
+                return record
             # cache full
             else:
                 await asyncio.sleep(0.1)
 
     async def _alloc_multimodal_resources(self, multimodal_params):
         for img in multimodal_params.images:
-            img.uuid = await self._alloc_resource(img.read())
+            record = await self._alloc_resource(img.read(), self.tokenizer.image_length)
+            img.uuid = record['id']
+            img.token_id = record['token_id']
+            img.token_num = record['token_num']
 
     async def _release_multimodal_resources(self, multimodal_params):
         if multimodal_params is not None:
@@ -100,9 +104,14 @@ class HttpServerManager:
                     self.cache_client.root.release(img.uuid)
 
     async def generate(self, prompt, sampling_params, request_id, multimodal_params):
-        prompt_ids = self.tokenizer.encode(prompt)
-        # special tokenizer for multimodal_params
-        prompt_ids = multimodal_params.after_tokenize(prompt_ids)
+        if self.enable_multimodal:
+            assert (
+                len(multimodal_params.images) <= self.args.cache_capacity
+            ), "too many images!"
+            await self._alloc_multimodal_resources(multimodal_params)
+            prompt_ids = self.tokenizer.encode(prompt, multimodal_params)
+        else:
+            prompt_ids = self.tokenizer.encode(prompt)
         prompt_tokens = len(prompt_ids)
 
         if prompt_tokens > self.max_req_input_len:
@@ -141,7 +150,6 @@ class HttpServerManager:
         prompt_cache_len, prompt_cache_req_id = self._find_prompt_cache_req(prompt_ids)
   
         if self.enable_multimodal:
-            await self._alloc_multimodal_resources(multimodal_params)
             self.send_to_visual.send_pyobj((prompt_ids, sampling_params, multimodal_params, request_id, prompt_cache_len, prompt_cache_req_id))
         else:
             self.send_to_router.send_pyobj((prompt_ids, sampling_params, multimodal_params, request_id, prompt_cache_len, prompt_cache_req_id))

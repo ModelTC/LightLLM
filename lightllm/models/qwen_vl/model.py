@@ -1,7 +1,9 @@
 import json
+import numpy as np
 import unicodedata
 from lightllm.models.qwen.model import QWenTpPartModel
 from .layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
+from lightllm.server.multimodal_params import MultimodalParams
 
 
 # Warp of the origal tokenizer
@@ -16,7 +18,6 @@ class QWenVLTokenizer:
         self.image_end_tag = tokenizer.image_end_tag
         self.image_end_id = tokenizer.img_end_id
         # <imgpad>: 151859
-        self.image_pad_id = tokenizer.img_pad_id
         self.image_length = 256
 
     def _list_find(self, input_list, target, start_idx):
@@ -38,14 +39,13 @@ class QWenVLTokenizer:
         return prompt
 
     # only change the impl of the encode func:
-    def encode(self, prompt):
+    def encode(self, prompt, multimodal_params: MultimodalParams = None):
         prompt = unicodedata.normalize("NFC", prompt)
         prompt = self._format_prompt(prompt)
         origin_ids = self.tokenizer.tokenizer.encode(prompt, allowed_special='all', disallowed_special=())
 
         input_ids = []
-        offsets = []
-        lengths = []
+        image_id = 0
         end = 0
         while True:
             # <img>xxx</img> -> <img><imgpad>*256</img>
@@ -57,15 +57,21 @@ class QWenVLTokenizer:
             if end == -1:
                 raise ValueError("Unclosed image token")
 
+            token_id = multimodal_params.images[image_id].token_id
+            token_num = multimodal_params.images[image_id].token_num
+            assert token_num == self.image_length, "invalid token num: {} vs {}!".format(token_num, self.image_length)
+
             input_ids.append(self.image_start_id)
-            offsets.append(len(input_ids))
-            lengths.append(self.image_length)
-            input_ids.extend([self.image_pad_id] * self.image_length)
+            input_ids.extend(range(token_id, token_id + token_num))
             input_ids.append(self.image_end_id)
             end += 1
+            image_id += 1
 
         input_ids.extend(origin_ids[end: ])
-        return {"input_ids": input_ids, "offsets": offsets, "lengths": lengths}
+        if multimodal_params:
+            image_cnt = len(multimodal_params.images)
+            assert image_cnt == image_id, "invalid image tag num: {} vs {}!".format(image_cnt, image_id)
+        return input_ids
 
     def __getattr__(self, name):
         if name != 'encode':

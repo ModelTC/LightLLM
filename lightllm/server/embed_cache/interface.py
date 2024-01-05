@@ -6,7 +6,7 @@ class CacheManager(object):
     def __init__(self) -> None:
         pass
 
-    def alloc(self, md5sum: str) -> int:
+    def alloc(self, md5sum: str, token_num: int) -> dict:
         pass
 
     def release(self, id: int) -> None:
@@ -23,6 +23,7 @@ class CacheManager(object):
 
     def get_item_embed(self, id: int) -> bool:
         pass
+
 
 class CacheManagerFactory(object):
     _impls = dict()

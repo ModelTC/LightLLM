@@ -19,19 +19,27 @@ class Record(object):
     embed: bool
     createtime: float
     visittime: float
+    token_id: int
+    token_num: int
 
 @CacheManagerFactory.register("naive")
 class InMemoryCache(CacheManager):
 
-    def __init__(self, capacity, reserved_ratio) -> None:
+    def __init__(self, args) -> None:
         self._records = dict()
         self._md5_to_record = dict()
-        self.capacity = max(1, capacity)
-        self.reserved = max(0, int(self.capacity * reserved_ratio))
+        self.capacity = max(1, args.cache_capacity)
+        self.reserved = max(0, int(self.capacity * args.cache_reserved_ratio))
         self.reserved = min(self.reserved, self.capacity - 1)
         self.occupied = 0
         self.expired_secs = 60 * 60
         self.lock = threading.Lock()
+
+        from lightllm.server.tokenizer import get_tokenizer
+        tokenizer = get_tokenizer(
+            args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code
+        )
+        self.cur_token_id = tokenizer.vocab_size + 10000
 
     def _clear(self):
         deleted = 0
@@ -51,7 +59,7 @@ class InMemoryCache(CacheManager):
                 if deleted >= max_delete:
                     break
 
-    def alloc(self, md5sum: str) -> int:
+    def alloc(self, md5sum: str, token_num: int) -> dict:
         with self.lock:
             t = time.time()
             # add new record
@@ -72,8 +80,11 @@ class InMemoryCache(CacheManager):
                     data=False,
                     embed=False,
                     createtime=t,
-                    visittime=t
+                    visittime=t,
+                    token_id=self.cur_token_id,
+                    token_num=token_num,
                 )
+                self.cur_token_id += token_num
                 self._records[id] = record
                 self._md5_to_record[md5sum] = record
                 self.occupied += 1
@@ -84,7 +95,11 @@ class InMemoryCache(CacheManager):
                 record.visittime = t
                 record.ref += 1
 
-            return record.id
+            return {
+                "id": record.id,
+                "token_id": record.token_id,
+                "token_num": record.token_num
+            }
 
     def release(self, id: int) -> None:
         with self.lock:

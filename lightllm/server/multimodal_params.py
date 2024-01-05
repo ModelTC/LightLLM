@@ -14,10 +14,10 @@ class ImageItem:
         self._data = kwargs["data"]
         # the unique id for the image 
         self.uuid = None
-        # where should the image fill into the text embeds
-        self.offset = -1
-        # the length of the image embeds
-        self.length = -1
+        # the start image token id
+        self.token_id = None
+        # the image token num
+        self.token_num = None
 
     def read(self):
         try:
@@ -39,9 +39,9 @@ class ImageItem:
 
     def to_dict(self):
         ret = {}
-        ret["uuid"] = self.uuid
-        ret["offset"] = self.offset
-        ret["length"] = self.length
+        ret['uuid'] = self.uuid
+        ret['token_id'] = self.token_id
+        ret['token_num'] = self.token_num
         return ret
 
 
@@ -53,20 +53,6 @@ class MultimodalParams:
     ) -> None:
         self.images = [ImageItem(**i) for i in images]
         return
-
-    def after_tokenize(self, prompt_ids):
-        if not isinstance(prompt_ids, dict):
-            return prompt_ids
-        # fill offsets and lengths for images
-        offsets = prompt_ids.pop("offsets")
-        lengths = prompt_ids.pop("lengths")
-        i_num, o_num, l_num = len(self.images), len(offsets), len(lengths)
-        assert i_num == o_num, "Invalid image offsets: {} vs {}".format(i_num, o_num)
-        assert i_num == l_num, "Invalid image lengths: {} vs {}".format(i_num, l_num)
-        for i, o, l in zip(self.images, offsets, lengths):
-            i.offset = o
-            i.length = l
-        return prompt_ids["input_ids"]
 
     def verify(self):
         return

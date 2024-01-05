@@ -409,7 +409,7 @@ def main():
 
     if args.enable_multimodal:
         start_submodule_processes(start_funcs=[start_cache_manager,],
-                                  start_args=[(cache_port, args.cache_capacity, args.cache_reserved_ratio)])
+                                  start_args=[(cache_port, args)])
 
     from .httpserver.manager import HttpServerManager
     global httpserver_manager
