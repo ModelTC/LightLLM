@@ -48,8 +48,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
             return
     
     def _copy_kv_to_mem_cache(self, key_buffer, value_buffer, mem_index, mem_manager):
-        destindex_copy_kv(key_buffer, mem_index, mem_manager.key_buffer[self.layer_num_])
-        destindex_copy_kv(value_buffer, mem_index, mem_manager.value_buffer[self.layer_num_])
+        destindex_copy_kv(key_buffer, value_buffer, mem_index, mem_manager.key_buffer[self.layer_num_], mem_manager.value_buffer[self.layer_num_])
         return
     
     def _context_attention_kernel(self, q, k, v, infer_state:InferStateInfo, layer_weight, out=None)->torch.Tensor:
