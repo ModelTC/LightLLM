@@ -74,13 +74,14 @@ class LlamaTransformerLayerInferAWquant(TransformerLayerInferActivationWeightQua
                                             quant_weight_params=layer_weight.q_weight_,
                                             is_prefill=infer_state.is_prefill,
                                             token_scale=token_scale)
+        rotary_emb_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_), infer_state.position_cos, infer_state.position_sin)
 
         out = self._awquant_matmul_for_qkv(input.view(-1, self.embed_dim_),
                                             quant_weight_params=layer_weight.k_weight_,
                                             is_prefill=infer_state.is_prefill,
                                             token_scale=token_scale)
         cache_k_ = out.view(-1, self.tp_k_head_num_, self.head_dim_)
-        rotary_emb_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_), cache_k_, infer_state.position_cos, infer_state.position_sin)
+        rotary_emb_fwd(cache_k_, infer_state.position_cos, infer_state.position_sin)
         out = self._awquant_matmul_for_qkv(input.view(-1, self.embed_dim_),
                                             quant_weight_params=layer_weight.v_weight_,
                                             is_prefill=infer_state.is_prefill,

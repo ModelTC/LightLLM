@@ -85,9 +85,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
     def _get_qkv(self, input, cache_k, cache_v, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight)->torch.Tensor:
         q = torch.mm(input.view(-1, self.embed_dim_), layer_weight.q_weight_)
+        rotary_emb_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_), infer_state.position_cos, infer_state.position_sin)
         torch.mm(input.view(-1, self.embed_dim_), layer_weight.k_weight_,
                     out=cache_k.view(-1, self.tp_k_head_num_ * self.head_dim_))
-        rotary_emb_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_), cache_k, infer_state.position_cos, infer_state.position_sin)
+        rotary_emb_fwd(cache_k, infer_state.position_cos, infer_state.position_sin)
         torch.mm(input.view(-1, self.embed_dim_), layer_weight.v_weight_,
                     out=cache_v.view(-1, self.tp_v_head_num_ * self.head_dim_))
         return q, cache_k, cache_v
@@ -180,24 +181,29 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return ffn2_out
     
     def _copy_kv_to_mem_cache_normal(self, key_buffer, value_buffer, mem_index, mem_manager):
-        destindex_copy_kv(key_buffer, value_buffer, mem_index, mem_manager.key_buffer[self.layer_num_], mem_manager.value_buffer[self.layer_num_])
+        destindex_copy_kv(key_buffer, mem_index, mem_manager.key_buffer[self.layer_num_])
+        destindex_copy_kv(value_buffer, mem_index, mem_manager.value_buffer[self.layer_num_])
         return
     
     def _copy_kv_to_mem_cache_int8kv(self, key_buffer, value_buffer, mem_index, mem_manager):
-        destindex_copy_quantize_kv(key_buffer, value_buffer,
+        destindex_copy_quantize_kv(key_buffer,
                                     mem_index,
                                     mem_manager.key_buffer[self.layer_num_],
-                                    mem_manager.key_scale_buffer[self.layer_num_],
+                                    mem_manager.key_scale_buffer[self.layer_num_])
+        destindex_copy_quantize_kv(value_buffer,
+                                    mem_index,
                                     mem_manager.value_buffer[self.layer_num_],
                                     mem_manager.value_scale_buffer[self.layer_num_])
         return
     
     def _copy_kv_to_mem_cache_ppl_int8kv(self, key_buffer, value_buffer, mem_index, mem_manager):
         from lightllm.models.llama.triton_kernel.ppl_quant_copy_kv import destindex_copy_quantize_kv
-        destindex_copy_quantize_kv(key_buffer, value_buffer,
+        destindex_copy_quantize_kv(key_buffer,
                                     mem_index,
                                     mem_manager.key_buffer[self.layer_num_],
-                                    mem_manager.key_scale_buffer[self.layer_num_],
+                                    mem_manager.key_scale_buffer[self.layer_num_])
+        destindex_copy_quantize_kv(value_buffer,
+                                    mem_index,
                                     mem_manager.value_buffer[self.layer_num_],
                                     mem_manager.value_scale_buffer[self.layer_num_])
         return

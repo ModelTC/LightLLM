@@ -25,8 +25,9 @@ class InternlmTransformerLayerInferWquant(LlamaTransformerLayerInferWquant):
         k = qkv_output[:, -2 * tp_k_head_dim: -tp_k_head_dim].add_(layer_weight.k_bias_)
         v = qkv_output[:, -tp_k_head_dim :].add_(layer_weight.v_bias_)
 
+        rotary_emb_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_), infer_state.position_cos, infer_state.position_sin)
         cache_k_ = k.view(-1, self.tp_k_head_num_, self.head_dim_)
-        rotary_emb_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_), cache_k_, infer_state.position_cos, infer_state.position_sin)
+        rotary_emb_fwd(cache_k_, infer_state.position_cos, infer_state.position_sin)
         cache_v_ = v.view(-1, self.tp_v_head_num_, self.head_dim_)
         return q, cache_k_, cache_v_
 
