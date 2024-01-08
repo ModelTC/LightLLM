@@ -3,7 +3,7 @@ import asyncio
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
 import zmq.asyncio
-from ..io_struct import BatchTokenIdOut, ReqDetokenizationState, BatchStrOut, AbortReq
+from ..io_struct import BatchTokenIdOut, ReqDetokenizationState, BatchStrOut, AbortReq, FinishStatus
 from typing import Union
 from .decode import decode_token
 from ..tokenizer import get_tokenizer
@@ -53,7 +53,7 @@ class DeTokenizationManager:
 
                 if isinstance(recv_obj, BatchTokenIdOut):
                     new_batch_str_out = BatchStrOut()
-                    for req_id, new_token_id, new_gen_metadata, finished, abort in recv_obj.reqs_infs:
+                    for req_id, new_token_id, new_gen_metadata, finish_status in recv_obj.reqs_infs:
                         if req_id not in self.req_id_to_out:
                             continue
                         req_out:ReqDetokenizationState = self.req_id_to_out[req_id]
@@ -73,8 +73,8 @@ class DeTokenizationManager:
                         else:
                             new_text = out_text[len(req_out.output_str):]
                             req_out.output_str = out_text
-                        new_batch_str_out.reqs_infs.append((req_id, new_text, new_gen_metadata, True if abort else finished, abort))
-                        if finished or abort:
+                        new_batch_str_out.reqs_infs.append((req_id, new_text, new_gen_metadata, finish_status))
+                        if FinishStatus(finish_status).is_finished():
                             try:
                                 del self.req_id_to_out[req_id]
                             except:

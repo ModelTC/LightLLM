@@ -5,7 +5,7 @@ from typing import List
 from ..io_struct import Batch, Req
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.server.io_struct import Req
-from lightllm.server.io_struct import ReqRunStatus
+from lightllm.server.io_struct import ReqRunStatus, FinishStatus
 
 class ReqQueue:
 
@@ -103,7 +103,7 @@ class ReqQueue:
         new_batch_first_router_need_tokens = 0 # 主要是对 prefill 或者 splitfuse 大块计算时候的限制
         aborted_count = 0
         for req in self.waiting_req_list:
-            if req.aborted and req.req_status == ReqRunStatus.WAIT_IN_QUEUE: 
+            if req.finish_status.is_aborted() and req.req_status == ReqRunStatus.WAIT_IN_QUEUE: 
                 # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉. 
                 # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token的泄漏
                 aborted_count += 1

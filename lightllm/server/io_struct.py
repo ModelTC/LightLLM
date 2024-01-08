@@ -1,6 +1,6 @@
 from .sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import asyncio
 import enum
 
@@ -12,6 +12,28 @@ class ReqRunStatus(enum.Enum):
     RERUNNING_FROM_KVKEEP = 4 # 从暂停中恢复
     RERUNNING_FROM_OFFLOAD = 5 # 从卸载KV中恢复
 
+class FinishStatus(enum.Enum):
+    NO_FINISH = 0 # 没有结束
+    FINISHED_STOP = 1 # 因为遇到了STOP token 而结束
+    FINISHED_LENGTH = 2 # 因为长度达到了最大长度而结束
+    FINISHED_ABORT = 3 # 因为请求被中止而结束
+
+    def is_finished(self):
+        return 1 <= self.value <= 3
+    
+    def is_aborted(self):
+        return self == FinishStatus.FINISHED_ABORT
+
+    def get_finish_reason(self):
+        if self == FinishStatus.FINISHED_STOP:
+            finish_reason = "stop"
+        elif self == FinishStatus.FINISHED_LENGTH:
+            finish_reason = "length"
+        elif self == FinishStatus.FINISHED_ABORT:
+            finish_reason = "abort"
+        else:
+            finish_reason = None
+        return finish_reason
 
 class Req:
     def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams, prompt_cache_len=0, prompt_cache_req_id=None):
@@ -23,10 +45,9 @@ class Req:
         self.multimodal_params = multimodal_params
         self.output_ids = []
         self.output_metadata_list = []
-        self.has_generate_finished = False
-        self.aborted = False
 
         self.req_status = ReqRunStatus.WAIT_IN_QUEUE
+        self.finish_status = FinishStatus.NO_FINISH
         self.cur_kv_len = 0 # 当前已经占用掉 token 的 kv len 长度
         self.prompt_cache_len = prompt_cache_len # 可以复用的一些公共 prompt 头对应的 kv cache 长度, 只有 splitfuse 模式当前才实际使用
         self.prompt_cache_req_id = prompt_cache_req_id # 对应的可复用的请求的 id，方便初始化的时候，将其 kv cache 复制到当前请求中, 默认值 为 None
@@ -215,13 +236,13 @@ class Batch:
         unfinished_req_ids, finished_req_ids = [], []
         for req in self.reqs:
             if req.stop_sequences_matched():
-                req.has_generate_finished = True
-            if len(req.output_ids) >= 1 and req.output_ids[-1] == eos_id and req.sample_params.ignore_eos == False:
-                req.has_generate_finished = True
-            if len(req.output_ids) >= req.max_output_len or req.aborted:
-                req.has_generate_finished = True
+                req.finish_status = FinishStatus.FINISHED_STOP
+            elif len(req.output_ids) >= 1 and req.output_ids[-1] == eos_id and req.sample_params.ignore_eos is False:
+                req.finish_status = FinishStatus.FINISHED_STOP
+            elif len(req.output_ids) >= req.max_output_len:
+                req.finish_status = FinishStatus.FINISHED_LENGTH
 
-            if req.has_generate_finished:
+            if req.finish_status.is_finished():
                 finished_req_ids.append(req.request_id)
                 # 标记的时候，也同时更新一些这些请求被移除掉的更新量，有点dirty
                 self.batch_used_tokens -= req.get_used_tokens()
@@ -263,11 +284,11 @@ class Batch:
         
 class BatchTokenIdOut:
     def __init__(self):
-        self.reqs_infs: List[Tuple[str, int, Dict, bool, bool]] = []  # [req_id, new_token_id, gen_metadata, finished_state, abort_state]
+        self.reqs_infs: List[Tuple[str, int, Dict, int]] = []  # [req_id, new_token_id, gen_metadata, finish_status]
 
 class BatchStrOut:
     def __init__(self):
-        self.reqs_infs: List[Tuple[str, str, Dict, bool, bool]] = [] # [req_id, token_str, gen_metadata, finished_state, abort_state]
+        self.reqs_infs: List[Tuple[str, str, Dict, int]] = [] # [req_id, token_str, gen_metadata, finish_status]
         
 class AbortReq:
     def __init__(self, req_id):

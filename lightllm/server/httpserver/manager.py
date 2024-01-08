@@ -8,7 +8,7 @@ import hashlib
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from ..tokenizer import get_tokenizer
-from ..io_struct import BatchStrOut, AbortReq
+from ..io_struct import BatchStrOut, AbortReq, FinishStatus
 from ..embed_cache.utils import get_shm_name_data, create_shm
 
 class HttpServerManager:
@@ -165,11 +165,11 @@ class HttpServerManager:
                 if len(req_status.out_token_info_list) == 0:
                     continue
 
-                for out_str, metadata, finished in req_status.out_token_info_list:
+                for out_str, metadata, finish_status in req_status.out_token_info_list:
                     metadata["prompt_tokens"] = prompt_tokens
-                    yield out_str, metadata, finished
+                    yield out_str, metadata, finish_status
 
-                    if finished:
+                    if finish_status.is_finished():
                         try:
                             del self.req_id_to_out_inf[request_id]
                             await self._release_multimodal_resources(multimodal_params)
@@ -198,12 +198,13 @@ class HttpServerManager:
             assert isinstance(
                 recv_ans, BatchStrOut
             ), f"error recv type {type(recv_ans)}"
-            for req_id, text, metadata, finished, abort in recv_ans.reqs_infs:
+            for req_id, text, metadata, finish_status in recv_ans.reqs_infs:
+                finish_status = FinishStatus(finish_status)
                 try:
-                    if not abort:
+                    if not finish_status.is_aborted():
                         req_status : ReqStatus = self.req_id_to_out_inf[req_id]
                         async with req_status.lock: 
-                            req_status.out_token_info_list.append((text, metadata, finished))
+                            req_status.out_token_info_list.append((text, metadata, finish_status))
                             req_status.event.set()
                     else:
                         del self.req_id_to_out_inf[req_id]

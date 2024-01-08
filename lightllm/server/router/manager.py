@@ -13,7 +13,7 @@ from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import ReqQueue
 from rpyc.utils.classic import obtain
 from lightllm.utils.infer_utils import calculate_time
-from ..io_struct import BatchTokenIdOut, AbortReq, ReqRunStatus
+from ..io_struct import BatchTokenIdOut, AbortReq, ReqRunStatus, FinishStatus
 from .stats import Stats
 from .pause_strategy import Fcfs, select_paused_reqs
 from ..tokenizer import get_tokenizer
@@ -133,12 +133,10 @@ class RouterManager:
         if self.running_batch is not None:
             for req in self.running_batch.reqs:
                 if req.request_id == request_id:
-                    req.has_generate_finished = True
-                    req.aborted = True
+                    req.finish_status = FinishStatus.FINISHED_ABORT
         for req in self.req_queue.waiting_req_list:
             if req.request_id == request_id:
-                req.has_generate_finished = True
-                req.aborted = True
+                req.finish_status = FinishStatus.FINISHED_ABORT
         return
 
     async def loop_for_fwd(self,):
@@ -343,7 +341,8 @@ class RouterManager:
         for req_id, (_, _, new_token_id, new_gen_metadata) in req_ans.items():
             req = batch.id_to_reqs[req_id]
             if new_token_id is not None:
-                batch_out.reqs_infs.append((req_id, new_token_id, new_gen_metadata, req.has_generate_finished, req.aborted))
+                # req.finish_status 传输 value值 不传送对象，可以减少序列化对象的大小。
+                batch_out.reqs_infs.append((req_id, new_token_id, new_gen_metadata, req.finish_status.value))
     
         self.send_to_detokenization.send_pyobj(batch_out)
         return
