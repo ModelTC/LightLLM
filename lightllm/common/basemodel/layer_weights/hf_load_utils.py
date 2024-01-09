@@ -2,7 +2,6 @@ import torch
 import os
 import gc
 from safetensors import safe_open
-import lightllm.utils.petrel_helper as utils
 
 
 def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_layer_list=None, weight_dir=None):
@@ -15,7 +14,7 @@ def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_lay
         weights = safe_open(os.path.join(weight_dir, file_), 'pt', 'cpu')
         weights = {k: weights.get_tensor(k) for k in weights.keys()}
     else:
-        weights = utils.PetrelHelper.load(os.path.join(weight_dir, file_), map_location='cpu')
+        weights = torch.load(os.path.join(weight_dir, file_), 'cpu')
 
     if pre_post_layer is not None:
         pre_post_layer.load_hf_weights(weights)
@@ -41,7 +40,7 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
         del weight_dict
         return
     use_safetensors = True
-    files = utils.PetrelHelper.list(weight_dir, extension='all')
+    files = os.listdir(weight_dir)
     candidate_files = list(filter(lambda x : x.endswith('.safetensors'), files))
     if len(candidate_files) == 0:
         use_safetensors = False
@@ -53,6 +52,4 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
     worker = int(os.environ.get('LOADWORKER', 1))
     with Pool(worker) as p:
         _ = p.map(partial_func, candidate_files)
-    if "s3://" in weight_dir:
-        os.rmdir(weight_dir)
     return

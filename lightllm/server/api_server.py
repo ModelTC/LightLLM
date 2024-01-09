@@ -105,7 +105,7 @@ async def generate(request: Request) -> Response:
     prompt_logprobs = None
     prompt_token_ids = None
     is_first_metadata = True
-    async for request_output, metadata, _ in results_generator:
+    async for request_output, metadata, finish_status in results_generator:
         if await request.is_disconnected():
             # Abort the request if the client disconnects.
             await httpserver_manager.abort(request_id)
@@ -132,6 +132,7 @@ async def generate(request: Request) -> Response:
     ret = {
         "generated_text": ["".join(final_output)],
         "count_output_tokens": count_output_tokens,
+        "finish_reason": finish_status.get_finish_reason()
     }
     if return_details:
         ret["tokens"] = tokens
@@ -164,7 +165,7 @@ async def generate_stream(request: Request) -> Response:
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output, metadata, finished in results_generator:
+        async for request_output, metadata, finish_status in results_generator:
             ret = {
                 "token": {
                     "id": metadata.get("id", None),
@@ -173,7 +174,8 @@ async def generate_stream(request: Request) -> Response:
                     "special": False
                 },
                 "generated_text": None,
-                "finished": finished,
+                "finished": finish_status.is_finished(),
+                "finish_reason": finish_status.get_finish_reason(),
                 "details": None
             }
 
@@ -410,10 +412,6 @@ def main():
     if args.enable_multimodal:
         start_submodule_processes(start_funcs=[start_cache_manager,],
                                   start_args=[(cache_port, args)])
-
-    if 's3://' in args.model_dir:
-        from lightllm.utils.petrel_helper import s3_model_prepare
-        s3_model_prepare(args.model_dir)
 
     from .httpserver.manager import HttpServerManager
     global httpserver_manager
