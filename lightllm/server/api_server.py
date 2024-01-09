@@ -413,6 +413,11 @@ def main():
         start_submodule_processes(start_funcs=[start_cache_manager,],
                                   start_args=[(cache_port, args)])
 
+    # help to manage data stored on Ceph
+    if 's3://' in args.model_dir:
+        from lightllm.utils.petrel_helper import s3_model_prepare
+        s3_model_prepare(args.model_dir)
+
     from .httpserver.manager import HttpServerManager
     global httpserver_manager
     httpserver_manager = HttpServerManager(
@@ -431,6 +436,10 @@ def main():
     if args.enable_multimodal:
         start_submodule_processes(start_funcs=[start_visual_process,],
                             start_args=[(args, router_port, visual_port, cache_port),])
+
+    if "s3://" in args.model_dir:
+        from lightllm.utils.petrel_helper import s3_model_clear
+        s3_model_clear(args.model_dir)
 
     uvicorn.run(
         app,
