@@ -54,6 +54,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         elif "ppl_fp16" in self.mode:
             self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_ppl_fp16, self)
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+        elif "ppl_fp16_flashdecoding" in self.mode:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_ppl_fp16_flashdecoding, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         elif "triton_int8kv" in self.mode:
             self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_int8kv, self)
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_int8kv, self)
@@ -351,3 +354,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                             infer_state.max_len_in_batch)
            
         return o_tensor
+    
+    def _token_decode_attention_ppl_fp16_flashdecoding(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
+        from lightllm.models.llama.triton_kernel.ppl_fp16_flash_decoding import token_decode_attention_flash_decoding
+        cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
+        cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
+        return token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out)
