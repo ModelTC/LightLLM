@@ -24,6 +24,7 @@ from lightllm.models.baichuan2_7b.model import Baichuan2_7bTpPartModel
 from lightllm.models.baichuan2_13b.model import Baichuan2_13bTpPartModel
 from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
 from lightllm.models.internlm.model import InternlmTpPartModel
+from lightllm.models.internlm2.model import Internlm2TpPartModel
 from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
 from lightllm.models.yi.model import YiTpPartModel
 from lightllm.models.mistral.model import MistralTpPartModel
@@ -126,7 +127,10 @@ class ModelRpcServer(rpyc.Service):
                 if any('int8weight' in mode_ or 'int4weight' in mode_ for mode_ in self.mode):
                     self.model = InternlmTpPartModelWQuant(model_kvargs)
                 else:
-                    self.model = InternlmTpPartModel(model_kvargs)
+                    if model_cfg["architectures"][0] == 'InternLM2ForCausalLM':
+                        self.model = Internlm2TpPartModel(model_kvargs)
+                    else:
+                        self.model = InternlmTpPartModel(model_kvargs)
             elif self.model_type == "Yi":
                 self.model = YiTpPartModel(model_kvargs)
             elif self.model_type == "mistral":
