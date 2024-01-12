@@ -77,6 +77,7 @@ class HttpServerManager:
     # connect cache server, calculate md5, alloc resource, return uuid
     async def _alloc_resource(self, data, num):
         md5sum = hashlib.md5(data).hexdigest()
+        wait_time = 1
         while True:
             record = self.cache_client.root.alloc(md5sum, num)
             # hit or new
@@ -88,7 +89,8 @@ class HttpServerManager:
                 return record
             # cache full
             else:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(wait_time)
+                wait_time = min(wait_time + 2, 9)
 
     async def _alloc_multimodal_resources(self, multimodal_params):
         for img in multimodal_params.images:
