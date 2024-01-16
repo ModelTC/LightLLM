@@ -37,9 +37,8 @@ class PetrelHelper(object):
             self.client = Client(self.conf_path)
 
             self._inited = True
-        except Exception as e:
-            print(e)
-            print('init petrel failed')
+        except:
+            pass
 
     def check_init(self):
         if not self._inited:
