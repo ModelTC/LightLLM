@@ -1,8 +1,8 @@
 import torch
 import numpy as np
-from lightllm.common.basemodel import InferStateInfo
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 
-class QwenInferStateInfo(InferStateInfo):
+class QwenInferStateInfo(LlamaInferStateInfo):
     def __init__(self):
         super().__init__()
         self.position_cos = None
@@ -11,6 +11,11 @@ class QwenInferStateInfo(InferStateInfo):
         self.logn_values = None
 
     def init_some_extra_state(self, model, input_ids : torch.Tensor):
+        use_dynamic_ntk = model.config.get("use_dynamic_ntk", False)
+        if not use_dynamic_ntk:
+            super().init_some_extra_state(model, input_ids)
+            return
+        
         if self.is_prefill:
             b_start_loc_numpy = self.b_start_loc.cpu().numpy() 
             b_seq_len_numpy = self.b_seq_len.cpu().numpy()
