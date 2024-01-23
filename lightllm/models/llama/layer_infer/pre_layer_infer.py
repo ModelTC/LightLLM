@@ -15,7 +15,7 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
     def __init__(self, tp_rank, world_size, network_config, mode):
         super().__init__(tp_rank, world_size, network_config, mode)
         tp_vob_ids = np.linspace(0, network_config["vocab_size"], self.world_size_ + 1, dtype=np.int64)
-        self.vob_start_id_, self.vob_end_id_ = tp_vob_ids[self.tp_rank_], tp_vob_ids[self.tp_rank_ + 1]
+        self.vob_start_id_, self.vob_end_id_ = int(tp_vob_ids[self.tp_rank_]), int(tp_vob_ids[self.tp_rank_ + 1])
         return
 
     @mark_cost_time("pre context forward")
