@@ -442,11 +442,11 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
                     alpha=1.0, out=cache_v.view(-1, self.tp_v_head_num_ * self.head_dim_))
         return q
     
-    def _context_attention_kernel(self, q, k, v, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
+    def _context_attention_kernel(self, q, kv, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
         o_tensor = torch.empty_like(q)
         context_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                              k.view(-1, self.tp_k_head_num_, self.head_dim_),
-                              v.view(-1, self.tp_v_head_num_, self.head_dim_),
+                              kv[:, 0: self.tp_k_head_num_, :],
+                              kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
                               o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
                               layer_weight.tp_alibi,
                               infer_state.b_start_loc,
@@ -457,8 +457,8 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     def _token_attention_kernel(self, q, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
         o_tensor = torch.empty_like(q)
         token_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                            infer_state.mem_manager.key_buffer[self.layer_num_],
-                            infer_state.mem_manager.value_buffer[self.layer_num_],
+                            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0: self.tp_k_head_num_, :],
+                            infer_state.mem_manager.kv_buffer[self.layer_num_][:, self.tp_k_head_num_: self.tp_k_head_num_+ self.tp_v_head_num_, :],
                             o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
                             layer_weight.tp_alibi,
                             infer_state.b_loc,

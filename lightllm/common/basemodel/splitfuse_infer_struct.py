@@ -34,8 +34,7 @@ class SplitFuseInferStateInfo:
         self.mem_start = None 
         self.mem_end = None
         self.mem_index = None
-        self.key_buffer = None 
-        self.value_buffer = None
+        self.kv_buffer = None
 
         self.parrall_stream = torch.cuda.Stream()
         self.start_event = torch.cuda.Event()

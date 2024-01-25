@@ -14,8 +14,7 @@ from lightllm.utils.infer_utils import mark_cost_time
 
 
 class BloomTransformerLayerInfer(TransformerLayerInferTpl):
-    """
-    """
+    """ """
 
     def __init__(self, layer_num, tp_rank, world_size, network_config, mode):
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
@@ -27,68 +26,92 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         self.head_dim_ = network_config["n_embed"] // network_config["num_attention_heads"]
         self.embed_dim_ = network_config["n_embed"]
         return
-    
-    def _att_norm(self, input, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
+
+    def _att_norm(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
         return layernorm_forward(
             input.view(-1, self.embed_dim_),
             weight=layer_weight.att_norm_weight_,
             bias=layer_weight.att_norm_bias_,
-            eps=self.eps_)
-    
-    def _ffn_norm(self, input, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
+            eps=self.eps_,
+        )
+
+    def _ffn_norm(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
         return layernorm_forward(
             input.view(-1, self.embed_dim_),
             weight=layer_weight.ffn_norm_weight_,
             bias=layer_weight.ffn_norm_bias_,
-            eps=self.eps_)
-    
-    def _get_qkv(self, input, cache_k, cache_v, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
-        q = torch.addmm(layer_weight.q_bias_, input.view(-1, self.embed_dim_), layer_weight.q_weight_, beta=1.0, alpha=1.0)
-        torch.addmm(layer_weight.k_bias_, input.view(-1, self.embed_dim_), layer_weight.k_weight_, beta=1.0,
-                    alpha=1.0, out=cache_k.view(-1, self.tp_k_head_num_ * self.head_dim_))
-        torch.addmm(layer_weight.v_bias_, input.view(-1, self.embed_dim_), layer_weight.v_weight_, beta=1.0,
-                    alpha=1.0, out=cache_v.view(-1, self.tp_v_head_num_ * self.head_dim_))
-        return q, cache_k, cache_v
-    
-    def _context_attention_kernel(self, q, k, v, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None)->torch.Tensor:
-        o_tensor =  torch.empty_like(q) if out is None else out
-        context_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                              k.view(-1, self.tp_k_head_num_, self.head_dim_),
-                              v.view(-1, self.tp_v_head_num_, self.head_dim_),
-                              o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                              layer_weight.tp_alibi,
-                              infer_state.b_start_loc,
-                              infer_state.b_seq_len,
-                              infer_state.max_len_in_batch)
+            eps=self.eps_,
+        )
+
+    def _get_qkv(
+        self, input, cache_kv, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight
+    ) -> torch.Tensor:
+        q = torch.addmm(
+            layer_weight.q_bias_, input.view(-1, self.embed_dim_), layer_weight.q_weight_, beta=1.0, alpha=1.0
+        )
+        torch.addmm(
+            layer_weight.kv_bias_,
+            input.view(-1, self.embed_dim_),
+            layer_weight.kv_weight_,
+            beta=1.0,
+            alpha=1.0,
+            out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_),
+        )
+        return q, cache_kv
+
+    def _context_attention_kernel(
+        self, q, kv, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
+    ) -> torch.Tensor:
+        o_tensor = torch.empty_like(q) if out is None else out
+        context_attention_fwd(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            kv[:, 0 : self.tp_k_head_num_, :],
+            kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
+            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+            layer_weight.tp_alibi,
+            infer_state.b_start_loc,
+            infer_state.b_seq_len,
+            infer_state.max_len_in_batch,
+        )
         return o_tensor
-    
-    def _token_attention_kernel(self, q, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None)->torch.Tensor:
-        o_tensor =  torch.empty_like(q) if out is None else out
-        token_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                            infer_state.mem_manager.key_buffer[self.layer_num_],
-                            infer_state.mem_manager.value_buffer[self.layer_num_],
-                            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                            layer_weight.tp_alibi,
-                            infer_state.req_manager.req_to_token_indexs,
-                            infer_state.b_req_idx,
-                            infer_state.b_start_loc,
-                            infer_state.b_seq_len,
-                            infer_state.max_len_in_batch,
-                            infer_state.total_token_num)
+
+    def _token_attention_kernel(
+        self, q, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
+    ) -> torch.Tensor:
+        o_tensor = torch.empty_like(q) if out is None else out
+        token_attention_fwd(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
+            infer_state.mem_manager.kv_buffer[self.layer_num_][
+                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+            ],
+            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+            layer_weight.tp_alibi,
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.b_req_idx,
+            infer_state.b_start_loc,
+            infer_state.b_seq_len,
+            infer_state.max_len_in_batch,
+            infer_state.total_token_num,
+        )
         return o_tensor
-    
-    def _get_o(self, input, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
-        o = torch.addmm(layer_weight.o_bias_,
-                        input.view(-1, self.tp_q_head_num_ * self.head_dim_),
-                        layer_weight.o_weight_,
-                        beta=1.0 / self.world_size_)
+
+    def _get_o(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
+        o = torch.addmm(
+            layer_weight.o_bias_,
+            input.view(-1, self.tp_q_head_num_ * self.head_dim_),
+            layer_weight.o_weight_,
+            beta=1.0 / self.world_size_,
+        )
         return o
-    
-    def _ffn(self, input, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
+
+    def _ffn(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
         ffn1_out = torch.addmm(layer_weight.ffn_1_bias_, input.view(-1, self.embed_dim_), layer_weight.ffn_1_weight_)
         input = None
-        gelu_out = torch.nn.functional.gelu(ffn1_out, approximate='tanh')
+        gelu_out = torch.nn.functional.gelu(ffn1_out, approximate="tanh")
         ffn1_out = None
-        ffn2_out = torch.addmm(layer_weight.ffn_2_bias_, gelu_out, layer_weight.ffn_2_weight_, beta=1.0 / self.world_size_)
+        ffn2_out = torch.addmm(
+            layer_weight.ffn_2_bias_, gelu_out, layer_weight.ffn_2_weight_, beta=1.0 / self.world_size_
+        )
         gelu_out = None
         return ffn2_out
