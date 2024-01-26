@@ -76,7 +76,7 @@ class QWenTpPartModel(LlamaTpPartModel):
                 )
             )
 
-            t = torch.arange(total_seq_len_supported + 64 * 1024, device="cpu", dtype=torch.float32)
+            t = torch.arange(total_seq_len_supported + 128 * 1024, device="cpu", dtype=torch.float32)
             freqs = torch.outer(t, inv_freq)
             self._cos_cached.append(torch.cos(freqs).to(torch.float16).cuda())
             self._sin_cached.append(torch.sin(freqs).to(torch.float16).cuda())
@@ -90,7 +90,7 @@ class QWenTpPartModel(LlamaTpPartModel):
         seq_len = self.config.get("seq_length", 2048)
         logn_list = [
             math.log(i, seq_len) if i > seq_len else 1
-            for i in range(1, total_seq_len_supported + 64 * 1024 + 1)
+            for i in range(1, total_seq_len_supported + 128 * 1024 + 1)
         ]
         self.logn_tensor = torch.tensor(logn_list).cuda()
         return

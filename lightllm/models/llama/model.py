@@ -128,7 +128,7 @@ class LlamaTpPartModel(TpPartBaseModel):
             pass
 
         inv_freq = 1.0 / (base ** (torch.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32) / self.head_dim_))
-        t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
+        t = torch.arange(max_seq_len + 1024 * 128, device="cpu", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
         self._cos_cached = torch.cos(freqs).to(torch.float16).cuda()
