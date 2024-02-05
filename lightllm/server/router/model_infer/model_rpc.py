@@ -123,7 +123,7 @@ class ModelRpcServer(rpyc.Service):
                     self.model = StarcoderTpPartModel(model_kvargs)
             elif self.model_type == 'chatglm':
                 self.model = ChatGlm2TpPartModel(model_kvargs)
-            elif self.model_type == 'internlm':
+            elif self.model_type == 'internlm' or self.model_type == 'internlm2':
                 if any('int8weight' in mode_ or 'int4weight' in mode_ for mode_ in self.mode):
                     self.model = InternlmTpPartModelWQuant(model_kvargs)
                 else:
