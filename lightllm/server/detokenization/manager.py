@@ -33,6 +33,7 @@ class DeTokenizationManager:
         self.send_to_httpserver.connect(f"tcp://127.0.0.1:{httpserver_port}")
 
         self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code)
+        self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out = {}
 
         self.skip_special_tokens = skip_special_tokens
@@ -58,6 +59,8 @@ class DeTokenizationManager:
                             continue
                         req_out:ReqDetokenizationState = self.req_id_to_out[req_id]
                         req_out.output_ids.append(new_token_id)
+                        new_gen_metadata["special"] = new_token_id in self.all_special_ids
+                        new_gen_metadata["count_output_tokens"] = len(req_out.output_ids)
                         req_out.gen_metadata.update(new_gen_metadata)
 
                         out_text = decode_token(

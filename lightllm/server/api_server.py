@@ -171,7 +171,8 @@ async def generate_stream(request: Request) -> Response:
                     "id": metadata.get("id", None),
                     "text": request_output,
                     "logprob": metadata.get("logprob", None),
-                    "special": False
+                    "special": metadata.get("special", False),
+                    "count_output_tokens": metadata.get("count_output_tokens", 0),
                 },
                 "generated_text": None,
                 "finished": finish_status.is_finished(),
