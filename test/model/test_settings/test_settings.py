@@ -58,7 +58,9 @@ def test_all_setting(gpu_name, model_name, mode, log_dir, world_sizes, in_out_le
     log_md_file = log_dir + ".md"
     md_file = open(log_md_file, "w")
     # write head
-    heads = ['mode', 'world_size', 'batch_size', 'input_len', 'output_len', 'prefill_cost', 'first_step_latency', 'last_step_latency', 'mean_latency', 'card_num_per_qps']
+    heads = ['mode', 'world_size', 'batch_size', 'input_len', 'output_len', 'prefill_cost', 'first_step_latency', 'last_step_latency', 'mean_latency', 
+             'prefill_throughput', 'decode_throughput', 'total_throughput',
+             'card_num_per_qps']
     md_file.write(f"test model: {model_name} \r\n")
     md_file.write('|')
     for head in heads:
@@ -71,18 +73,25 @@ def test_all_setting(gpu_name, model_name, mode, log_dir, world_sizes, in_out_le
     log_files = list(os.listdir(log_dir))
     sorted(log_files, key=lambda x: tuple(map(int, x.split("##")[2:6])))
     for log_file in log_files:
-        _, _, world_size, input_len, output_len, batch_size, _ = log_file.split("##")
+        _, mode, world_size, input_len, output_len, batch_size, _ = log_file.split("##")
         fp_file = open(os.path.join(log_dir, log_file), "r") 
         all_lines = fp_file.readlines()
         fp_file.close()
+        if len(all_lines) <= 2:
+            continue
         prefill_cost = float(all_lines[0].split(":")[1].strip())
         firststep_cost = float(all_lines[1].split(":")[1].strip())
         laststep_cost = float(all_lines[-2].split(":")[1].strip())
         all_step_cost = float(all_lines[-1].split(":")[1].strip())
         mean_step_cost = (all_step_cost - prefill_cost) / float(output_len)
         card_num_per_qps =  float(world_size) / (float(batch_size) / (all_step_cost / 1000))
+        prefill_throughput = float(batch_size) * float(input_len) / (prefill_cost / 1000)
+        decode_throughput = float(batch_size) * float(output_len) / ((all_step_cost - prefill_cost) / 1000)
+        total_throughput = float(batch_size) * (float(input_len) + float(output_len)) / (all_step_cost / 1000)
         md_file.write('|')
-        infos = [world_size, mode, batch_size, input_len, output_len, prefill_cost, firststep_cost, laststep_cost, mean_step_cost, card_num_per_qps]
+        infos = [mode, world_size, batch_size, input_len, output_len, prefill_cost, firststep_cost, laststep_cost, mean_step_cost,
+                 prefill_throughput, decode_throughput, total_throughput,
+                  card_num_per_qps]
         for info in infos:
             md_file.write(str(format(info, ".4f")) if isinstance(info, float) else str(info))
             md_file.write("|")
@@ -97,7 +106,7 @@ batch_sizes = [1, 2] # batch_sizes 中的数字也必须从小到大排列。
 
 test_all_setting(gpu_name,
                  "llama-7b", 
-                 mode=["triton_int8weight", "ppl_int8kv"], # mode 为 【】 为普通 fp16 的格式。
+                 mode=["triton_int8weight", "ppl_fp16_flashdecoding"], # mode 为 【】 为普通 fp16 的格式。
                  log_dir="./", 
                  world_sizes=[1], 
                  in_out_lens=in_out_lens, 
