@@ -21,6 +21,8 @@ class LlavaVisionModel:
         # load clip vision model by cfg['mm_vision_tower']:
         #   huggingface_name or path_of_clip_relative_to_llava_model_dir
         vision_path = config.get('mm_vision_tower', 'openai/clip-vit-large-patch14-336')
+        if isinstance(vision_path, list):
+            vision_path = vision_path[0]
         if vision_path.startswith("./"):
             vision_path = os.path.join(weight_dir, vision_path)
 

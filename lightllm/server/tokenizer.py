@@ -70,9 +70,9 @@ def get_tokenizer(
 
     model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
     if model_cfg["model_type"] == "llava":
-        tokenizer = LlavaTokenizer(tokenizer)
+        tokenizer = LlavaTokenizer(tokenizer, model_cfg)
     elif model_cfg["model_type"] == "qwen" and "visual" in model_cfg:
-        tokenizer = QWenVLTokenizer(tokenizer)
+        tokenizer = QWenVLTokenizer(tokenizer, model_cfg)
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.info(

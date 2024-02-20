@@ -9,7 +9,7 @@ from lightllm.server.multimodal_params import MultimodalParams
 # Warp of the origal tokenizer
 class QWenVLTokenizer:
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, model_cfg):
         self.tokenizer = tokenizer
         # <img>: 151857
         self.image_start_tag = tokenizer.image_start_tag
@@ -18,7 +18,7 @@ class QWenVLTokenizer:
         self.image_end_tag = tokenizer.image_end_tag
         self.image_end_id = tokenizer.img_end_id
         # <imgpad>: 151859
-        self.image_length = 256
+        self.image_length = model_cfg['visual'].get("n_queries", 256)
 
     def _list_find(self, input_list, target, start_idx):
         cur_list = input_list[start_idx:]
