@@ -69,7 +69,7 @@ def get_tokenizer(
                                                   **kwargs)
 
     model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
-    if model_cfg["model_type"] == "llava":
+    if model_cfg["model_type"] == "llava" or model_cfg["model_type"] == "internlmxcomposer2":
         tokenizer = LlavaTokenizer(tokenizer, model_cfg)
     elif model_cfg["model_type"] == "qwen" and "visual" in model_cfg:
         tokenizer = QWenVLTokenizer(tokenizer, model_cfg)
