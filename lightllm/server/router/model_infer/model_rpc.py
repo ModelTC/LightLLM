@@ -24,6 +24,7 @@ from lightllm.models.baichuan2_7b.model import Baichuan2_7bTpPartModel
 from lightllm.models.baichuan2_13b.model import Baichuan2_13bTpPartModel
 from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
 from lightllm.models.internlm.model import InternlmTpPartModel
+from lightllm.models.stablelm.model import  StablelmTpPartModel
 from lightllm.models.internlm2.model import Internlm2TpPartModel
 from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
 from lightllm.models.yi.model import YiTpPartModel
@@ -136,6 +137,8 @@ class ModelRpcServer(rpyc.Service):
                 self.model = YiTpPartModel(model_kvargs)
             elif self.model_type == "mistral":
                 self.model = MistralTpPartModel(model_kvargs)
+            elif self.model_type == "stablelm":
+                self.model = StablelmTpPartModel(model_kvargs)
             elif self.model_type == "mixtral":
                 self.model = MixtralTpPartModel(model_kvargs)
             elif self.model_type == "llava":
