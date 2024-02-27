@@ -29,6 +29,7 @@ from lightllm.models.internlm2.model import Internlm2TpPartModel
 from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
 from lightllm.models.yi.model import YiTpPartModel
 from lightllm.models.mistral.model import MistralTpPartModel
+from lightllm.models.minicpm.model import MiniCPMTpPartModel
 from lightllm.models.llava.model import LlavaTpPartModel
 from lightllm.models.qwen_vl.model import QWenVLTpPartModel
 from lightllm.models.internlm_xcomposer.model import InternlmComposerTpPartModel
@@ -87,7 +88,7 @@ class ModelRpcServer(rpyc.Service):
         }
 
         try:
-            self.model_type = model_cfg["model_type"]
+            self.model_type = model_cfg.get("model_type", "")
             if self.model_type == "bloom":
                 self.model = BloomTpPartModel(model_kvargs)
             elif self.model_type == "llama":
@@ -141,6 +142,8 @@ class ModelRpcServer(rpyc.Service):
                 self.model = StablelmTpPartModel(model_kvargs)
             elif self.model_type == "mixtral":
                 self.model = MixtralTpPartModel(model_kvargs)
+            elif self.model_type == "minicpm" or model_cfg["architectures"][0]=="MiniCPMForCausalLM":
+                self.model = MiniCPMTpPartModel(model_kvargs)
             elif self.model_type == "llava":
                 self.model = LlavaTpPartModel(model_kvargs)
                 self.is_multimodal = True
