@@ -67,7 +67,7 @@ class LlamaTpPartModel(TpPartBaseModel):
         """
         if self.config.get("use_rope_yarn", False):
             self._init_to_get_yarn_rotary()
-        elif self.config.get("use_dynamic_ntk", False) or self.config.get("rope_scaling", {}).get("type", "base") == "dynamic":
+        elif self.config.get("use_dynamic_ntk", False) or (self.config.get("rope_scaling", None) is not None and self.config.get("rope_scaling", {}).get("type", "base") == "dynamic"):
             self._init_to_get_dynamic_ntk_rotary()
         else:
             self._init_to_get_rotary()
