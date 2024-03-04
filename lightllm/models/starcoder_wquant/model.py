@@ -23,7 +23,7 @@ class StarcoderTpPartModelWQuant(StarcoderTpPartModel):
 
     def _verify_params(self):
         assert self.load_way in ["HF", "DS"], "llama only supports HF and DS format to load Now!"
-        assert any("int8weight" in mode_ or "int4weight" in mode_ for mode_ in self.mode), "only for weight quant model"
+        assert any("w4a16" in mode_ or "w8a16" in mode_ for mode_ in self.mode), "only for weight quant model"
         return
     
     def _init_mem_manager(self):

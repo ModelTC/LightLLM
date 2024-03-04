@@ -48,7 +48,7 @@ class LlamaTransformerLayerInferAWquant(TransformerLayerInferActivationWeightQua
         return
 
     def _bind_norm(self):
-        if "ppl_int8_activation_weight" in self.mode:
+        if "ppl_w8a8" in self.mode:
             self._awquant_att_norm = partial(LlamaTransformerLayerInferAWquant._awquant_att_norm_ppl_int8, self)
             self._awquant_ffn_norm = partial(LlamaTransformerLayerInferAWquant._awquant_ffn_norm_ppl_int8, self)
         else:
@@ -56,7 +56,7 @@ class LlamaTransformerLayerInferAWquant(TransformerLayerInferActivationWeightQua
         return
 
     def _bind_matmul(self):
-        if "ppl_int8_activation_weight" in self.mode:
+        if "ppl_w8a8" in self.mode:
             self._awquant_matmul_for_qkv = partial(
                 LlamaTransformerLayerInferAWquant._awquant_matmul_ppl_int8_quant_dequant, self
             )
@@ -70,13 +70,13 @@ class LlamaTransformerLayerInferAWquant(TransformerLayerInferActivationWeightQua
                 LlamaTransformerLayerInferAWquant._awquant_matmul_ppl_int8_quant_dequant, self
             )
             if self.tp_rank_ == 0 and self.layer_num_ == 0:
-                print("model use ppl_int8_activation_weight kernel")
+                print("model use ppl_w8a8 kernel")
         else:
             raise Exception(f"error mode {self.mode}")
         return
 
     def _bind_silu(self):
-        if "ppl_int8_activation_weight" in self.mode:
+        if "ppl_w8a8" in self.mode:
             func = partial(LlamaTransformerLayerInferAWquant._awquant_silu_ppl_int8, self)
             self._awquant_silu = func
         else:

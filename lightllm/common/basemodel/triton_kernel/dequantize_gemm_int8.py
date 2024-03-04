@@ -84,7 +84,7 @@ def matmul_dequantize_int8(a, b, b_scale, out=None):
     return c
 
 
-def quantize_int8(weight, axis=0):
+def quantize_int8(weight, axis=0, tp_rank=0):
     # Weight shape: [H1, H2]
     # Scale shape: [H2]
     scale = weight.abs().amax(axis, keepdim=True) / 127.
@@ -92,7 +92,7 @@ def quantize_int8(weight, axis=0):
     if axis == 0:
         weight = weight.t().contiguous().t()
     scale = scale.squeeze(axis)
-    return weight, scale
+    return weight.contiguous().cuda(tp_rank), scale.contiguous().cuda(tp_rank)
 
 
 def test_int8(M, K, N):

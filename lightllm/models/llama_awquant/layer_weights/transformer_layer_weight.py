@@ -14,8 +14,10 @@ class LlamaTransformerLayerActivationWeightQuantized(TransformerLayerWeight):
         self.init_quant_mode()
 
     def init_quant_mode(self):
-        if "ppl_int8_activation_weight" in self.mode:
+        if "ppl_w8a8" in self.mode:
             self.quantize_weight = partial(dynamic_channelwise_quant_fp16_i8_ppl, tp_rank=self.tp_rank_)
+        else:
+            raise Exception(f"error mode {self.mode}")
 
     def load_hf_weights(self, weights):
         self._load_qkvo_weights(weights)

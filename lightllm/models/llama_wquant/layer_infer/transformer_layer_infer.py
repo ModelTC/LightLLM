@@ -51,38 +51,38 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
         return
 
     def _bind_matmul(self):
-        if "triton_int8weight" in self.mode:
+        if "triton_w8a16" in self.mode:
             func = partial(LlamaTransformerLayerInferWquant._wquant_matmul_triton_int8weight_only_quant, self)
             self._wquant_matmul_for_qkv = func
             self._wquant_matmul_for_o = func
             self._wquant_matmul_for_ffn_up = func
             self._wquant_matmul_for_ffn_down = func
             if self.tp_rank_ == 0 and self.layer_num_ == 0:
-                logger.info("model use triton_int8weight kernel")
-        elif "triton_int4weight" in self.mode:
+                logger.info("model use triton_w8a16 kernel")
+        elif "triton_w4a16" in self.mode:
             func = partial(LlamaTransformerLayerInferWquant._wquant_matmul_triton_int4weight_only_quant, self)
             self._wquant_matmul_for_qkv = func
             self._wquant_matmul_for_o = func
             self._wquant_matmul_for_ffn_up = func
             self._wquant_matmul_for_ffn_down = func
             if self.tp_rank_ == 0 and self.layer_num_ == 0:
-                logger.info("model use triton_int4weight kernel")
-        elif "lmdeploy_int4weight" in self.mode:
+                logger.info("model use triton_w4a16 kernel")
+        elif "lmdeploy_w4a16" in self.mode:
             func = partial(LlamaTransformerLayerInferWquant._wquant_matmul_lmdeploy_int4weight_only_quant, self)
             self._wquant_matmul_for_qkv = func
             self._wquant_matmul_for_o = func
             self._wquant_matmul_for_ffn_up = func
             self._wquant_matmul_for_ffn_down = func
             if self.tp_rank_ == 0 and self.layer_num_ == 0:
-                logger.info("model use lmdeploy_int4weight kernel")
-        elif "ppl_int4weight" in self.mode:
+                logger.info("model use lmdeploy_w4a16 kernel")
+        elif "ppl_w4a16" in self.mode:
             func = partial(LlamaTransformerLayerInferWquant._wquant_matmul_ppl_int4weight_only_quant, self)
             self._wquant_matmul_for_qkv = func
             self._wquant_matmul_for_o = func
             self._wquant_matmul_for_ffn_up = func
             self._wquant_matmul_for_ffn_down = func
             if self.tp_rank_ == 0 and self.layer_num_ == 0:
-                logger.info("model use ppl_int4weight kernel")
+                logger.info("model use ppl_w4a16 kernel")
         else:
             raise Exception(f"error mode {self.mode}")
         return
@@ -132,12 +132,8 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
         self, input, quant_weight_params, infer_state: LlamaInferStateInfo, out=None, bias=None, has_act=False
     ):
         assert has_act is False
-        if infer_state.is_splitfuse is False and infer_state.is_prefill:
-            qweight, scale = quant_weight_params
-            out = matmul_dequantize_int8(input, qweight, scale, out=out)
-        else:
-            qweight, scale = quant_weight_params
-            out = matmul_quantize_int8(input, qweight, scale, out=out)
+        qweight, scale = quant_weight_params
+        out = matmul_dequantize_int8(input, qweight, scale, out=out)
         if bias is None:
             return out
         else:

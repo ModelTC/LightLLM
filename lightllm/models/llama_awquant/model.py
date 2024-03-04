@@ -23,7 +23,7 @@ class LlamaTpPartModelAWQuant(LlamaTpPartModel):
 
     def _verify_params(self):
         assert self.load_way in ["HF", "DS"], "llama only supports HF and DS format to load Now!"
-        assert any("int8_activation_weight" in mode_ or "int4_activation_weight" in mode_ for mode_ in self.mode), "only for weight quant model"
+        assert any("w8a8" in mode_ for mode_ in self.mode), "only for weight-activation quant model"
         assert self.config["num_key_value_heads"] % self.world_size_ == 0
         assert self.config["num_attention_heads"] % self.world_size_ == 0
         return
