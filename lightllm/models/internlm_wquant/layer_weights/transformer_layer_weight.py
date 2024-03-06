@@ -16,7 +16,7 @@ class InternlmTransformerLayerWeightQuantized(LlamaTransformerLayerWeightQuantiz
 
         # handle internlm 20b, which has no bias, so set q k v o bias to zero
         if not self.network_config_.get("bias", True):
-            for layer_type in ("q", "k", "v", "o"):
+            for layer_type in ("q", "kv", "o"):
                 attr_name = f"{layer_type}_bias_"
                 if hasattr(self, attr_name):
                     continue
@@ -44,7 +44,6 @@ class InternlmTransformerLayerWeightQuantized(LlamaTransformerLayerWeightQuantiz
             self.att_norm_weight_ = self._cuda(weights[f"model.layers.{self.layer_num_}.input_layernorm.weight"])
 
         n_embed = self.network_config_["hidden_size"]
-
         q_split_n_embed = n_embed // self.world_size_
         kv_split_n_embed = (
             n_embed
@@ -52,7 +51,6 @@ class InternlmTransformerLayerWeightQuantized(LlamaTransformerLayerWeightQuantiz
             * self.network_config_["num_key_value_heads"]
             // self.world_size_
         )
-
         # q k v weights for llama
         if f"model.layers.{self.layer_num_}.self_attn.q_proj.weight" in weights:
             q_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.q_proj.weight"]
@@ -71,17 +69,14 @@ class InternlmTransformerLayerWeightQuantized(LlamaTransformerLayerWeightQuantiz
             k_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.k_proj.weight"]
             k_weight_ = k_weight_[kv_split_n_embed * self.tp_rank_ : kv_split_n_embed * (self.tp_rank_ + 1), :]
             self.k_weight_ = k_weight_.transpose(0, 1).to(self.data_type_)
-
         if f"model.layers.{self.layer_num_}.self_attn.k_proj.bias" in weights:
             self.k_bias_ = weights[f"model.layers.{self.layer_num_}.self_attn.k_proj.bias"][
                 kv_split_n_embed * self.tp_rank_ : kv_split_n_embed * (self.tp_rank_ + 1)
             ]
-
         if f"model.layers.{self.layer_num_}.self_attn.v_proj.weight" in weights:
             v_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.v_proj.weight"]
             v_weight_ = v_weight_[kv_split_n_embed * self.tp_rank_ : kv_split_n_embed * (self.tp_rank_ + 1), :]
             self.v_weight_ = v_weight_.transpose(0, 1).to(self.data_type_)
-
         if f"model.layers.{self.layer_num_}.self_attn.v_proj.bias" in weights:
             self.v_bias_ = weights[f"model.layers.{self.layer_num_}.self_attn.v_proj.bias"][
                 kv_split_n_embed * self.tp_rank_ : kv_split_n_embed * (self.tp_rank_ + 1)

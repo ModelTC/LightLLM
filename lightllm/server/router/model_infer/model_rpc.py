@@ -27,6 +27,7 @@ from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.models.stablelm.model import  StablelmTpPartModel
 from lightllm.models.internlm2.model import Internlm2TpPartModel
 from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
+from lightllm.models.internlm2_wquant.model import Internlm2TpPartModelWQuant
 from lightllm.models.yi.model import YiTpPartModel
 from lightllm.models.mistral.model import MistralTpPartModel
 from lightllm.models.minicpm.model import MiniCPMTpPartModel
@@ -126,14 +127,16 @@ class ModelRpcServer(rpyc.Service):
                     self.model = StarcoderTpPartModel(model_kvargs)
             elif self.model_type == 'chatglm':
                 self.model = ChatGlm2TpPartModel(model_kvargs)
-            elif self.model_type == 'internlm' or self.model_type == 'internlm2':
+            elif self.model_type == 'internlm':
                 if any('w8a16' in mode_ or 'w4a16' in mode_ for mode_ in self.mode):
                     self.model = InternlmTpPartModelWQuant(model_kvargs)
                 else:
-                    if model_cfg["architectures"][0] == 'InternLM2ForCausalLM':
-                        self.model = Internlm2TpPartModel(model_kvargs)
-                    else:
-                        self.model = InternlmTpPartModel(model_kvargs)
+                    self.model = InternlmTpPartModel(model_kvargs)
+            elif self.model_type == 'internlm2':
+                if any('w8a16' in mode_ or 'w4a16' in mode_ for mode_ in self.mode):
+                    self.model = Internlm2TpPartModelWQuant(model_kvargs)
+                else:
+                    self.model = Internlm2TpPartModel(model_kvargs)
             elif self.model_type == "Yi":
                 self.model = YiTpPartModel(model_kvargs)
             elif self.model_type == "mistral":
