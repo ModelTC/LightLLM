@@ -17,6 +17,7 @@ from lightllm.models.llama_wquant.model import LlamaTpPartModelWQuant
 from lightllm.models.llama_awquant.model import LlamaTpPartModelAWQuant
 from lightllm.models.starcoder.model import StarcoderTpPartModel
 from lightllm.models.starcoder_wquant.model import StarcoderTpPartModelWQuant
+from lightllm.models.starcoder2.model import Starcoder2TpPartModel
 from lightllm.models.qwen.model import QWenTpPartModel
 from lightllm.models.qwen_wquant.model import QWenTpPartModelWQuant
 from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
@@ -127,6 +128,8 @@ class ModelRpcServer(rpyc.Service):
                     self.model = StarcoderTpPartModelWQuant(model_kvargs)
                 else:
                     self.model = StarcoderTpPartModel(model_kvargs)
+            elif self.model_type == "starcoder2":
+                self.model = Starcoder2TpPartModel(model_kvargs)
             elif self.model_type == "chatglm":
                 self.model = ChatGlm2TpPartModel(model_kvargs)
             elif self.model_type == "internlm":
