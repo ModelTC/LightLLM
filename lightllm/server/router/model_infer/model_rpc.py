@@ -35,6 +35,7 @@ from lightllm.models.minicpm.model import MiniCPMTpPartModel
 from lightllm.models.llava.model import LlavaTpPartModel
 from lightllm.models.qwen_vl.model import QWenVLTpPartModel
 from lightllm.models.internlm_xcomposer.model import InternlmComposerTpPartModel
+from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from .pre_process import prepare_decode_inputs, prepare_prefill_inputs, splitfuse_prepare_decode_inputs
@@ -156,6 +157,8 @@ class ModelRpcServer(rpyc.Service):
                 self.is_multimodal = True
             elif self.model_type == "qwen2":
                 self.model = Qwen2TpPartModel(model_kvargs)
+            elif self.model_type == "gemma":
+                self.model = Gemma_2bTpPartModel(model_kvargs)
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:

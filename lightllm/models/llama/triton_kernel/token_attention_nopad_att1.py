@@ -73,7 +73,7 @@ def token_att_fwd(q, k, att_out, Req_to_tokens, B_req_idx, B_Start_Loc, B_Seqlen
     # shape constraints
     Lq, Lk = q.shape[-1], k.shape[-1]
     assert Lq == Lk
-    assert Lk in {16, 32, 64, 128}
+    assert Lk in {16, 32, 64, 128, 256}
     sm_scale = 1.0 / (Lk ** 0.5)
 
     batch, head_num = B_req_idx.shape[0], q.shape[1]
