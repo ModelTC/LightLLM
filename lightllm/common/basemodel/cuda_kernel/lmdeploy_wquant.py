@@ -9,6 +9,7 @@ def quantize_int4_lmdeploy(weight, group_size=128, tp_rank=0, pack_order=[0, 2, 
         scale_zeros: [K//group_size, N] int32
         # qzeros: [K//group_size, N//8] int32 (packed int4*8) new pack_order
     """
+    weight = weight.half()
     K, N = weight.shape
     weight = weight.transpose(1, 0)
     print("tp_rank: {} quantize_int4_lmdeploy for K={} N={} ...".format(tp_rank, K, N))
@@ -42,7 +43,7 @@ def quantize_int4_lmdeploy(weight, group_size=128, tp_rank=0, pack_order=[0, 2, 
 
     weight = None
     qweight = qweight.transpose(1, 0).contiguous()
-    scale = scale.transpose(1, 0).contiguous()
+    scale = scale.half().transpose(1, 0).contiguous()
     qzeros = qzeros.transpose(1, 0).contiguous()
 
     # convert to layout defined inside lmdeploy
