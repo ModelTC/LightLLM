@@ -16,6 +16,9 @@ def _silu_and_mul_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
+    stride_input_m = stride_input_m.to(tl.int64)
+    stride_output_m = stride_output_m.to(tl.int64)
+    
     tid = tl.program_id(0)
     input_m_offsets = tid * BLOCK_M + tl.arange(0, BLOCK_M)
     output_m_offsets = tid * BLOCK_M + tl.arange(0, BLOCK_M)
