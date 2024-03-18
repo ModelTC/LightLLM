@@ -31,7 +31,7 @@ class BloomPostLayerInfer(PostLayerInferTpl):
         batch_size = infer_state.batch_size
         last_input = torch.empty((batch_size, self.embed_dim_), device=input_embdings.device, dtype=torch.float16)
         if infer_state.is_prefill:
-            last_index = torch.cumsum(infer_state.b_seq_len, dim=0, dtype=torch.long) - 1
+            last_index = torch.cumsum(infer_state.b_seq_len - infer_state.b_ready_cache_len, dim=0, dtype=torch.long) - 1
             last_input[:, :] = input_embdings[last_index, :]
         else:
             last_input[:, :] = input_embdings[-batch_size:, :]

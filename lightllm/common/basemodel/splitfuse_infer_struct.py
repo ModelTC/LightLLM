@@ -3,6 +3,7 @@ from .infer_struct import InferStateInfo
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
 
+
 class SplitFuseInferStateInfo:
     """
     推理时用的信息结构体
@@ -12,26 +13,26 @@ class SplitFuseInferStateInfo:
 
     def __init__(self):
         self.batch_size = None
-        
+
         self.decode_req_num = None
         self.decode_total_token_num = None
-        self.decode_b_req_idx : torch.Tensor = None
-        self.decode_b_start_loc : torch.Tensor = None
-        self.decode_b_seq_len : torch.Tensor = None
+        self.decode_b_req_idx: torch.Tensor = None
+        self.decode_b_start_loc: torch.Tensor = None
+        self.decode_b_seq_len: torch.Tensor = None
         self.decode_max_len_in_batch = None
 
         self.prefill_req_num = None
-        self.prefill_b_req_idx : torch.Tensor = None
-        self.prefill_b_split_start_loc : torch.Tensor = None
-        self.prefill_b_split_seq_len : torch.Tensor = None
+        self.prefill_b_req_idx: torch.Tensor = None
+        self.prefill_b_split_start_loc: torch.Tensor = None
+        self.prefill_b_split_ready_cache_len: torch.Tensor = None
         self.prefill_max_split_seq_len_in_batch = None
-        self.prefill_b_seq_len : torch.Tensor = None
+        self.prefill_b_seq_len: torch.Tensor = None
 
         self.mem_manager: MemoryManager = None
         self.req_manager: ReqManager = None
 
         self.mem_is_contiguous = None
-        self.mem_start = None 
+        self.mem_start = None
         self.mem_end = None
         self.mem_index = None
         self.kv_buffer = None
@@ -59,6 +60,6 @@ class SplitFuseInferStateInfo:
 
         self.inner_decode_infer_status = infer_status
         return infer_status
-        
-    def init_some_extra_state(self, model, input_ids : torch.Tensor):
+
+    def init_some_extra_state(self, model, input_ids: torch.Tensor):
         pass

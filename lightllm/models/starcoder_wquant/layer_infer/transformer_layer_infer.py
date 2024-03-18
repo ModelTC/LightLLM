@@ -44,7 +44,7 @@ class StarcoderTransformerLayerInferWQuant(TransformerLayerInferWeightQuantTpl):
         self._ffn_norm = partial(BloomTransformerLayerInfer._ffn_norm, self)
 
         LlamaTransformerLayerInferWquant._bind_matmul(self)
-        LlamaTransformerLayerInferWquant._bind_attention(self)
+        LlamaTransformerLayerInfer._bind_attention(self)
         return
 
     def _get_qkv(

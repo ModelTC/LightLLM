@@ -2,7 +2,6 @@ import asyncio
 import numpy as np
 import rpyc
 import torch
-import traceback
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
@@ -45,6 +44,7 @@ from .infer_batch import requests_mapping
 from .infer_batch import InferReq
 from lightllm.server.io_struct import ReqRunStatus
 from lightllm.utils.log_utils import init_logger
+from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 
 
 class ModelRpcServer(rpyc.Service):
@@ -65,6 +65,7 @@ class ModelRpcServer(rpyc.Service):
         self.is_splitfuse_mode = kvargs.get("is_splitfuse_mode", False)
         self.splitfuse_block_size = kvargs.get("splitfuse_block_size", None)
         self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
+        self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
 
         self.cache = {}
         self.logger = init_logger(__name__)
@@ -76,6 +77,12 @@ class ModelRpcServer(rpyc.Service):
             "nccl", init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}', rank=self.tp_rank, world_size=world_size
         )
         torch.cuda.set_device(self.tp_rank)
+
+        self.radix_cache = (
+            RadixCache(str(kvargs["nccl_port"]), max_total_token_num, self.tp_rank)
+            if self.use_dynamic_prompt_cache
+            else None
+        )
 
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 
@@ -166,10 +173,13 @@ class ModelRpcServer(rpyc.Service):
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:
             self.logger.error(f"load model error: {str(e)} {e} {type(e)}")
+            import traceback
+
             traceback.print_exc()
             raise e
 
         set_random_seed(2147483647)
+
         return
 
     # @calculate_time(show=True, min_cost_ms=0.1)
@@ -183,7 +193,13 @@ class ModelRpcServer(rpyc.Service):
         else:
             assert False, "error dtype"
         batch_data = InferBatch.init_batch(
-            batch_id, reqs, dtype, torch.cuda.current_device(), self.model.req_manager, self.model.vocab_size
+            batch_id,
+            reqs,
+            dtype,
+            torch.cuda.current_device(),
+            self.model.req_manager,
+            self.model.vocab_size,
+            self.radix_cache,
         )
         self.cache[batch_id] = batch_data
 
@@ -256,38 +272,31 @@ class ModelRpcServer(rpyc.Service):
         output_dict = {}
         batch: InferBatch = self.cache.pop(batch_id)
         if is_prefill:
-            kwargs, run_reqs, not_run_reqs = prepare_prefill_inputs(batch, self.is_multimodal)
+            kwargs, run_reqs = prepare_prefill_inputs(
+                batch, self.radix_cache, self.model.mem_manager, self.is_multimodal
+            )
         else:
-            kwargs, run_reqs, not_run_reqs = prepare_decode_inputs(batch)
+            kwargs, run_reqs = prepare_decode_inputs(batch, self.radix_cache, self.model.mem_manager)
 
-        if len(run_reqs) >= 1:
-            logits = self.model.forward(**kwargs)
-            next_token_ids, next_token_probs = sample(logits, run_reqs)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+        logits = self.model.forward(**kwargs)
+        next_token_ids, next_token_probs = sample(logits, run_reqs)
+        next_token_ids = next_token_ids.detach().cpu().numpy()
+        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
-            for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
-                # prefill and decode is same
-                req_obj.cur_kv_len = len(req_obj.input_token_ids)
-                req_obj.input_token_ids.append(next_token_id)
-                req_obj.out_token_id_count[next_token_id] += 1
-                metadata = {
-                    "id": int(next_token_id),
-                    "logprob": float(next_token_logprob),
-                }
-                output_dict[req_obj.r_id] = (
-                    req_obj.req_status,
-                    req_obj.cur_kv_len,
-                    int(next_token_id),
-                    metadata,
-                )  # 状态， cur_kv_len, token_id, metadata
-
-        for req_obj in not_run_reqs:
+        for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
+            # prefill and decode is same
+            req_obj.cur_kv_len = len(req_obj.input_token_ids)
+            req_obj.input_token_ids.append(next_token_id)
+            req_obj.out_token_id_count[next_token_id] += 1
+            metadata = {
+                "id": int(next_token_id),
+                "logprob": float(next_token_logprob),
+            }
             output_dict[req_obj.r_id] = (
                 req_obj.req_status,
                 req_obj.cur_kv_len,
-                None,
-                None,
+                int(next_token_id),
+                metadata,
             )  # 状态， cur_kv_len, token_id, metadata
 
         self.cache[batch.batch_id] = batch
@@ -295,62 +304,55 @@ class ModelRpcServer(rpyc.Service):
 
     @torch.no_grad()
     def _prefill_to_return_all_prompt_logprobs(self, batch_id):
+        # 在 return all_prompt_logprobs 的模式下，不能启用 dynamic prompt cache
+        assert self.radix_cache is None
         output_dict = {}
         batch: InferBatch = self.cache.pop(batch_id)
-        kwargs, run_reqs, not_run_reqs = prepare_prefill_inputs(batch)
+        kwargs, run_reqs = prepare_prefill_inputs(batch, self.radix_cache, self.model.mem_manager)
 
-        if len(run_reqs) >= 1:
-            prompt_all_logits = self.model.forward(**kwargs)
-            input_ids = kwargs["input_ids"]
-            b_start_loc = kwargs["b_start_loc"]
-            b_seq_len = kwargs["b_seq_len"]
-            last_index = torch.cumsum(b_seq_len, dim=0, dtype=torch.long) - 1
-            logits = prompt_all_logits[last_index, :]
+        prompt_all_logits = self.model.forward(**kwargs)
+        input_ids = kwargs["input_ids"]
+        b_start_loc = kwargs["b_start_loc"]
+        b_seq_len = kwargs["b_seq_len"]
+        last_index = torch.cumsum(b_seq_len, dim=0, dtype=torch.long) - 1
+        logits = prompt_all_logits[last_index, :]
 
-            next_token_ids, next_token_probs = sample(logits, run_reqs)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+        next_token_ids, next_token_probs = sample(logits, run_reqs)
+        next_token_ids = next_token_ids.detach().cpu().numpy()
+        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
-            b_start_loc = b_start_loc.cpu().numpy()
-            b_seq_len = b_seq_len.cpu().numpy()
-            for req_obj, next_token_id, next_token_logprob, start_loc, seq_len in zip(
-                run_reqs, next_token_ids, next_token_logprobs, b_start_loc, b_seq_len
-            ):
-                # prefill and decode is same
-                req_obj.cur_kv_len = len(req_obj.input_token_ids)
-                req_obj.input_token_ids.append(next_token_id)
-                req_obj.out_token_id_count[next_token_id] += 1
-                metadata = {
-                    "id": int(next_token_id),
-                    "logprob": float(next_token_logprob),
-                }
+        b_start_loc = b_start_loc.cpu().numpy()
+        b_seq_len = b_seq_len.cpu().numpy()
+        for req_obj, next_token_id, next_token_logprob, start_loc, seq_len in zip(
+            run_reqs, next_token_ids, next_token_logprobs, b_start_loc, b_seq_len
+        ):
+            # prefill and decode is same
+            req_obj.cur_kv_len = len(req_obj.input_token_ids)
+            req_obj.input_token_ids.append(next_token_id)
+            req_obj.out_token_id_count[next_token_id] += 1
+            metadata = {
+                "id": int(next_token_id),
+                "logprob": float(next_token_logprob),
+            }
 
-                cur_ids: torch.Tensor = input_ids[start_loc : start_loc + seq_len]
-                cur_logits = prompt_all_logits[start_loc : start_loc + seq_len]
-                cur_logprobs = torch.log_softmax(cur_logits, dim=-1, dtype=torch.float)[0:-1, :]
-                cur_logprobs = torch.gather(cur_logprobs, dim=1, index=cur_ids[1:].view(-1, 1)).detach().cpu().numpy()
+            cur_ids: torch.Tensor = input_ids[start_loc : start_loc + seq_len]
+            cur_logits = prompt_all_logits[start_loc : start_loc + seq_len]
+            cur_logprobs = torch.log_softmax(cur_logits, dim=-1, dtype=torch.float)[0:-1, :]
+            cur_logprobs = torch.gather(cur_logprobs, dim=1, index=cur_ids[1:].view(-1, 1)).detach().cpu().numpy()
 
-                cur_ids = cur_ids.cpu().numpy()
-                all_prompts = []
-                for index in range(len(cur_ids) - 1):
-                    tmp_dict = {int(cur_ids[index + 1]): float(cur_logprobs[index, 0])}
-                    all_prompts.append([int(cur_ids[index]), tmp_dict])
+            cur_ids = cur_ids.cpu().numpy()
+            all_prompts = []
+            for index in range(len(cur_ids) - 1):
+                tmp_dict = {int(cur_ids[index + 1]): float(cur_logprobs[index, 0])}
+                all_prompts.append([int(cur_ids[index]), tmp_dict])
 
-                metadata["prompt_logprobs"] = all_prompts
-                metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
-                output_dict[req_obj.r_id] = (
-                    req_obj.req_status,
-                    req_obj.cur_kv_len,
-                    int(next_token_id),
-                    metadata,
-                )  # 状态， cur_kv_len, token_id, metadata
-
-        for req_obj in not_run_reqs:
+            metadata["prompt_logprobs"] = all_prompts
+            metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
             output_dict[req_obj.r_id] = (
                 req_obj.req_status,
                 req_obj.cur_kv_len,
-                None,
-                None,
+                int(next_token_id),
+                metadata,
             )  # 状态， cur_kv_len, token_id, metadata
 
         self.cache[batch.batch_id] = batch
@@ -360,7 +362,9 @@ class ModelRpcServer(rpyc.Service):
     def splitfuse_forward(self, batch_id):
         output_dict = {}
         batch: InferBatch = self.cache.pop(batch_id)
-        kwargs, decode_reqs, prefill_reqs = splitfuse_prepare_decode_inputs(batch, self.splitfuse_block_size)
+        kwargs, decode_reqs, prefill_reqs = splitfuse_prepare_decode_inputs(
+            batch, self.splitfuse_block_size, self.radix_cache, self.model.mem_manager
+        )
         decode_req_num = len(decode_reqs)
         all_reqs = decode_reqs
         all_reqs.extend(prefill_reqs)

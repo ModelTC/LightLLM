@@ -3,18 +3,24 @@ import numpy as np
 from lightllm.common.basemodel import InferStateInfo
 from lightllm.common.req_manager import ReqManager
 
+
 class LlamaInferStateInfo(InferStateInfo):
     def __init__(self):
         super().__init__()
         self.position_cos = None
         self.position_sin = None
         self.other_kv_index = None
-    
-    def init_some_extra_state(self, model, input_ids : torch.Tensor):
+
+    def init_some_extra_state(self, model, input_ids: torch.Tensor):
         if self.is_prefill:
             b_seq_len_numpy = self.b_seq_len.cpu().numpy()
-            position_ids = torch.from_numpy(np.concatenate([np.arange(0, b_seq_len_numpy[i])
-                                            for i in range(len(b_seq_len_numpy))], axis=0)).cuda()
+            b_ready_cache_len_numpy = self.b_ready_cache_len.cpu().numpy()
+            position_ids = torch.from_numpy(
+                np.concatenate(
+                    [np.arange(b_ready_cache_len_numpy[i], b_seq_len_numpy[i]) for i in range(len(b_seq_len_numpy))],
+                    axis=0,
+                )
+            ).cuda()
             self.position_cos = torch.index_select(model._cos_cached, 0, position_ids).view(position_ids.shape[0], -1)
             self.position_sin = torch.index_select(model._sin_cached, 0, position_ids).view(position_ids.shape[0], -1)
             position_ids = None

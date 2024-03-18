@@ -123,15 +123,35 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, q, kv, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
         o_tensor = torch.empty_like(q) if out is None else out
-        context_attention_fwd(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            kv[:, 0 : self.tp_k_head_num_, :],
-            kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-            infer_state.b_start_loc,
-            infer_state.b_seq_len,
-            infer_state.max_len_in_batch,
-        )
+        import triton
+        if triton.__version__ >= "2.1.0":
+            context_attention_fwd(
+                q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
+                infer_state.mem_manager.kv_buffer[self.layer_num_][
+                    :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+                ],
+                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+                infer_state.b_req_idx,
+                infer_state.b_start_loc,
+                infer_state.b_seq_len,
+                infer_state.b_ready_cache_len,
+                infer_state.max_len_in_batch,
+                infer_state.req_manager.req_to_token_indexs,
+            )
+        elif triton.__version__ == "2.0.0":
+            context_attention_fwd(
+                q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                kv[:, 0 : self.tp_k_head_num_, :],
+                kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
+                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+                infer_state.b_start_loc,
+                infer_state.b_seq_len,
+                infer_state.max_len_in_batch,
+            )
+        else:
+            assert False
+
         return o_tensor
 
     def _splitfuse_attention_kernel(
@@ -163,7 +183,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                     infer_state.req_manager.req_to_token_indexs,
                     infer_state.prefill_b_req_idx,
                     infer_state.prefill_b_split_start_loc,
-                    infer_state.prefill_b_split_seq_len,
+                    infer_state.prefill_b_split_ready_cache_len,
                     infer_state.prefill_b_seq_len,
                     infer_state.prefill_max_split_seq_len_in_batch,
                 )
@@ -205,7 +225,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                     infer_state.req_manager.req_to_token_indexs,
                     infer_state.prefill_b_req_idx,
                     infer_state.prefill_b_split_start_loc,
-                    infer_state.prefill_b_split_seq_len,
+                    infer_state.prefill_b_split_ready_cache_len,
                     infer_state.prefill_b_seq_len,
                     infer_state.prefill_max_split_seq_len_in_batch,
                 )
