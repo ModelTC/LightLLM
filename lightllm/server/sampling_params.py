@@ -1,5 +1,5 @@
 """Sampling parameters for text generation."""
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 
 _SAMPLING_EPS = 1e-5
 
@@ -12,6 +12,7 @@ class SamplingParams:
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
         repetition_penalty: float = 1.0,
+        exponential_decay_length_penalty: Tuple[int, float] = (1, 1.0),
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,  # -1 is for all 
@@ -23,6 +24,7 @@ class SamplingParams:
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty
         self.repetition_penalty = repetition_penalty
+        self.exponential_decay_length_penalty = exponential_decay_length_penalty
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
@@ -53,6 +55,12 @@ class SamplingParams:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, got {self.top_k}.")
         if self.max_new_tokens < 1:
             raise ValueError(f"max_new_tokens must be at least 1 , got {self.max_new_tokens}.")
+        if len(self.exponential_decay_length_penalty) != 2:
+            raise ValueError(f"exponential_decay_length_penalty must be a tuple of (int, float), got {self.exponential_decay_length_penalty}.")
+        if not isinstance(self.exponential_decay_length_penalty[0], int) or self.exponential_decay_length_penalty[0] < 0:
+            raise ValueError(f"exponential_decay_length_penalty[0] must be a non-negative integer, got {self.exponential_decay_length_penalty[0]}.")
+        if not isinstance(self.exponential_decay_length_penalty[1], float) or self.exponential_decay_length_penalty[1] < 1.0:
+            raise ValueError(f"exponential_decay_length_penalty[1] must be a float >= 1.0, got {self.exponential_decay_length_penalty[1]}.")
         return
 
     def stop_sentences_to_token_ids(self, tokenizer):
@@ -77,6 +85,7 @@ class SamplingParams:
         ret["presence_penalty"] = self.presence_penalty
         ret["frequency_penalty"] = self.frequency_penalty
         ret["repetition_penalty"] = self.repetition_penalty
+        ret["exponential_decay_length_penalty"] = self.exponential_decay_length_penalty
         ret["temperature"] = self.temperature
         ret["top_p"] = self.top_p
         ret["top_k"] = self.top_k

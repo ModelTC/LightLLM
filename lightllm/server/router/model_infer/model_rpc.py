@@ -100,6 +100,7 @@ class ModelRpcServer(rpyc.Service):
 
         try:
             self.model_type = model_cfg.get("model_type", "")
+            self.eos_id = model_cfg.get("eos_token_id", 2)
             if self.model_type == "bloom":
                 self.model = BloomTpPartModel(model_kvargs)
             elif self.model_type == "llama":
@@ -279,7 +280,7 @@ class ModelRpcServer(rpyc.Service):
             kwargs, run_reqs = prepare_decode_inputs(batch, self.radix_cache, self.model.mem_manager)
 
         logits = self.model.forward(**kwargs)
-        next_token_ids, next_token_probs = sample(logits, run_reqs)
+        next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
         next_token_ids = next_token_ids.detach().cpu().numpy()
         next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
@@ -317,7 +318,7 @@ class ModelRpcServer(rpyc.Service):
         last_index = torch.cumsum(b_seq_len, dim=0, dtype=torch.long) - 1
         logits = prompt_all_logits[last_index, :]
 
-        next_token_ids, next_token_probs = sample(logits, run_reqs)
+        next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
         next_token_ids = next_token_ids.detach().cpu().numpy()
         next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
@@ -370,7 +371,7 @@ class ModelRpcServer(rpyc.Service):
         all_reqs.extend(prefill_reqs)
 
         logits = self.model.splitfuse_forward(**kwargs)
-        next_token_ids, next_token_probs = sample(logits, all_reqs)
+        next_token_ids, next_token_probs = sample(logits, all_reqs, self.eos_id)
         next_token_ids = next_token_ids.detach().cpu().numpy()
         next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 

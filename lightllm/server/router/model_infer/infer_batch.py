@@ -4,7 +4,7 @@ import numpy as np
 import collections
 
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.utils.infer_utils import mark_start, mark_end
@@ -25,6 +25,7 @@ class InferSamplingParams:
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
         repetition_penalty: float = 1.0,
+        exponential_decay_length_penalty: Tuple[int, float] = (1, 1.0),
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,
@@ -34,6 +35,7 @@ class InferSamplingParams:
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty
         self.repetition_penalty = repetition_penalty
+        self.exponential_decay_length_penalty = exponential_decay_length_penalty
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
