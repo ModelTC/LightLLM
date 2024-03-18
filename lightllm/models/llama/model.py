@@ -140,7 +140,10 @@ class LlamaTpPartModel(TpPartBaseModel):
         partial_head_dim = int(self.config.get("partial_rotary_factor", 1) * self.head_dim_)
         max_position_embeddings = self.config.get("max_position_embeddings", 2048)
         base = self.config.get("rope_theta", 10000.0)
-        scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
+        if self.config.get("rope_scaling", {}) is None:
+            scaling_factor = 1.0
+        else:
+            scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
         max_seq_len = 32 * max_position_embeddings # 64k
         self._cos_cached = torch.zeros((max_seq_len, partial_head_dim // 2), dtype=torch.float16, device="cuda")
         self._sin_cached = torch.zeros((max_seq_len, partial_head_dim // 2), dtype=torch.float16, device="cuda")
@@ -165,7 +168,10 @@ class LlamaTpPartModel(TpPartBaseModel):
         dim = self.head_dim_
         max_position_embeddings = self.config.get("max_position_embeddings", 2048)
         base = self.config.get("rope_theta", 10000.0)
-        scale = self.config.get("rope_scaling", {}).get("factor", 1.0)
+        if self.config.get("rope_scaling", {}) is None:
+            scale = 1.0
+        else:
+            scale = self.config.get("rope_scaling", {}).get("factor", 1.0)
         original_max_position_embeddings = self.config.get("original_max_position_embeddings", 2048)
         extrapolation_factor = 1.0
         attn_factor = 1.0
