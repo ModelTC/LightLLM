@@ -7,7 +7,6 @@ from PIL import Image
 from typing import List, Union
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
-from transformers import CLIPVisionModel
 
 
 class InternVisionModel:
@@ -57,6 +56,7 @@ class InternVisionModel:
             transforms.Normalize((0.48145466, 0.4578275, 0.40821073),
                                  (0.26862954, 0.26130258, 0.27577711)),
         ])
+        from transformers import CLIPVisionModel
         self.vision_tower = CLIPVisionModel.from_pretrained(vision_path)
         self.vision_tower.requires_grad_(False)
         self.resize_pos(config, vision_path)

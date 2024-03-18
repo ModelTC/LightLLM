@@ -4,7 +4,6 @@ import json
 import os
 from PIL import Image
 from typing import List, Union
-from transformers import CLIPVisionModel, CLIPImageProcessor
 
 
 class LlavaVisionModel:
@@ -26,6 +25,7 @@ class LlavaVisionModel:
         if vision_path.startswith("./"):
             vision_path = os.path.join(weight_dir, vision_path)
 
+        from transformers import CLIPVisionModel, CLIPImageProcessor
         self.image_processor = CLIPImageProcessor.from_pretrained(vision_path)
         self.vision_tower = CLIPVisionModel.from_pretrained(vision_path).half()
         self.vision_tower.requires_grad_(False)
