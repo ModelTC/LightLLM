@@ -44,6 +44,7 @@ class TpPartBaseModel:
         self.max_req_num = kvargs.get("max_req_num", 1000)
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
         self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
+        self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
 
         self._init_config()
         self._verify_must()
@@ -192,6 +193,7 @@ class TpPartBaseModel:
         infer_state = self.infer_state_class()
         infer_state.is_prefill = True
         infer_state.return_all_prompt_logprobs = self.return_all_prompt_logprobs
+        infer_state.use_dynamic_prompt_cache = self.use_dynamic_prompt_cache
         infer_state.batch_size = batch_size
         infer_state.total_token_num = total_token_num
         infer_state.max_len_in_batch = max_len_in_batch
@@ -251,6 +253,7 @@ class TpPartBaseModel:
         infer_state.batch_size = batch_size
         infer_state.total_token_num = total_token_num
         infer_state.max_len_in_batch = max_len_in_batch
+        infer_state.use_dynamic_prompt_cache = self.use_dynamic_prompt_cache
         assert b_req_idx.shape[0] == b_start_loc.shape[0] == b_seq_len.shape[0]
         infer_state.b_req_idx = b_req_idx
         infer_state.b_start_loc = b_start_loc
@@ -301,6 +304,7 @@ class TpPartBaseModel:
     ):
 
         infer_state = self.splitfuse_infer_state_class()
+        infer_state.use_dynamic_prompt_cache = self.use_dynamic_prompt_cache
         infer_state.batch_size = decode_req_num + prefill_req_num
 
         infer_state.decode_req_num = decode_req_num

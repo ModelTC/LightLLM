@@ -12,6 +12,8 @@ class SplitFuseInferStateInfo:
     inner_decode_infer_state_class = InferStateInfo
 
     def __init__(self):
+        self.use_dynamic_prompt_cache = False
+
         self.batch_size = None
 
         self.decode_req_num = None

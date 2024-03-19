@@ -7,7 +7,10 @@ from functools import partial
 import triton
 
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
+from lightllm.models.llama.triton_kernel.context_flashattention_nopad import (
+    context_attention_fwd,
+    context_attention_fwd_no_prompt_cache,
+)
 from lightllm.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd, token_att_fwd_int8k
 from lightllm.models.llama.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
 from lightllm.models.llama.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2, token_att_fwd2_int8v
@@ -54,6 +57,11 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
         if "ppl_int8kv" in self.mode:
             self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_ppl_int8kv, self)
+        elif "ppl_int8kv_flashdecoding" in self.mode:
+            self._token_attention_kernel = partial(
+                LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv_flashdecoding, self
+            )
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_ppl_int8kv, self)
         elif "ppl_fp16" in self.mode:
             self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_ppl_fp16, self)
@@ -124,21 +132,33 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     ) -> torch.Tensor:
         o_tensor = torch.empty_like(q) if out is None else out
         import triton
+
         if triton.__version__ >= "2.1.0":
-            context_attention_fwd(
-                q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-                infer_state.mem_manager.kv_buffer[self.layer_num_][
-                    :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                ],
-                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                infer_state.b_req_idx,
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.b_ready_cache_len,
-                infer_state.max_len_in_batch,
-                infer_state.req_manager.req_to_token_indexs,
-            )
+            if infer_state.use_dynamic_prompt_cache:
+                kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+                context_attention_fwd(
+                    q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                    kv[:, 0 : self.tp_k_head_num_, :],
+                    kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
+                    o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+                    infer_state.b_req_idx,
+                    infer_state.b_start_loc,
+                    infer_state.b_seq_len,
+                    infer_state.b_ready_cache_len,
+                    infer_state.max_len_in_batch,
+                    infer_state.req_manager.req_to_token_indexs,
+                )
+            else:
+                context_attention_fwd_no_prompt_cache(
+                    q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                    kv[:, 0 : self.tp_k_head_num_, :],
+                    kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
+                    o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+                    infer_state.b_start_loc,
+                    infer_state.b_seq_len,
+                    infer_state.max_len_in_batch,
+                )
+
         elif triton.__version__ == "2.0.0":
             context_attention_fwd(
                 q.view(-1, self.tp_q_head_num_, self.head_dim_),
@@ -486,4 +506,21 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         ]
         return token_decode_attention_flash_decoding(
             q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out
+        )
+
+    def _token_decode_attention_ppl_int8kv_flashdecoding(
+        self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None
+    ):
+        from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding import token_decode_attention_flash_decoding
+
+        cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
+        cache_k_scale = infer_state.mem_manager.scale_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
+        cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
+            :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+        ]
+        cache_v_scale = infer_state.mem_manager.scale_buffer[self.layer_num_][
+            :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+        ]
+        return token_decode_attention_flash_decoding(
+            q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_k_scale, cache_v, cache_v_scale, out=out
         )
