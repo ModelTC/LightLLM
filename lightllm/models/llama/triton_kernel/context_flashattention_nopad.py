@@ -506,6 +506,8 @@ elif triton.__version__ == "2.0.0":
             num_stages=1,
         )
         return
+    
+    context_attention_fwd_no_prompt_cache = None
 
 else:
     raise Exception("error triton version!")
