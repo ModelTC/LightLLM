@@ -201,7 +201,10 @@ class TpPartBaseModel:
         infer_state.b_req_idx = b_req_idx
         infer_state.b_start_loc = b_start_loc
         infer_state.b_seq_len = b_seq_len
-        infer_state.b_ready_cache_len = b_ready_cache_len
+        if b_ready_cache_len is not None:
+            infer_state.b_ready_cache_len = b_ready_cache_len
+        else:
+            infer_state.b_ready_cache_len = torch.zeros_like(b_seq_len, dtype=b_seq_len.dtype, device=b_seq_len.device)
         infer_state.multimodal_params = multimodal_params
 
         infer_state.mem_manager = self.mem_manager
