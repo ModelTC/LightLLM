@@ -38,7 +38,7 @@ class TpPartBaseModel:
         self.weight_dir_ = kvargs["weight_dir"]
         self.max_total_token_num = kvargs["max_total_token_num"]
         self.load_way = kvargs.get("load_way", "HF")
-        self.mode = kvargs.get("mode", [])
+        self.mode = [m.replace('int4weight', 'w4a16').replace('int8weight', 'w8a16') for m in kvargs.get("mode", [])]
         self.weight_dict = kvargs.get("weight_dict", None)
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
@@ -231,7 +231,7 @@ class TpPartBaseModel:
             self.req_manager.req_to_token_indexs,
             b_req_idx,
             b_seq_len,
-            b_ready_cache_len,
+            infer_state.b_ready_cache_len,
             max_len_in_batch,
             infer_state.mem_index,
         )
