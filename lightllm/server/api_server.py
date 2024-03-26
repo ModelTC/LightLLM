@@ -322,7 +322,7 @@ def main():
         default=None,
         help="max tokens num for new cat batch, it control prefill batch size to Preventing OOM",
     )
-    parser.add_argument("--eos_id", nargs='+', type=int, default=2, help="eos stop token id")
+    parser.add_argument("--eos_id", nargs='+', type=int, default=[2], help="eos stop token id")
     parser.add_argument(
         "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
     )
