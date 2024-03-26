@@ -66,6 +66,7 @@ class ModelRpcServer(rpyc.Service):
         self.splitfuse_block_size = kvargs.get("splitfuse_block_size", None)
         self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
+        self.eos_id = kvargs.get("eos_id", [2])
 
         self.cache = {}
         self.logger = init_logger(__name__)
@@ -101,7 +102,6 @@ class ModelRpcServer(rpyc.Service):
 
         try:
             self.model_type = model_cfg.get("model_type", "")
-            self.eos_id = model_cfg.get("eos_token_id", 2)
             if self.model_type == "bloom":
                 self.model = BloomTpPartModel(model_kvargs)
             elif self.model_type == "llama":

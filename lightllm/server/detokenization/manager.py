@@ -17,13 +17,12 @@ logger = init_logger(__name__)
 class DeTokenizationManager:
     def __init__(
         self,
+        eos_id,
         model_weightdir,
         tokenizor_mode,
         detokenization_port,
         httpserver_port,
         trust_remote_code,
-        skip_special_tokens,
-        spaces_between_special_tokens,
     ):
         context = zmq.asyncio.Context(2)
         self.recv_from_router = context.socket(zmq.PULL)
@@ -35,9 +34,8 @@ class DeTokenizationManager:
         self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code)
         self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out = {}
+        self.eos_id = eos_id
 
-        self.skip_special_tokens = skip_special_tokens
-        self.spaces_between_special_tokens = spaces_between_special_tokens
 
     async def handle_loop(self):
         while True:
@@ -67,8 +65,7 @@ class DeTokenizationManager:
                             self.tokenizer,
                             req_out,
                             new_token_id,
-                            skip_special_tokens=self.skip_special_tokens,
-                            spaces_between_special_tokens=self.spaces_between_special_tokens,
+                            self.eos_id,
                         )
 
                         if out_text.endswith(u'\ufffd'):
@@ -92,13 +89,12 @@ class DeTokenizationManager:
 def start_detokenization_process(args, detokenization_port, httpserver_port, pipe_writer):
     try:
         router = DeTokenizationManager(
+            args.eos_id,
             args.model_dir,
             args.tokenizer_mode,
             detokenization_port=detokenization_port,
             httpserver_port=httpserver_port,
             trust_remote_code=args.trust_remote_code,
-            skip_special_tokens=not args.no_skipping_special_tokens,
-            spaces_between_special_tokens=not args.no_spaces_between_special_tokens,
         )
     except Exception as e:
         pipe_writer.send(str(e))

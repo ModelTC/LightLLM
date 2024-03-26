@@ -18,7 +18,10 @@ class SamplingParams:
         top_k: int = -1,  # -1 is for all 
         ignore_eos: bool = False,
         max_new_tokens: int = 16,
-        stop_sequences: Optional[Union[str, List[str]]] = None  # 停止句子条件
+        stop_sequences: Optional[Union[str, List[str]]] = None,  # 停止句子条件
+        skip_special_tokens: bool = True, # whether to skip special tokens when decoding
+        add_spaces_between_special_tokens: bool = True, # whether to add spaces between special tokens when decoding
+        print_eos_token: bool = False, # eos_id will be always ignored except the value is set to True
     ) -> None:
         self.do_sample = do_sample
         self.presence_penalty = presence_penalty
@@ -31,6 +34,9 @@ class SamplingParams:
         self.ignore_eos = ignore_eos
         self.max_new_tokens = max_new_tokens
         self.stop_sequences = stop_sequences
+        self.skip_special_tokens = skip_special_tokens
+        self.add_spaces_between_special_tokens = add_spaces_between_special_tokens
+        self.print_eos_token = print_eos_token
         if self.do_sample == False:
             self.temperature = 1.0
             self.top_p = 1.0

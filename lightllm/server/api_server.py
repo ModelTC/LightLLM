@@ -322,7 +322,7 @@ def main():
         default=None,
         help="max tokens num for new cat batch, it control prefill batch size to Preventing OOM",
     )
-    parser.add_argument("--eos_id", type=int, default=2, help="eos stop token id")
+    parser.add_argument("--eos_id", nargs='+', type=int, default=2, help="eos stop token id")
     parser.add_argument(
         "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
     )
@@ -362,15 +362,6 @@ def main():
     parser.add_argument("--router_token_ratio", type=float, default=0.0, help="token ratio to control router dispatch")
     parser.add_argument(
         "--router_max_new_token_len", type=int, default=1024, help="the request max new token len for router"
-    )
-
-    parser.add_argument(
-        "--no_skipping_special_tokens", action="store_true", help="whether to skip special tokens when decoding"
-    )
-    parser.add_argument(
-        "--no_spaces_between_special_tokens",
-        action="store_true",
-        help="whether to add spaces between special tokens when decoding",
     )
 
     parser.add_argument("--use_dynamic_prompt_cache", action="store_true", help="use_dynamic_prompt_cache test")

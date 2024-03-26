@@ -75,6 +75,7 @@ class RouterManager:
                 "splitfuse_block_size": self.splitfuse_block_size,
                 "return_all_prompt_logprobs": self.args.return_all_prompt_logprobs,
                 "use_dynamic_prompt_cache": self.args.use_dynamic_prompt_cache,
+                "eos_id": self.eos_id,
             }
             init_model_ret.append(self.model_rpcs[rank_id].init_model(kvargs))
 

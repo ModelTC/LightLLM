@@ -5,7 +5,7 @@ from lightllm.server.router.model_infer.infer_batch import InferBatch
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 
 
-def sample(logits, reqs, eos_id=2):
+def sample(logits, reqs, eos_id:List[int]=[2]):
     logits = logits.contiguous()
     (
         presence_penalties,
@@ -33,7 +33,7 @@ def sample(logits, reqs, eos_id=2):
         p_max_len_in_batch,
     )
     logits[:, eos_id] = logits[:, eos_id] + torch.abs(logits[:, eos_id]) * (
-        torch.pow(exponential_decay_length_penalties, length_penalty_idx).view((-1,)) - 1
+        torch.pow(exponential_decay_length_penalties, length_penalty_idx).view((-1, 1)) - 1
     )
     logits.div_(temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
