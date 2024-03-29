@@ -100,12 +100,14 @@ class ModelRpcServer(rpyc.Service):
             "use_dynamic_prompt_cache": self.use_dynamic_prompt_cache,
         }
 
+        is_weight_only_quant = any("w6a16" in mode_ or "w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode)
+
         try:
             self.model_type = model_cfg.get("model_type", "")
             if self.model_type == "bloom":
                 self.model = BloomTpPartModel(model_kvargs)
             elif self.model_type == "llama":
-                if any("w4a16" in mode_ or "w8a16" in mode_ for mode_ in self.mode):
+                if is_weight_only_quant:
                     self.model = LlamaTpPartModelWQuant(model_kvargs)
                 elif any("w8a8" in mode_ for mode_ in self.mode):
                     self.model = LlamaTpPartModelAWQuant(model_kvargs)
@@ -115,7 +117,7 @@ class ModelRpcServer(rpyc.Service):
                 if "visual" in model_cfg:
                     self.model = QWenVLTpPartModel(model_kvargs)
                     self.is_multimodal = True
-                elif any("w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode):
+                elif is_weight_only_quant:
                     self.model = QWenTpPartModelWQuant(model_kvargs)
                 else:
                     self.model = QWenTpPartModel(model_kvargs)
@@ -133,7 +135,7 @@ class ModelRpcServer(rpyc.Service):
                 else:
                     raise Exception("can not support baichuan format")
             elif self.model_type == "gpt_bigcode":
-                if any("w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode):
+                if is_weight_only_quant:
                     self.model = StarcoderTpPartModelWQuant(model_kvargs)
                 else:
                     self.model = StarcoderTpPartModel(model_kvargs)
@@ -142,12 +144,12 @@ class ModelRpcServer(rpyc.Service):
             elif self.model_type == "chatglm":
                 self.model = ChatGlm2TpPartModel(model_kvargs)
             elif self.model_type == "internlm":
-                if any("w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode):
+                if is_weight_only_quant:
                     self.model = InternlmTpPartModelWQuant(model_kvargs)
                 else:
                     self.model = InternlmTpPartModel(model_kvargs)
             elif self.model_type == "internlm2":
-                if any("w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode):
+                if is_weight_only_quant:
                     self.model = Internlm2TpPartModelWQuant(model_kvargs)
                 else:
                     self.model = Internlm2TpPartModel(model_kvargs)

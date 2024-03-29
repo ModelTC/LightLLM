@@ -18,7 +18,7 @@ class QWenTpPartModelWQuant(QWenTpPartModel):
     
     def _verify_params(self):
         super()._verify_params()
-        assert any("w4a16" in mode_ or "w8a16" in mode_ for mode_ in self.mode), "only for weight quant model"
+        assert any("w6a16" in mode_ or "w4a16" in mode_ or "w8a16" in mode_ for mode_ in self.mode), "only for weight quant model"
         assert self.config["num_key_value_heads"] % self.world_size_ == 0
         assert self.config["num_attention_heads"] % self.world_size_ == 0
         return

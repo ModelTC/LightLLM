@@ -21,6 +21,7 @@ from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import (
 )
 from lightllm.common.basemodel.cuda_kernel.lmdeploy_wquant import matmul_dequantize_int4_lmdeploy
 from lightllm.common.basemodel.cuda_kernel.ppl_wquant import matmul_dequantize_int4_ppl
+from lightllm.common.basemodel.cuda_kernel.fast_llm_wquant import matmul_dequantize_int6_fast_llm
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.utils.log_utils import init_logger
 
@@ -83,6 +84,14 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
             self._wquant_matmul_for_ffn_down = func
             if self.tp_rank_ == 0 and self.layer_num_ == 0:
                 logger.info("model use ppl_w4a16 kernel")
+        elif "flash_llm_w6a16" in self.mode:
+            func = partial(LlamaTransformerLayerInferWquant._wquant_matmul_fast_llm_int6weight_only_quant, self)
+            self._wquant_matmul_for_qkv = func
+            self._wquant_matmul_for_o = func
+            self._wquant_matmul_for_ffn_up = func
+            self._wquant_matmul_for_ffn_down = func
+            if self.tp_rank_ == 0 and self.layer_num_ == 0:
+                logger.info("model use flash_llm_w6a16 kernel")
         else:
             raise Exception(f"error mode {self.mode}")
         return
@@ -174,6 +183,18 @@ class LlamaTransformerLayerInferWquant(TransformerLayerInferWeightQuantTpl):
         assert has_act is False
         qweight, qscale = quant_weight_params
         out = matmul_dequantize_int4_ppl(input, qweight, qscale)
+        if bias is None:
+            return out
+        else:
+            out.add_(bias)
+            return out
+        
+    def _wquant_matmul_fast_llm_int6weight_only_quant(
+        self, input, quant_weight_params, infer_state: LlamaInferStateInfo, out=None, bias=None, has_act=False
+    ):
+        assert has_act is False
+        qweight, qscale = quant_weight_params
+        out = matmul_dequantize_int6_fast_llm(input, qweight, qscale)
         if bias is None:
             return out
         else:

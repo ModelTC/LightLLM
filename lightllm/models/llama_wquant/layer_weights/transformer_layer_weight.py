@@ -9,6 +9,7 @@ from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int8 import quantiz
 from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import quantize_int4
 from lightllm.common.basemodel.cuda_kernel.lmdeploy_wquant import quantize_int4_lmdeploy
 from lightllm.common.basemodel.cuda_kernel.ppl_wquant import quantize_int4_ppl
+from lightllm.common.basemodel.cuda_kernel.fast_llm_wquant import fp6_quant
 
 
 class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
@@ -39,6 +40,9 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
                 if _mode.startswith("g"):
                     self.int4_q_group_size = int(_mode[1:])
             self.quantize_weight = partial(quantize_int4_ppl, group_size=self.int4_q_group_size, tp_rank=self.tp_rank_)
+        elif "flash_llm_w6a16" in self.mode:
+             # per channel 
+             self.quantize_weight = partial(fp6_quant, tp_rank=self.tp_rank_)
         else:
             raise Exception(f"error mode {self.mode}")
 
