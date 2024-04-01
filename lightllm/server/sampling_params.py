@@ -5,7 +5,6 @@ _SAMPLING_EPS = 1e-5
 
 
 class SamplingParams:
-
     def __init__(
         self,
         do_sample: bool = False,
@@ -15,13 +14,14 @@ class SamplingParams:
         exponential_decay_length_penalty: Tuple[int, float] = (1, 1.0),
         temperature: float = 1.0,
         top_p: float = 1.0,
-        top_k: int = -1,  # -1 is for all 
+        top_k: int = -1,  # -1 is for all
         ignore_eos: bool = False,
         max_new_tokens: int = 16,
+        min_new_tokens: int = 1,
         stop_sequences: Optional[Union[str, List[str]]] = None,  # 停止句子条件
-        skip_special_tokens: bool = True, # whether to skip special tokens when decoding
-        add_spaces_between_special_tokens: bool = True, # whether to add spaces between special tokens when decoding
-        print_eos_token: bool = False, # eos_id will be always ignored except the value is set to True
+        skip_special_tokens: bool = True,  # whether to skip special tokens when decoding
+        add_spaces_between_special_tokens: bool = True,  # whether to add spaces between special tokens when decoding
+        print_eos_token: bool = False,  # eos_id will be always ignored except the value is set to True
     ) -> None:
         self.do_sample = do_sample
         self.presence_penalty = presence_penalty
@@ -33,19 +33,22 @@ class SamplingParams:
         self.top_k = top_k
         self.ignore_eos = ignore_eos
         self.max_new_tokens = max_new_tokens
+        self.min_new_tokens = min_new_tokens
         self.stop_sequences = stop_sequences
         self.skip_special_tokens = skip_special_tokens
         self.add_spaces_between_special_tokens = add_spaces_between_special_tokens
         self.print_eos_token = print_eos_token
-        if self.do_sample == False:
+        if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
             self.top_k = 1
-        if self.temperature >= 0.0 and self.temperature < _SAMPLING_EPS: # temperature is too slow, change to greedy search
+        if (
+            self.temperature >= 0.0 and self.temperature < _SAMPLING_EPS
+        ):  # temperature is too slow, change to greedy search
             self.temperature = 1.0
             self.top_k = 1
         return
-    
+
     def verify(self):
         if self.presence_penalty < 0.0:
             raise ValueError(f"presence_penalty must >= 0.0, got {self.presence_penalty}")
@@ -61,12 +64,35 @@ class SamplingParams:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, got {self.top_k}.")
         if self.max_new_tokens < 1:
             raise ValueError(f"max_new_tokens must be at least 1 , got {self.max_new_tokens}.")
+        if self.min_new_tokens < 1:
+            raise ValueError(f"min_new_tokens must be at least 1 , got {self.min_new_tokens}.")
+        if self.min_new_tokens > self.max_new_tokens:
+            raise ValueError(
+                f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
+            )
+
         if len(self.exponential_decay_length_penalty) != 2:
-            raise ValueError(f"exponential_decay_length_penalty must be a tuple of (int, float), got {self.exponential_decay_length_penalty}.")
-        if not isinstance(self.exponential_decay_length_penalty[0], int) or self.exponential_decay_length_penalty[0] < 0:
-            raise ValueError(f"exponential_decay_length_penalty[0] must be a non-negative integer, got {self.exponential_decay_length_penalty[0]}.")
-        if not isinstance(self.exponential_decay_length_penalty[1], float) or self.exponential_decay_length_penalty[1] < 1.0:
-            raise ValueError(f"exponential_decay_length_penalty[1] must be a float >= 1.0, got {self.exponential_decay_length_penalty[1]}.")
+            raise ValueError(
+                f"exponential_decay_length_penalty must be a tuple of (int, float), \
+                got {self.exponential_decay_length_penalty}."
+            )
+        if (
+            not isinstance(self.exponential_decay_length_penalty[0], int)
+            or self.exponential_decay_length_penalty[0] < 0
+        ):
+            raise ValueError(
+                f"exponential_decay_length_penalty[0] must be a non-negative integer, \
+                got {self.exponential_decay_length_penalty[0]}."
+            )
+        if (
+            not isinstance(self.exponential_decay_length_penalty[1], float)
+            or self.exponential_decay_length_penalty[1] < 1.0
+        ):
+            raise ValueError(
+                f"exponential_decay_length_penalty[1] must be a float >= 1.0, \
+                got {self.exponential_decay_length_penalty[1]}."
+            )
+
         return
 
     def stop_sentences_to_token_ids(self, tokenizer):
@@ -78,13 +104,13 @@ class SamplingParams:
             new_stop_sequences = []
             for stop_str in self.stop_sequences:
                 stop_str_ids = tokenizer.encode(stop_str)
-                if stop_str_ids is not None and len(stop_str_ids) >= 1: # remove bos_token_id
+                if stop_str_ids is not None and len(stop_str_ids) >= 1:  # remove bos_token_id
                     stop_str_ids = stop_str_ids[1:]
                 if len(stop_str_ids) > 0:
                     new_stop_sequences.append(stop_str_ids)
             self.stop_sequences = new_stop_sequences
         return
-    
+
     def to_dict(self):
         ret = {}
         ret["do_sample"] = self.do_sample
@@ -95,6 +121,7 @@ class SamplingParams:
         ret["temperature"] = self.temperature
         ret["top_p"] = self.top_p
         ret["top_k"] = self.top_k
+        ret["min_new_tokens"] = self.min_new_tokens
         # if self.ignore_eos is not None:
         #     ret["ignore_eos"] = self.ignore_eos
         # if self.max_tokens is not None:

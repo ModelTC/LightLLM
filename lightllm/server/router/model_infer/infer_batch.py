@@ -30,6 +30,7 @@ class InferSamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         vocab_size: int = -1,
+        min_new_tokens: int = 1,
     ) -> None:
         self.do_sample = do_sample
         self.presence_penalty = presence_penalty
@@ -39,6 +40,7 @@ class InferSamplingParams:
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
+        self.min_new_tokens = min_new_tokens
         if self.top_k == -1:
             self.top_k = vocab_size
         return
@@ -202,7 +204,9 @@ class InferBatch:
             return self
         if len(request_ids) == 0:
             self.free_self()
-            return InferBatch(batch_id=self.batch_id, request_ids=[], req_manager=self.req_manager, radix_cache=self.radix_cache)
+            return InferBatch(
+                batch_id=self.batch_id, request_ids=[], req_manager=self.req_manager, radix_cache=self.radix_cache
+            )
         free_req_index = []
         free_token_index = []
         for request_id in finished_request_ids:

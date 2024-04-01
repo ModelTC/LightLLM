@@ -5,7 +5,7 @@ from lightllm.server.router.model_infer.infer_batch import InferBatch
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 
 
-def sample(logits, reqs, eos_id:List[int]=[2]):
+def sample(logits, reqs, eos_id: List[int] = [2]):
     logits = logits.contiguous()
     (
         presence_penalties,
@@ -20,6 +20,7 @@ def sample(logits, reqs, eos_id:List[int]=[2]):
         p_cumsum_seq_len,
         p_max_len_in_batch,
         length_penalty_idx,
+        mask_eos_reqs,
     ) = _get_post_sample_tensors(reqs)
 
     apply_penalty(
@@ -35,6 +36,7 @@ def sample(logits, reqs, eos_id:List[int]=[2]):
     logits[:, eos_id] = logits[:, eos_id] + torch.abs(logits[:, eos_id]) * (
         torch.pow(exponential_decay_length_penalties, length_penalty_idx).view((-1, 1)) - 1
     )
+    logits[mask_eos_reqs, eos_id] = -1000000.0
     logits.div_(temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
     probs_sort, probs_idx = _top_p_top_k(probs, top_ps, top_ks)
@@ -67,9 +69,12 @@ def _get_post_sample_tensors(reqs):
     top_ks: List[int] = []
     p_token_ids: List[int] = []
     p_token_counts: List[int] = []
-    p_seq_len: List[int] = [0,]
+    p_seq_len: List[int] = [
+        0,
+    ]
     p_max_len_in_batch: int = 0
     length_penalty_idx: List[int] = []
+    mask_eos_reqs: List[bool] = []
     for i, req_obj in enumerate(reqs):
         id_to_count = req_obj.out_token_id_count
         sample_param = req_obj.sampling_param
@@ -77,9 +82,9 @@ def _get_post_sample_tensors(reqs):
         frequency_penalties.append(sample_param.frequency_penalty)
         repetition_penalties.append(sample_param.repetition_penalty)
         exponential_decay_length_penalties.append(sample_param.exponential_decay_length_penalty[1])
-        length_penalty_idx.append(
-            max(len(req_obj.input_token_ids) - req_obj.prompt_len - sample_param.exponential_decay_length_penalty[0], 0)
-        )
+        out_token_len = len(req_obj.input_token_ids) - req_obj.prompt_len
+        length_penalty_idx.append(max(out_token_len - sample_param.exponential_decay_length_penalty[0], 0))
+        mask_eos_reqs.append(out_token_len < sample_param.min_new_tokens - 1)
 
         temperatures.append(sample_param.temperature)
         top_ps.append(sample_param.top_p)
@@ -105,6 +110,7 @@ def _get_post_sample_tensors(reqs):
     p_seq_len = torch.tensor(p_seq_len, dtype=torch.int32, device="cuda")
     p_cumsum_seq_len = torch.cumsum(p_seq_len, dim=0, dtype=torch.int32)
     length_penalty_idx = torch.tensor(length_penalty_idx, dtype=torch.int32, device="cuda")
+    mask_eos_reqs = torch.tensor(mask_eos_reqs, dtype=torch.bool, device="cuda")
     return (
         presence_penalties,
         frequency_penalties,
@@ -118,4 +124,5 @@ def _get_post_sample_tensors(reqs):
         p_cumsum_seq_len,
         p_max_len_in_batch,
         length_penalty_idx,
+        mask_eos_reqs,
     )
