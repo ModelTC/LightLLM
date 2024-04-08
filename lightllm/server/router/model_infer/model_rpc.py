@@ -14,6 +14,7 @@ from lightllm.models.bloom.model import BloomTpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.llama_wquant.model import LlamaTpPartModelWQuant
 from lightllm.models.llama_awquant.model import LlamaTpPartModelAWQuant
+from lightllm.models.llama_quik.model import LlamaTpPartModelQuik
 from lightllm.models.starcoder.model import StarcoderTpPartModel
 from lightllm.models.starcoder_wquant.model import StarcoderTpPartModelWQuant
 from lightllm.models.starcoder2.model import Starcoder2TpPartModel
@@ -111,6 +112,9 @@ class ModelRpcServer(rpyc.Service):
                     self.model = LlamaTpPartModelWQuant(model_kvargs)
                 elif any("w8a8" in mode_ for mode_ in self.mode):
                     self.model = LlamaTpPartModelAWQuant(model_kvargs)
+                elif any('quik_activation_weight' in mode_ for mode_ in self.mode):
+                    # Supports both w4a4 and w8a8 modes, with automatic mode selection upon model loading.
+                    self.model = LlamaTpPartModelQuik(model_kvargs)
                 else:
                     self.model = LlamaTpPartModel(model_kvargs)
             elif self.model_type == "qwen":
