@@ -43,6 +43,7 @@ from .router.manager import start_router_process
 from .embed_cache.manager import start_cache_manager
 from .visualserver.manager import start_visual_process
 from .req_id_generator import ReqIDGenerator
+from .api_tgi import tgi_generate_impl, tgi_generate_stream_impl
 
 from lightllm.utils.net_utils import alloc_can_use_network_port
 from lightllm.utils.start_utils import start_submodule_processes
@@ -78,6 +79,11 @@ def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse
 @app.get("/health")
 def healthcheck():
     return "OK"
+
+
+@app.head("/health")
+def healthcheckhead():
+    return None
 
 
 @app.post("/generate")
@@ -192,6 +198,26 @@ async def generate_stream(request: Request) -> Response:
     background_tasks.add_task(abort_request)
 
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+
+
+@app.post("/tgi_generate")
+async def tgi_generate(request: Request) -> Response:
+    global isFirst
+    if isFirst:
+        loop = asyncio.get_event_loop()
+        loop.create_task(httpserver_manager.handle_loop())
+        isFirst = False
+    return await tgi_generate_impl(request, g_id_gen, httpserver_manager)
+
+
+@app.post("/tgi_generate_stream")
+async def tgi_generate_stream(request: Request) -> Response:
+    global isFirst
+    if isFirst:
+        loop = asyncio.get_event_loop()
+        loop.create_task(httpserver_manager.handle_loop())
+        isFirst = False
+    return await tgi_generate_stream_impl(request, g_id_gen, httpserver_manager)
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
