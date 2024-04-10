@@ -56,7 +56,7 @@ def _gelu_and_mul_kernel(
     ).to(tl.float32)
 
     gate = gelu(gate)
-    gate = gate.to(tl.float16)
+    gate = gate.to(input_ptr.dtype.element_ty)
 
     tl.store(
         input_ptr + res_offsets,

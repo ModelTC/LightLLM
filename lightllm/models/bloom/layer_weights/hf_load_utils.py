@@ -5,7 +5,8 @@ from safetensors import safe_open
 
 
 def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None, weight_dict=None):
-    data_type = torch.float16 if data_type == 'fp16' else torch.float32
+    if isinstance(data_type, str):
+        data_type = torch.float16 if data_type == 'fp16' else torch.float32
     if pre_post_layer is not None:
         assert pre_post_layer.data_type_ == data_type, "type is not right"
     if transformer_layer_list is not None:

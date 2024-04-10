@@ -43,7 +43,7 @@ class StarcoderTpPartModel(TpPartBaseModel):
 
     def _init_mem_manager(self):    
         self.mem_manager = select_mem_manager_class(self.mode)(self.max_total_token_num,
-                                         dtype=torch.float16,
+                                         dtype=self.data_type,
                                          head_num=self.config["num_key_value_heads"],
                                          head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
                                          layer_num=self.config["num_hidden_layers"])

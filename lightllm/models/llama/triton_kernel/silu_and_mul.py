@@ -44,7 +44,7 @@ if triton.__version__ >= "2.1.0":
         ).to(tl.float32)
 
         gate = gate / (1 + tl.exp(-gate))
-        gate = gate.to(tl.float16)
+        gate = gate.to(input_ptr.dtype.element_ty)
 
         tl.store(
             input_ptr + res_offsets,

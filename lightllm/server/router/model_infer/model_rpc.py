@@ -99,8 +99,8 @@ class ModelRpcServer(rpyc.Service):
             "max_seq_length": kvargs.get("max_seq_length", 1024 * 5),
             "return_all_prompt_logprobs": self.return_all_prompt_logprobs,
             "use_dynamic_prompt_cache": self.use_dynamic_prompt_cache,
+            "data_type": kvargs.get("data_type", "float16"),
         }
-
         is_weight_only_quant = any("w6a16" in mode_ or "w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode)
 
         try:

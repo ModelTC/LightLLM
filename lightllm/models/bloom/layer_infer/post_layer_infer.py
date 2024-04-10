@@ -29,7 +29,7 @@ class BloomPostLayerInfer(PostLayerInferTpl):
 
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: BloomPreAndPostLayerWeight, return_logics=False):
         batch_size = infer_state.batch_size
-        last_input = torch.empty((batch_size, self.embed_dim_), device=input_embdings.device, dtype=torch.float16)
+        last_input = torch.empty((batch_size, self.embed_dim_), device=input_embdings.device, dtype=input_embdings.dtype)
         if infer_state.is_prefill:
             last_index = torch.cumsum(infer_state.b_seq_len - infer_state.b_ready_cache_len, dim=0, dtype=torch.long) - 1
             last_input[:, :] = input_embdings[last_index, :]
@@ -44,7 +44,7 @@ class BloomPostLayerInfer(PostLayerInferTpl):
         if self.world_size_ == 1:
             gather_data = logic_batch
         else:
-            gather_data = torch.empty((self.vocab_size_, batch_size), device=logic_batch.device, dtype=torch.float16)
+            gather_data = torch.empty((self.vocab_size_, batch_size), device=logic_batch.device, dtype=input_embdings.dtype)
             split_size = self.vocab_size_ // self.world_size_
             dist.all_gather([gather_data[i * split_size: (i + 1) * split_size, :]
                             for i in range(self.world_size_)], logic_batch, group=None, async_op=False)

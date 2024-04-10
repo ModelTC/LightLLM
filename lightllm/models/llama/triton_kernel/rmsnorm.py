@@ -35,7 +35,7 @@ def _rms_norm_fwd_fused(
         x_hat = x * rstd
         y = x_hat * w
         # Write output
-        tl.store(Y + cols, y.to(tl.float16), mask=mask)
+        tl.store(Y + cols, y.to(Y.dtype.element_ty), mask=mask)
 
 
 def rmsnorm_forward(x, weight, eps):

@@ -51,7 +51,7 @@ class MistralTpPartModel(TpPartBaseModel):
 
     def _init_mem_manager(self):
         self.mem_manager = MemoryManager(self.max_total_token_num, # [SYM] should be sliding window?
-                                        dtype=torch.float16,
+                                        dtype=self.data_type,
                                         head_num=self.config["num_key_value_heads"] // self.world_size_,
                                         head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
                                         layer_num=self.config["num_hidden_layers"],
@@ -79,7 +79,7 @@ class MistralTpPartModel(TpPartBaseModel):
         t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(torch.float16).cuda()
-        self._sin_cached = torch.sin(freqs).to(torch.float16).cuda()
+        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
+        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
         return
     

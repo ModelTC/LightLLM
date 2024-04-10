@@ -45,7 +45,9 @@ class TpPartBaseModel:
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
         self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
-
+        self.data_type = kvargs.get("data_type", "float16")
+        
+        self._init_datatype()
         self._init_config()
         self._verify_must()
         self._verify_params()
@@ -80,16 +82,16 @@ class TpPartBaseModel:
 
     def _init_weights(self):
         self.pre_post_weight = self.pre_and_post_weight_class(
-            self.tp_rank_, self.world_size_, torch.float16, network_config=self.config, mode=self.mode
+            self.tp_rank_, self.world_size_, self.data_type, network_config=self.config, mode=self.mode
         )
         self.trans_layers_weight = [
             self.transformer_weight_class(
-                i, self.tp_rank_, self.world_size_, torch.float16, network_config=self.config, mode=self.mode
+                i, self.tp_rank_, self.world_size_, self.data_type, network_config=self.config, mode=self.mode
             )
             for i in range(self.config["n_layer"])
         ]
         load_hf_weights(
-            "fp16",
+            self.data_type,
             weight_dir=self.weight_dir_,
             pre_post_layer=self.pre_post_weight,
             transformer_layer_list=self.trans_layers_weight,
@@ -103,7 +105,7 @@ class TpPartBaseModel:
         assert self.config["num_attention_heads"] % self.world_size_ == 0
         self.mem_manager = MemoryManager(
             self.max_total_token_num,
-            dtype=torch.float16,
+            dtype=self.data_type,
             head_num=self.config["num_attention_heads"] // self.world_size_,
             head_dim=self.config["n_embed"] // self.config["num_attention_heads"],
             layer_num=self.config["n_layer"],
@@ -136,6 +138,16 @@ class TpPartBaseModel:
         self.layers_num = self.config["n_layer"]
         self.vocab_size = self.config["vocab_size"]
         return
+
+    def _init_datatype(self):
+        if self.data_type in ["fp16", "float16"]:
+            self.data_type = torch.float16
+        elif self.data_type in ["bf16", "bfloat16"]:
+            self.data_type = torch.bfloat16
+        elif self.data_type in ["fp32", "float32"]:
+            self.data_type =torch.float32
+        else:
+            raise ValueError(f"Unsupport datatype {self.data_type}!")
 
     def _init_custom(self):
         pass
@@ -223,7 +235,7 @@ class TpPartBaseModel:
             infer_state.mem_index = alloc_mem
             infer_state.kv_buffer = torch.empty(
                 (input_ids.shape[0], self.tp_k_head_num_ + self.tp_v_head_num_, self.head_dim_),
-                dtype=torch.float16,
+                dtype=self.data_type,
                 device="cuda",
             )
 
@@ -279,7 +291,7 @@ class TpPartBaseModel:
             infer_state.mem_index = alloc_mem
             infer_state.kv_buffer = torch.empty(
                 (batch_size, self.tp_k_head_num_ + self.tp_v_head_num_, self.head_dim_),
-                dtype=torch.float16,
+                dtype=self.data_type,
                 device="cuda",
             )
             copy_kv_index_to_req(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len, infer_state.mem_index)
@@ -341,7 +353,7 @@ class TpPartBaseModel:
             infer_state.mem_index = alloc_mem
             infer_state.kv_buffer = torch.empty(
                 (alloc_size, self.tp_k_head_num_ + self.tp_v_head_num_, self.head_dim_),
-                dtype=torch.float16,
+                dtype=self.data_type,
                 device="cuda",
             )
 

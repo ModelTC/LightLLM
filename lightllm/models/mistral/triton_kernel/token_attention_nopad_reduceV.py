@@ -41,7 +41,7 @@ def _fwd_kernel_token_att2(
         v_value = tl.load(V + v_offs + v_loc[:, None] * stride_vbs, mask=(start_n + offs_n[:, None] + cur_batch_start_index) < cur_batch_seq_len, other=0.0) # [1, D] + [64, 1] = [64, D]
         acc += tl.sum(p_value[:, None] * v_value, 0) # [64, 1] * [64, D] = [64, D] -> [D]
 
-    acc = acc.to(tl.float16)
+    acc = acc.to(Out.dtype.element_ty)
     off_o = cur_batch * stride_obs + cur_head * stride_oh + offs_d * stride_od
     out_ptrs = Out + off_o
     tl.store(out_ptrs, acc)

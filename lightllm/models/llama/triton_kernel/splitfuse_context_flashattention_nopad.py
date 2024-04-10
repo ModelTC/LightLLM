@@ -301,8 +301,8 @@ def _fwd_kernel_int8(
             vs_ptrs + kv_loc[:, None] * stride_vsbs, mask=(start_n + offs_n)[:, None] < cur_batch_seq_len, other=0.0
         )
 
-        p = p.to(tl.float16)
-        acc += tl.dot(p, v.to(tl.float16) * v_scale)
+        p = p.to(V.dtype.element_ty)
+        acc += tl.dot(p, v.to(V.dtype.element_ty) * v_scale)
 
         # update m_i and l_i
         l_i = l_i_new

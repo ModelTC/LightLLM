@@ -78,8 +78,8 @@ class QWenTpPartModel(LlamaTpPartModel):
 
             t = torch.arange(total_seq_len_supported + 128 * 1024, device="cpu", dtype=torch.float32)
             freqs = torch.outer(t, inv_freq)
-            self._cos_cached.append(torch.cos(freqs).to(torch.float16).cuda())
-            self._sin_cached.append(torch.sin(freqs).to(torch.float16).cuda())
+            self._cos_cached.append(torch.cos(freqs).to(self.data_type).cuda())
+            self._sin_cached.append(torch.sin(freqs).to(self.data_type).cuda())
 
         self._cos_cached = torch.stack(self._cos_cached, dim=0).contiguous()
         self._sin_cached = torch.stack(self._sin_cached, dim=0).contiguous()

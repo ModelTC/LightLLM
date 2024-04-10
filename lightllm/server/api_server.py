@@ -404,6 +404,11 @@ def main():
     parser.add_argument(
         "--cache_reserved_ratio", type=float, default=0.5, help="cache server reserved capacity ratio after clear"
     )
+    parser.add_argument(
+        "--data_type", type=str, 
+        choices=["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"],
+        default="float16", help="the data type of the model weight"
+    )
     parser.add_argument("--return_all_prompt_logprobs", action="store_true", help="return all prompt tokens logprobs")
     parser.add_argument(
         "--long_truncation_mode",

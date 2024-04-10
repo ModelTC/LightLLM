@@ -20,7 +20,6 @@ from typing import List, Tuple, Union
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from transformers.convert_slow_tokenizer import convert_slow_tokenizer
-from transformers import LlamaTokenizer
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.log_utils import init_logger
 
