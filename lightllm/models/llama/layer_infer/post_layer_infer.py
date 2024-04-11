@@ -72,6 +72,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         return_logics=False,
     ):
         last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
+        input_embdings_dtype = input_embdings.dtype
         input_embdings = None
         last_input = self._norm(last_input, infer_state, layer_weight)
         last_input = rearrange(last_input, "batch embed_dim -> embed_dim batch").contiguous().reshape(-1, token_num)
@@ -81,7 +82,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if self.world_size_ == 1:
             gather_data = logic_batch
         else:
-            gather_data = torch.empty((self.vocab_size_, token_num), device=logic_batch.device, dtype=input_embdings.dtype)
+            gather_data = torch.empty((self.vocab_size_, token_num), device=logic_batch.device, dtype=input_embdings_dtype)
             split_indexes = np.linspace(0, self.vocab_size_, self.world_size_ + 1, dtype=np.int64)
             dist.all_gather(
                 [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.world_size_)],

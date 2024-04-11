@@ -36,6 +36,7 @@ class BloomPostLayerInfer(PostLayerInferTpl):
         else:
             last_input[:, :] = input_embdings[-batch_size:, :]
 
+        input_embdings_dtype = input_embdings.dtype
         input_embdings = None
         last_input = self._norm(last_input, infer_state, layer_weight)
         last_input = rearrange(last_input, "batch embed_dim -> embed_dim batch").contiguous().reshape(-1, batch_size)
@@ -44,7 +45,7 @@ class BloomPostLayerInfer(PostLayerInferTpl):
         if self.world_size_ == 1:
             gather_data = logic_batch
         else:
-            gather_data = torch.empty((self.vocab_size_, batch_size), device=logic_batch.device, dtype=input_embdings.dtype)
+            gather_data = torch.empty((self.vocab_size_, batch_size), device=logic_batch.device, dtype=input_embdings_dtype)
             split_size = self.vocab_size_ // self.world_size_
             dist.all_gather([gather_data[i * split_size: (i + 1) * split_size, :]
                             for i in range(self.world_size_)], logic_batch, group=None, async_op=False)
