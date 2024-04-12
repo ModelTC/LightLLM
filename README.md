@@ -112,17 +112,19 @@ You can use the official Docker container to run the model more easily. To do th
 python setup.py install
 ~~~
 
- The code has been tested on a range of GPUs including A100, A800, 4090, and H800. If you are running the code on A100, A800, etc., we recommend using triton==2.1.0 or triton==2.0.0.dev20221202. If you are running the code on H800, etc., it is necessary to compile and install the source code of [triton==2.1.0](https://github.com/openai/triton/tree/main) from the GitHub repository. If the code doesn't work on other GPUs, try modifying the triton kernel used in model inference.
-- Install Triton Package
 
-use triton==2.1.0  (Better performance, but the code is under continuous development and may be unstable.)
+
+- Install Triton Package  
+
+The code has been tested on a range of GPUs including V100, A100, A800, 4090, and H800. If you are running the code on A100, A800, etc., we recommend using triton==2.1.0. 
+
 ~~~shell
-pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly
+pip install triton==2.1.0 --no-deps
 ~~~
-
-use triton==2.0.0.dev20221202 (This version has a memory leak bug. Refer to the [issue #209](https://github.com/ModelTC/lightllm/issues/209) for the fix method. )
+If you are running the code on H800 or V100., we recommend using triton-nightly, triton-nightly has a significant CPU bottleneck, leading to high decode latency at low concurrency levels. You can observe [this issue](https://github.com/openai/triton/issues/3619) and [fix PR](https://github.com/openai/triton/pull/3638).You can try modifying and compiling the 
+source code yourself to resolve this issue.
 ~~~shell
-pip install triton==2.0.0.dev20221202
+pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly --no-deps
 ~~~
 
 ### RUN LLaMA

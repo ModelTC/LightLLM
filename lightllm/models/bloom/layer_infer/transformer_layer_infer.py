@@ -63,37 +63,21 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         self, q, kv, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
     ) -> torch.Tensor:
         o_tensor = torch.empty_like(q) if out is None else out
-        import triton
-        if triton.__version__ >= "2.1.0":
-            context_attention_fwd(
-                q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-                infer_state.mem_manager.kv_buffer[self.layer_num_][
-                    :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                ],
-                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                infer_state.b_req_idx,
-                layer_weight.tp_alibi,
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.b_ready_cache_len,
-                infer_state.max_len_in_batch,
-                infer_state.req_manager.req_to_token_indexs,
-            )
-        elif triton.__version__ == "2.0.0":
-            context_attention_fwd(
-                q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                kv[:, 0 : self.tp_k_head_num_, :],
-                kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                layer_weight.tp_alibi,
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.max_len_in_batch,
-            )
-        else:
-            assert False
-
+        context_attention_fwd(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
+            infer_state.mem_manager.kv_buffer[self.layer_num_][
+                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+            ],
+            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+            infer_state.b_req_idx,
+            layer_weight.tp_alibi,
+            infer_state.b_start_loc,
+            infer_state.b_seq_len,
+            infer_state.b_ready_cache_len,
+            infer_state.max_len_in_batch,
+            infer_state.req_manager.req_to_token_indexs,
+        )
         return o_tensor
 
     def _token_attention_kernel(

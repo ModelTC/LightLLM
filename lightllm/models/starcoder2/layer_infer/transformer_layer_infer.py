@@ -127,48 +127,23 @@ class Starcoder2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         o_tensor = torch.empty_like(q) if out is None else out
 
-        if triton.__version__ == "2.0.0":
-            prob = torch.empty_like(att_m_tensor)
-            token_softmax_fwd(
-                att_m_tensor, infer_state.b_att_start_loc, infer_state.b_att_seq_len, prob, infer_state.sliding_window
-            )
-            att_m_tensor = None
-            token_att_fwd2(
-                prob,
-                infer_state.mem_manager.kv_buffer[self.layer_num_][
-                    :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                ],
-                o_tensor.view(calcu_shape1),
-                infer_state.req_manager.req_to_token_indexs,
-                infer_state.b_req_idx,
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.b_start_loc_window,
-                infer_state.b_att_start_loc,
-                infer_state.b_att_seq_len,
-            )
-            prob = None
-            return o_tensor
-        elif triton.__version__ >= "2.1.0":
-            from lightllm.models.mistral.triton_kernel.token_attention_softmax_and_reducev import (
-                token_softmax_reducev_fwd,
-            )
+        from lightllm.models.mistral.triton_kernel.token_attention_softmax_and_reducev import (
+            token_softmax_reducev_fwd,
+        )
 
-            token_softmax_reducev_fwd(
-                att_m_tensor,
-                infer_state.mem_manager.kv_buffer[self.layer_num_][
-                    :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                ],
-                o_tensor.view(calcu_shape1),
-                infer_state.req_manager.req_to_token_indexs,
-                infer_state.b_req_idx,
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.b_start_loc_window,
-                infer_state.b_att_start_loc,
-                infer_state.b_att_seq_len,
-                infer_state.other_kv_index,
-            )
-            return o_tensor
-        else:
-            raise Exception("not support triton version")
+        token_softmax_reducev_fwd(
+            att_m_tensor,
+            infer_state.mem_manager.kv_buffer[self.layer_num_][
+                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+            ],
+            o_tensor.view(calcu_shape1),
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.b_req_idx,
+            infer_state.b_start_loc,
+            infer_state.b_seq_len,
+            infer_state.b_start_loc_window,
+            infer_state.b_att_start_loc,
+            infer_state.b_att_seq_len,
+            infer_state.other_kv_index,
+        )
+        return o_tensor

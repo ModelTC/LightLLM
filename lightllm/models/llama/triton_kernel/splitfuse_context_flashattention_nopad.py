@@ -133,9 +133,6 @@ def splitfuse_context_attention_fwd(
     prefill_b_seq_len,
     prefill_max_split_seq_len_in_batch,
 ):
-    if triton.__version__ == "2.0.0":
-        raise Exception("triton version is not right")
-
     BLOCK = 128
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -330,8 +327,6 @@ def splitfuse_context_attention_fwd_int8kv(
     prefill_b_seq_len,
     prefill_max_split_seq_len_in_batch,
 ):
-    if triton.__version__ == "2.0.0":
-        raise Exception("triton version is not right")
 
     BLOCK = 128
     # shape constraints

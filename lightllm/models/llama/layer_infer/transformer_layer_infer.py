@@ -136,36 +136,22 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, q, kv, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
         o_tensor = torch.empty_like(q) if out is None else out
-        import triton
-
-        if triton.__version__ >= "2.1.0":
-            if infer_state.use_dynamic_prompt_cache:
-                kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-                context_attention_fwd(
-                    q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                    kv[:, 0 : self.tp_k_head_num_, :],
-                    kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-                    o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                    infer_state.b_req_idx,
-                    infer_state.b_start_loc,
-                    infer_state.b_seq_len,
-                    infer_state.b_ready_cache_len,
-                    infer_state.max_len_in_batch,
-                    infer_state.req_manager.req_to_token_indexs,
-                )
-            else:
-                context_attention_fwd_no_prompt_cache(
-                    q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                    kv[:, 0 : self.tp_k_head_num_, :],
-                    kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-                    o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                    infer_state.b_start_loc,
-                    infer_state.b_seq_len,
-                    infer_state.max_len_in_batch,
-                )
-
-        elif triton.__version__ == "2.0.0":
+        if infer_state.use_dynamic_prompt_cache:
+            kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
             context_attention_fwd(
+                q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                kv[:, 0 : self.tp_k_head_num_, :],
+                kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
+                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+                infer_state.b_req_idx,
+                infer_state.b_start_loc,
+                infer_state.b_seq_len,
+                infer_state.b_ready_cache_len,
+                infer_state.max_len_in_batch,
+                infer_state.req_manager.req_to_token_indexs,
+            )
+        else:
+            context_attention_fwd_no_prompt_cache(
                 q.view(-1, self.tp_q_head_num_, self.head_dim_),
                 kv[:, 0 : self.tp_k_head_num_, :],
                 kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
@@ -174,8 +160,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 infer_state.b_seq_len,
                 infer_state.max_len_in_batch,
             )
-        else:
-            assert False
 
         return o_tensor
 
@@ -330,46 +314,23 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         )
 
         o_tensor = torch.empty_like(q) if out is None else out
+        from lightllm.models.llama.triton_kernel.token_attention_softmax_and_reducev import (
+            token_softmax_reducev_fwd,
+        )
 
-        if triton.__version__ == "2.0.0":
-            prob = torch.empty_like(att_m_tensor)
-            token_softmax_fwd(
-                att_m_tensor, infer_state.b_start_loc, infer_state.b_seq_len, prob, infer_state.max_len_in_batch
-            )
-            att_m_tensor = None
-            token_att_fwd2(
-                prob,
-                infer_state.mem_manager.kv_buffer[self.layer_num_][
-                    :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                ],
-                o_tensor.view(calcu_shape1),
-                infer_state.req_manager.req_to_token_indexs,
-                infer_state.b_req_idx,
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-            )
-            prob = None
-            return o_tensor
-        elif triton.__version__ >= "2.1.0":
-            from lightllm.models.llama.triton_kernel.token_attention_softmax_and_reducev import (
-                token_softmax_reducev_fwd,
-            )
-
-            token_softmax_reducev_fwd(
-                att_m_tensor,
-                infer_state.mem_manager.kv_buffer[self.layer_num_][
-                    :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                ],
-                o_tensor.view(calcu_shape1),
-                infer_state.req_manager.req_to_token_indexs,
-                infer_state.b_req_idx,
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.other_kv_index,
-            )
-            return o_tensor
-        else:
-            raise Exception("not support triton version")
+        token_softmax_reducev_fwd(
+            att_m_tensor,
+            infer_state.mem_manager.kv_buffer[self.layer_num_][
+                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+            ],
+            o_tensor.view(calcu_shape1),
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.b_req_idx,
+            infer_state.b_start_loc,
+            infer_state.b_seq_len,
+            infer_state.other_kv_index,
+        )
+        return o_tensor
 
     def _token_decode_gqa_attention_normal(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
         batch_size = infer_state.batch_size
