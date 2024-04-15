@@ -111,10 +111,10 @@ def matmul4_kernel(
         b = (b >> shifter[:, None]) & 0xF  # Extract the 4-bit values
         b = b * scales[None, :] - zeros[None, :]  # Scale and shift
         # print("data type", a, b)
-        accumulator += tl.dot(a, b.to(tl.float16))
+        accumulator += tl.dot(a, b.to(a.dtype))
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += (BLOCK_SIZE_K // infearure_per_bits) * stride_bk  
-    c = accumulator.to(tl.float16)  
+    c = accumulator.to(c_ptr.dtype.element_ty)  
     # Store the result
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -154,7 +154,7 @@ def matmul_dequantize_int4_gptq(x: torch.FloatTensor, qweight: torch.IntTensor, 
 	# output = torch.empty((M, N), device='cuda', dtype=torch.float16)
 	if output is None:
 		inplace = False
-		output = torch.empty((M, N), device=x.device, dtype=torch.float16)
+		output = torch.empty((M, N), device=x.device, dtype=x.dtype)
 	else:
 		inplace = True
 
@@ -281,14 +281,14 @@ def matmul_kernel(
         # We accumulate along the K dimension.
         int_b = (b >> b_shift_bits) & 0xF
         int_bzp = (bzp >> bzp_shift_bits) & 0xF
-        b = ((int_b - int_bzp) * bs).to(tl.float16)
-        accumulator += tl.dot(a.to(tl.float16), b.to(tl.float16))
+        b = ((int_b - int_bzp) * bs).to(a.dtype)
+        accumulator += tl.dot(a, b.to(a.dtype))
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
         b_ptrs += (BLOCK_SIZE_K * SPLIT_K * stride_bk // 8)  # assert BLOCK_SIZE_K % 8 == 0
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
-    c = accumulator.to(tl.float16)
+    c = accumulator.to(c_ptr.dtype.element_ty)
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -309,7 +309,7 @@ def matmul_dequantize_int4_s2(x: torch.FloatTensor, qweight: torch.IntTensor, sc
     M, K = x.shape
     N = scales.shape[1]
     if output is None:
-        output = torch.zeros((M, N), device=x.device, dtype=torch.float16)  
+        output = torch.zeros((M, N), device=x.device, dtype=x.dtype)  
     grid = lambda META: (
         triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
         META['SPLIT_K'],

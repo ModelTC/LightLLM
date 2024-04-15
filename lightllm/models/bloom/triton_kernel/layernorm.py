@@ -46,7 +46,7 @@ def _layer_norm_fwd_fused(
         x_hat = (x - mean) * rstd
         y = x_hat * w + b
         # Write output
-        tl.store(Y + cols, y.to(tl.float16), mask=mask)
+        tl.store(Y + cols, y.to(Y.dtype.element_ty), mask=mask)
 
 
 # def layernorm_forward(x, weight, bias, eps):

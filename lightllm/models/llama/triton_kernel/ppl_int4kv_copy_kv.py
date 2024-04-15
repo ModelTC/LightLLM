@@ -47,7 +47,7 @@ def _fwd_kernel_destindex_copy_quantize_int4_kv(
     abs_data_0 = tl.abs(src_data_0)
     abs_data_1 = tl.abs(src_data_1)
 
-    data_scale = (tl.maximum(tl.max(abs_data_0, axis=1), tl.max(abs_data_1, axis=1)) / 7.0).to(tl.float16)
+    data_scale = (tl.maximum(tl.max(abs_data_0, axis=1), tl.max(abs_data_1, axis=1)) / 7.0).to(Out_scale.dtype.element_ty)
     q_src_data_0 = (src_data_0 / data_scale[:, None]).to(tl.int8)
     q_src_data_0 = tl.where(q_src_data_0 > 7, 7, q_src_data_0)
     q_src_data_0 = tl.where(q_src_data_0 < -7, -7, q_src_data_0)

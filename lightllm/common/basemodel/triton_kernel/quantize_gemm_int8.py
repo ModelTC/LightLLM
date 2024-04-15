@@ -49,7 +49,7 @@ def quantize_int8_perrow_kernel(
 
 def quantize_int8_perrow(fpa):
     a = torch.empty(fpa.shape, device=fpa.device, dtype=torch.int8)
-    a_scale = torch.empty(fpa.shape[0], device=fpa.device, dtype=torch.float16)
+    a_scale = torch.empty(fpa.shape[0], device=fpa.device, dtype=fpa.dtype)
     M, K = fpa.shape
     BLOCK_SIZE_M = 1
     BLOCK_SIZE_K = triton.next_power_of_2(K)
@@ -175,7 +175,7 @@ def matmul_kernel(
         b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
-    c = (accumulator.to(tl.float32) * a_scale[:, None] * b_scale[None, :]).to(tl.float16)
+    c = (accumulator.to(tl.float32) * a_scale[:, None] * b_scale[None, :]).to(c_ptr.dtype.element_ty)
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -201,7 +201,7 @@ def matmul_int8(a, a_scale, b, b_scale, out=None):
     K, N = b.shape
     # Allocates output.
     if out == None:
-        c = torch.zeros((M, N), device=a.device, dtype=torch.float16)
+        c = torch.zeros((M, N), device=a.device, dtype=a.dtype)
     else:
         c = out.fill_(0.)
     grid = lambda META: (

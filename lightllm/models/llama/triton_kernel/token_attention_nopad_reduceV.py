@@ -57,7 +57,7 @@ def _fwd_kernel_token_att2(
         )
         acc += tl.sum(p_value[:, None] * v_value, 0)
 
-    acc = acc.to(tl.float16)
+    acc = acc.to(Out.dtype.element_ty)
     off_o = cur_batch * stride_obs + cur_head * stride_oh + offs_d * stride_od
     out_ptrs = Out + off_o
     tl.store(out_ptrs, acc)
@@ -165,7 +165,7 @@ def _fwd_kernel_token_att2_int8v(
         )
         acc += tl.sum(p_value[:, None] * v_value * vs_value, 0)
 
-    acc = acc.to(tl.float16)
+    acc = acc.to(Out.dtype.element_ty)
     off_o = cur_batch * stride_obs + cur_head * stride_oh + offs_d * stride_od
     out_ptrs = Out + off_o
     tl.store(out_ptrs, acc)
