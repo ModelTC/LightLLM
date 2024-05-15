@@ -59,9 +59,11 @@ class VisualManager:
         await asyncio.gather(*init_model_ret)
         return
 
-    async def abort(self, request_id):
-        abort_req = AbortReq(req_id=request_id)
+    async def abort(self, group_req_id):
+        abort_req = AbortReq(group_req_id=group_req_id)
         self.send_to_router.send_pyobj(abort_req)
+        # 过滤掉被 aborted的请求。
+        self.waiting_reqs = [req for req in self.waiting_reqs if req[3] != group_req_id]
         return
 
     async def infer_imgs(self, uuids):
@@ -122,8 +124,8 @@ class VisualManager:
                 self.waiting_reqs.append(recv_req)
             elif isinstance(recv_req, AbortReq):
                 abort_req = recv_req
-                request_id = abort_req.req_id
-                await self.abort(request_id)
+                group_req_id = abort_req.group_req_id
+                await self.abort(group_req_id)
             else:
                 assert False, f"Error Req Inf {recv_req}"
 
@@ -136,6 +138,12 @@ class VisualManager:
 
 
 def start_visual_process(args, router_port, visual_port, client_port, pipe_writer):
+    # 注册graceful 退出的处理
+    from lightllm.utils.graceful_utils import graceful_registry
+    import inspect
+
+    graceful_registry(inspect.currentframe().f_code.co_name)
+
     try:
         visualserver = VisualManager(args, router_port, visual_port, client_port)
         asyncio.run(visualserver.wait_to_model_ready())

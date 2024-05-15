@@ -1,4 +1,5 @@
 import asyncio
+
 # asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
 import zmq.asyncio
@@ -51,15 +52,25 @@ class CacheServer(rpyc.Service):
         id = obtain(id)
         return self._impl.get_item_embed(id=id)
 
+
 def start_cache_manager(port: int, args, pipe_writer):
+    # 注册graceful 退出的处理
+    from lightllm.utils.graceful_utils import graceful_registry
+    import inspect
+
+    graceful_registry(inspect.currentframe().f_code.co_name)
+
     from .interface import CacheManagerFactory
+
     manager_cls = CacheManagerFactory.get_impl("naive")
     manager = manager_cls(args)
     service = CacheServer(manager)
     from rpyc.utils.server import ThreadedServer
+
     t = ThreadedServer(service, port=port)
-    pipe_writer.send('init ok')
+    pipe_writer.send("init ok")
     t.start()
+
 
 if __name__ == "__main__":
     start_cache_manager(2233)

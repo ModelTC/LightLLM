@@ -17,10 +17,12 @@
 # limitations under the License.
 
 import asyncio
+import collections
 import time
 import torch
 import uvloop
 import sys
+import os
 
 from .build_prompt import build_prompt
 
@@ -44,6 +46,7 @@ from .embed_cache.manager import start_cache_manager
 from .visualserver.manager import start_visual_process
 from .req_id_generator import ReqIDGenerator
 from .api_tgi import tgi_generate_impl, tgi_generate_stream_impl
+from .api_lightllm import lightllm_generate, lightllm_generate_stream
 
 from lightllm.utils.net_utils import alloc_can_use_network_port
 from lightllm.utils.start_utils import start_submodule_processes
@@ -61,172 +64,101 @@ from .api_models import (
 
 from lightllm.utils.log_utils import init_logger
 
+from .metrics import monitor
+from prometheus_client import generate_latest
+
 logger = init_logger(__name__)
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 
 g_id_gen = ReqIDGenerator()
 app = FastAPI()
+server = uvicorn.Server(uvicorn.Config(app))
 
 isFirst = True
+
+
+def first_set_handle_loop():
+    global isFirst
+    if isFirst:
+        loop = asyncio.get_event_loop()
+        loop.create_task(httpserver_manager.handle_loop())
+        isFirst = False
+    return
 
 
 def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
     return JSONResponse({"message": message}, status_code=status_code.value)
 
 
+@app.get("/liveness")
+@app.post("/liveness")
+def liveness():
+    return {"status": "ok"}
+
+
+@app.get("/readiness")
+@app.post("/readiness")
+def readiness():
+    return {"status": "ok"}
+
+
 @app.get("/healthz")
 @app.get("/health")
-def healthcheck():
-    return "OK"
-
-
 @app.head("/health")
-def healthcheckhead():
-    return None
+async def healthcheck(request: Request):
+    first_set_handle_loop()
+    if os.environ.get("DEBUG_HEALTHCHECK_RETURN_FAIL") == "true":
+        return JSONResponse({"message": "Error"}, status_code=404)
+
+    from lightllm.utils.health_check import health_check
+
+    if health_check(httpserver_manager, g_id_gen, request):
+        return JSONResponse({"message": "Ok"}, status_code=200)
+    else:
+        return JSONResponse({"message": "Error"}, status_code=404)
 
 
+@app.get("/token_load")
+async def token_load(request: Request):
+    return JSONResponse(
+        {
+            # 当前使用token量，估计的负载
+            "current_load": float(shared_token_load.get_current_load()),
+            # 朴素估计的负载，简单将当前请求的输入和输出长度想加得到,目前已未使用，其值与dynamic_max_load一样。
+            "logical_max_load": float(shared_token_load.get_logical_max_load()),
+            # 动态估计的最大负载，考虑请求中途退出的情况的负载
+            "dynamic_max_load": float(shared_token_load.get_dynamic_max_load()),
+        },
+        status_code=200,
+    )
+
+
+@monitor.histogram_timer("lightllm_request_duration")
 @app.post("/generate")
 async def generate(request: Request) -> Response:
-    global isFirst
-    if isFirst:
-        loop = asyncio.get_event_loop()
-        loop.create_task(httpserver_manager.handle_loop())
-        isFirst = False
-
-    request_dict = await request.json()
-    prompt = request_dict.pop("inputs")
-    sample_params_dict = request_dict["parameters"]
-    return_details = sample_params_dict.pop("return_details", False)
-    sampling_params = SamplingParams(**sample_params_dict)
-    sampling_params.verify()
-    multimodal_params_dict = request_dict.get("multimodal_params", {})
-    multimodal_params = MultimodalParams(**multimodal_params_dict)
-
-    request_id = g_id_gen.generate_id()
-    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id, multimodal_params)
-
-    # Non-streaming case
-    final_output = []
-    count_output_tokens = 0
-    tokens = []
-    prompt_logprobs = None
-    prompt_token_ids = None
-    is_first_metadata = True
-    async for request_output, metadata, finish_status in results_generator:
-        if await request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await httpserver_manager.abort(request_id)
-            return Response(status_code=499)
-
-        # when set "--return_all_prompt_logprobs", the first token metadata will contains
-        # prompt_logprobs and prompt_token_ids
-        if is_first_metadata:
-            prompt_logprobs = metadata.get("prompt_logprobs", None)
-            prompt_token_ids = metadata.get("prompt_token_ids", None)
-            if prompt_logprobs is not None:
-                del metadata["prompt_logprobs"]
-            if prompt_token_ids is not None:
-                del metadata["prompt_token_ids"]
-            is_first_metadata = False
-
-        count_output_tokens += 1
-        final_output.append(request_output)
-        if return_details:
-            metadata["text"] = request_output
-            tokens.append(metadata)
-
-    assert final_output is not None
-    ret = {
-        "generated_text": ["".join(final_output)],
-        "count_output_tokens": count_output_tokens,
-        "finish_reason": finish_status.get_finish_reason(),
-    }
-    if return_details:
-        ret["tokens"] = tokens
-    if prompt_token_ids is not None:
-        ret["prompt_token_ids"] = prompt_token_ids
-    if prompt_logprobs is not None:
-        ret["prompt_logprobs"] = prompt_logprobs
-    return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
+    first_set_handle_loop()
+    try:
+        return await g_generate_func(request, g_id_gen, httpserver_manager)
+    except Exception as e:
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
 
+@monitor.histogram_timer("lightllm_request_duration")
 @app.post("/generate_stream")
 async def generate_stream(request: Request) -> Response:
-    global isFirst
-    if isFirst:
-        loop = asyncio.get_event_loop()
-        loop.create_task(httpserver_manager.handle_loop())
-        isFirst = False
-
-    request_dict = await request.json()
-    prompt = request_dict.pop("inputs")
-    sample_params_dict = request_dict["parameters"]
-    _ = sample_params_dict.pop("return_details", False)
-    sampling_params = SamplingParams(**sample_params_dict)
-    sampling_params.verify()
-    multimodal_params_dict = request_dict.get("multimodal_params", {})
-    multimodal_params = MultimodalParams(**multimodal_params_dict)
-
-    request_id = g_id_gen.generate_id()
-    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id, multimodal_params)
-
-    # Streaming case
-    async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output, metadata, finish_status in results_generator:
-            ret = {
-                "token": {
-                    "id": metadata.get("id", None),
-                    "text": request_output,
-                    "logprob": metadata.get("logprob", None),
-                    "special": metadata.get("special", False),
-                    "count_output_tokens": metadata.get("count_output_tokens", 0),
-                },
-                "generated_text": None,
-                "finished": finish_status.is_finished(),
-                "finish_reason": finish_status.get_finish_reason(),
-                "details": None,
-            }
-
-            yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")
-
-    async def abort_request() -> None:
-        await httpserver_manager.abort(request_id)
-
-    background_tasks = BackgroundTasks()
-    # Abort the request if the client disconnects.
-    background_tasks.add_task(abort_request)
-
-    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+    first_set_handle_loop()
+    try:
+        return await g_generate_stream_func(request, g_id_gen, httpserver_manager)
+    except Exception as e:
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
 
-@app.post("/tgi_generate")
-async def tgi_generate(request: Request) -> Response:
-    global isFirst
-    if isFirst:
-        loop = asyncio.get_event_loop()
-        loop.create_task(httpserver_manager.handle_loop())
-        isFirst = False
-    return await tgi_generate_impl(request, g_id_gen, httpserver_manager)
-
-
-@app.post("/tgi_generate_stream")
-async def tgi_generate_stream(request: Request) -> Response:
-    global isFirst
-    if isFirst:
-        loop = asyncio.get_event_loop()
-        loop.create_task(httpserver_manager.handle_loop())
-        isFirst = False
-    return await tgi_generate_stream_impl(request, g_id_gen, httpserver_manager)
-
-
+@monitor.histogram_timer("lightllm_request_duration")
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
-    global isFirst
-    if isFirst:
-        loop = asyncio.get_event_loop()
-        loop.create_task(httpserver_manager.handle_loop())
-        isFirst = False
+    monitor.counter_inc("lightllm_request_count")
+    first_set_handle_loop()
 
     if request.logit_bias is not None:
         return create_error_response(
@@ -257,18 +189,16 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     multimodal_params = MultimodalParams(images=[])
 
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
-    results_generator = httpserver_manager.generate(prompt, sampling_params, request_id, multimodal_params)
+    results_generator = httpserver_manager.generate(
+        prompt, sampling_params, request_id, multimodal_params, request=raw_request
+    )
 
     # Non-streaming case
     if not request.stream:
         final_output = []
         prompt_tokens = -1
         completion_tokens = 0
-        async for request_output, metadata, _ in results_generator:
-            if await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await httpserver_manager.abort(request_id)
-                return Response(status_code=499)
+        async for sub_req_id, request_output, metadata, _ in results_generator:
             completion_tokens += 1
             if prompt_tokens == -1:
                 prompt_tokens = metadata["prompt_tokens"]
@@ -288,7 +218,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output, metadata, _ in results_generator:
+        async for sub_req_id, request_output, metadata, _ in results_generator:
             delta_message = DeltaMessage(role="assistant", content=request_output)
 
             stream_choice = ChatCompletionStreamResponseChoice(index=0, delta=delta_message)
@@ -307,8 +237,35 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     background_tasks = BackgroundTasks()
     # Abort the request if the client disconnects.
     background_tasks.add_task(abort_request)
-
+    monitor.counter_inc("lightllm_request_success")
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    metrics_data = generate_latest()
+    response = Response(metrics_data)
+    response.mimetype = "text/plain"
+    return response
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    logger.info("Received signal to shutdown. Performing graceful shutdown...")
+    await asyncio.sleep(3)
+    logger.info("Graceful shutdown completed.")
+
+    # 杀掉所有子进程
+    import psutil
+    import signal
+
+    parent = psutil.Process(os.getpid())
+    children = parent.children(recursive=True)
+    for child in children:
+        os.kill(child.pid, signal.SIGKILL)
+
+    server.should_exit = True
+    return
 
 
 def main():
@@ -348,7 +305,7 @@ def main():
         default=None,
         help="max tokens num for new cat batch, it control prefill batch size to Preventing OOM",
     )
-    parser.add_argument("--eos_id", nargs='+', type=int, default=[2], help="eos stop token id")
+    parser.add_argument("--eos_id", nargs="+", type=int, default=[2], help="eos stop token id")
     parser.add_argument(
         "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
     )
@@ -390,11 +347,22 @@ def main():
         "--router_max_new_token_len", type=int, default=1024, help="the request max new token len for router"
     )
 
+    parser.add_argument(
+        "--router_max_wait_tokens",
+        type=int,
+        default=10,
+        help="schedule new requests after every router_max_wait_tokens decode steps.",
+    )
+
     parser.add_argument("--use_dynamic_prompt_cache", action="store_true", help="use_dynamic_prompt_cache test")
 
-    parser.add_argument("--splitfuse_mode", action="store_true", help="use splitfuse mode")
-    
     parser.add_argument("--splitfuse_block_size", type=int, default=256, help="splitfuse block size")
+
+    parser.add_argument("--splitfuse_mode", action="store_true", help="use splitfuse mode")
+    parser.add_argument("--beam_mode", action="store_true", help="use beamsearch mode")
+    parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
+    parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
+
     parser.add_argument(
         "--enable_multimodal", action="store_true", help="Whether or not to allow to load additional multimodal models."
     )
@@ -405,11 +373,14 @@ def main():
         "--cache_reserved_ratio", type=float, default=0.5, help="cache server reserved capacity ratio after clear"
     )
     parser.add_argument(
-        "--data_type", type=str, 
+        "--data_type",
+        type=str,
         choices=["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"],
-        default="float16", help="the data type of the model weight"
+        default="float16",
+        help="the data type of the model weight",
     )
     parser.add_argument("--return_all_prompt_logprobs", action="store_true", help="return all prompt tokens logprobs")
+
     parser.add_argument(
         "--long_truncation_mode",
         type=str,
@@ -420,11 +391,38 @@ def main():
                         head : remove some head tokens to make input token len <= max_req_input_len
                         center : remove some tokens in center loc to make input token len <= max_req_input_len""",
     )
+    parser.add_argument("--use_tgi_api", action="store_true", help="use tgi input and ouput format")
+    parser.add_argument(
+        "--health_monitor", action="store_true", help="check the health of service and restart when error"
+    )
 
     args = parser.parse_args()
 
+    global g_generate_func
+    global g_generate_stream_func
+    if args.use_tgi_api:
+        g_generate_func = tgi_generate_impl
+        g_generate_stream_func = tgi_generate_stream_impl
+    else:
+        g_generate_func = lightllm_generate
+        g_generate_stream_func = lightllm_generate_stream
+
+    logger.info(f"use tgi api: {args.use_tgi_api}")
+
     assert args.max_req_input_len < args.max_req_total_len
     assert args.max_req_total_len <= args.max_total_token_num
+    monitor.init_api_server_monitor(args)
+
+    # 这些模式不能同时设置。
+    assert [args.splitfuse_mode, args.beam_mode, args.diverse_mode, args.token_healing_mode].count(True) <= 1
+    # 部分模式目前还无法与dynamic_prompt_cache一起跑，to do。
+    if args.use_dynamic_prompt_cache:
+        assert args.beam_mode is False
+        assert args.token_healing_mode is False
+
+    # 部分模式还不能支持与高级动态调度算法协同，to do.
+    if args.beam_mode or args.diverse_mode:
+        assert args.router_token_ratio == 0.0
 
     if not args.splitfuse_mode:
         # 普通模式下
@@ -492,6 +490,18 @@ def main():
 
         s3_model_clear(args.model_dir)
 
+    if args.health_monitor:
+        from lightllm.server.health_monitor.manager import start_health_check_process
+
+        start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+
+    # 共享变量，用于获取router端调度分析得到的机器负载信息
+    from lightllm.server import TokenLoad
+
+    global shared_token_load
+    shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load")
+
+    server.install_signal_handlers()
     uvicorn.run(
         app,
         host=args.host,

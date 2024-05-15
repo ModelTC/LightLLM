@@ -69,7 +69,7 @@ class StarcoderTransformerLayerInferWQuant(TransformerLayerInferWeightQuantTpl):
         self, input, infer_state: StarcoderInferStateInfo, layer_weight: StarcoderTransformerLayerWeightQuantized
     ) -> torch.Tensor:
         o_output = self._wquant_matmul_for_o(
-            input.view(-1, self.embed_dim_), layer_weight.o_weight_, infer_state=infer_state, bias=layer_weight.o_bias_
+            input, layer_weight.o_weight_, infer_state=infer_state, bias=layer_weight.o_bias_
         )
         return o_output
 

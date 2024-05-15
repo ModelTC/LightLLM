@@ -1,5 +1,7 @@
+import os
 import torch
 from lightllm.utils.log_utils import init_logger
+from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 
 logger = init_logger(__name__)
 
@@ -17,6 +19,13 @@ class MemoryManager:
         self.mem_state = torch.zeros((size,), dtype=torch.int32, device="cuda")
         self.indexes = torch.arange(0, size, dtype=torch.long, device="cuda")
         self.can_use_mem_size = size
+        # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
+        nccl_port = os.environ.get("_NCCL_PORT_", None)
+        assert nccl_port is not None
+        logger.info(f"mem manger get nccl port: {str(nccl_port)}")
+        self.shared_can_use_token_num = SharedInt(f"{str(nccl_port)}_mem_manger_can_use_token_num")
+
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
@@ -78,6 +87,7 @@ class MemoryManager:
         has_used_tokens = torch.count_nonzero(state).item()
         all_tokens = len(state)
         self.can_use_mem_size -= all_tokens - has_used_tokens
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self.mem_state[token_index] += 1
         return
 
@@ -89,11 +99,13 @@ class MemoryManager:
         used_tokens = torch.count_nonzero(state).item()
         all_tokens = len(state)
         self.can_use_mem_size += all_tokens - used_tokens
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         return
 
     @torch.no_grad()
     def free_all(self):
         self.can_use_mem_size = len(self.mem_state)
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self.mem_state[:] = 0
 
     @torch.no_grad()
@@ -110,6 +122,7 @@ class MemoryManager:
         self.mem_state = torch.zeros((size,), dtype=torch.int32, device="cuda")
         self.indexes = torch.arange(0, size, dtype=torch.long, device="cuda")
         self.can_use_mem_size = size
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._free_buffers()
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
         return

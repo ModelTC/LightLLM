@@ -79,3 +79,5 @@ tiktoken==0.5.2
 matplotlib==3.8.2
 --extra-index-url https://download.pytorch.org/whl/cu118
 torchvision==0.15.1
+psutil==5.9.4
+prometheus_client==0.20.0

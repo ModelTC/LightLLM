@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Tuple
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray, SharedTreeInfoNode, SharedLinkedListManager
+from lightllm.common.mem_manager import MemoryManager
 
 
 class UniqueTimeIdGenerator:
@@ -108,7 +109,8 @@ class RadixCache:
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, tp_id):
+    def __init__(self, unique_name, total_token_num, tp_id, mem_manager: MemoryManager = None):
+        self.mem_manager = mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -323,6 +325,21 @@ class RadixCache:
             self._print_helper(child, indent=indent + 2)
         return
 
+    def free_radix_cache_to_get_enough_token(self, need_token_num):
+        assert self.mem_manager is not None
+        if need_token_num > self.mem_manager.can_use_mem_size:
+            need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size
+            release_mems = []
+
+            def release_mem(mem_index):
+                release_mems.append(mem_index)
+                return
+
+            self.evict(need_evict_token_num, release_mem)
+            mem_index = torch.concat(release_mems)
+            self.mem_manager.free(mem_index.cuda())
+        return
+
 
 class RadixCacheReadOnlyClient:
     """
@@ -339,6 +356,9 @@ class RadixCacheReadOnlyClient:
 
     def get_tree_total_tokens_num(self):
         return self.tree_total_tokens_num.arr[0]
+
+    def get_unrefed_tokens_num(self):
+        return self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0]
 
     def get_shared_node(self, idx):
         return self.shared_idx_manager.get_shared_node(idx)

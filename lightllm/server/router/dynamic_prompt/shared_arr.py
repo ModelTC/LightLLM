@@ -18,6 +18,15 @@ class SharedArray:
         self.shm = shm  # SharedMemory 对象一定要被持有，否则会被释放
         self.arr = np.ndarray(shape, dtype=dtype, buffer=self.shm.buf)
 
+class SharedInt(SharedArray):
+    def __init__(self, name):
+        super().__init__(name, shape=(1,), dtype=np.int64)
+    
+    def set_value(self, value):
+        self.arr[0] = value
+    
+    def get_value(self):
+        return self.arr[0]
 
 class SharedTreeInfoNode:
     def __init__(self, manager, idx) -> None:

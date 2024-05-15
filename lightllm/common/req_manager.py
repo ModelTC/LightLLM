@@ -37,5 +37,3 @@ class ReqManager:
     def free_all(self):
         self.can_use_req_size = len(self.req_state)
         self.req_state[:] = 0
-    
-    
