@@ -241,6 +241,17 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
+@app.get("/tokens")
+@app.post("/tokens")
+async def tokens(request: Request):
+    try:
+        request_dict = await request.json()
+        prompt = request_dict.pop("text")
+        return JSONResponse({"ntokens": httpserver_manager.tokens(prompt)}, status_code=200)
+    except Exception as e:
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
+
+
 @app.get("/metrics")
 async def metrics() -> Response:
     metrics_data = generate_latest()

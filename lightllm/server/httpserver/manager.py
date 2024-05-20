@@ -85,6 +85,10 @@ class HttpServerManager:
                 if img.uuid is not None:
                     self.cache_client.root.release(img.uuid)
 
+    def tokens(self, prompt):
+        prompt_ids = self.tokenizer.encode(prompt)
+        return len(prompt_ids)
+
     async def generate(
         self, prompt, sampling_params: SamplingParams, group_request_id, multimodal_params, request=None
     ):
