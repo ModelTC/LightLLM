@@ -33,10 +33,6 @@ class TransformerLayerInferActivationWeightQuantTpl(TransformerLayerInferTpl):
         raise Exception("need to impl")
     
     def _pre_cache_kv(self, infer_state:InferStateInfo, layer_weight)->Tuple[torch.Tensor, torch.Tensor]:
-        '''
-        Release kv buffer to save memory, since we allocate while kv projection. 
-        '''
-        infer_state.kv_buffer = None
-        return None
+        return infer_state.kv_buffer
 
 

@@ -28,7 +28,8 @@ class LlamaTransformerLayerActivationWeightQuantized(TransformerLayerWeight):
         weights = [
             self.att_norm_weight_,
             self.q_weight_,
-            self.kv_weight_,
+            self.k_weight_,
+            self.v_weight_,
             self.o_weight_,
             self.ffn_norm_weight_,
             self.gate_proj,
@@ -63,14 +64,12 @@ class LlamaTransformerLayerActivationWeightQuantized(TransformerLayerWeight):
         if f"model.layers.{self.layer_num_}.self_attn.k_proj.weight" in weights:
             k_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.k_proj.weight"]
             k_weight_ = k_weight_[kv_split_n_embed * self.tp_rank_ : kv_split_n_embed * (self.tp_rank_ + 1), :]
-            self.k_weight_ = k_weight_.transpose(0, 1).to(self.data_type_)
+            self.k_weight_ = self.quantize_weight(k_weight_.transpose(0, 1).to(self.data_type_))
 
         if f"model.layers.{self.layer_num_}.self_attn.v_proj.weight" in weights:
             v_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.v_proj.weight"]
             v_weight_ = v_weight_[kv_split_n_embed * self.tp_rank_ : kv_split_n_embed * (self.tp_rank_ + 1), :]
-            self.v_weight_ = v_weight_.transpose(0, 1).to(self.data_type_)
-
-        self._try_cat_to(["k_weight_", "v_weight_"], "kv_weight_", cat_dim=1, handle_func=self.quantize_weight)
+            self.v_weight_ = self.quantize_weight(v_weight_.transpose(0, 1).to(self.data_type_))
 
         # attention output dense params
         if f"model.layers.{self.layer_num_}.self_attn.o_proj.weight" in weights:

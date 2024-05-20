@@ -91,35 +91,28 @@ class LlamaTransformerLayerInferAWquant(TransformerLayerInferActivationWeightQua
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerActivationWeightQuantized,
     ) -> torch.Tensor:
-        q = self._awquant_matmul_for_qkv(
-            input.view(-1, self.embed_dim_),
-            quant_weight_params=layer_weight.q_weight_,
-            is_prefill=infer_state.is_prefill,
-            token_scale=token_scale,
-        )
-        cache_kv = self._awquant_matmul_for_qkv(
-            input.view(-1, self.embed_dim_),
-            quant_weight_params=layer_weight.kv_weight_,
-            is_prefill=infer_state.is_prefill,
-            token_scale=token_scale,
-        ).view(-1, self.tp_k_head_num_ + self.tp_v_head_num_, self.head_dim_)
-        rotary_emb_fwd(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            cache_kv[:, 0 : self.tp_k_head_num_, :],
-            infer_state.position_cos,
-            infer_state.position_sin,
-        )
-        out = self._awquant_matmul_for_qkv(
-            input.view(-1, self.embed_dim_),
-            quant_weight_params=layer_weight.v_weight_,
-            is_prefill=infer_state.is_prefill,
-            token_scale=token_scale,
-        )
-        cache_kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :] = out.view(
-            -1, self.tp_v_head_num_, self.head_dim_
-        )
-        return q, cache_kv
+        q = self._awquant_matmul_for_qkv(input.view(-1, self.embed_dim_),
+                                            quant_weight_params=layer_weight.q_weight_,
+                                            is_prefill=infer_state.is_prefill,
+                                            token_scale=token_scale)
 
+        cache_k_ = self._awquant_matmul_for_qkv(input.view(-1, self.embed_dim_),
+                                            quant_weight_params=layer_weight.k_weight_,
+                                            is_prefill=infer_state.is_prefill,
+                                            token_scale=token_scale)
+        
+        cache_k_ = cache_k_.view(-1, self.tp_k_head_num_, self.head_dim_)
+        rotary_emb_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_), cache_k_, infer_state.position_cos, infer_state.position_sin)
+        cache_v_ = self._awquant_matmul_for_qkv(input.view(-1, self.embed_dim_),
+                                            quant_weight_params=layer_weight.v_weight_,
+                                            is_prefill=infer_state.is_prefill,
+                                            token_scale=token_scale).view(-1, self.tp_v_head_num_, self.head_dim_)
+        
+        infer_state.kv_buffer[:, 0 : self.tp_k_head_num_, :] = cache_k_
+        infer_state.kv_buffer[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :] = cache_v_
+
+        return q, infer_state.kv_buffer
+    
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerActivationWeightQuantized
     ) -> torch.Tensor:
