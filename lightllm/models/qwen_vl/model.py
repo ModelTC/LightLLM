@@ -3,7 +3,7 @@ import numpy as np
 import unicodedata
 from lightllm.models.qwen.model import QWenTpPartModel
 from .layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
-from lightllm.server.multimodal_params import MultimodalParams
+from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 
 
 # Warp of the origal tokenizer
@@ -25,6 +25,9 @@ class QWenVLTokenizer:
         if target in cur_list:
             return cur_list.index(target) + start_idx
         return -1
+
+    def get_image_token_length(self, img: ImageItem):
+        return self.image_length
 
     # <img>xxx</img> -> Picture {image_idx}:<img>xxx</img>\n
     def _format_prompt(self, prompt):

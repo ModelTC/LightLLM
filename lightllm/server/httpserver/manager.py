@@ -74,7 +74,7 @@ class HttpServerManager:
 
     async def _alloc_multimodal_resources(self, multimodal_params):
         for img in multimodal_params.images:
-            record = await self._alloc_resource(img.read(), self.tokenizer.image_length)
+            record = await self._alloc_resource(img.read(), self.tokenizer.get_image_token_length(img))
             img.uuid = record["id"]
             img.token_id = record["token_id"]
             img.token_num = record["token_num"]

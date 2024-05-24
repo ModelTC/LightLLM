@@ -3,7 +3,7 @@ import json
 import numpy as np
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
-from lightllm.server.multimodal_params import MultimodalParams
+from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 
 
 # Warp of the origal tokenizer
@@ -23,6 +23,9 @@ class LlavaTokenizer:
         # (image_size // patch_size) ** 2: (336 // 14) ** 2 = 576
         self.image_length = (image_size // patch_size) ** 2
         self.skip_start = model_cfg.get("skip_start", True)
+
+    def get_image_token_length(self, img: ImageItem):
+        return self.image_length
 
     # only change the impl of the encode func:
     def encode(self, prompt, multimodal_params: MultimodalParams = None):
