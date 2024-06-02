@@ -26,6 +26,8 @@ class LlamaTpPartModelAWQuant(LlamaTpPartModel):
         assert any("w8a8" in mode_ for mode_ in self.mode), "only for weight-activation quant model"
         assert self.config["num_key_value_heads"] % self.world_size_ == 0
         assert self.config["num_attention_heads"] % self.world_size_ == 0
+        if "triton_w8a8" in self.mode:
+            assert self.data_type == torch.float16, f"triton_w8a8 needs torch.float16 data_type not {self.data_type}."
         return
     
     def _init_mem_manager(self):

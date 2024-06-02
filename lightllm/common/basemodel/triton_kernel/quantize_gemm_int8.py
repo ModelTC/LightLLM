@@ -201,7 +201,7 @@ def matmul_int8(a, a_scale, b, b_scale, out=None):
     K, N = b.shape
     # Allocates output.
     if out == None:
-        c = torch.zeros((M, N), device=a.device, dtype=a.dtype)
+        c = torch.zeros((M, N), device=a.device, dtype=torch.float16)
     else:
         c = out.fill_(0.)
     grid = lambda META: (
