@@ -19,6 +19,9 @@ class Qwen2PreAndPostLayerWeight(PreAndPostLayerWeight):
                     split_vob_size * self.tp_rank_ : split_vob_size * (self.tp_rank_ + 1), :
                 ]
             )
+            tie_word_embeddings = self.network_config_.get('tie_word_embeddings', False)
+            if tie_word_embeddings:
+                self.lm_head_weight_ = self.wte_weight_
         if "lm_head.weight" in weights:
             self.lm_head_weight_ = self._cuda(
                 weights["lm_head.weight"][split_vob_size * self.tp_rank_ : split_vob_size * (self.tp_rank_ + 1), :]
