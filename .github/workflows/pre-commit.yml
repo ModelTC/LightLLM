@@ -26,16 +26,10 @@ jobs:
         pip install pre-commit
         pre-commit install-hooks
 
-    - name: Get list of modified files
-      id: files
-      run: |
-        echo "MODIFIED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }})" >> $GITHUB_ENV
-        cat $GITHUB_ENV
-
     - name: Run pre-commit on modified files
       run: |
-        if [ -n "${{ env.MODIFIED_FILES }}" ]; then
-          pre-commit run --files ${{ env.MODIFIED_FILES }}
+        if [ -n "$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }})" ]; then
+          pre-commit run --files $(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }})
         else
           echo "No files to check"
         fi
