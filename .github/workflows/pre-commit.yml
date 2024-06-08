@@ -30,7 +30,7 @@ jobs:
       id: files
       run: |
         echo "MODIFIED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }})" >> $GITHUB_ENV
-        echo $GITHUB_ENV
+        cat $GITHUB_ENV
 
     - name: Run pre-commit on modified files
       run: |
