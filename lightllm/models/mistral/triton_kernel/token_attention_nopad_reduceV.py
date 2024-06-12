@@ -13,7 +13,6 @@ def _fwd_kernel_token_att2(
     B_req_idx,
     B_Start_Loc,
     B_Seqlen,
-    B_Start_Loc_Window,
     B_Att_Start_Loc,
     B_Att_Seqlen,
     stride_req_to_tokens_b,
@@ -27,6 +26,7 @@ def _fwd_kernel_token_att2(
     stride_oh,
     stride_od,
     kv_group_num,
+    sliding_window,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -38,7 +38,7 @@ def _fwd_kernel_token_att2(
     offs_n = tl.arange(0, BLOCK_N)  # [64]
     offs_d = tl.arange(0, BLOCK_DMODEL)  # [D]
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
-    cur_batch_start_index = tl.load(B_Start_Loc_Window + cur_batch)  # new index
+    cur_batch_start_index = tl.maximum(cur_batch_seq_len - sliding_window, 0)  # new index
     # cur_batch_end_index = cur_batch_seq_len
     cur_batch_in_all_start_index = tl.load(B_Att_Start_Loc + cur_batch)  # new index
     cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
@@ -75,7 +75,7 @@ def _fwd_kernel_token_att2(
 
 @torch.no_grad()
 def token_att_fwd2(
-    prob, v, out, Req_to_tokens, B_req_idx, B_Start_Loc, B_Seqlen, B_Start_Loc_Window, B_Att_Start_Loc, B_Att_Seqlen
+    prob, v, out, Req_to_tokens, B_req_idx, B_Start_Loc, B_Seqlen, B_Att_Start_Loc, B_Att_Seqlen, sliding_window
 ):
     BLOCK = 128
     # BLOCK = 64 # for triton 2.0.0dev
@@ -94,7 +94,6 @@ def token_att_fwd2(
         B_req_idx,
         B_Start_Loc,
         B_Seqlen,
-        B_Start_Loc_Window,
         B_Att_Start_Loc,
         B_Att_Seqlen,
         Req_to_tokens.stride(0),
@@ -108,6 +107,7 @@ def token_att_fwd2(
         out.stride(1),
         out.stride(2),
         kv_group_num=kv_group_num,
+        siliding_window=sliding_window,
         BLOCK_DMODEL=dim,
         BLOCK_N=BLOCK,
         num_warps=num_warps,

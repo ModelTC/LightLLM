@@ -119,7 +119,6 @@ class Starcoder2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.b_req_idx,
             infer_state.b_start_loc,
             infer_state.b_seq_len,
-            infer_state.b_start_loc_window,
             infer_state.b_att_start_loc,
             infer_state.b_att_seq_len,
             infer_state.sliding_window,
@@ -141,9 +140,9 @@ class Starcoder2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.b_req_idx,
             infer_state.b_start_loc,
             infer_state.b_seq_len,
-            infer_state.b_start_loc_window,
             infer_state.b_att_start_loc,
             infer_state.b_att_seq_len,
             infer_state.other_kv_index,
+            infer_state.sliding_window,
         )
         return o_tensor
