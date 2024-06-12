@@ -6,6 +6,7 @@ import torch
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
+from lightllm.models.cohere.model import CohereTpPartModel
 from lightllm.models.mixtral.model import MixtralTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 from rpyc.utils.classic import obtain
@@ -171,6 +172,8 @@ class ModeBackend:
                 self.model = Qwen2TpPartModel(model_kvargs)
             elif self.model_type == "gemma":
                 self.model = Gemma_2bTpPartModel(model_kvargs)
+            elif self.model_type == "cohere":
+                self.model = CohereTpPartModel(model_kvargs)
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:
@@ -192,7 +195,7 @@ class ModeBackend:
         return
 
     def init_custom(self):
-        pass 
+        pass
 
     # @calculate_time(show=False, min_cost_ms=300)
     def prefill_batch(self, batch_id):
