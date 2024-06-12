@@ -302,8 +302,9 @@ def main():
         "--tokenizer_mode",
         type=str,
         default="slow",
-        help="""tokenizer load mode, can be slow or auto, slow mode load fast but run slow, slow mode is
-          good for debug and test, when you want to get best performance, try auto mode""",
+        help="""tokenizer load mode, can be slow, fast or auto, slow mode load fast but run slow,
+          slow mode is good for debug and test, fast mode get best performance, auto mode will
+          try to use fast mode, if failed will use slow mode""",
     )
     parser.add_argument(
         "--load_way",
