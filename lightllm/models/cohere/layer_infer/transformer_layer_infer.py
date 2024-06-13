@@ -6,9 +6,9 @@ from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_cohe
 )
 from lightllm.models.cohere.infer_struct import CohereInferStateInfo
 from lightllm.models.cohere.layer_weights.transformer_layer_weight import CohereTransformerLayerWeight
-from lightllm.models.cohere.triton_kernels.layernorm import layernorm_forward, multi_head_layernorm_forward
+from lightllm.models.cohere.triton_kernels.layernorm import layernorm_forward, torch_layernorm
+from lightllm.models.cohere.triton_kernels.rotary_emb import rotary_emb_fwd
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 
 
@@ -42,13 +42,13 @@ class CohereTransformerLayerInfer(TransformerLayerCohereInferTpl):
         self._rotary_emb_fwd = partial(CohereTransformerLayerInfer._rotary_emb_fwd, self)
 
     def _att_norm(self, input, infer_state, layer_weight):
-        return layernorm_forward(input, layer_weight.att_norm_weight_, self.eps_)
+        return layernorm_forward(input.unsqueeze(1), layer_weight.att_norm_weight_.unsqueeze(0), self.eps_).squeeze(1)
 
     def _q_norm(self, input, infer_state, layer_weight):
-        return multi_head_layernorm_forward(input, layer_weight.q_norm_weight_, self.eps_)
+        return layernorm_forward(input, layer_weight.q_norm_weight_, self.eps_)
 
     def _k_norm(self, input, infer_state, layer_weight):
-        return multi_head_layernorm_forward(input, layer_weight.k_norm_weight_, self.eps_)
+        return layernorm_forward(input, layer_weight.k_norm_weight_, self.eps_)
 
     def _bind_norm(self):
         self._att_norm = partial(CohereTransformerLayerInfer._att_norm, self)

@@ -55,7 +55,12 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
             k = cache_kv[:, 0 : self.tp_k_head_num_, :]
             q = self._q_norm(q, infer_state, layer_weight)
             cache_kv[:, 0 : self.tp_k_head_num_, :] = self._k_norm(k, infer_state, layer_weight)
-        self._rotary_emb_fwd(q, cache_kv, infer_state.position_cos, infer_state.position_sin)
+        self._rotary_emb_fwd(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            cache_kv[:, 0 : self.tp_k_head_num_, :],
+            infer_state.position_cos,
+            infer_state.position_sin,
+        )
         return q, cache_kv
 
     def _context_attention_kernel(self, q, kv, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:

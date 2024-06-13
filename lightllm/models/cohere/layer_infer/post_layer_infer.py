@@ -4,7 +4,7 @@ import numpy as np
 
 from lightllm.models.cohere.infer_struct import CohereInferStateInfo
 from lightllm.models.cohere.layer_weights.pre_and_post_layer_weight import CoherePreAndPostLayerWeight
-from lightllm.models.cohere.triton_kernels.layernorm import layernorm_forward, multi_head_layernorm_forward
+from lightllm.models.cohere.triton_kernels.layernorm import layernorm_forward
 from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
 from lightllm.common.basemodel.splitfuse_infer_struct import SplitFuseInferStateInfo
 
@@ -22,7 +22,9 @@ class CoherePostLayerInfer(PostLayerInferTpl):
         return
 
     def _norm(self, input, infer_state, layer_weight: CoherePreAndPostLayerWeight) -> torch.Tensor:
-        return layernorm_forward(input, layer_weight.final_norm_weight_, eps=self.eps_)
+        return layernorm_forward(
+            input.unsqueeze(1), layer_weight.final_norm_weight_.unsqueeze(0), eps=self.eps_
+        ).squeeze(1)
 
     def _slice_get_last_input(self, input_embdings, infer_state: CohereInferStateInfo):
         if infer_state.is_splitfuse:
