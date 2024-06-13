@@ -13,6 +13,7 @@ from lightllm.models.llama_awquant.layer_weights.transformer_layer_weight import
 )
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.models.llama.splitfuse_infer_struct import LlamaSplitFuseInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.common.basemodel import TransformerLayerInferActivationWeightQuantTpl
 from lightllm.common.basemodel.cuda_kernel.ppl_awquant import (
@@ -212,6 +213,33 @@ class LlamaTransformerLayerInferActivationWeightQuantPpl(TransformerLayerInferAc
 
     # this impl dont to use @mark_cost_time
     def _token_ffn(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight):
+        input1, token_scale, skip_out = self._awquant_ffn_norm(input_embdings, infer_state, layer_weight)
+        ffn_out = self._ffn(input1, token_scale, infer_state, layer_weight)
+        input1 = None
+        if self.world_size_ > 1:
+            dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
+        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+        return
+
+    def _splitfuse_attention(self, input_embding, infer_state: LlamaSplitFuseInferStateInfo, layer_weight):
+        # 因为 LlamaSplitFuseInferStateInfo 对象并没有 is_prefill 成员，但是后续的矩阵乘法算子入口
+        # 函数输入中需要使用到, 所以在开始的地方默认添加一个 is_prefill 成员，并设置为True.
+        infer_state.is_prefill = True
+
+        input1, token_scale, skip_out = self._awquant_att_norm(input_embding, infer_state, layer_weight)
+        cache_kv = self._pre_cache_kv(infer_state, layer_weight)
+        q, cache_kv = self._get_qkv(input1, cache_kv, token_scale, infer_state, layer_weight)
+        input1 = None
+        self._post_cache_kv(cache_kv, infer_state, layer_weight)
+        o = self._splitfuse_attention_kernel(q, infer_state, layer_weight)
+        q = None
+        o = self._get_o(o, infer_state, layer_weight)
+        if self.world_size_ > 1:
+            dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
+        input_embding.add_(o.view(-1, self.embed_dim_))
+        return
+
+    def _splitfuse_ffn(self, input_embdings, infer_state: LlamaSplitFuseInferStateInfo, layer_weight):
         input1, token_scale, skip_out = self._awquant_ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, token_scale, infer_state, layer_weight)
         input1 = None
