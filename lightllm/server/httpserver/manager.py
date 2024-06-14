@@ -180,10 +180,11 @@ class HttpServerManager:
                         except:
                             pass
                         total_cost_time_ms = (time.time() - start_time) * 1000
+                        mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
                         logger.debug(
                             f"req_id:{group_request_id},start:{start_time}s,first_token_cost:{first_token_cost_ms}ms\n"
                             f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter}\n"
-                            f"mean_per_token_cost_time: {total_cost_time_ms/out_token_counter}ms\n"
+                            f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms\n"
                             f"prompt_token_num:{prompt_tokens}"
                         )
                         monitor.histogram_observe("lightllm_request_inference_duration", total_cost_time_ms)
