@@ -6,6 +6,7 @@ from lightllm.server.router.model_infer.infer_batch import InferBatch, group_map
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 from lightllm.server.io_struct import FinishStatus
 from lightllm.server.router.model_infer.mode_backend.continues_batch.post_process import _top_p_top_k
+
 SPLIT_TOKEN = int(os.getenv("SPLIT_TOKEN", -1))
 global_topp = [0.7, 0.9, 0.9]
 global_repetition = [1.12, 1.15, 1.14]
@@ -41,7 +42,8 @@ def sample(logits, req_groups, is_prefill, vocab_size, req_manager, eos_id: List
     logits[:, eos_id] = logits[:, eos_id] + torch.abs(logits[:, eos_id]) * (
         torch.pow(exponential_decay_length_penalties, length_penalty_idx).view((-1, 1)) - 1
     )
-    logits[mask_eos_reqs, eos_id] = -1000000.0
+    if mask_eos_reqs.any():
+        logits[mask_eos_reqs, eos_id] = -1000000.0
     logits.div_(temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
 
@@ -52,7 +54,7 @@ def sample(logits, req_groups, is_prefill, vocab_size, req_manager, eos_id: List
         req_group = req_groups[i]
         best_of = req_group.best_of
         end = start + 1 if is_prefill else start + best_of
-        if best_of > 1 and not req_group.has_beam:            
+        if best_of > 1 and not req_group.has_beam:
             next_token_id, next_token_logprob = diverse_sample(probs[start:end], req_group, is_prefill, req_manager)
         else:
             probs_sort, probs_idx = _top_p_top_k(probs[start:end], top_ps[start:end], top_ks[start:end])
@@ -60,11 +62,11 @@ def sample(logits, req_groups, is_prefill, vocab_size, req_manager, eos_id: List
             next_token_id = next_token_id.view(-1).detach().cpu().numpy()
             next_token_logprob = torch.log(next_token_prob).view(-1).detach().cpu().numpy()
 
-
         batch_next_token_ids.append(next_token_id)
         batch_next_token_logprobs.append(next_token_logprob)
         start = end
     return batch_next_token_ids, batch_next_token_logprobs
+
 
 def random_sample(probs_sort, probs_idx):
     sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
@@ -72,9 +74,9 @@ def random_sample(probs_sort, probs_idx):
     batch_next_token_probs = torch.gather(probs_sort, dim=1, index=sampled_index)
     return batch_next_token_ids, batch_next_token_probs
 
+
 def diverse_sample(probs, req_group, is_prefill, req_manager):
     best_of = req_group.best_of
-    valid_beams = 0
     logprobs = torch.log(probs)
     best_of = req_group.best_of
     next_token_logprob, next_token_id = torch.topk(logprobs[0].view(-1), best_of, dim=0, largest=True, sorted=True)
@@ -88,6 +90,7 @@ def diverse_sample(probs, req_group, is_prefill, req_manager):
     if is_prefill:
         req_group.beam_copy(req_manager, is_prefill)
     return next_token_id, next_token_logprob
+
 
 def _get_post_sample_tensors(req_groups, is_prefill):
     presence_penalties: List[float] = []

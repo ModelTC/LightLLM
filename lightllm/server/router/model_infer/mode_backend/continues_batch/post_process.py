@@ -36,7 +36,8 @@ def sample(logits, reqs, eos_id: List[int] = [2]):
     logits[:, eos_id] = logits[:, eos_id] + torch.abs(logits[:, eos_id]) * (
         torch.pow(exponential_decay_length_penalties, length_penalty_idx).view((-1, 1)) - 1
     )
-    logits[mask_eos_reqs, eos_id] = -1000000.0
+    if mask_eos_reqs.any():
+        logits[mask_eos_reqs, eos_id] = -1000000.0
     logits.div_(temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
     probs_sort, probs_idx = _top_p_top_k(probs, top_ps, top_ks)

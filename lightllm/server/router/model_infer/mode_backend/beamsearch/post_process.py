@@ -38,7 +38,8 @@ def sample(logits, req_groups, is_prefill, vocab_size, req_manager, eos_id: List
     logits[:, eos_id] = logits[:, eos_id] + torch.abs(logits[:, eos_id]) * (
         torch.pow(exponential_decay_length_penalties, length_penalty_idx).view((-1, 1)) - 1
     )
-    logits[mask_eos_reqs, eos_id] = -1000000.0
+    if mask_eos_reqs.any():
+        logits[mask_eos_reqs, eos_id] = -1000000.0
     logits.div_(temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
 
@@ -51,7 +52,9 @@ def sample(logits, req_groups, is_prefill, vocab_size, req_manager, eos_id: List
         best_of = req_group.best_of
         end = start + 1 if is_prefill else start + best_of
         if best_of > 1:
-            next_token_id, next_token_logprob, next_cumlogprob = beam_sample(probs[start:end], req_group, is_prefill, eos_id, vocab_size, req_manager)
+            next_token_id, next_token_logprob, next_cumlogprob = beam_sample(
+                probs[start:end], req_group, is_prefill, eos_id, vocab_size, req_manager
+            )
         else:
             probs_sort, probs_idx = _top_p_top_k(probs[start:end], top_ps[start:end], top_ks[start:end])
             next_token_id, next_token_prob = random_sample(probs_sort, probs_idx)
@@ -59,18 +62,19 @@ def sample(logits, req_groups, is_prefill, vocab_size, req_manager, eos_id: List
             next_token_logprob = torch.log(next_token_prob).view(-1).detach().cpu().numpy()
             next_cumlogprob = [req_group.get_req(0).cum_logprob + next_token_logprob[0]]
 
-
         batch_next_token_ids.append(next_token_id)
         batch_next_token_logprobs.append(next_token_logprob)
         batch_cumlogprob.append(next_cumlogprob)
         start = end
     return batch_next_token_ids, batch_next_token_logprobs, batch_cumlogprob
 
+
 def random_sample(probs_sort, probs_idx):
     sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
     batch_next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
     batch_next_token_probs = torch.gather(probs_sort, dim=1, index=sampled_index)
     return batch_next_token_ids, batch_next_token_probs
+
 
 def beam_sample(probs, req_group, is_prefill, eos_id, vocab_size, req_manager):
     best_of = req_group.best_of
@@ -94,7 +98,7 @@ def beam_sample(probs, req_group, is_prefill, eos_id, vocab_size, req_manager):
         req_obj.logprobs.append(next_logprobs[i])
         req_obj.update_finish_status(eos_id)
         if req_obj.finish_status.is_finished():
-            output_ids = req_obj.input_token_ids[req_obj.prompt_len:]
+            output_ids = req_obj.input_token_ids[req_obj.prompt_len :]
             req_group.add_res(output_ids, req_obj.logprobs, next_logprobs[i], req_obj.finish_status.value)
             if not req_obj.finish_status == FinishStatus.FINISHED_LENGTH:
                 req_obj.finish_status = FinishStatus.NO_FINISH
@@ -114,6 +118,7 @@ def beam_sample(probs, req_group, is_prefill, eos_id, vocab_size, req_manager):
     req_group.beam_copy(req_manager, is_prefill)
     req_group.update_finish_status(best_score)
     return next_token_id, next_token_logprob, next_cumlogprob
+
 
 def _get_post_sample_tensors(req_groups, is_prefill):
     presence_penalties: List[float] = []
