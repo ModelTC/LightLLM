@@ -77,10 +77,6 @@ class ModeBackend:
         )
         torch.cuda.set_device(self.tp_rank)
 
-        # 为了不修改，原有的接口形式，在这里写入环境变量，model 对象中的mem_manger对象初始化的时候，
-        # 需要读取，来初始化用于信息共享的shared mem 名称
-        os.environ["_NCCL_PORT_"] = str(kvargs["nccl_port"])
-
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
         model_kvargs = {

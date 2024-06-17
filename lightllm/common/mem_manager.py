@@ -1,3 +1,4 @@
+import re
 import os
 import torch
 from lightllm.utils.log_utils import init_logger
@@ -19,10 +20,14 @@ class MemoryManager:
         self.mem_state = torch.zeros((size,), dtype=torch.int32, device="cuda")
         self.indexes = torch.arange(0, size, dtype=torch.long, device="cuda")
         self.can_use_mem_size = size
+
         # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
-        nccl_port = os.environ.get("_NCCL_PORT_", None)
+        from torch.distributed.distributed_c10d import _default_pg_init_method
+
+        nccl_port = re.search(r":(\d+)$", _default_pg_init_method).group(1)
         assert nccl_port is not None
         logger.info(f"mem manger get nccl port: {str(nccl_port)}")
+
         self.shared_can_use_token_num = SharedInt(f"{str(nccl_port)}_mem_manger_can_use_token_num")
 
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
