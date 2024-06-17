@@ -392,9 +392,7 @@ class TpPartBaseModel:
         input_embs = self.pre_infer.context_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         for i in range(self.layers_num):
             input_embs = self.layers_infer[i].context_forward(input_embs, infer_state, self.trans_layers_weight[i])
-        predict_logics = self.post_infer.token_forward(
-            input_embs, infer_state, self.pre_post_weight, return_logics=True
-        )
+        predict_logics = self.post_infer.token_forward(input_embs, infer_state, self.pre_post_weight)
         return predict_logics
 
     @final
@@ -403,9 +401,7 @@ class TpPartBaseModel:
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         for i in range(self.layers_num):
             input_embs = self.layers_infer[i].token_forward(input_embs, infer_state, self.trans_layers_weight[i])
-        predict_logics = self.post_infer.token_forward(
-            input_embs, infer_state, self.pre_post_weight, return_logics=True
-        )
+        predict_logics = self.post_infer.token_forward(input_embs, infer_state, self.pre_post_weight)
         return predict_logics
 
     @final
@@ -414,7 +410,5 @@ class TpPartBaseModel:
         input_embs = self.pre_infer.splitfuse_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         for i in range(self.layers_num):
             input_embs = self.layers_infer[i].splitfuse_forward(input_embs, infer_state, self.trans_layers_weight[i])
-        predict_logics = self.post_infer.splitfuse_forward(
-            input_embs, infer_state, self.pre_post_weight, return_logics=True
-        )
+        predict_logics = self.post_infer.splitfuse_forward(input_embs, infer_state, self.pre_post_weight)
         return predict_logics

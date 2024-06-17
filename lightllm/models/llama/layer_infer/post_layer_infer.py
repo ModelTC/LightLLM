@@ -90,16 +90,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
         assert False, "Error State"
 
-    def soft_max(self, data):
-        return torch.softmax(data.permute(1, 0).float(), dim=-1)
-
-    def token_forward(
-        self,
-        input_embdings,
-        infer_state: LlamaInferStateInfo,
-        layer_weight: LlamaPreAndPostLayerWeight,
-        return_logics=False,
-    ):
+    def token_forward(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
         last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
         input_embdings_dtype = input_embdings.dtype
         input_embdings = None
@@ -123,17 +114,10 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             )
         logic_batch = None
 
-        if not return_logics:
-            prob_out = self.soft_max(gather_data)
-            gather_data = None
-            return prob_out
-        else:
-            ans_logics = gather_data.permute(1, 0).float()
-            gather_data = None
-            return ans_logics
+        ans_logics = gather_data.permute(1, 0).float()
+        gather_data = None
+        return ans_logics
 
     # @mark_cost_time("splitfuse post forward")
-    def splitfuse_forward(
-        self, input_embdings, infer_state: SplitFuseInferStateInfo, layer_weight: BaseLayerWeight, return_logics=False
-    ):
-        return self.token_forward(input_embdings, infer_state, layer_weight, return_logics=return_logics)
+    def splitfuse_forward(self, input_embdings, infer_state: SplitFuseInferStateInfo, layer_weight: BaseLayerWeight):
+        return self.token_forward(input_embdings, infer_state, layer_weight)
