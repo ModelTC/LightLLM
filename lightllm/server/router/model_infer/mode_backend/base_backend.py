@@ -93,88 +93,101 @@ class ModeBackend:
             "use_dynamic_prompt_cache": self.use_dynamic_prompt_cache,
             "data_type": kvargs.get("data_type", "float16"),
         }
+
         is_weight_only_quant = any("w6a16" in mode_ or "w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode)
+        is_weight_activation_quant = any("w8a8" in mode_ for mode_ in self.mode)
+        is_quik_activation_weight_quant = any("quik_activation_weight" in mode_ for mode_ in self.mode)
 
         try:
             self.model_type = model_cfg.get("model_type", "")
-            if self.model_type == "bloom":
-                self.model = BloomTpPartModel(model_kvargs)
-            elif self.model_type == "llama":
-                if is_weight_only_quant:
-                    self.model = LlamaTpPartModelWQuant(model_kvargs)
-                elif any("w8a8" in mode_ for mode_ in self.mode):
-                    self.model = LlamaTpPartModelAWQuant(model_kvargs)
-                elif any("quik_activation_weight" in mode_ for mode_ in self.mode):
+
+            if is_quik_activation_weight_quant:
+                if self.model_type == "llama":
                     # Supports both w4a4 and w8a8 modes, with automatic mode selection upon model loading.
                     self.model = LlamaTpPartModelQuik(model_kvargs)
                 else:
-                    self.model = LlamaTpPartModel(model_kvargs)
-            elif self.model_type == "qwen":
-                if "visual" in model_cfg:
-                    self.model = QWenVLTpPartModel(model_kvargs)
-                    self.is_multimodal = True
-                elif is_weight_only_quant:
+                    raise Exception(f"quik_activation_weight_quant can not support {self.model_type}")
+
+            elif is_weight_activation_quant:
+                if self.model_type == "llama":
+                    self.model = LlamaTpPartModelAWQuant(model_kvargs)
+                else:
+                    raise Exception(f"weight_activation_quant can not support {self.model_type}")
+
+            elif is_weight_only_quant:
+                if self.model_type == "llama":
+                    self.model = LlamaTpPartModelWQuant(model_kvargs)
+                elif self.model_type == "qwen":
                     self.model = QWenTpPartModelWQuant(model_kvargs)
-                else:
-                    self.model = QWenTpPartModel(model_kvargs)
-            elif self.model_type == "baichuan":
-                if model_cfg["hidden_size"] == 4096:
-                    if model_cfg["architectures"][0] == "BaichuanForCausalLM":
-                        self.model = Baichuan2_7bTpPartModel(model_kvargs)
-                    else:
-                        self.model = Baichuan7bTpPartModel(model_kvargs)
-                elif model_cfg["hidden_size"] == 5120:
-                    if model_cfg["architectures"][0] == "BaichuanForCausalLM":
-                        self.model = Baichuan2_13bTpPartModel(model_kvargs)
-                    else:
-                        self.model = Baichuan13bTpPartModel(model_kvargs)
-                else:
-                    raise Exception("can not support baichuan format")
-            elif self.model_type == "gpt_bigcode":
-                if is_weight_only_quant:
+                elif self.model_type == "gpt_bigcode":
                     self.model = StarcoderTpPartModelWQuant(model_kvargs)
-                else:
-                    self.model = StarcoderTpPartModel(model_kvargs)
-            elif self.model_type == "starcoder2":
-                self.model = Starcoder2TpPartModel(model_kvargs)
-            elif self.model_type == "chatglm":
-                self.model = ChatGlm2TpPartModel(model_kvargs)
-            elif self.model_type == "internlm":
-                if is_weight_only_quant:
+                elif self.model_type == "internlm":
                     self.model = InternlmTpPartModelWQuant(model_kvargs)
-                else:
-                    self.model = InternlmTpPartModel(model_kvargs)
-            elif self.model_type == "internlm2":
-                if is_weight_only_quant:
+                elif self.model_type == "internlm2":
                     self.model = Internlm2TpPartModelWQuant(model_kvargs)
                 else:
+                    raise Exception(f"weight_only_quant can not support {self.model_type}")
+
+            else:  # no quant
+                if self.model_type == "bloom":
+                    self.model = BloomTpPartModel(model_kvargs)
+                elif self.model_type == "llama":
+                    self.model = LlamaTpPartModel(model_kvargs)
+                elif self.model_type == "qwen":
+                    if "visual" in model_cfg:
+                        self.model = QWenVLTpPartModel(model_kvargs)
+                        self.is_multimodal = True
+                    else:
+                        self.model = QWenTpPartModel(model_kvargs)
+                elif self.model_type == "baichuan":
+                    if model_cfg["hidden_size"] == 4096:
+                        if model_cfg["architectures"][0] == "BaichuanForCausalLM":
+                            self.model = Baichuan2_7bTpPartModel(model_kvargs)
+                        else:
+                            self.model = Baichuan7bTpPartModel(model_kvargs)
+                    elif model_cfg["hidden_size"] == 5120:
+                        if model_cfg["architectures"][0] == "BaichuanForCausalLM":
+                            self.model = Baichuan2_13bTpPartModel(model_kvargs)
+                        else:
+                            self.model = Baichuan13bTpPartModel(model_kvargs)
+                    else:
+                        raise Exception("can not support baichuan format")
+                elif self.model_type == "gpt_bigcode":
+                    self.model = StarcoderTpPartModel(model_kvargs)
+                elif self.model_type == "starcoder2":
+                    self.model = Starcoder2TpPartModel(model_kvargs)
+                elif self.model_type == "chatglm":
+                    self.model = ChatGlm2TpPartModel(model_kvargs)
+                elif self.model_type == "internlm":
+                    self.model = InternlmTpPartModel(model_kvargs)
+                elif self.model_type == "internlm2":
                     self.model = Internlm2TpPartModel(model_kvargs)
-            elif self.model_type == "Yi":
-                self.model = YiTpPartModel(model_kvargs)
-            elif self.model_type == "mistral":
-                self.model = MistralTpPartModel(model_kvargs)
-            elif self.model_type == "stablelm":
-                self.model = StablelmTpPartModel(model_kvargs)
-            elif self.model_type == "mixtral":
-                self.model = MixtralTpPartModel(model_kvargs)
-            elif self.model_type == "minicpm" or model_cfg["architectures"][0] == "MiniCPMForCausalLM":
-                self.model = MiniCPMTpPartModel(model_kvargs)
-            elif self.model_type == "llava":
-                self.model = LlavaTpPartModel(model_kvargs)
-                self.is_multimodal = True
-            elif self.model_type == "internlmxcomposer2":
-                self.model = InternlmComposerTpPartModel(model_kvargs)
-                self.is_multimodal = True
-            elif self.model_type == "qwen2":
-                self.model = Qwen2TpPartModel(model_kvargs)
-            elif self.model_type == "gemma":
-                self.model = Gemma_2bTpPartModel(model_kvargs)
-            elif self.model_type == "cohere":
-                self.model = CohereTpPartModel(model_kvargs)
-            elif self.model_type == "phi3":
-                self.model = Phi3TpPartModel(model_kvargs)
-            else:
-                raise Exception(f"can not support {self.model_type} now")
+                elif self.model_type == "Yi":
+                    self.model = YiTpPartModel(model_kvargs)
+                elif self.model_type == "mistral":
+                    self.model = MistralTpPartModel(model_kvargs)
+                elif self.model_type == "stablelm":
+                    self.model = StablelmTpPartModel(model_kvargs)
+                elif self.model_type == "mixtral":
+                    self.model = MixtralTpPartModel(model_kvargs)
+                elif self.model_type == "minicpm" or model_cfg["architectures"][0] == "MiniCPMForCausalLM":
+                    self.model = MiniCPMTpPartModel(model_kvargs)
+                elif self.model_type == "llava":
+                    self.model = LlavaTpPartModel(model_kvargs)
+                    self.is_multimodal = True
+                elif self.model_type == "internlmxcomposer2":
+                    self.model = InternlmComposerTpPartModel(model_kvargs)
+                    self.is_multimodal = True
+                elif self.model_type == "qwen2":
+                    self.model = Qwen2TpPartModel(model_kvargs)
+                elif self.model_type == "gemma":
+                    self.model = Gemma_2bTpPartModel(model_kvargs)
+                elif self.model_type == "cohere":
+                    self.model = CohereTpPartModel(model_kvargs)
+                elif self.model_type == "phi3":
+                    self.model = Phi3TpPartModel(model_kvargs)
+                else:
+                    raise Exception(f"can not support {self.model_type} now")
         except Exception as e:
             self.logger.error(f"load model error: {str(e)} {e} {type(e)}")
             import traceback
@@ -189,6 +202,8 @@ class ModeBackend:
             if self.use_dynamic_prompt_cache
             else None
         )
+
+        self.logger.info(f"loaded model class {self.model.__class__}")
         self.init_custom()
 
         return

@@ -153,6 +153,7 @@ async def generate_stream(request: Request) -> Response:
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
+
 @app.post("/")
 async def compat_generate(request: Request) -> Response:
     request_dict = await request.json()
@@ -161,6 +162,7 @@ async def compat_generate(request: Request) -> Response:
         return await generate_stream(request)
     else:
         return await generate(request)
+
 
 @monitor.histogram_timer("lightllm_request_duration")
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
@@ -459,6 +461,8 @@ def main():
             batch_max_tokens = int(1 / 6 * args.max_total_token_num)
             batch_max_tokens = max(batch_max_tokens, args.splitfuse_block_size)
             args.batch_max_tokens = batch_max_tokens
+
+    logger.info(f"all start args:{args}")
 
     can_use_ports = alloc_can_use_network_port(num=5 + args.tp, used_nccl_port=args.nccl_port)
     router_port, detokenization_port, httpserver_port, visual_port, cache_port = can_use_ports[0:5]
