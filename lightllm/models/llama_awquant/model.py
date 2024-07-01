@@ -5,10 +5,12 @@ import torch
 
 from lightllm.models.llama_awquant.layer_weights.transformer_layer_weight import (
     LlamaTransformerLayerActivationWeightQuantPpl,
+    LlamaTransformerLayerActivationWeightQuantPplMixdown,
     LlamaTransformerLayerActivationWeightQuantTriton,
 )
 from lightllm.models.llama_awquant.layer_infer.transformer_layer_infer import (
     LlamaTransformerLayerInferActivationWeightQuantPpl,
+    LlamaTransformerLayerInferActivationWeightQuantPplMixdown,
     LlamaTransformerLayerInferActivationWeightQuantTriton,
 )
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
@@ -28,6 +30,9 @@ class LlamaTpPartModelAWQuant(LlamaTpPartModel):
         if "ppl_w8a8" in kvargs["mode"]:
             self.transformer_weight_class = LlamaTransformerLayerActivationWeightQuantPpl
             self.transformer_layer_infer_class = LlamaTransformerLayerInferActivationWeightQuantPpl
+        elif "ppl_w8a8_mixdown" in kvargs["mode"]:
+            self.transformer_weight_class = LlamaTransformerLayerActivationWeightQuantPplMixdown
+            self.transformer_layer_infer_class = LlamaTransformerLayerInferActivationWeightQuantPplMixdown
         elif "triton_w8a8" in kvargs["mode"]:
             self.transformer_weight_class = LlamaTransformerLayerActivationWeightQuantTriton
             self.transformer_layer_infer_class = LlamaTransformerLayerInferActivationWeightQuantTriton

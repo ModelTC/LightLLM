@@ -7,6 +7,9 @@ from functools import partial
 from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.common.basemodel.cuda_kernel.ppl_awquant import dynamic_channelwise_quant_fp16_i8_ppl
 from lightllm.common.basemodel.triton_kernel.quantize_gemm_int8 import quantize_int8
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class LlamaTransformerLayerActivationWeightQuantPpl(TransformerLayerWeight):
@@ -105,6 +108,54 @@ class LlamaTransformerLayerActivationWeightQuantPpl(TransformerLayerWeight):
                 :, split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1)
             ]
             self.down_proj = self.quantize_weight(down_proj.transpose(0, 1))
+        return
+
+
+class LlamaTransformerLayerActivationWeightQuantPplMixdown(LlamaTransformerLayerActivationWeightQuantPpl):
+    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[]):
+        super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
+        self._init_mixdown()
+
+    def _init_mixdown(self):
+        self.mixdown = self.network_config_.get("mixdown", list(range(self.network_config_["num_hidden_layers"])))
+        assert isinstance(self.mixdown, list), "mixdown must be all or a list."
+
+    def init_quant_mode(self):
+        if "ppl_w8a8_mixdown" in self.mode:
+            self.quantize_weight = partial(dynamic_channelwise_quant_fp16_i8_ppl, tp_rank=self.tp_rank_)
+        else:
+            raise Exception(f"error mode {self.mode}")
+
+    def _load_ffn_weights(self, weights):
+        if f"model.layers.{self.layer_num_}.post_attention_layernorm.weight" in weights:
+            self.ffn_norm_weight_ = self._cuda(
+                weights[f"model.layers.{self.layer_num_}.post_attention_layernorm.weight"]
+            )
+
+        inter_size = self.network_config_["intermediate_size"]
+        split_inter_size = inter_size // self.world_size_
+
+        if f"model.layers.{self.layer_num_}.mlp.up_proj.weight" in weights:
+            up_proj = weights[f"model.layers.{self.layer_num_}.mlp.up_proj.weight"][
+                split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1), :
+            ]
+            self.up_proj = self.quantize_weight(up_proj.transpose(0, 1).to(self.data_type_))
+
+        if f"model.layers.{self.layer_num_}.mlp.gate_proj.weight" in weights:
+            gate_proj = weights[f"model.layers.{self.layer_num_}.mlp.gate_proj.weight"][
+                split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1), :
+            ]
+            self.gate_proj = self.quantize_weight(gate_proj.transpose(0, 1).to(self.data_type_))
+
+        if f"model.layers.{self.layer_num_}.mlp.down_proj.weight" in weights:
+            down_proj = weights[f"model.layers.{self.layer_num_}.mlp.down_proj.weight"][
+                :, split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1)
+            ]
+            if self.layer_num_ in self.mixdown:
+                self.down_proj = self._cuda(down_proj.transpose(0, 1))
+                logger.info(f"layer {self.layer_num_} down_proj set to fp16")
+            else:
+                self.down_proj = self.quantize_weight(down_proj.transpose(0, 1))
         return
 
 
