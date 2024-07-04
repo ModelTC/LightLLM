@@ -16,6 +16,7 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.llama_wquant.model import LlamaTpPartModelWQuant
 from lightllm.models.llama_awquant.model import LlamaTpPartModelAWQuant
 from lightllm.models.llama_quik.model import LlamaTpPartModelQuik
+from lightllm.models.qwen2_wquant.model import QWen2TpPartModelWQuant
 from lightllm.models.starcoder.model import StarcoderTpPartModel
 from lightllm.models.starcoder_wquant.model import StarcoderTpPartModelWQuant
 from lightllm.models.starcoder2.model import Starcoder2TpPartModel
@@ -125,6 +126,8 @@ class ModeBackend:
                     self.model = InternlmTpPartModelWQuant(model_kvargs)
                 elif self.model_type == "internlm2":
                     self.model = Internlm2TpPartModelWQuant(model_kvargs)
+                elif self.model_type == "qwen2":
+                    self.model = QWen2TpPartModelWQuant(model_kvargs)
                 else:
                     raise Exception(f"weight_only_quant can not support {self.model_type}")
 
