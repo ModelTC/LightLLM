@@ -396,6 +396,25 @@ python test_llama.py
 - `error   : PTX .version 7.4 does not support .target sm_89`
     - launch with `bash tools/resolve_ptx_version python -m lightllm.server.api_server ... `
 
+## Projects using lightllm
+
+If you have a project that should be incorporated, please contact via email or create a pull request.
+
+1. <details><summary> <b><a href=https://github.com/LazyAGI/LazyLLM>LazyLLM</a></b>: Easyest and lazyest way for building multi-agent LLMs applications.</summary>
+
+    Once you have installed `lightllm` and `lazyllm`, and then you can use the following code to build your own chatbot:
+
+    ~~~python
+    from lazyllm import TrainableModule, deploy, WebModule
+    # Model will be download automatically if you have an internet connection
+    m = TrainableModule('internlm2-chat-7b').deploy_method(deploy.lightllm)
+    WebModule(t).start().wait()
+    ~~~
+
+    Documents: https://lazyllm.readthedocs.io/
+
+    </details>
+
 ## Community
 
 For further information and discussion, [join our discord server](https://discord.gg/WzzfwVSguU).
