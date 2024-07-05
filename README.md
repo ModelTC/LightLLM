@@ -408,7 +408,7 @@ If you have a project that should be incorporated, please contact via email or c
     from lazyllm import TrainableModule, deploy, WebModule
     # Model will be download automatically if you have an internet connection
     m = TrainableModule('internlm2-chat-7b').deploy_method(deploy.lightllm)
-    WebModule(t).start().wait()
+    WebModule(m).start().wait()
     ~~~
 
     Documents: https://lazyllm.readthedocs.io/
