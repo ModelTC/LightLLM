@@ -23,7 +23,7 @@ import torch
 import uvloop
 import sys
 import os
-
+import rpyc
 from .build_prompt import build_prompt
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -43,6 +43,7 @@ from .httpserver.manager import HttpServerManager
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from .embed_cache.manager import start_cache_manager
+from .metrics.manager import start_metric_manager
 from .visualserver.manager import start_visual_process
 from .req_id_generator import ReqIDGenerator
 from .api_tgi import tgi_generate_impl, tgi_generate_stream_impl
@@ -63,9 +64,8 @@ from .api_models import (
 )
 
 from lightllm.utils.log_utils import init_logger
-
-from .metrics import monitor
 from prometheus_client import generate_latest
+from lightllm.server.metrics.manager import MetricClient
 
 logger = init_logger(__name__)
 
@@ -76,6 +76,7 @@ app = FastAPI()
 server = uvicorn.Server(uvicorn.Config(app))
 
 isFirst = True
+metric_client = None
 
 
 def first_set_handle_loop():
@@ -88,6 +89,7 @@ def first_set_handle_loop():
 
 
 def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
+    metric_client.counter_inc("lightllm_request_failure")
     return JSONResponse({"message": message}, status_code=status_code.value)
 
 
@@ -134,7 +136,6 @@ async def token_load(request: Request):
     )
 
 
-@monitor.histogram_timer("lightllm_request_duration")
 @app.post("/generate")
 async def generate(request: Request) -> Response:
     first_set_handle_loop()
@@ -144,7 +145,6 @@ async def generate(request: Request) -> Response:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
 
-@monitor.histogram_timer("lightllm_request_duration")
 @app.post("/generate_stream")
 async def generate_stream(request: Request) -> Response:
     first_set_handle_loop()
@@ -164,10 +164,8 @@ async def compat_generate(request: Request) -> Response:
         return await generate(request)
 
 
-@monitor.histogram_timer("lightllm_request_duration")
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
-    monitor.counter_inc("lightllm_request_count")
     first_set_handle_loop()
 
     if request.logit_bias is not None:
@@ -247,7 +245,6 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     background_tasks = BackgroundTasks()
     # Abort the request if the client disconnects.
     background_tasks.add_task(abort_request)
-    monitor.counter_inc("lightllm_request_success")
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
@@ -264,8 +261,8 @@ async def tokens(request: Request):
 
 @app.get("/metrics")
 async def metrics() -> Response:
-    metrics_data = generate_latest()
-    response = Response(metrics_data)
+    data = await metric_client.generate_latest()
+    response = Response(data)
     response.mimetype = "text/plain"
     return response
 
@@ -418,6 +415,9 @@ def main():
     parser.add_argument(
         "--health_monitor", action="store_true", help="check the health of service and restart when error"
     )
+    parser.add_argument("--metric_gateway", type=str, default=None, help="address for collecting monitoring metrics")
+    parser.add_argument("--job_name", type=str, default="lightllm", help="job name for monitor")
+    parser.add_argument("--push_interval", type=int, default=10, help="interval of pushing monitoring metrics")
 
     args = parser.parse_args()
 
@@ -434,7 +434,6 @@ def main():
 
     assert args.max_req_input_len < args.max_req_total_len
     assert args.max_req_total_len <= args.max_total_token_num
-    monitor.init_api_server_monitor(args)
 
     # 这些模式不能同时设置。
     assert [args.splitfuse_mode, args.beam_mode, args.diverse_mode, args.token_healing_mode].count(True) <= 1
@@ -465,9 +464,9 @@ def main():
 
     logger.info(f"all start args:{args}")
 
-    can_use_ports = alloc_can_use_network_port(num=5 + args.tp, used_nccl_port=args.nccl_port)
-    router_port, detokenization_port, httpserver_port, visual_port, cache_port = can_use_ports[0:5]
-    model_rpc_ports = can_use_ports[5:]
+    can_use_ports = alloc_can_use_network_port(num=6 + args.tp, used_nccl_port=args.nccl_port)
+    router_port, detokenization_port, httpserver_port, visual_port, cache_port, metric_port = can_use_ports[0:6]
+    model_rpc_ports = can_use_ports[6:]
 
     if args.enable_multimodal:
         start_submodule_processes(
@@ -476,6 +475,15 @@ def main():
             ],
             start_args=[(cache_port, args)],
         )
+
+    start_submodule_processes(
+        start_funcs=[
+            start_metric_manager,
+        ],
+        start_args=[(metric_port, args)],
+    )
+    global metric_client
+    metric_client = MetricClient(metric_port)
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -491,12 +499,13 @@ def main():
         visual_port=visual_port,
         httpserver_port=httpserver_port,
         enable_multimodal=args.enable_multimodal,
+        metric_port=metric_port,
     )
 
     start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[
-            (args, router_port, detokenization_port, model_rpc_ports),
+            (args, router_port, detokenization_port, model_rpc_ports, metric_port),
             (args, detokenization_port, httpserver_port),
         ],
     )

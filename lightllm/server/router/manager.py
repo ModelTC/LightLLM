@@ -3,6 +3,7 @@ import time
 import uuid
 import uvloop
 import asyncio
+import rpyc
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -24,14 +25,13 @@ from ..tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
-from lightllm.server.metrics import monitor
+from lightllm.server.metrics.manager import MetricClient
 
-monitor.init_router_monitor()
 logger = init_logger(__name__)
 
 
 class RouterManager:
-    def __init__(self, args, router_port, detokenization_port, model_rpc_ports):
+    def __init__(self, args, router_port, detokenization_port, model_rpc_ports, metric_port):
         self.args = args
         self.model_weightdir = args.model_dir
         self.world_size = args.tp
@@ -69,6 +69,7 @@ class RouterManager:
         self.splitfuse_block_size = args.splitfuse_block_size
 
         self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
+        self.metric_client = MetricClient(metric_port)
         return
 
     async def wait_to_model_ready(self):
@@ -114,6 +115,7 @@ class RouterManager:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         group_req_id: int,
+        start_time: float,
     ):
         req_group = []
         for i in range(sampling_params.best_of):
@@ -127,6 +129,7 @@ class RouterManager:
                 )
             else:
                 req = NormalReq(group_req_id + i, copy.deepcopy(prompt_ids), sampling_params, multimodal_params)
+            req.start_time = start_time
             req_group.append(req)
 
         self.req_queue.extend(req_group)
@@ -177,15 +180,20 @@ class RouterManager:
                     self.req_queue.update_token_load(self.running_batch)
                     pass
                 self.stats_tool.print_stats()
-                monitor.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
-                monitor.gauge_set("lightllm_batch_pause_size", len(self.req_queue.pause_req_dict))
-                monitor.gauge_set("lightllm_queue_size", len(self.req_queue.waiting_req_list))
+                self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
+                self.metric_client.gauge_set("lightllm_batch_pause_size", len(self.req_queue.pause_req_dict))
+                self.metric_client.gauge_set("lightllm_queue_size", len(self.req_queue.waiting_req_list))
+                self.metric_client.gauge_set(
+                    "lightllm_batch_current_max_tokens",
+                    int(self.shared_token_load.get_dynamic_max_load() * self.max_total_token_num),
+                )
             else:
                 self.shared_token_load.set_dynamic_max_load(0.0)
                 self.shared_token_load.set_current_load(0.0)
-                monitor.gauge_set("lightllm_batch_current_size", 0.0)
-                monitor.gauge_set("lightllm_batch_pause_size", 0.0)
-                monitor.gauge_set("lightllm_queue_size", 0.0)
+                self.metric_client.gauge_set("lightllm_batch_current_size", 0.0)
+                self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
+                self.metric_client.gauge_set("lightllm_queue_size", 0.0)
+                self.metric_client.gauge_set("lightllm_batch_current_max_tokens", 0.0)
 
             if self.running_batch is None:
                 await asyncio.sleep(0.01)  # 10ms
@@ -199,6 +207,11 @@ class RouterManager:
         if self.running_batch is None:
             new_batch = self.req_queue.generate_new_batch(self.running_batch)
             if new_batch is not None:
+                self.metric_client.histogram_observe("lightllm_batch_next_size", len(new_batch.reqs))
+                for req in new_batch.reqs:
+                    self.metric_client.histogram_observe(
+                        "lightllm_request_queue_duration_bucket", time.time() - req.start_time
+                    )
                 self.stats_tool.count_prompt_tokens(new_batch)
                 self.running_batch = new_batch
                 await self._prefill_batch(self.running_batch)
@@ -247,10 +260,22 @@ class RouterManager:
             req_to_req_status = ans[0]
 
         self._update_init_status_to_batch(batch, req_to_req_status)
+        for req in batch.reqs:
+            prompt_cache_len = req.cur_kv_len
+            prompt_cache_ratio = req.cur_kv_len / req.input_len
+            self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
+            self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
+            logger.info(
+                f"lightllm_req_id:{req.request_id} "
+                f"prompt_cache_len:{prompt_cache_len} "
+                f"prompt_cache_ratio:{prompt_cache_ratio} "
+            )
         logger.debug(f"Init Batch: {batch.simple_log()} \n")
         return
 
     async def _prefill_batch(self, batch: Batch):
+        start_time = time.time()
+        self.metric_client.counter_inc("lightllm_batch_inference_count", "prefill")
         await self._init_batch(batch)
         if not self.is_splitfuse_mode:
             # 在 非 splitfuse 模式下，才需要真的执行 prefill 的操作。
@@ -266,9 +291,14 @@ class RouterManager:
             self._send_to_detokenization_proc(batch, req_to_out_status)
             batch.filter_out_finished_req(unfinished_req_ids, finished_req_ids)
             await self._handle_finish_req(batch, unfinished_req_ids, finished_req_ids)
+        self.metric_client.histogram_observe(
+            "lightllm_batch_inference_duration_bucket", time.time() - start_time, "prefill"
+        )
         return
 
     async def _decode_batch(self, batch: Batch):
+        start_time = time.time()
+        self.metric_client.counter_inc("lightllm_batch_inference_count", "decode")
         rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
         if self.world_size != 1:
@@ -281,6 +311,9 @@ class RouterManager:
         self._send_to_detokenization_proc(batch, req_to_out_status)
         batch.filter_out_finished_req(unfinished_req_ids, finished_req_ids)
         await self._handle_finish_req(batch, unfinished_req_ids, finished_req_ids)
+        self.metric_client.histogram_observe(
+            "lightllm_batch_inference_duration_bucket", time.time() - start_time, "decode"
+        )
         return
 
     async def _filter_batch(self, batch: Batch, unfinished_req_ids, finished_req_ids: List):
@@ -384,9 +417,9 @@ class RouterManager:
     async def loop_for_netio_req(self):
         while True:
             recv_req = await self.recv_from_httpserver.recv_pyobj()
-            if isinstance(recv_req, tuple) and len(recv_req) == 4:
-                prompt_ids, sampling_params, multimodal_params, group_req_id = recv_req
-                self.add_req(prompt_ids, sampling_params, multimodal_params, group_req_id)
+            if isinstance(recv_req, tuple) and len(recv_req) == 5:
+                prompt_ids, sampling_params, multimodal_params, group_req_id, start_time = recv_req
+                self.add_req(prompt_ids, sampling_params, multimodal_params, group_req_id, start_time)
             elif isinstance(recv_req, AbortReq):
                 abort_req = recv_req
                 group_req_id = abort_req.group_req_id
@@ -403,7 +436,7 @@ class RouterManager:
         return
 
 
-def start_router_process(args, router_port, detokenization_port, model_rpc_ports, pipe_writer):
+def start_router_process(args, router_port, detokenization_port, model_rpc_ports, metric_port, pipe_writer):
     # 注册graceful 退出的处理
     from lightllm.utils.graceful_utils import graceful_registry
     import inspect
@@ -412,7 +445,11 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
 
     try:
         router = RouterManager(
-            args, router_port=router_port, detokenization_port=detokenization_port, model_rpc_ports=model_rpc_ports
+            args,
+            router_port=router_port,
+            detokenization_port=detokenization_port,
+            model_rpc_ports=model_rpc_ports,
+            metric_port=metric_port,
         )
 
         asyncio.run(router.wait_to_model_ready())

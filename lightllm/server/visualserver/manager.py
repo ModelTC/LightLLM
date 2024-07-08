@@ -101,7 +101,7 @@ class VisualManager:
                 uuids_need_infer = []
                 while cur_batch_size < self.infer_batch_size and len(self.waiting_reqs) > 0:
                     req = self.waiting_reqs.pop(0)
-                    _, _, multimodal_params, _ = req
+                    _, _, multimodal_params, _, _ = req
                     for img in multimodal_params.images:
                         if not self.cache_client.root.get_item_embed(img.uuid):
                             cur_batch_size += 1
@@ -120,7 +120,7 @@ class VisualManager:
     async def loop_for_netio_req(self):
         while True:
             recv_req = await self.recv_from_httpserver.recv_pyobj()
-            if isinstance(recv_req, tuple) and len(recv_req) == 4:
+            if isinstance(recv_req, tuple) and len(recv_req) == 5:
                 self.waiting_reqs.append(recv_req)
             elif isinstance(recv_req, AbortReq):
                 abort_req = recv_req

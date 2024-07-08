@@ -327,7 +327,7 @@ class InferBatch:
             group_mapping.clear()
 
         if self.radix_cache is not None:
-            logger.info(
+            logger.debug(
                 f"free a batch state:\n"
                 f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"
                 f"radix hold token num {self.radix_cache.get_tree_total_tokens_num()}\n"

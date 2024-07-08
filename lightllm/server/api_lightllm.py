@@ -4,12 +4,10 @@ from fastapi import BackgroundTasks, Request
 from fastapi.responses import Response, StreamingResponse
 from .sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
-from .metrics import monitor
 import json
 
 
 async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> Response:
-    monitor.counter_inc("lightllm_request_count")
 
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
@@ -74,12 +72,10 @@ async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> R
         ret["prompt_token_ids"] = prompt_token_ids
     if prompt_logprobs is not None:
         ret["prompt_logprobs"] = prompt_logprobs
-    monitor.counter_inc("lightllm_request_success")
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
 
 
 async def lightllm_generate_stream(request: Request, g_id_gen, httpserver_manager) -> Response:
-    monitor.counter_inc("lightllm_request_count")
 
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
@@ -123,5 +119,4 @@ async def lightllm_generate_stream(request: Request, g_id_gen, httpserver_manage
     background_tasks = BackgroundTasks()
     # Abort the request if the client disconnects.
     background_tasks.add_task(abort_request)
-    monitor.counter_inc("lightllm_request_success")
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
