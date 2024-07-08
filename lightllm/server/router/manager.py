@@ -190,10 +190,11 @@ class RouterManager:
             else:
                 self.shared_token_load.set_dynamic_max_load(0.0)
                 self.shared_token_load.set_current_load(0.0)
-                self.metric_client.gauge_set("lightllm_batch_current_size", 0.0)
-                self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
-                self.metric_client.gauge_set("lightllm_queue_size", 0.0)
-                self.metric_client.gauge_set("lightllm_batch_current_max_tokens", 0.0)
+                if counter_count % 100 == 0:
+                    self.metric_client.gauge_set("lightllm_batch_current_size", 0.0)
+                    self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
+                    self.metric_client.gauge_set("lightllm_queue_size", 0.0)
+                    self.metric_client.gauge_set("lightllm_batch_current_max_tokens", 0.0)
 
             if self.running_batch is None:
                 await asyncio.sleep(0.01)  # 10ms
