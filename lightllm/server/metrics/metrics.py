@@ -1,6 +1,8 @@
+import os
 import time
 from prometheus_client import CollectorRegistry, Histogram, Counter, Gauge
 from prometheus_client import push_to_gateway
+from prometheus_client.exposition import basic_auth_handler
 
 MONITOR_INFO = {
     "lightllm_request_count": "The total number of requests",
@@ -27,6 +29,14 @@ MONITOR_INFO = {
 }
 
 
+def my_auth_handler(url, method, timeout, headers, data):
+    username = os.getenv("USERNAME", None)
+    password = os.getenv("PASSWORD", None)
+    if username is None or password is None:
+        raise ValueError("USERNAME and PASSWORD must be set when the auth is opened.")
+    return basic_auth_handler(url, method, timeout, headers, data, username, password)
+
+
 class Monitor:
     def __init__(self, args):
         duration_buckets = []
@@ -40,6 +50,7 @@ class Monitor:
         self.gateway_url = args.metric_gateway
         self.registry = CollectorRegistry()
         self.job_name = args.job_name
+        self.auth = args.enable_monitor_auth
         self.init_metrics(args)
 
     def init_metrics(self, args):
@@ -115,4 +126,7 @@ class Monitor:
 
     def push_metrices(self):
         if self.gateway_url is not None:
-            push_to_gateway(self.gateway_url, job=self.job_name, registry=self.registry)
+            if self.auth:
+                push_to_gateway(self.gateway_url, job=self.job_name, registry=self.registry, handler=my_auth_handler)
+            else:
+                push_to_gateway(self.gateway_url, job=self.job_name, registry=self.registry)

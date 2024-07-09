@@ -418,6 +418,9 @@ def main():
     parser.add_argument("--metric_gateway", type=str, default=None, help="address for collecting monitoring metrics")
     parser.add_argument("--job_name", type=str, default="lightllm", help="job name for monitor")
     parser.add_argument("--push_interval", type=int, default=10, help="interval of pushing monitoring metrics")
+    parser.add_argument(
+        "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"
+    )
 
     args = parser.parse_args()
 
