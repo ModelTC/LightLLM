@@ -10,6 +10,10 @@ import multiprocessing.shared_memory as shm
 from concurrent.futures import ThreadPoolExecutor
 import functools
 from rpyc import async_, SocketStream
+import queue
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 def connect_decorator(func):
@@ -59,13 +63,11 @@ class MetricServer(rpyc.Service):
             time.sleep(self.interval)
 
 
-class MetricClient:
+class MetricClient(threading.Thread):
     def __init__(self, port):
+        super().__init__()
         self.port = port
         self.conn = rpyc.connect("localhost", self.port)
-        self.counter_inc = async_(self.conn.root.counter_inc)
-        self.histogram_observe = async_(self.conn.root.histogram_observe)
-        self.gauge_set = async_(self.conn.root.gauge_set)
 
         def async_wrap(f):
             f = rpyc.async_(f)
@@ -79,9 +81,49 @@ class MetricClient:
 
         self._generate_latest = async_wrap(self.conn.root.generate_latest)
 
+        self.task_queue = queue.Queue(maxsize=1024)
+        self.daemon = True
+        self.start()
+
     async def generate_latest(self):
         ans = await self._generate_latest()
         return ans
+
+    def counter_inc(self, *args, **kwargs):
+        def inner_func():
+            return self.conn.root.counter_inc(*args, **kwargs)
+
+        self._append_task(inner_func)
+        return
+
+    def histogram_observe(self, *args, **kwargs):
+        def inner_func():
+            return self.conn.root.histogram_observe(*args, **kwargs)
+
+        self._append_task(inner_func)
+        return
+
+    def gauge_set(self, *args, **kwargs):
+        def inner_func():
+            return self.conn.root.gauge_set(*args, **kwargs)
+
+        self._append_task(inner_func)
+        return
+
+    def _append_task(self, task_func):
+        try:
+            self.task_queue.put_nowait(task_func)
+        except queue.Full as e:
+            logger.warning(f"monitor task queue is full, error {str(e)}")
+        return
+
+    def run(self):
+        while True:
+            task_func = self.task_queue.get()
+            try:
+                task_func()
+            except Exception as e:
+                logger.error(f"monitor error {str(e)}")
 
 
 def start_metric_manager(port: int, args, pipe_writer):
