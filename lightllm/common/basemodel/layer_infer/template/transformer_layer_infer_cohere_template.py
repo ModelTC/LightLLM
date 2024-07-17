@@ -80,9 +80,6 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
     def _ffn(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
-    @mark_cost_time(
-        "trans context flash forward time cost"
-    )  # dont to remove this, will make performence down, did not know why
     def _context_attention(self, input_embding, infer_state: InferStateInfo, layer_weight):
         cache_kv = self._pre_cache_kv(infer_state, layer_weight)
         q, cache_kv = self._get_qkv(input_embding, cache_kv, infer_state, layer_weight)
@@ -95,9 +92,6 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         infer_state._attn_out = o
         return
 
-    @mark_cost_time(
-        "trans context ffn forward time cost"
-    )  # dont to remove this, will make performence down, did not know why
     def _context_ffn(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         ffn_out = self._ffn(input_embdings, infer_state, layer_weight)
         if self.world_size_ > 1:
@@ -105,7 +99,6 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         infer_state._ffn_out = ffn_out
         return
 
-    # this impl dont to use @mark_cost_time
     def _token_attention(self, input_embding, infer_state: InferStateInfo, layer_weight):
         cache_kv = self._pre_cache_kv(infer_state, layer_weight)
         q, cache_kv = self._get_qkv(input_embding, cache_kv, infer_state, layer_weight)
@@ -118,7 +111,6 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         infer_state._attn_out = o
         return
 
-    # this impl dont to use @mark_cost_time
     def _token_ffn(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         ffn_out = self._ffn(input_embdings, infer_state, layer_weight)
         if self.world_size_ > 1:

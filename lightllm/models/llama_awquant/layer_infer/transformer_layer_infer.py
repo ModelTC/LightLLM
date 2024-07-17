@@ -171,9 +171,6 @@ class LlamaTransformerLayerInferActivationWeightQuantPpl(TransformerLayerInferAc
 
         return ffn2_out
 
-    @mark_cost_time(
-        "trans context flash forward time cost"
-    )  # dont to remove this, will make performence down, did not know why
     def _context_attention(self, input_embding, infer_state: LlamaInferStateInfo, layer_weight):
         input1, token_scale, skip_out = self._awquant_att_norm(input_embding, infer_state, layer_weight)
         cache_kv = self._pre_cache_kv(infer_state, layer_weight)
@@ -188,9 +185,6 @@ class LlamaTransformerLayerInferActivationWeightQuantPpl(TransformerLayerInferAc
         input_embding.add_(o.view(-1, self.embed_dim_))
         return
 
-    @mark_cost_time(
-        "trans context ffn forward time cost"
-    )  # dont to remove this, will make performence down, did not know why
     def _context_ffn(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight):
         input1, token_scale, skip_out = self._awquant_ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, token_scale, infer_state, layer_weight)
@@ -200,7 +194,6 @@ class LlamaTransformerLayerInferActivationWeightQuantPpl(TransformerLayerInferAc
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return
 
-    # this impl dont to use @mark_cost_time
     def _token_attention(self, input_embding, infer_state: LlamaInferStateInfo, layer_weight):
         input1, token_scale, skip_out = self._awquant_att_norm(input_embding, infer_state, layer_weight)
         cache_kv = self._pre_cache_kv(infer_state, layer_weight)
@@ -215,7 +208,6 @@ class LlamaTransformerLayerInferActivationWeightQuantPpl(TransformerLayerInferAc
         input_embding.add_(o.view(-1, self.embed_dim_))
         return
 
-    # this impl dont to use @mark_cost_time
     def _token_ffn(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight):
         input1, token_scale, skip_out = self._awquant_ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, token_scale, infer_state, layer_weight)
@@ -513,9 +505,6 @@ class LlamaTransformerLayerInferActivationWeightQuantTriton(TransformerLayerInfe
         ffn1_out = None
         return ffn2_out
 
-    @mark_cost_time(
-        "trans context flash forward time cost"
-    )  # dont to remove this, will make performence down, did not know why
     def _context_attention(self, input_embding, infer_state: LlamaInferStateInfo, layer_weight):
         input1 = self._awquant_att_norm(input_embding, infer_state, layer_weight)
         token_scale = None
@@ -531,9 +520,6 @@ class LlamaTransformerLayerInferActivationWeightQuantTriton(TransformerLayerInfe
         input_embding.add_(o.view(-1, self.embed_dim_))
         return
 
-    @mark_cost_time(
-        "trans context ffn forward time cost"
-    )  # dont to remove this, will make performence down, did not know why
     def _context_ffn(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight):
         input1 = self._awquant_ffn_norm(input_embdings, infer_state, layer_weight)
         token_scale = None
@@ -544,7 +530,6 @@ class LlamaTransformerLayerInferActivationWeightQuantTriton(TransformerLayerInfe
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return
 
-    # this impl dont to use @mark_cost_time
     def _token_attention(self, input_embding, infer_state: LlamaInferStateInfo, layer_weight):
         input1 = self._awquant_att_norm(input_embding, infer_state, layer_weight)
         token_scale = None
@@ -560,7 +545,6 @@ class LlamaTransformerLayerInferActivationWeightQuantTriton(TransformerLayerInfe
         input_embding.add_(o.view(-1, self.embed_dim_))
         return
 
-    # this impl dont to use @mark_cost_time
     def _token_ffn(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight):
         input1 = self._awquant_ffn_norm(input_embdings, infer_state, layer_weight)
         token_scale = None

@@ -23,13 +23,13 @@ infer_state.multimodal_params: batch list of MultimodalParams-dict like:
        ...
    }
 """
-class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
 
+
+class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
     def __init__(self, tp_rank, world_size, network_config, mode):
         super().__init__(tp_rank, world_size, network_config, mode)
         return
 
-    @mark_cost_time("pre context forward")
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
 
         img_weight = []
@@ -74,7 +74,7 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             img_start_token_ids,
             img_start_locs,
             self.vob_start_id_,
-            self.vob_end_id_
+            self.vob_end_id_,
         )
         if self.world_size_ > 1:
             dist.all_reduce(out, op=dist.ReduceOp.SUM, async_op=False)

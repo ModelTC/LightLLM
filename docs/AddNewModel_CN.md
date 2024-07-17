@@ -361,7 +361,6 @@ class BloomPreLayerInfer(PreLayerInferTpl):
     def _norm(self, input, infer_state, layer_weight : BloomPreAndPostLayerWeight) -> torch.Tensor:
         return layernorm_forward(input, layer_weight.pre_norm_weight_, layer_weight.pre_norm_bias_, eps=self.eps_)
 
-    @mark_cost_time("pre context forward")  # dont to remove this, will make performence down, did not know why
     def context_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: BloomPreAndPostLayerWeight):
         total_token_num = infer_state.total_token_num
         input_ids = input_ids[0:total_token_num]

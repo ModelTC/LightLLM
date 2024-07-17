@@ -121,6 +121,5 @@ class CoherePostLayerInfer(PostLayerInferTpl):
         gather_data = None
         return ans_logics
 
-    # @mark_cost_time("splitfuse post forward")
     def splitfuse_forward(self, input_embdings, infer_state: SplitFuseInferStateInfo, layer_weight: BaseLayerWeight):
         return self.token_forward(input_embdings, infer_state, layer_weight)

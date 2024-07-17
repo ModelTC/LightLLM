@@ -18,7 +18,6 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
         self.vob_start_id_, self.vob_end_id_ = int(tp_vob_ids[self.tp_rank_]), int(tp_vob_ids[self.tp_rank_ + 1])
         return
 
-    @mark_cost_time("pre context forward")
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
         input_mask = torch.logical_or(self.vob_start_id_ > input_ids, input_ids >= self.vob_end_id_)
         tmp_input_ids = input_ids - self.vob_start_id_
@@ -39,7 +38,6 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         return input_embdings
 
-    # @mark_cost_time("splitfuse forward")
     def splitfuse_forward(
         self, input_ids, infer_state: SplitFuseInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
