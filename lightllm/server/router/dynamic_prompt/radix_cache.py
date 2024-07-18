@@ -276,6 +276,12 @@ class RadixCache:
             self.shared_idx_manager.free(node.shared_idx_node.get_idx())
         return
 
+    def assert_leafs_is_right(self):
+        for node in self.evict_tree_set:
+            if node.is_leaf() and node.ref_counter == 0:
+                a = node.token_mem_index_value.cuda()
+                assert (self.mem_manager.mem_state[a] == 1).sum().item() == len(a)
+
     def clear_tree_nodes(self):
         """
         该函数只在测试时调用

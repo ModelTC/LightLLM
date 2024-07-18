@@ -194,6 +194,22 @@ class InferReqGroup:
             req_manager.req_to_token_indexs[req.req_idx][: len(req.input_token_ids)] = cache_req_to_token[prev_]
             req_manager.mem_manager.add_refs(cache_req_to_token[prev_])
 
+    def diverse_copy(self, req_manager, is_prefill):
+        # record previous status
+        prev_req = requests_mapping[self.req_group[0]]
+        if prev_req.shared_kv_node is not None:
+            prefix_len = prev_req.shared_kv_node.shared_idx_node.get_node_prefix_total_len()
+        else:
+            prefix_len = 0
+        cache_token_id = req_manager.req_to_token_indexs[prev_req.req_idx][prefix_len : len(prev_req.input_token_ids)]
+        # update the InferReq status and mem_manager status for cache sharing
+        for req_id in self.req_group[1:]:
+            req = requests_mapping[req_id]
+            req.finish_status = FinishStatus.NO_FINISH
+            req_manager.req_to_token_indexs[req.req_idx][prefix_len : len(req.input_token_ids)] = cache_token_id
+            assert len(req.input_token_ids) == len(prev_req.input_token_ids)
+            req_manager.mem_manager.add_refs(cache_token_id)
+
     def update_finish_status(self, best_new_score):
         if len(self.res) < self.best_of:
             self.finish_status = False
@@ -291,18 +307,24 @@ class InferBatch:
             radix_cache=radix_cache,
         )
 
-    def _free_a_req_mem(self, free_token_index: List, req: InferReq):
+    def _free_a_req_mem(self, free_token_index: List, req: InferReq, is_group_finished: bool):
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len])
         else:
             key = torch.tensor(req.input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-            prefix_len = self.radix_cache.insert(key, value)
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][:prefix_len])
-            if req.shared_kv_node is not None:
-                assert req.shared_kv_node.shared_idx_node.get_node_prefix_total_len() <= prefix_len
-                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                req.shared_kv_node = None
+            if is_group_finished:
+                prefix_len = self.radix_cache.insert(key, value)
+                free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][:prefix_len])
+                if req.shared_kv_node is not None:
+                    assert req.shared_kv_node.shared_idx_node.get_node_prefix_total_len() <= prefix_len
+                    self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                    req.shared_kv_node = None
+            else:
+                free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len])
+                if req.shared_kv_node is not None:
+                    self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                    req.shared_kv_node = None
 
     @torch.no_grad()
     def free_self(self):
@@ -312,11 +334,14 @@ class InferBatch:
             req: InferReq = requests_mapping.pop(request_id)
             group_req_id = convert_sub_id_to_group_id(req.r_id)
             if group_req_id in group_mapping:
-                is_empty = group_mapping[group_req_id].decrease_refs(req.r_id)
-                if is_empty:
+                is_group_finished = group_mapping[group_req_id].decrease_refs(req.r_id)
+                if is_group_finished:
                     del group_mapping[group_req_id]
+                self._free_a_req_mem(free_token_index, req, is_group_finished)
+            else:
+                self._free_a_req_mem(free_token_index, req, True)
+
             free_req_index.append(req.req_idx)
-            self._free_a_req_mem(free_token_index, req)
             req.cur_kv_len = 0
 
         free_token_index = torch.cat(free_token_index, dim=-1)
@@ -353,11 +378,13 @@ class InferBatch:
             req: InferReq = requests_mapping.pop(request_id)
             group_req_id = convert_sub_id_to_group_id(req.r_id)
             if group_req_id in group_mapping:
-                is_empty = group_mapping[group_req_id].decrease_refs(req.r_id)
-                if is_empty:
+                is_group_finished = group_mapping[group_req_id].decrease_refs(req.r_id)
+                if is_group_finished:
                     del group_mapping[group_req_id]
+                self._free_a_req_mem(free_token_index, req, is_group_finished)
+            else:
+                self._free_a_req_mem(free_token_index, req, True)
             free_req_index.append(req.req_idx)
-            self._free_a_req_mem(free_token_index, req)
             req.cur_kv_len = 0
 
         free_token_index = torch.cat(free_token_index, dim=-1)

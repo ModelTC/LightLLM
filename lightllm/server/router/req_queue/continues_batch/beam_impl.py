@@ -11,7 +11,6 @@ from lightllm.server.router.req_queue.base_queue import BaseQueue
 class BeamContinuesBatchQueue(BaseQueue):
     def __init__(self, args, router) -> None:
         super().__init__(args, router)
-        assert args.use_dynamic_prompt_cache is False
         return
 
     def _init_cache_list(self, current_batch: Batch, is_busy):
