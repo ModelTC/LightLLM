@@ -5,7 +5,7 @@ import torch
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
-from lightllm.models.qwen2.infer_struct import Qwen2InferStateInfo
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.qwen2.layer_weights.pre_and_post_layer_weight import Qwen2PreAndPostLayerWeight
 from lightllm.models.qwen2.layer_weights.transformer_layer_weight import Qwen2TransformerLayerWeight
 from lightllm.models.qwen2.layer_infer.transformer_layer_infer import Qwen2TransformerLayerInfer
@@ -26,7 +26,7 @@ class Qwen2TpPartModel(TpPartBaseModel):
     transformer_layer_infer_class = Qwen2TransformerLayerInfer
 
     # infer state class
-    infer_state_class = Qwen2InferStateInfo
+    infer_state_class = LlamaInferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)

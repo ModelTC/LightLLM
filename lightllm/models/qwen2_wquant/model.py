@@ -22,9 +22,7 @@ class QWen2TpPartModelWQuant(Qwen2TpPartModel):
             "w6a16" in mode_ or "w4a16" in mode_ or "w8a16" in mode_ for mode_ in self.mode
         ), "only for weight quant model"
         assert not any("int8kv" in mode_ or "int4kv" in mode_ for mode_ in self.mode), "not support kv cache quant"
-        assert not any(
-            "ppl_fp16" in mode_ or "triton_flashdecoding" in mode_ or "triton_gqa" in mode_ for mode_ in self.mode
-        ), "only support kernel support sliding window"
+        assert self.data_type == torch.float16, f"not support {self.data_type}, only support torch.float16"
         assert self.config["num_key_value_heads"] % self.world_size_ == 0
         assert self.config["num_attention_heads"] % self.world_size_ == 0
         return
