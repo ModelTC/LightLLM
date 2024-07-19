@@ -174,9 +174,6 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             "The logit_bias parameter is not currently supported",
         )
 
-    if request.n > 1:
-        return create_error_response(HTTPStatus.BAD_REQUEST, "The n parameter currently only supports 1")
-
     if request.function_call != "none":
         return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
 
@@ -192,47 +189,66 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         ignore_eos=request.ignore_eos,
         max_new_tokens=request.max_tokens,
         stop_sequences=request.stop,
+        n=request.n,
+        best_of=request.n,
     )
     sampling_params.verify()
     multimodal_params = MultimodalParams(images=[])
 
-    request_id = f"chatcmpl-{uuid.uuid4().hex}"
+    group_request_id = g_id_gen.generate_id()
     results_generator = httpserver_manager.generate(
-        prompt, sampling_params, request_id, multimodal_params, request=raw_request
+        prompt, sampling_params, group_request_id, multimodal_params, request=raw_request
     )
 
     # Non-streaming case
     if not request.stream:
-        final_output = []
-        prompt_tokens = -1
+        final_output_dict = collections.defaultdict(list)
+        count_output_tokens_dict = collections.defaultdict(lambda: 0)
+        finish_reason_dict = {}
+        prompt_tokens_dict = {}
         completion_tokens = 0
-        async for sub_req_id, request_output, metadata, _ in results_generator:
-            completion_tokens += 1
-            if prompt_tokens == -1:
-                prompt_tokens = metadata["prompt_tokens"]
-            final_output.append(request_output)
-
-        usage = UsageInfo(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-        )
-        chat_message = ChatMessage(role="assistant", content="".join(final_output))
-        choice = ChatCompletionResponseChoice(index=0, message=chat_message)
+        async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            count_output_tokens_dict[sub_req_id] += 1
+            final_output_dict[sub_req_id].append(request_output)
+            if finish_status.is_finished():
+                finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
+                prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
+        choices = []
+        sub_ids = list(final_output_dict.keys())[: request.n]
+        for i in range(request.n):
+            sub_req_id = sub_ids[i]
+            prompt_tokens = prompt_tokens_dict[sub_req_id]
+            completion_tokens = count_output_tokens_dict[sub_req_id]
+            usage = UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+            chat_message = ChatMessage(role="assistant", content="".join(final_output_dict[sub_req_id]))
+            choice = ChatCompletionResponseChoice(
+                index=i, message=chat_message, finish_reason=finish_reason_dict[sub_req_id]
+            )
+            choices.append(choice)
         resp = ChatCompletionResponse(
-            id=request_id, created=created_time, model=request.model, choices=[choice], usage=usage
+            id=group_request_id, created=created_time, model=request.model, choices=choices, usage=usage
         )
         return resp
 
+    if sampling_params.n != 1:
+        raise Exception("stream api only support n = 1")
+
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for sub_req_id, request_output, metadata, _ in results_generator:
+        finish_reason = None
+        async for sub_req_id, request_output, metadata, finish_status in results_generator:
             delta_message = DeltaMessage(role="assistant", content=request_output)
-
-            stream_choice = ChatCompletionStreamResponseChoice(index=0, delta=delta_message)
-
+            if finish_status.is_finished():
+                finish_reason = finish_status.get_finish_reason()
+            stream_choice = ChatCompletionStreamResponseChoice(
+                index=0, delta=delta_message, finish_reason=finish_reason
+            )
             stream_resp = ChatCompletionStreamResponse(
-                id=request_id,
+                id=group_request_id,
                 created=created_time,
                 model=request.model,
                 choices=[stream_choice],
@@ -240,7 +256,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             yield ("data: " + stream_resp.json(ensure_ascii=False) + "\n\n").encode("utf-8")
 
     async def abort_request() -> None:
-        await httpserver_manager.abort(request_id)
+        await httpserver_manager.abort(group_request_id)
 
     background_tasks = BackgroundTasks()
     # Abort the request if the client disconnects.
