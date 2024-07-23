@@ -81,7 +81,7 @@ class MetricClient(threading.Thread):
 
         self._generate_latest = async_wrap(self.conn.root.generate_latest)
 
-        self.task_queue = queue.Queue(maxsize=1024)
+        self.task_queue = queue.Queue(maxsize=4096)
         self.daemon = True
         self.start()
 
