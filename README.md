@@ -51,6 +51,8 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - [MiniCPM](https://huggingface.co/openbmb/MiniCPM-2B-sft-bf16)
 - [Phi-3](https://huggingface.co/collections/microsoft/phi-3-6626e15e9585a200d2d761e3)
 - [CohereForAI](https://huggingface.co/CohereForAI/c4ai-command-r-plus)
+- [DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)
+- [DeepSeek-V2](https://huggingface.co/deepseek-ai/DeepSeek-V2)
 
 > When you start Qwen-7b, you need to set the parameter '--eos_id 151643 --trust_remote_code'.
 
@@ -63,6 +65,8 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 > Stablelm needs to set the parameter '--trust_remote_code'.
 
 > Phi-3 only supports Mini and Small.
+
+> DeepSeek-V2-Lite and DeepSeek-V2 need to set the parameter '--data_type bfloat16'
 
 ## Get started
 
