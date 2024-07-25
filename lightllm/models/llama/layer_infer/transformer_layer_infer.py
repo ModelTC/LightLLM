@@ -300,7 +300,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         batch_size = infer_state.batch_size
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
 
-        att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
+        att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=torch.float32, device="cuda")
 
         token_att_fwd(
             q.view(calcu_shape1),
