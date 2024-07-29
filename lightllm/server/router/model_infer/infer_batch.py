@@ -284,7 +284,7 @@ class InferBatch:
 
             # 如果是具有 prompt_cache 的使用特性则需要进行提前的填充和恢复操作。
             if r_obj.req_status in [ReqRunStatus.RERUNNING_FROM_OFFLOAD, ReqRunStatus.WAIT_IN_QUEUE]:
-                if radix_cache is not None:
+                if radix_cache is not None and len(r_obj.input_token_ids) > 1:
                     key = torch.tensor(r_obj.input_token_ids, dtype=torch.int64, device="cpu")
                     key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
                     share_node, kv_len, value_tensor = radix_cache.match_prefix(key, update_refs=True)
