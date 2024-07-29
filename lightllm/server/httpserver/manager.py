@@ -85,6 +85,10 @@ class HttpServerManager:
             for img in multimodal_params.images:
                 if img.uuid is not None:
                     self.cache_client.root.release(img.uuid)
+                    # 将 uuid 等 赋值为 None, 防止因为abort等异常情况造成重复释放异常
+                    img.uuid = None
+                    img.token_id = None
+                    img.token_num = None
 
     def tokens(self, prompt):
         prompt_ids = self.tokenizer.encode(prompt)
