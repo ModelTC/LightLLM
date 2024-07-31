@@ -17,6 +17,7 @@ async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> R
     sampling_params.verify()
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
+    multimodal_params.verify_and_preload()
 
     group_request_id = g_id_gen.generate_id()
     results_generator = httpserver_manager.generate(
@@ -91,6 +92,7 @@ async def lightllm_generate_stream(request: Request, g_id_gen, httpserver_manage
 
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
+    multimodal_params.verify_and_preload()
 
     group_request_id = g_id_gen.generate_id()
     results_generator = httpserver_manager.generate(

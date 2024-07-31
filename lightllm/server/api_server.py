@@ -194,6 +194,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     )
     sampling_params.verify()
     multimodal_params = MultimodalParams(images=[])
+    multimodal_params.verify_and_preload()
 
     group_request_id = g_id_gen.generate_id()
     results_generator = httpserver_manager.generate(
