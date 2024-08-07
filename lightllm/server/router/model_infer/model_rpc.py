@@ -9,6 +9,7 @@ from lightllm.server.router.model_infer.mode_backend import (
     SplitFuseBackend,
     BeamSearchBackend,
     DiversehBackend,
+    RewardModelBackend,
 )
 from lightllm.utils.log_utils import init_logger
 
@@ -24,11 +25,14 @@ class ModelRpcServer(rpyc.Service):
 
         is_splitfuse_mode = kvargs.get("is_splitfuse_mode", False)
         return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
+        use_reward_model = kvargs.get("use_reward_model", False)
         beam_mode = kvargs.get("beam_mode", False)
         diverse_mode = kvargs.get("diverse_mode", False)
         # use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
 
-        if is_splitfuse_mode:
+        if use_reward_model:
+            self.backend = RewardModelBackend()
+        elif is_splitfuse_mode:
             self.backend = SplitFuseBackend()
         elif return_all_prompt_logprobs:
             self.backend = ReturnPromptLogProbBackend()

@@ -47,8 +47,7 @@ from .metrics.manager import start_metric_manager
 from .visualserver.manager import start_visual_process
 from .req_id_generator import ReqIDGenerator
 from .api_tgi import tgi_generate_impl, tgi_generate_stream_impl
-from .api_lightllm import lightllm_generate, lightllm_generate_stream
-
+from .api_lightllm import lightllm_generate, lightllm_generate_stream, lightllm_get_score
 from lightllm.utils.net_utils import alloc_can_use_network_port
 from lightllm.utils.start_utils import start_submodule_processes
 
@@ -150,6 +149,15 @@ async def generate_stream(request: Request) -> Response:
     first_set_handle_loop()
     try:
         return await g_generate_stream_func(request, g_id_gen, httpserver_manager)
+    except Exception as e:
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
+
+
+@app.post("/get_score")
+async def get_score(request: Request) -> Response:
+    first_set_handle_loop()
+    try:
+        return await lightllm_get_score(request, g_id_gen, httpserver_manager)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
@@ -418,6 +426,8 @@ def main():
     )
     parser.add_argument("--return_all_prompt_logprobs", action="store_true", help="return all prompt tokens logprobs")
 
+    parser.add_argument("--use_reward_model", action="store_true", help="use reward model")
+
     parser.add_argument(
         "--long_truncation_mode",
         type=str,
@@ -460,7 +470,13 @@ def main():
     assert not (args.beam_mode and args.use_dynamic_prompt_cache), "Beam mode incompatible with dynamic prompt cache"
 
     # 这些模式不能同时设置。
-    assert [args.splitfuse_mode, args.beam_mode, args.diverse_mode, args.token_healing_mode].count(True) <= 1
+    assert [
+        args.use_reward_model,
+        args.splitfuse_mode,
+        args.beam_mode,
+        args.diverse_mode,
+        args.token_healing_mode,
+    ].count(True) <= 1
     # 部分模式目前还无法与dynamic_prompt_cache一起跑，to do。
     if args.use_dynamic_prompt_cache:
         assert args.beam_mode is False

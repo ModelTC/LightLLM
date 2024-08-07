@@ -7,6 +7,30 @@ from .multimodal_params import MultimodalParams
 import json
 
 
+async def lightllm_get_score(request: Request, g_id_gen, httpserver_manager) -> Response:
+    request_dict = await request.json()
+    prompt = request_dict.pop("chat")
+    sample_params_dict = {"max_new_tokens": 1}
+    sampling_params = SamplingParams(**sample_params_dict)
+    sampling_params.verify()
+    multimodal_params_dict = request_dict.get("multimodal_params", {})
+    multimodal_params = MultimodalParams(**multimodal_params_dict)
+    multimodal_params.verify_and_preload()
+    group_request_id = g_id_gen.generate_id()
+    results_generator = httpserver_manager.generate(
+        prompt, sampling_params, group_request_id, multimodal_params, request=request
+    )
+
+    ret = {}
+    # n === 1
+    async for sub_req_id, request_output, metadata, finish_status in results_generator:
+        ret["score"] = metadata["score"]
+        ret["prompt_tokens"] = metadata.get("prompt_tokens", 0)
+        ret["finish_reason"] = finish_status.get_finish_reason()
+
+    return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
+
+
 async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> Response:
 
     request_dict = await request.json()

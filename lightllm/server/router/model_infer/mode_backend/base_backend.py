@@ -30,6 +30,7 @@ from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
 from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.models.stablelm.model import StablelmTpPartModel
 from lightllm.models.internlm2.model import Internlm2TpPartModel
+from lightllm.models.internlm2_reward.model import Internlm2RewardTpPartModel
 from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
 from lightllm.models.internlm2_wquant.model import Internlm2TpPartModelWQuant
 from lightllm.models.yi.model import YiTpPartModel
@@ -165,7 +166,10 @@ class ModeBackend:
                 elif self.model_type == "internlm":
                     self.model = InternlmTpPartModel(model_kvargs)
                 elif self.model_type == "internlm2":
-                    self.model = Internlm2TpPartModel(model_kvargs)
+                    if model_cfg["architectures"][0] == "InternLM2ForRewardModel":
+                        self.model = Internlm2RewardTpPartModel(model_kvargs)
+                    else:
+                        self.model = Internlm2TpPartModel(model_kvargs)
                 elif self.model_type == "Yi":
                     self.model = YiTpPartModel(model_kvargs)
                 elif self.model_type == "mistral":

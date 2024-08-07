@@ -95,6 +95,7 @@ class RouterManager:
                 "splitfuse_block_size": self.splitfuse_block_size,
                 "is_token_healing": self.args.token_healing_mode,
                 "return_all_prompt_logprobs": self.args.return_all_prompt_logprobs,
+                "use_reward_model": self.args.use_reward_model,
                 "use_dynamic_prompt_cache": self.args.use_dynamic_prompt_cache,
                 "data_type": self.args.data_type,
                 "eos_id": self.eos_id,
