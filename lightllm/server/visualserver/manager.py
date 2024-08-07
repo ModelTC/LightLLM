@@ -33,6 +33,7 @@ class VisualManager:
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"tcp://127.0.0.1:{visual_port}")
         self.cache_client = rpyc.connect("localhost", client_port)
+        self.client_port = client_port
         self.waiting_reqs = []
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
@@ -53,7 +54,9 @@ class VisualManager:
             kvargs = {
                 "weight_dir": self.model_weightdir,
                 "trust_remote_code": self.trust_remote_code,
+                "client_port": self.client_port,
                 "rank_id": rank_id,
+                "data_type": self.args.data_type,
             }
             init_model_ret.append(self.model_rpcs[rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)

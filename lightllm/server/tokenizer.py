@@ -26,6 +26,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 from ..models.llava.model import LlavaTokenizer
 from ..models.qwen_vl.model import QWenVLTokenizer
+from ..models.internvl.model import InternvlTokenizer
 
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
@@ -71,6 +72,8 @@ def get_tokenizer(
         tokenizer = LlavaTokenizer(tokenizer, model_cfg)
     elif model_type == "qwen" and "visual" in model_cfg:
         tokenizer = QWenVLTokenizer(tokenizer, model_cfg)
+    elif model_type == "internvl_chat":
+        tokenizer = InternvlTokenizer(tokenizer, model_cfg)
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.info(

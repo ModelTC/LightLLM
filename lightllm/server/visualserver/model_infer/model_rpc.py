@@ -10,6 +10,7 @@ from rpyc.utils.classic import obtain
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.internlm_xcomposer.internlm_visual import InternVisionModel
+from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 
@@ -41,6 +42,13 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = LlavaVisionModel()
             elif self.model_type == "internlmxcomposer2":
                 self.model = InternVisionModel()
+            elif self.model_type == "internvl_chat":
+                # tp_rank = kvargs['rank_id']
+                client_port = kvargs["client_port"]
+                data_type = kvargs["data_type"]
+                model_kvargs = {"weight_dir": weight_dir, "client_port": client_port, "data_type": data_type}
+                self.model = InternVLVisionModel(model_kvargs)
+
             else:
                 raise Exception(f"can not support {self.model_type} now")
             self.model.load_model(weight_dir)
