@@ -41,6 +41,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - [Baichuan2-13b](https://github.com/baichuan-inc/Baichuan2)    
 - [Baichuan-13b](https://github.com/baichuan-inc/Baichuan-13B)
 - [InternLM-7b](https://github.com/InternLM/InternLM)
+- [InternVL-Chat](https://huggingface.co/OpenGVLab/InternVL-Chat-V1-5)
 - [Yi-34b](https://huggingface.co/01-ai/Yi-34B)  
 - [Qwen-VL](https://huggingface.co/Qwen/Qwen-VL)
 - [Qwen-VL-Chat](https://huggingface.co/Qwen/Qwen-VL-Chat)
@@ -61,6 +62,10 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 > Baichuan and Baichuan2 needs to set the parameter '--trust_remote_code'.
 
 > InternLM needs to set the parameter '--trust_remote_code'.
+
+> InternVL-Chat(Phi3) needs to set the parameter '--eos_id 32007 --trust_remote_code'.
+
+> InternVL-Chat(InternLM2) needs to set the parameter '--eos_id 92542 --trust_remote_code'.
 
 > Stablelm needs to set the parameter '--trust_remote_code'.
 
