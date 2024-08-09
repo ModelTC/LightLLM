@@ -124,10 +124,11 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
 
         # attention output dense params
         if f"model.layers.{self.layer_num_}.self_attn.o_proj.weight" in weights:
-            self.o_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.o_proj.weight"]
-            self.o_weight_ = self.o_weight_.T.view(self.num_attention_heads, self.qk_nope_head_dim, -1)
+            o_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.o_proj.weight"]
+            o_weight_ = o_weight_.T.view(self.num_attention_heads, self.qk_nope_head_dim, -1)
+            print("Here", self.tp_q_head_num_, self.world_size_, self.network_config_["num_attention_heads"])
             self.o_weight_ = (
-                self.o_weight_[self.tp_q_head_num_ * self.tp_rank_ : self.tp_q_head_num_ * (self.tp_rank_ + 1), :, :]
+                o_weight_[self.tp_q_head_num_ * self.tp_rank_ : self.tp_q_head_num_ * (self.tp_rank_ + 1), :, :]
                 .contiguous()
                 .to(self.data_type_)
                 .cpu()
