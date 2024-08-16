@@ -35,3 +35,14 @@ class InternVLInternlm2PreAndPostLayerWeight(Internlm2PreAndPostLayerWeight):
         rename_weight_keys(weights)
         super().load_hf_weights(weights)
         return
+
+
+class InternVLLlamaPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
+    def __init__(self, tp_rank, world_size, data_type, network_config, mode):
+        super().__init__(tp_rank, world_size, data_type, network_config, mode)
+        return
+
+    def load_hf_weights(self, weights):
+        rename_weight_keys(weights)
+        super().load_hf_weights(weights)
+        return
