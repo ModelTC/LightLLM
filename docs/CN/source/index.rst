@@ -77,11 +77,11 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
 
 .. toctree::
    :maxdepth: 1
-   :caption: lightllm原理
+   :caption: Lightllm
 
-   lightllm介绍 <lightllm_info/lightllm>
-
-
+   lightllm/lightllm_intro
+   lightllm/lightllm_impl
+   
 .. toctree::
    :maxdepth: 1
    :caption: 模型
@@ -104,14 +104,12 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
 
    user/api_param
    user/openapi_docs
-   user/param_class/index
    
    
 .. toctree::
    :maxdepth: 1
    :caption: 开发者文档
 
-   dev/lightllm_impl
    dev/token_attention
    dev/router
    
