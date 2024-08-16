@@ -1,0 +1,536 @@
+{
+  "openapi": "3.0.2",
+  "info": {
+    "title": "FastAPI",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/liveness": {
+      "get": {
+        "summary": "Liveness",
+        "operationId": "liveness_liveness_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Liveness",
+        "operationId": "liveness_liveness_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readiness": {
+      "get": {
+        "summary": "Readiness",
+        "operationId": "readiness_readiness_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Readiness",
+        "operationId": "readiness_readiness_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Check server health",
+        "operationId": "healthcheck_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "summary": "Check server health",
+        "operationId": "healthcheck_health_head",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "summary": "Check server health",
+        "operationId": "healthcheck_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/token_load": {
+      "get": {
+        "summary": "Get the current server's load on tokens",
+        "operationId": "token_load_token_load_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/generate": {
+      "post": {
+        "summary": "Generate",
+        "operationId": "generate_generate_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/generate_stream": {
+      "post": {
+        "summary": "Generate Stream",
+        "operationId": "generate_stream_generate_stream_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get_score": {
+      "post": {
+        "summary": "Get Score",
+        "operationId": "get_score_get_score_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "post": {
+        "summary": "Compat Generate",
+        "operationId": "compat_generate__post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Chat Completions",
+        "operationId": "chat_completions_v1_chat_completions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCompletionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCompletionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tokens": {
+      "get": {
+        "summary": "Tokens",
+        "operationId": "tokens_tokens_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Tokens",
+        "operationId": "tokens_tokens_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Metrics",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChatCompletionRequest": {
+        "title": "ChatCompletionRequest",
+        "required": [
+          "model",
+          "messages"
+        ],
+        "type": "object",
+        "properties": {
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "messages": {
+            "title": "Messages",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "function_call": {
+            "title": "Function Call",
+            "type": "string",
+            "default": "none"
+          },
+          "temperature": {
+            "title": "Temperature",
+            "type": "number",
+            "default": 1
+          },
+          "top_p": {
+            "title": "Top P",
+            "type": "number",
+            "default": 1.0
+          },
+          "n": {
+            "title": "N",
+            "type": "integer",
+            "default": 1
+          },
+          "stream": {
+            "title": "Stream",
+            "type": "boolean",
+            "default": false
+          },
+          "stop": {
+            "title": "Stop",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "max_tokens": {
+            "title": "Max Tokens",
+            "type": "integer",
+            "default": 16
+          },
+          "presence_penalty": {
+            "title": "Presence Penalty",
+            "type": "number",
+            "default": 0.0
+          },
+          "frequency_penalty": {
+            "title": "Frequency Penalty",
+            "type": "number",
+            "default": 0.0
+          },
+          "logit_bias": {
+            "title": "Logit Bias",
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "user": {
+            "title": "User",
+            "type": "string"
+          },
+          "do_sample": {
+            "title": "Do Sample",
+            "type": "boolean",
+            "default": false
+          },
+          "top_k": {
+            "title": "Top K",
+            "type": "integer",
+            "default": -1
+          },
+          "ignore_eos": {
+            "title": "Ignore Eos",
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "ChatCompletionResponse": {
+        "title": "ChatCompletionResponse",
+        "required": [
+          "model",
+          "choices",
+          "usage"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "object": {
+            "title": "Object",
+            "type": "string",
+            "default": "chat.completion"
+          },
+          "created": {
+            "title": "Created",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "choices": {
+            "title": "Choices",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatCompletionResponseChoice"
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/UsageInfo"
+          }
+        }
+      },
+      "ChatCompletionResponseChoice": {
+        "title": "ChatCompletionResponseChoice",
+        "required": [
+          "index",
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "message": {
+            "$ref": "#/components/schemas/ChatMessage"
+          },
+          "finish_reason": {
+            "title": "Finish Reason",
+            "enum": [
+              "stop",
+              "length",
+              "function_call"
+            ],
+            "type": "string"
+          }
+        }
+      },
+      "ChatMessage": {
+        "title": "ChatMessage",
+        "required": [
+          "role",
+          "content"
+        ],
+        "type": "object",
+        "properties": {
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          }
+        }
+      },
+      "HTTPValidationError": {
+        "title": "HTTPValidationError",
+        "type": "object",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            }
+          }
+        }
+      },
+      "UsageInfo": {
+        "title": "UsageInfo",
+        "type": "object",
+        "properties": {
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer",
+            "default": 0
+          },
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer",
+            "default": 0
+          },
+          "total_tokens": {
+            "title": "Total Tokens",
+            "type": "integer",
+            "default": 0
+          }
+        }
+      },
+      "ValidationError": {
+        "title": "ValidationError",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "type": "object",
+        "properties": {
+          "loc": {
+            "title": "Location",
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            }
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
