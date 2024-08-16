@@ -59,8 +59,10 @@ class MetricServer(rpyc.Service):
 
     def push_metrics(self):
         while True:
-            self.monitor.push_metrices()
-            time.sleep(self.interval)
+            try:
+                self.monitor.push_metrices()
+            finally:
+                time.sleep(self.interval)
 
 
 class MetricClient(threading.Thread):
