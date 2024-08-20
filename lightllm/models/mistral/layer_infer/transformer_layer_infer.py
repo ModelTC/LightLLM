@@ -5,6 +5,7 @@ import numpy as np
 from typing import Tuple
 import triton
 
+from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.mistral.infer_struct import MistralInferStateInfo
 
@@ -12,6 +13,7 @@ from lightllm.models.mistral.triton_kernel.context_flashattention_nopad import c
 from lightllm.models.mistral.triton_kernel.token_attention_nopad_att1 import token_att_fwd
 from lightllm.models.mistral.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2
 from lightllm.models.llama.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
+from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 
@@ -20,10 +22,15 @@ class MistralTransformerLayerInfer(LlamaTransformerLayerInfer):
     """ """
 
     def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
+        self.sliding_window = network_config.get("sliding_window", None)
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+        self.head_dim_ = network_config.get("head_dim", self.head_dim_)
         return
 
     def _bind_func(self):
+        if not self.sliding_window:
+            super()._bind_func()
+            return
         self._token_attention_kernel = self._token_decode_attention_normal
         self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_normal
         return

@@ -16,6 +16,10 @@ class MistralInferStateInfo(LlamaInferStateInfo):
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         self.sliding_window = model.config["sliding_window"]
+        # Degrades to llama when sliding_window is None.
+        if not self.sliding_window:
+            super().init_some_extra_state(model, input_ids)
+            return
         if self.is_prefill:
             b_seq_len_numpy = self.b_seq_len.cpu().numpy()
             position_ids = torch.from_numpy(

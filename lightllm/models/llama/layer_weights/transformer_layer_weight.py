@@ -35,13 +35,11 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
             self.att_norm_weight_ = self._cuda(weights[f"model.layers.{self.layer_num_}.input_layernorm.weight"])
 
         n_embed = self.network_config_["hidden_size"]
-        q_split_n_embed = n_embed // self.world_size_
-        kv_split_n_embed = (
-            n_embed
-            // self.network_config_["num_attention_heads"]
-            * self.network_config_["num_key_value_heads"]
-            // self.world_size_
-        )
+        # Dealing with head_dim_!=n_embed // num_attention_heads scenarios, such as mistral 13B
+        head_dim = n_embed // self.network_config_["num_attention_heads"]
+        head_dim = self.network_config_.get("head_dim", head_dim)
+        q_split_n_embed = head_dim * self.network_config_["num_attention_heads"] // self.world_size_
+        kv_split_n_embed = head_dim * self.network_config_["num_key_value_heads"] // self.world_size_
         # q k v weights for llama
         if f"model.layers.{self.layer_num_}.self_attn.q_proj.weight" in weights:
             self.q_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.q_proj.weight"]
