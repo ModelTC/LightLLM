@@ -97,6 +97,17 @@ class HttpServerManager:
     async def generate(
         self, prompt, sampling_params: SamplingParams, group_request_id, multimodal_params, request=None
     ):
+        # 记录请求到达的相关信息
+        if request is not None:
+            x_request_id = request.headers.get("X-Request-Id", "")
+            x_session_id = request.headers.get("X-Session-Id", "")
+            format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
+            logger.info(
+                f"recieved req X-Request-Id:{x_request_id} "
+                f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
+                f"lightllm_req_id:{group_request_id} "
+            )
+
         # 监控
         self.metric_client.counter_inc("lightllm_request_count")
 
