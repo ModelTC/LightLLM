@@ -22,7 +22,7 @@ def _rms_norm_fwd_fused(
     _var = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
     for off in range(0, N, BLOCK_SIZE):
         cols = off + tl.arange(0, BLOCK_SIZE)
-        x = tl.load(X + cols, mask=cols < N, other=0.).to(tl.float32)
+        x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
         _var += x * x
     var = tl.sum(_var, axis=0) / N
     rstd = 1 / tl.sqrt(var + eps)
@@ -31,16 +31,16 @@ def _rms_norm_fwd_fused(
         cols = off + tl.arange(0, BLOCK_SIZE)
         mask = cols < N
         w = tl.load(W + cols, mask=mask).to(tl.float32)
-        x = tl.load(X + cols, mask=mask, other=0.).to(tl.float32)
+        x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
         x_hat = x * rstd
         y = x_hat * w
         # Write output
         tl.store(Y + cols, y.to(Y.dtype.element_ty), mask=mask)
 
 
-def rmsnorm_forward(x, weight, eps):
+def rmsnorm_forward(x, weight, eps, out=None):
     # allocate output
-    y = torch.empty_like(x)
+    y = torch.empty_like(x) if out is None else out
     # reshape input data into 2D tensor
     x_arg = x.view(-1, x.shape[-1])
     M, N = x_arg.shape
@@ -56,9 +56,7 @@ def rmsnorm_forward(x, weight, eps):
     BLOCK_SIZE = 128 * 2 * 2 * 2 * 2 * 2 * 2 * 2
     num_warps = 8
     # enqueue kernel
-    _rms_norm_fwd_fused[(M,)](x_arg, y, weight,
-                              x_arg.stride(0), N, eps,
-                              BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps)
+    _rms_norm_fwd_fused[(M,)](x_arg, y, weight, x_arg.stride(0), N, eps, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps)
     return y
 
 
@@ -66,12 +64,12 @@ def torch_rms_norm(x, weight, eps):
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight
 
 
-def test_rms_norm(M, N, dtype, eps=1e-5, device='cuda'):
+def test_rms_norm(M, N, dtype, eps=1e-5, device="cuda"):
     # create data
     x_shape = (M, N)
-    w_shape = (x_shape[-1], )
-    weight = torch.rand(w_shape, dtype=dtype, device='cuda')
-    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device='cuda')
+    w_shape = (x_shape[-1],)
+    weight = torch.rand(w_shape, dtype=dtype, device="cuda")
+    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device="cuda")
     # forward pass
     y_tri = rmsnorm_forward(x, weight, eps)
     y_ref = torch_rms_norm(x.to(torch.float32), weight.to(torch.float32), eps).to(dtype)
