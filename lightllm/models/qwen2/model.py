@@ -14,9 +14,10 @@ from lightllm.models.qwen2.layer_infer.transformer_layer_infer import Qwen2Trans
 from lightllm.common.mem_utils import MemoryManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
+from lightllm.models.llama.model import LlamaTpPartModel
 
 
-class Qwen2TpPartModel(TpPartBaseModel):
+class Qwen2TpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = Qwen2PreAndPostLayerWeight
     transformer_weight_class = Qwen2TransformerLayerWeight
@@ -47,10 +48,6 @@ class Qwen2TpPartModel(TpPartBaseModel):
         assert self.config["num_attention_heads"] % self.world_size_ == 0
         return
 
-    def _init_custom(self):
-        self._init_to_get_rotary()
-        return
-
     def _init_mem_manager(self):
         self.mem_manager = MemoryManager(
             self.max_total_token_num,  # [SYM] should be sliding window?
@@ -60,30 +57,4 @@ class Qwen2TpPartModel(TpPartBaseModel):
             layer_num=self.config["num_hidden_layers"],
             always_copy=False,
         )
-        return
-
-    def _init_to_get_rotary(self, default_base=10000):
-        if self.config.get("rope_scaling", {}) is None:
-            rope_scaling_factor = 1.0
-        else:
-            rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
-
-        base = self.config.get("rope_theta", float(default_base))
-
-        if "max_sequence_length" in self.config:
-            max_seq_len = self.config["max_sequence_length"]
-        else:
-            max_position_embeddings = self.config.get(
-                "max_position_embeddings", 2048 if base <= 10000.0 + 1e-5 else 16384
-            )
-            max_seq_len = max_position_embeddings * rope_scaling_factor
-
-        inv_freq = 1.0 / (
-            base ** (torch.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32) / self.head_dim_)
-        )
-        t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
-        freqs = torch.outer(t, inv_freq)
-
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
         return
