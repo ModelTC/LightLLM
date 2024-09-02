@@ -407,6 +407,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--beam_mode", action="store_true", help="use beamsearch mode")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
+    parser.add_argument("--simple_constraint_mode", action="store_true", help="output constraint mode")
 
     parser.add_argument(
         "--enable_multimodal", action="store_true", help="Whether or not to allow to load additional multimodal models."

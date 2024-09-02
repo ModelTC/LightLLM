@@ -10,7 +10,7 @@ import zmq
 import zmq.asyncio
 from typing import Dict, List, Optional
 from ..sampling_params import SamplingParams
-from ..io_struct import Req, NormalReq, SplitFuseReq, Batch
+from ..io_struct import Req, NormalReq, SplitFuseReq, TokenHealingReq, Batch
 from ..multimodal_params import MultimodalParams
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
@@ -66,6 +66,7 @@ class RouterManager:
         self.model_rpc_ports = model_rpc_ports
 
         self.is_splitfuse_mode = args.splitfuse_mode
+        self.is_token_healing = self.args.token_healing_mode
         self.splitfuse_block_size = args.splitfuse_block_size
 
         self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
@@ -82,6 +83,7 @@ class RouterManager:
         init_model_ret = []
         for rank_id in range(self.world_size):  # async init model process
             kvargs = {
+                "args": self.args,
                 "rank_id": rank_id,
                 "world_size": self.world_size,
                 "weight_dir": self.model_weightdir,
@@ -128,6 +130,8 @@ class RouterManager:
                     multimodal_params,
                     self.splitfuse_block_size,
                 )
+            elif self.is_token_healing:
+                req = TokenHealingReq(group_req_id + i, copy.deepcopy(prompt_ids), sampling_params, multimodal_params)
             else:
                 req = NormalReq(group_req_id + i, copy.deepcopy(prompt_ids), sampling_params, multimodal_params)
             req.start_time = start_time

@@ -60,6 +60,7 @@ class ModeBackend:
         import torch.distributed as dist
 
         world_size = kvargs["world_size"]
+        self.args = kvargs.get("args", None)
         self.is_multimodal = False
         self.tp_rank = kvargs["rank_id"]
         self.world_size = kvargs["world_size"]

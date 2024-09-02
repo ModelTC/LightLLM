@@ -128,6 +128,35 @@ class NormalReq(Req):
             assert False, "error state"
 
 
+class TokenHealingReq(NormalReq):
+    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams):
+        super().__init__(request_id, prompt_ids, sample_params, multimodal_params)
+
+        for prefix_token_num in range(2, -1, -1):
+            if len(self.prompt_ids) > prefix_token_num:
+                self.prefix_token_ids = self.prompt_ids[-prefix_token_num:]
+                del self.prompt_ids[-prefix_token_num:]
+                self.prefix_token_num = prefix_token_num
+                break
+
+        # 因为原始的输出token数量，会被中间的前缀补全占用decode次数，
+        # 所以默认多添加一些decode步数
+        self.added_max_new_tokens = 6
+        self.sample_params.max_new_tokens += self.added_max_new_tokens
+
+    def get_tuple_tokens(self, is_busy, router_max_new_token_len):
+        ans = super().get_tuple_tokens(is_busy, router_max_new_token_len)
+        # token healing mode 下，由于估计的生成token数据对应的生存周期可能会不准确
+        # 所以为了缓解调度带来的显存估计问题，对于生成token的长度 + 3来缓解可能的估计
+        # 错误问题。
+        return (ans[0], ans[1] + self.prefix_token_num + self.added_max_new_tokens)
+
+    def to_rpc_obj(self):
+        ans = super().to_rpc_obj()
+        ans["prefix_token_ids"] = self.prefix_token_ids
+        return ans
+
+
 class SplitFuseReq(Req):
     def __init__(
         self,

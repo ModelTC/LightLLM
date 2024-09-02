@@ -25,12 +25,13 @@ class SamplingParams:
         ignore_eos: bool = False,
         max_new_tokens: int = 16,
         min_new_tokens: int = 1,
-        stop_sequences: Optional[Union[str, List[str]]] = None,  # 停止句子条件
+        stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None,  # 停止句子条件
         skip_special_tokens: bool = True,  # whether to skip special tokens when decoding
         add_spaces_between_special_tokens: bool = True,  # whether to add spaces between special tokens when decoding
         print_eos_token: bool = False,  # eos_id will be always ignored except the value is set to True
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
         input_penalty: bool = DEFAULT_INPUT_PENALTY,
+        regular_constraint: Optional[str] = None,  # Regular expressions constrain the output.
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -49,6 +50,7 @@ class SamplingParams:
         self.skip_special_tokens = skip_special_tokens
         self.add_spaces_between_special_tokens = add_spaces_between_special_tokens
         self.print_eos_token = print_eos_token
+        self.regular_constraint = regular_constraint
         if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -112,8 +114,38 @@ class SamplingParams:
                 f"exponential_decay_length_penalty[1] must be a float >= 1.0, \
                 got {self.exponential_decay_length_penalty[1]}."
             )
+        if self.regular_constraint is not None and not isinstance(self.regular_constraint, str):
+            raise ValueError(
+                f"regular_expression must be str type, \
+                              but get {str(self.regular_constraint)}"
+            )
+
+        if self.regular_constraint is not None:
+            # check regex format
+            try:
+                import interegular
+
+                interegular.parse_pattern(self.regular_constraint)
+            except Exception as e:
+                raise ValueError(f"regular_expression '{self.regular_constraint}' has parse_pattern_error: {str(e)}")
+
+        self._verify_stop_sentences()
 
         return
+
+    def _verify_stop_sentences(self):
+        if self.stop_sequences is not None:
+            if isinstance(self.stop_sequences, str):
+                return
+            if isinstance(self.stop_sequences, list):
+                all_str = all(isinstance(stop_info, str) for stop_info in self.stop_sequences)
+                all_int_list = all(
+                    (isinstance(stop_info, list) and isinstance(x, int) for x in stop_info)
+                    for stop_info in self.stop_sequences
+                )
+                if all_str or all_int_list:
+                    return
+            raise ValueError("stop_sequences only support str, list[str], list[list[int]] type")
 
     def stop_sentences_to_token_ids(self, tokenizer):
         if self.stop_sequences is None:
@@ -122,14 +154,21 @@ class SamplingParams:
             if isinstance(self.stop_sequences, str):
                 self.stop_sequences = [self.stop_sequences]
             new_stop_sequences = []
-            for stop_str in self.stop_sequences:
-                stop_str_ids = tokenizer.encode(stop_str)
-                if stop_str_ids is not None and len(stop_str_ids) > 1:  # remove bos_token_id
-                    stop_str_ids = stop_str_ids[1:]
-                if len(stop_str_ids) > 0:
-                    new_stop_sequences.append(stop_str_ids)
+            for stop_info in self.stop_sequences:
+                if isinstance(stop_info, str):
+                    stop_str_ids = self._stop_str_to_token_ids(stop_info, tokenizer)
+                    if stop_str_ids is not None and len(stop_str_ids) > 0:
+                        new_stop_sequences.append(stop_str_ids)
+                if isinstance(stop_info, list):
+                    if all(isinstance(x, int) for x in stop_info):
+                        if len(stop_info) > 0:
+                            new_stop_sequences.append(stop_info)
             self.stop_sequences = new_stop_sequences
         return
+
+    def _stop_str_to_token_ids(self, stop_str: str, tokenizer):
+        stop_str_ids = tokenizer.encode(stop_str, add_special_tokens=False)
+        return stop_str_ids
 
     def to_dict(self):
         ret = {}
@@ -147,4 +186,5 @@ class SamplingParams:
         ret["stop_sequences"] = self.stop_sequences
         ret["best_of"] = self.best_of
         ret["input_penalty"] = self.input_penalty
+        ret["regular_constraint"] = self.regular_constraint
         return ret

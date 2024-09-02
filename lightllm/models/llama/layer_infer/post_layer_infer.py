@@ -51,15 +51,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             start_index = 0
             select_token_num = 0
             for cur_len in b_seq_len_numpy:
-                if cur_len == 1:
-                    select_index.append(start_index + cur_len - 1)
-                    start_index += cur_len
-                    select_token_num += 1
-                else:
-                    select_index.append(start_index + cur_len - 2)
-                    select_index.append(start_index + cur_len - 1)
-                    start_index += cur_len
-                    select_token_num += 2
+                select_index.append(start_index + cur_len - 1)
+                start_index += cur_len
+                select_token_num += 1
 
             last_index = torch.tensor(select_index, dtype=torch.long, device=input_embdings.device)
             last_input = torch.empty(

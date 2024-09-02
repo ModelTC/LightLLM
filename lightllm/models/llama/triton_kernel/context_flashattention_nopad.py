@@ -294,6 +294,8 @@ def _fwd_kernel_no_prompt_cache(
 @torch.no_grad()
 def context_attention_fwd_no_prompt_cache(q, k, v, o, b_start_loc, b_seq_len, max_input_len):
     BLOCK = 128 if not TESLA else 64
+    if q.dtype == torch.float32:
+        BLOCK = BLOCK // 2
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv

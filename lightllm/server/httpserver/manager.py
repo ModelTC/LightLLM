@@ -111,6 +111,8 @@ class HttpServerManager:
         # 监控
         self.metric_client.counter_inc("lightllm_request_count")
 
+        sampling_params.stop_sentences_to_token_ids(self.tokenizer)
+
         # 统计信息变量
         start_time = time.time()
         out_token_counter = 0
@@ -153,8 +155,6 @@ class HttpServerManager:
         if req_total_len + 1 > self.total_token_num:
             raise ValueError(f"the req token total len + 1 is too long > max_total_token_num:{self.total_token_num}")
         verify_time_end = time.time()
-
-        sampling_params.stop_sentences_to_token_ids(self.tokenizer)
 
         req_status = ReqStatus(group_request_id, multimodal_params)
         event = req_status.event

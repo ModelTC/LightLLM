@@ -39,13 +39,18 @@ class DeTokenizationManager:
         self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out = {}
         self.eos_id = eos_id
+        self._init_get_token_id_to_token_str()
+
+    def _init_get_token_id_to_token_str(self):
+        self.token_id_to_token = {token_id: token for token, token_id in self.tokenizer.get_vocab().items()}
+        return
 
     async def handle_loop(self):
         while True:
             try:
-                recv_obj: Union(
+                recv_obj: Union[
                     BatchTokenIdOut, ReqDetokenizationState, AbortReq
-                ) = await self.recv_from_router.recv_pyobj()
+                ] = await self.recv_from_router.recv_pyobj()
                 assert isinstance(
                     recv_obj, (BatchTokenIdOut, ReqDetokenizationState, AbortReq)
                 ), f"type is not right {type(recv_obj)}"
@@ -88,6 +93,17 @@ class DeTokenizationManager:
 
                         if out_text.endswith("\ufffd"):
                             new_text = ""
+                        elif "prefix_str" in new_gen_metadata:
+                            # 对应 token_healing 的特殊处理
+                            token = new_gen_metadata["prefix_str"]
+                            token_str = self.tokenizer.convert_tokens_to_string([token])
+                            new_text = out_text[len(req_out.output_str) :]
+                            logger.info(
+                                f"token headling prefix_token_and_str: '{token}':'{token_str}' new_text: '{new_text}'"
+                            )
+                            assert new_text.startswith(token_str)
+                            new_text = new_text[len(token_str) :]
+                            req_out.output_str = out_text
                         else:
                             new_text = out_text[len(req_out.output_str) :]
                             req_out.output_str = out_text
