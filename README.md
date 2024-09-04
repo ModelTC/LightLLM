@@ -7,7 +7,7 @@
 ---
 <div align="center">
 
-[![docs](https://img.shields.io/badge/docs-latest-blue)](https://github.com/ModelTC/lightllm/blob/main/docs/TokenAttention.md)
+[![docs](https://img.shields.io/badge/docs-latest-blue)](https://lightllm-en.readthedocs.io/en/latest/)
 [![Docker](https://github.com/ModelTC/lightllm/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/ModelTC/lightllm/actions/workflows/docker-publish.yml)
 [![stars](https://img.shields.io/github/stars/ModelTC/lightllm?style=social)](https://github.com/ModelTC/lightllm)
 ![visitors](https://komarev.com/ghpvc/?username=lightllm&label=visitors)
@@ -16,6 +16,9 @@
 </div>
 
 LightLLM is a Python-based LLM (Large Language Model) inference and serving framework, notable for its lightweight design, easy scalability, and high-speed performance. LightLLM harnesses the strengths of numerous well-regarded open-source implementations, including but not limited to FasterTransformer, TGI, vLLM, and FlashAttention.
+
+
+[English Docs](https://lightllm-en.readthedocs.io/en/latest/) | [中文文档](https://lightllm-cn.readthedocs.io/en/latest/)
 
 ## Features
 
