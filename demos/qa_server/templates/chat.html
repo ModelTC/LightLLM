@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>两人多轮对话窗口</title>
+<style>
+  body {
+    font-family: 'Arial', sans-serif;
+    background-color: #f0f0f0;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+  }
+  .dialog-container {
+    width: 1200px;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+  }
+  .header {
+    background-color: #007BFF;
+    color: #fff;
+    padding: 10px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+  }
+  .header h3 {
+    margin: 0;
+    font-size: 18px;
+  }
+  .messages {
+    padding: 10px;
+    height: 600px;
+    overflow-y: auto;
+  }
+  .message {
+    margin-bottom: 10px;
+  }
+  .message p {
+    display: inline-block;
+    background-color: #e6e6e6;
+    padding: 5px 10px;
+    border-radius: 20px;
+    max-width: 200px;
+    overflow-wrap: break-word;
+  }
+  .user1 {
+    text-align: left;
+  }
+  .user2 {
+    text-align: right;
+  }
+  .user2 p {
+    background-color: #007BFF;
+    color: #fff;
+  }
+  .input-area {
+    padding: 10px;
+    border-top: 1px solid #e6e6e6;
+  }
+  .input-area input {
+    width: 100%;
+    border: none;
+    background-color: #f0f0f0;
+    padding: 10px;
+    border-radius: 20px;
+  }
+  .input-area input:focus {
+    outline: none;
+  }
+</style>
+</head>
+<body>
+<div class="dialog-container">
+  <div class="header">
+    <h3>两人多轮对话</h3>
+  </div>
+  <div class="messages">
+    <!-- 对话内容将通过JavaScript添加到这里 -->
+  </div>
+  <div class="input-area">
+    <input type="text" id="messageInput" placeholder="输入你的消息">
+  </div>
+</div>
+<script>
+  // 示例对话内容
+  const dialogs = [
+    { user: '1', message: '你好！' },
+    { user: '1', message: '你好，请问有什么可以帮助你的吗？' },
+  ];
+
+  const messagesContainer = document.querySelector('.messages');
+
+  // 添加对话到页面
+  function addMessageToPage(user, message) {
+    const messageDiv = document.createElement('div');
+    messageDiv.classList.add('message', `user${user}`);
+    messageDiv.innerHTML = `<p>${message}</p>`;
+    messagesContainer.appendChild(messageDiv);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  }
+
+  // 填充示例对话
+  dialogs.forEach(dialog => {
+    addMessageToPage(dialog.user, dialog.message);
+  });
+
+  // 监听消息输入
+  const messageInput = document.getElementById('messageInput');
+  messageInput.addEventListener('keypress', event => {
+    if (event.key === 'Enter') {
+      const user = '2';
+      const message = messageInput.value;
+      addMessageToPage(user, message);
+      messageInput.value = '';
+
+      // 使用Fetch API获取接口响应
+      fetch(`/chat?message=${encodeURIComponent(message)}`)
+        .then(response => response.text())
+        .then(data => {
+            // 显示响应
+            addMessageToPage('1', data);
+        }).catch(error => {
+            console.error('获取接口响应时出错:', error);
+            addMessageToPage('1', '获取接口响应时出错');
+        });
+
+        messageInput.value = '';
+    }
+  });
+</script>
+</body>
+</html>
