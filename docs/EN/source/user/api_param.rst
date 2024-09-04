@@ -65,6 +65,10 @@ Calling the model to implement text completion
     $      "multimodal_params":{}
     $     }'
 
+.. tip::
+
+    For the contents of parameters, refer to :ref:`parameters`, for the contents of multimodal_params, refer to :ref:`MultimodalParams`
+
 
 **Output Examples**：
 

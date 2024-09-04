@@ -72,12 +72,13 @@ Docs List
    getting_started/installation
    getting_started/quickstart
 
+
 .. toctree::
    :maxdepth: 1
-   :caption: Lightllm
+   :caption: lightllm Overview
 
-   lightllm/lightllm_intro
-   lightllm/lightllm_impl
+   lightllm_info/lightllm
+
 
 .. toctree::
    :maxdepth: 1
@@ -101,12 +102,14 @@ Docs List
 
    user/api_param
    user/openapi_docs
+   user/param_class/index
    
    
 .. toctree::
    :maxdepth: 1
    :caption: development docs
 
+   dev/lightllm_impl
    dev/token_attention
    dev/router
    

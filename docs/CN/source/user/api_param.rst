@@ -65,6 +65,10 @@
     $      "multimodal_params":{}
     $     }'
 
+.. tip::
+
+    其中的 parameters 的内容参考 :ref:`parameters` , multimodal_params 的内容参考 :ref:`MultimodalParams`
+
 
 **输出示例**：
 
