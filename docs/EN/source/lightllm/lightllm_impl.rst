@@ -1,4 +1,4 @@
-lightllm Overview
+Lightllm Architecture
 ==========================
 
 The core design of lightllm is multi-process collaboration. Each process is responsible for a module, and multi-process collaboration is carried out through zmq and rpc.

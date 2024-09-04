@@ -1,6 +1,6 @@
 .. _lightllm:
 
-LightLLM介绍
+LightLLM 介绍
 ================
 
 随着ChatGPT的流行，大语言模型(简称LLM)受到越来越多的关注。此类模式的出现，极大地提高了人们的工作效率。
@@ -93,38 +93,5 @@ LightLLM的核心特点如下：
   :class: no-scaled-link
 
 
-
-性能评测
------------
-
-我们使用当前主流推理框架TGI、NV Triton + FasterTransformer、vLLM在ShareGPT_Vicuna_unfiltered数据集上进行了性能比较。结果如下图所示。可以看出，LightLLM 在不同模型大小上实现了更高的吞吐量。 TGI内存碎片严重，难以实现高吞吐量。 vLLM引入了PageAttention，但由于其整体实现细节更利于小模型推理，因此在大模型上的并发性能不是很理想（使用默认配置）。相比之下，LightLLM 在各种模型尺寸上都保持了稳健的性能，并且在大型模型 (LLaMA-65B) 上比 TGI 和 vLLM 提高了约 2-3 倍。
-
-.. image:: ../assets/lightllm/Performance.png
-   :alt: Efficient_Router1
-   :align: center
-
-
-TGI兼容性和消融分析为了进一步验证TokenAttention和Router的有效性，我们还将这些功能集成到TGI中以解决其内存碎片问题，如下图（左）所示。可以看出，引入TokenAttention和Router后，与原始TGI相比，性能提升了4倍以上。
-
-长短混合请求情况下的改进：从下图（左）可以看出，Router的引入并没有带来更明显的性能提升，这是由于问题长度的差异ShareGPT_Vicuna_unfiltered 的数据集并不重要。为此，我们构建了长度差异较大的请求集合，并验证了高效路由器的性能。结果如下所示（右）。可以看到，我们的Efficient Router可以更好地利用GPU资源，对于问题长度差异较大的请求可以带来近50%的性能提升。
-
-
-.. image:: ../assets/lightllm/Performance2.png
-   :alt: Efficient_Router1
-   :align: center
-
-
-左图展示了LightLLM和TGI的兼容性以及消融分析，右图展示了我们的Efficient Router对长短请求的增强
-
-
-未来工作
----------
-
-* 支持更多的模型
-* 增强路由调度算法
-* 高性能的 int8 和 int4 仅权重的 kv cache 的支持
-* 全量化模型的支持
-* 混合精度模型
-* 稀疏化
 
 LightLLM致力于让更多人参与进来，从而灵活高效地探索各种LLM部署和推理解决方案。也为硬件厂商推动该领域的发展提供参考。我们希望大家能够给它更多的star，fork这个项目，并做出贡献。我们相信未来将会出现更多的技术和解决方案（如TensorRT），不断降低部署成本，让AGI更容易走进普通家庭。
