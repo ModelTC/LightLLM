@@ -38,10 +38,10 @@ class QaBot:
         # 添加知识库
         chat_session.add_prompt(knowledge_start)
 
-        title = "lightllm的仓库连接"
+        title = "lightllm的仓库链接"
         content = "https://github.com/ModelTC/lightllm"
         chat_session.add_prompt(f"<item><title>{title}</title><content>{content}</content></item>\n")
-        title = "lightllm的文档连接"
+        title = "lightllm的文档链接"
         content = "https://github.com/ModelTC/lightllm/tree/main/docs"
         chat_session.add_prompt(f"<item><title>{title}</title><content>{content}</content></item>\n")
         title = "steam 账号"
