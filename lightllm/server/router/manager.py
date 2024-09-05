@@ -269,13 +269,14 @@ class RouterManager:
         for req in batch.reqs:
             prompt_cache_len = req.cur_kv_len
             prompt_cache_ratio = req.cur_kv_len / req.input_len
+            req.prompt_cache_len = prompt_cache_len
             self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
             self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
-            logger.info(
-                f"lightllm_req_id:{req.request_id} "
-                f"prompt_cache_len:{prompt_cache_len} "
-                f"prompt_cache_ratio:{prompt_cache_ratio} "
-            )
+            # logger.info(
+            #     f"lightllm_req_id:{req.request_id} "
+            #     f"prompt_cache_len:{prompt_cache_len} "
+            #     f"prompt_cache_ratio:{prompt_cache_ratio} "
+            # )
         logger.debug(f"Init Batch: {batch.simple_log()} \n")
         return
 
@@ -402,6 +403,7 @@ class RouterManager:
             req = batch.id_to_reqs[req_id]
             for idx, (new_token_id, new_gen_metadata) in enumerate(token_info_list):
                 # req.finish_status 传输 value值 不传送对象，可以减少序列化对象的大小。
+                new_gen_metadata["prompt_cache_len"] = req.prompt_cache_len
                 if idx == len(token_info_list) - 1:
                     batch_out.reqs_infs.append((req_id, new_token_id, new_gen_metadata, req.finish_status.value))
                 else:
