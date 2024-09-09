@@ -1,3 +1,23 @@
+# coding=utf-8
+# Copyright 2024 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
+#
+# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
+# and OPT implementations in this library. It has been modified from its
+# original forms to accommodate minor architectural differences compared
+# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import re
 import json
@@ -38,7 +58,8 @@ else:
 
 logger = logging.get_logger(__name__)
 
-
+# adapted from
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
 class Qwen2VLVisionConfig(PretrainedConfig):
     model_type = "qwen2_vl"
 
@@ -188,6 +209,8 @@ class VisionAttention(nn.Module):
         return attn_output
 
 
+# adapted from
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
 class VisionFlashAttention2(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
@@ -211,6 +234,8 @@ class VisionFlashAttention2(nn.Module):
         return attn_output
 
 
+# adapted from
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
 class VisionSdpaAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
@@ -245,7 +270,8 @@ QWEN2_VL_VISION_ATTENTION_CLASSES = {
     "sdpa": VisionSdpaAttention,
 }
 
-
+# adapted from
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
 class Qwen2VLVisionBlock(nn.Module):
     def __init__(self, embed_dim, mlp_ratio, num_heads, hidden_act, attn_implementation: str = "eager") -> None:
         super().__init__()
@@ -264,6 +290,8 @@ class Qwen2VLVisionBlock(nn.Module):
         return hidden_states
 
 
+# adapted from
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
 class Qwen2VisionTransformerPretrainedModel(nn.Module):
     def __init__(
         self,

@@ -77,6 +77,8 @@ lightllm 支持大多数的主流的开源大语言模型以及多模态模型�
     -  :code:`--enable_multimodal`
   * - `Llava-13b <https://huggingface.co/liuhaotian/llava-v1.5-13b>`_
     -  :code:`--enable_multimodal`
+  * - `Qwen2-VL <https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct>`_
+    -  :code:`--enable_multimodal`
 
 
 Reward模型

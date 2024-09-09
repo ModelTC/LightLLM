@@ -26,7 +26,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 from ..models.llava.model import LlavaTokenizer
 from ..models.qwen_vl.model import QWenVLTokenizer
-from ..models.qwen2_vl.model import QWen22VLTokenizer
+from ..models.qwen2_vl.model import QWen2VLTokenizer
 from ..models.internvl.model import InternvlTokenizer
 
 
@@ -77,7 +77,7 @@ def get_tokenizer(
         from transformers import AutoProcessor
 
         image_processor = AutoProcessor.from_pretrained(tokenizer_name)
-        tokenizer = QWen22VLTokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
+        tokenizer = QWen2VLTokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
     elif model_type == "internvl_chat":
         tokenizer = InternvlTokenizer(tokenizer, model_cfg)
 

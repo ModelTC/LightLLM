@@ -24,7 +24,7 @@ import os
 # from lightllm.models.qwen2_vl.layer_weight.pre_and_post_layer_weight import Qwen2VLPreAndPostLayerWeight
 
 # Warp of the origal tokenizer
-class QWen22VLTokenizer:
+class QWen2VLTokenizer:
     def __init__(self, tokenizer=None, image_processor=None, **kwargs):
         self.tokenizer = tokenizer
         self.image_processor = image_processor

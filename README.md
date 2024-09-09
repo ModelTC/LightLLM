@@ -48,6 +48,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - [Yi-34b](https://huggingface.co/01-ai/Yi-34B)  
 - [Qwen-VL](https://huggingface.co/Qwen/Qwen-VL)
 - [Qwen-VL-Chat](https://huggingface.co/Qwen/Qwen-VL-Chat)
+- [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct)
 - [Llava-7b](https://huggingface.co/liuhaotian/llava-v1.5-7b)
 - [Llava-13b](https://huggingface.co/liuhaotian/llava-v1.5-13b)  
 - [Mixtral](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1)
@@ -69,6 +70,8 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 > InternVL-Chat(Phi3) needs to set the parameter '--eos_id 32007 --trust_remote_code'.
 
 > InternVL-Chat(InternLM2) needs to set the parameter '--eos_id 92542 --trust_remote_code'.
+
+> Qwen2-VL-7b needs to set the parameter '--eos_id 151645 --trust_remote_code'.
 
 > Stablelm needs to set the parameter '--trust_remote_code'.
 
