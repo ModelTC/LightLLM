@@ -86,7 +86,8 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 The code has been tested with Pytorch>=1.3, CUDA 11.8, and Python 3.9. To install the necessary dependencies, please refer to the provided **requirements.txt** and follow the instructions as
 
 ~~~shell
-pip install -r requirements.txt
+# for cuda 11.8
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
 ~~~
 
 ### Container
@@ -136,13 +137,12 @@ python setup.py install
 
 - Install Triton Package  
 
-The code has been tested on a range of GPUs including V100, A100, A800, 4090, and H800. If you are running the code on A100, A800, etc., we recommend using triton==2.1.0. 
+The code has been tested on a range of GPUs including V100, A100, A800, 4090, and H800. If you are running the code on A100, A800, etc., we recommend using triton==3.0.0. 
 
 ~~~shell
-pip install triton==2.1.0 --no-deps
+pip install triton==3.0.0 --no-deps
 ~~~
-If you are running the code on H800 or V100., we recommend using triton-nightly, triton-nightly has a significant CPU bottleneck, leading to high decode latency at low concurrency levels. You can observe [this issue](https://github.com/openai/triton/issues/3619) and [fix PR](https://github.com/openai/triton/pull/3638).You can try modifying and compiling the 
-source code yourself to resolve this issue.
+If you are running the code on H800 or V100., you can try triton-nightly to get better performance.
 ~~~shell
 pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly --no-deps
 ~~~

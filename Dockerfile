@@ -47,7 +47,7 @@ RUN mkdir ~/cuda-nvcc && cd ~/cuda-nvcc && \
 WORKDIR /root
 
 COPY ./requirements.txt /lightllm/requirements.txt
-RUN pip install -r /lightllm/requirements.txt --no-cache-dir --ignore-installed
+RUN pip install -r /lightllm/requirements.txt --no-cache-dir --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu118
 
 COPY . /lightllm
 RUN pip install -e /lightllm --no-cache-dir

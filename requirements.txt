@@ -20,7 +20,6 @@ filelock==3.12.2
 fsspec==2023.6.0
 gmpy2==2.1.2
 h11==0.14.0
-huggingface-hub==0.24.6
 humanfriendly==10.0
 humanize==4.7.0
 idna==3.4
@@ -61,11 +60,13 @@ sniffio==1.3.0
 sympy==1.12
 sortedcontainers==2.4.0
 toolz==0.12.0
-torch==2.1.0
+torch==2.4.0
+torchvision==0.19.0
 tqdm==4.65.0
 transformers==4.43.2
 tokenizers==0.19.1
-triton==2.1.0
+huggingface-hub==0.24.6
+triton==3.0.0
 urllib3==1.26.16
 uvicorn==0.19.0
 uvloop==0.17.0
@@ -75,8 +76,6 @@ safetensors==0.4.3
 Pillow==10.2.0
 tiktoken==0.5.2
 matplotlib==3.8.2
---extra-index-url https://download.pytorch.org/whl/cu118
-torchvision==0.16.0
 psutil==5.9.4
 prometheus_client==0.20.0
 outlines==0.0.46
