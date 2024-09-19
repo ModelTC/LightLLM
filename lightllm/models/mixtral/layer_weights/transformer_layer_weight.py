@@ -10,7 +10,10 @@ logger = init_logger(__name__)
 class MixtralTransformerLayerWeight(TransformerLayerWeight):
     def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[]):
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
-        self.experts = [{"w1": None, "w2": None, "w3": None} for _ in range(self.network_config_["num_local_experts"])]
+        self.n_routed_experts = network_config["num_local_experts"]
+        self.experts_w1 = [None] * self.n_routed_experts
+        self.w2_list = [None] * self.n_routed_experts
+        self.experts_w3 = [None] * self.n_routed_experts
         return
 
     def load_hf_weights(self, weights):
@@ -26,20 +29,10 @@ class MixtralTransformerLayerWeight(TransformerLayerWeight):
             self.kv_weight_,
             self.o_weight_,
             self.ffn_norm_weight_,
-            self.gate,
+            self.moe_gate,
         ]
         for i in range(len(weights)):
-            assert weights[i] is not None, str(i) + " " + str(self.layer_num_) + " " + errors
-        for i in range(self.network_config_["num_local_experts"]):
-            assert self.experts[i]["w1"] is not None, (
-                "layer " + str(self.layer_num_) + " expert " + str(i) + " w1 " + errors
-            )
-            assert self.experts[i]["w2"] is not None, (
-                "layer " + str(self.layer_num_) + " expert " + str(i) + " w2 " + errors
-            )
-            assert self.experts[i]["w3"] is not None, (
-                "layer " + str(self.layer_num_) + " expert " + str(i) + " w3 " + errors
-            )
+            assert weights[i] is not None, "index:" + str(i) + " " + errors
         return
 
     def _load_qkvo_weights(self, weights):
@@ -90,24 +83,54 @@ class MixtralTransformerLayerWeight(TransformerLayerWeight):
         split_inter_size = inter_size // self.world_size_
 
         if f"model.layers.{self.layer_num_}.block_sparse_moe.gate.weight" in weights:
-            self.gate = weights[f"model.layers.{self.layer_num_}.block_sparse_moe.gate.weight"]
-            self.gate = self._cuda(self.gate.transpose(0, 1))
+            self.moe_gate = weights[f"model.layers.{self.layer_num_}.block_sparse_moe.gate.weight"]
+            self.moe_gate = self._cuda(self.moe_gate.transpose(0, 1))
 
-        for expert_idx in range(self.network_config_["num_local_experts"]):
+        for expert_idx in range(self.n_routed_experts):
+            expert_w1 = None
+            expert_w2 = None
+            expert_gate_up_proj = None
+            expert_w3 = None
+
             if f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{expert_idx}.w1.weight" in weights:
-                self.experts[expert_idx]["w1"] = weights[
-                    f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{expert_idx}.w1.weight"
-                ][split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1), :]
-                self.experts[expert_idx]["w1"] = self._cuda(self.experts[expert_idx]["w1"].transpose(0, 1))
+                expert_w1 = weights[f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{expert_idx}.w1.weight"][
+                    split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1), :
+                ]
+                self.experts_w1[expert_idx] = self._cuda(expert_w1)
             if f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{expert_idx}.w2.weight" in weights:
-                self.experts[expert_idx]["w2"] = weights[
-                    f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{expert_idx}.w2.weight"
-                ][:, split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1)]
-                self.experts[expert_idx]["w2"] = self._cuda(self.experts[expert_idx]["w2"].transpose(0, 1))
+                expert_w2 = weights[f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{expert_idx}.w2.weight"][
+                    :, split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1)
+                ]
+                self.w2_list[expert_idx] = self._cuda(expert_w2)
 
             if f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{expert_idx}.w3.weight" in weights:
-                self.experts[expert_idx]["w3"] = weights[
-                    f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{expert_idx}.w3.weight"
-                ][split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1), :]
-                self.experts[expert_idx]["w3"] = self._cuda(self.experts[expert_idx]["w3"].transpose(0, 1))
+                expert_w3 = weights[f"model.layers.{self.layer_num_}.block_sparse_moe.experts.{expert_idx}.w3.weight"][
+                    split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1), :
+                ]
+                self.experts_w3[expert_idx] = self._cuda(expert_w3)
+
+            with self.lock:
+                if (
+                    hasattr(self, "experts_w1")
+                    and None not in self.experts_w1
+                    and None not in self.experts_w3
+                    and None not in self.w2_list
+                ):
+
+                    w1_list = []
+                    for i_experts in range(self.n_routed_experts):
+                        expert_gate_up_proj = torch.cat([self.experts_w1[i_experts], self.experts_w3[i_experts]], dim=0)
+                        expert_gate_up_proj = self._cuda(expert_gate_up_proj)
+                        w1_list.append(expert_gate_up_proj)
+
+                    inter_shape, hidden_size = w1_list[0].shape[0], w1_list[0].shape[1]
+                    self.w1 = torch._utils._flatten_dense_tensors(w1_list).view(len(w1_list), inter_shape, hidden_size)
+                    inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
+                    self.w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(
+                        len(self.w2_list), inter_shape, hidden_size
+                    )
+
+                    delattr(self, "w2_list")
+                    delattr(self, "experts_w1")
+                    delattr(self, "experts_w3")
         return
