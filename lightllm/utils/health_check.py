@@ -12,8 +12,6 @@ logger = init_logger(__name__)
 async def health_check(httpserver_manager: HttpServerManager, g_id_gen, request):
     try:
         request_dict = {"inputs": "你好！", "parameters": {"do_sample": True, "temperature": 0.8, "max_new_tokens": 2}}
-
-        request_dict = await request.json()
         prompt = request_dict.pop("inputs")
         sample_params_dict = request_dict["parameters"]
         sampling_params = SamplingParams(**sample_params_dict)
@@ -29,5 +27,5 @@ async def health_check(httpserver_manager: HttpServerManager, g_id_gen, request)
             pass
         return True
     except Exception as e:
-        logger.error("health_check error:", e)
+        logger.exception(str(e))
         return False
