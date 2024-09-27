@@ -51,9 +51,9 @@ class TpPartBaseModel:
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
         self.data_type = kvargs.get("data_type", "float16")
-        graph_max_batch_size = kvargs["graph_max_batch_size"]
-        graph_max_len_in_batch = kvargs["graph_max_len_in_batch"]
-        disable_cudagraph = kvargs["disable_cudagraph"]
+        graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
+        graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8196)
+        disable_cudagraph = kvargs.get("disable_cudagraph", False)
         self.graph = None if disable_cudagraph else CudaGraph(graph_max_batch_size, graph_max_len_in_batch)
 
         self._init_datatype()
@@ -289,7 +289,7 @@ class TpPartBaseModel:
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
-        
+
         # 在使用 cuda graph 特性的时候，必须保证每次推理的流程一致
         # 所以不再使用分配连续的mem带来的优化，保证推理流程的一致
         alloc_mem = None if self.graph is not None else self.mem_manager.alloc_contiguous(batch_size)
