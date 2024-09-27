@@ -99,6 +99,9 @@ class ModeBackend:
             "return_all_prompt_logics": self.return_all_prompt_logprobs,
             "use_dynamic_prompt_cache": self.use_dynamic_prompt_cache,
             "data_type": kvargs.get("data_type", "float16"),
+            "graph_max_batch_size": kvargs.get("graph_max_batch_size", 16),
+            "graph_max_len_in_batch": kvargs.get("graph_max_len_in_batch", 8196),
+            "disable_cudagraph": kvargs.get("disable_cudagraph", False),
         }
 
         is_weight_only_quant = any("w6a16" in mode_ or "w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode)

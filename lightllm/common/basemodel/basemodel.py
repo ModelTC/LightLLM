@@ -14,6 +14,7 @@ from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 from lightllm.common.basemodel.triton_kernel.splitfuse_copy_kv_index_to_req import splitfuse_copy_kv_index_to_req
+from lightllm.common.basemodel.cuda_graph import CudaGraph
 
 torch.backends.cudnn.enabled = True
 
@@ -50,6 +51,10 @@ class TpPartBaseModel:
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
         self.data_type = kvargs.get("data_type", "float16")
+        graph_max_batch_size = kvargs["graph_max_batch_size"]
+        graph_max_len_in_batch = kvargs["graph_max_len_in_batch"]
+        disable_cudagraph = kvargs["disable_cudagraph"]
+        self.graph = None if disable_cudagraph else CudaGraph(graph_max_batch_size, graph_max_len_in_batch)
 
         self._init_datatype()
         self._init_config()
@@ -284,8 +289,10 @@ class TpPartBaseModel:
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
-
-        alloc_mem = self.mem_manager.alloc_contiguous(batch_size)
+        
+        # 在使用 cuda graph 特性的时候，必须保证每次推理的流程一致
+        # 所以不再使用分配连续的mem带来的优化，保证推理流程的一致
+        alloc_mem = None if self.graph is not None else self.mem_manager.alloc_contiguous(batch_size)
         if alloc_mem is not None:
             infer_state.mem_is_contiguous = True
             infer_state.mem_index = alloc_mem[0]
@@ -304,7 +311,13 @@ class TpPartBaseModel:
             copy_kv_index_to_req(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len, infer_state.mem_index)
 
         infer_state.init_some_extra_state(self, input_ids)
-        predict_logics = self._token_forward(input_ids, infer_state)
+        if self.graph.can_run(batch_size, max_len_in_batch):
+            if self.graph.need_capture(batch_size):
+                predict_logics = self.graph.capture_decode(self._token_forward, input_ids, infer_state)
+            else:
+                predict_logics = self.graph.replay(input_ids, infer_state)
+        else:
+            predict_logics = self._token_forward(input_ids, infer_state)
         return predict_logics
 
     @torch.no_grad()

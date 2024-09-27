@@ -38,3 +38,9 @@ class InferStateInfo:
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         pass
+
+    def copy_for_cuda_graph(self, new_infer_state):
+        for attr_name, attr_value in vars(new_infer_state).items():
+            if isinstance(attr_value, torch.Tensor):
+                getattr(self, attr_name).copy_(attr_value)
+        return

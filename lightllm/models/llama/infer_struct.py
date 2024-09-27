@@ -31,3 +31,4 @@ class LlamaInferStateInfo(InferStateInfo):
             self.other_kv_index = self.req_manager.req_to_token_indexs[self.b_req_idx[0], 0].item()
             # b_loc[0, max_len_in_batch - 1].item()
         return
+

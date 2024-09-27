@@ -468,7 +468,21 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"
     )
-
+    parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
+    parser.add_argument(
+        "--graph_max_batch_size",
+        type=int,
+        default=16,
+        help="""Maximum batch size that can be captured by the cuda graph for decodign stage.
+                The default value is 8. It will turn into eagar mode if encounters a larger value.""",
+    )
+    parser.add_argument(
+        "--graph_max_len_in_batch",
+        type=int,
+        default=8192,
+        help="""Maximum sequence length that can be captured by the cuda graph for decodign stage.
+                The default value is 8192. It will turn into eagar mode if encounters a larger value. """,
+    )
     return parser
 
 
@@ -491,6 +505,10 @@ def main():
     assert args.max_req_input_len < args.max_req_total_len
     assert args.max_req_total_len <= args.max_total_token_num
     assert not (args.beam_mode and args.use_dynamic_prompt_cache), "Beam mode incompatible with dynamic prompt cache"
+    
+    # splitfuse_mode 和 cuda_graph 不能同时开启
+    if args.splitfuse_mode:
+        assert args.disable_cudagraph
 
     # 这些模式不能同时设置。
     assert [args.splitfuse_mode, args.beam_mode, args.diverse_mode, args.token_healing_mode].count(True) <= 1
