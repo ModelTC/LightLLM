@@ -300,7 +300,7 @@ def context_attention_fwd_no_prompt_cache(q, k, v, o, b_start_loc, b_seq_len, ma
     kv_group_num = q.shape[1] // k.shape[1]
 
     grid = (triton.cdiv(max_input_len, BLOCK_M), batch * head, 1)
-    BLOCK_N = BLOCK_M // 2
+    BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
 
