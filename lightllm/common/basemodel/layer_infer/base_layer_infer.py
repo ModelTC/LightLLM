@@ -19,20 +19,15 @@ class BaseLayerInfer:
     def splitfuse_forward(self, input_ids, infer_state: SplitFuseInferStateInfo, layer_weight: BaseLayerWeight):
         raise Exception("need to impl")
 
-    # 后续的 mark_cache_alloc_start, mark_cache_alloc_end, alloc_tensor， release_all_caches
-    # 4 个函数接口，理论上只能 transformer 层进行调用。不要在其他层进行调用, 用户只需要调用 alloc_tensor 即可
-    # 其他接口是在 basemodel.py 的框架流程中进行调用的
-    def mark_cache_alloc_start(self):
-        g_cache_manager.mark_cache_alloc_start()
-
-    def mark_cache_alloc_end(self):
-        g_cache_manager.mark_cache_alloc_end()
-
     def alloc_tensor(
-        self, shape: Union[torch.Size, Iterable[int]], data_type: torch.dtype, device: str = "cuda"
+        self,
+        shape: Union[torch.Size, Iterable[int]],
+        data_type: torch.dtype,
+        device: str = "cuda",
+        is_graph_out: bool = False,
     ) -> torch.Tensor:
-        return g_cache_manager.alloc_tensor(shape, data_type, device=device)
-
-    def release_all_caches(self):
-        g_cache_manager.release_all_caches()
-        return
+        """
+        is_graph_out 用于标记是graph图推理中的最后一个tensor，该参数只会在开启cuda graph时生效。该tensor的复用有特殊的逻辑，用于降低显存
+        占用
+        """
+        return g_cache_manager.alloc_tensor(shape, data_type, device=device, is_graph_out=is_graph_out)

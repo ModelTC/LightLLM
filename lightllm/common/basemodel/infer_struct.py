@@ -35,6 +35,7 @@ class InferStateInfo:
         self.return_all_prompt_logics = False
         self.use_dynamic_prompt_cache = False
         self.multimodal_params = None
+        self.is_cuda_graph = False  # 标记是否是cuda graph的捕获推理
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         pass

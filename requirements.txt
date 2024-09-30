@@ -80,3 +80,4 @@ psutil==5.9.4
 prometheus_client==0.20.0
 outlines==0.0.46
 cchardet==2.1.7
+nvidia-nccl-cu12==2.20.5
