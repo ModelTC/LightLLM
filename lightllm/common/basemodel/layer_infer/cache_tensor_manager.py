@@ -193,7 +193,11 @@ else:
             return
 
         def alloc_tensor(
-            self, shape: Union[torch.Size, Iterable[int]], data_type: torch.dtype, device: str = "cuda"
+            self,
+            shape: Union[torch.Size, Iterable[int]],
+            data_type: torch.dtype,
+            device: str = "cuda",
+            is_graph_out: bool = False,
         ) -> torch.Tensor:
             return torch.empty(shape, dtype=data_type, device=device, requires_grad=False)
 
