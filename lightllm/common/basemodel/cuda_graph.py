@@ -1,5 +1,8 @@
 import os
 import torch
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class CudaGraph:
@@ -22,7 +25,7 @@ class CudaGraph:
         batch_size = input_ids.shape[0]
         infer_state.max_len_in_batch = self.graph_max_len_in_batch
         infer_state.total_token_num = self.graph_max_len_in_batch * batch_size
-        # warmup 
+        # warmup
         for _ in range(1):
             torch.cuda.synchronize()
             decode_func(input_ids, infer_state)
@@ -40,3 +43,50 @@ class CudaGraph:
         graph_infer_state.copy_for_cuda_graph(infer_state)
         graph_obj.replay()
         return graph_predict_logics
+
+    def warmup(self, model):
+        logger.info("Begin capture cudagraph, use the --disable_cudagraph to disable it.")
+        for batch_size in range(self.max_batch_size, 0, -1):
+            # dummy prefill
+            prefill_input_len = 1
+            dummy_input_ids = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
+            b_req_idx = model.req_manager.alloc(batch_size).int()
+            b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
+            b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+            b_start_loc = torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
+            total_token_num = prefill_input_len * batch_size
+            logics = model.forward(
+                batch_size,
+                total_token_num,
+                prefill_input_len,
+                dummy_input_ids,
+                b_req_idx,
+                b_start_loc,
+                b_seq_len,
+                b_ready_cache_len=b_ready_cache_len,
+                is_prefill=True,
+            )
+            prob_out = torch.softmax(logics, dim=-1)
+            predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
+            predict_ids = predict_ids.detach().cpu().numpy()
+
+            # dummy decoding, capture the cudagraph
+            b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
+            total_token_num += batch_size
+            b_seq_len += 1
+            logics = model.forward(
+                batch_size,
+                total_token_num,
+                prefill_input_len + 1,
+                torch.from_numpy(predict_ids).cuda().reshape(-1),
+                b_req_idx,
+                b_start_loc,
+                b_seq_len,
+                is_prefill=False,
+            )
+            model.mem_manager.free_all()
+            model.req_manager.free_all()
+        logger.info(
+            f"Capture cudagraph success, batch_size <={self.max_batch_size}   \
+            and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph."
+        )

@@ -53,9 +53,8 @@ class TpPartBaseModel:
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
         self.data_type = kvargs.get("data_type", "float16")
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
-        graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8196)
-        disable_cudagraph = kvargs.get("disable_cudagraph", False)
-        self.graph = None if disable_cudagraph else CudaGraph(self.graph_max_batch_size, graph_max_len_in_batch)
+        self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8196)
+        self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
 
         self._init_datatype()
         self._init_config()
@@ -67,6 +66,7 @@ class TpPartBaseModel:
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
+        self._init_cudagraph()
         return
 
     def _init_config(self):
@@ -160,6 +160,13 @@ class TpPartBaseModel:
             self.data_type = torch.float32
         else:
             raise ValueError(f"Unsupport datatype {self.data_type}!")
+
+    def _init_cudagraph(self):
+        self.graph = (
+            None if self.disable_cudagraph else CudaGraph(self.graph_max_batch_size, self.graph_max_len_in_batch)
+        )
+        if self.graph is not None:
+            self.graph.warmup(self)
 
     def _init_custom(self):
         pass
@@ -312,7 +319,7 @@ class TpPartBaseModel:
             copy_kv_index_to_req(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len, infer_state.mem_index)
 
         infer_state.init_some_extra_state(self, input_ids)
-        if self.graph.can_run(batch_size, max_len_in_batch):
+        if self.graph is not None and self.graph.can_run(batch_size, max_len_in_batch):
             if self.graph.need_capture(batch_size):
                 infer_state.is_cuda_graph = True
                 predict_logics = self.graph.capture_decode(self._token_forward, input_ids, infer_state)
