@@ -65,6 +65,7 @@ class CudaGraph:
                 b_seq_len,
                 b_ready_cache_len=b_ready_cache_len,
                 is_prefill=True,
+                multimodal_params=[],
             )
             prob_out = torch.softmax(logics, dim=-1)
             predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
@@ -87,6 +88,6 @@ class CudaGraph:
             model.mem_manager.free_all()
             model.req_manager.free_all()
         logger.info(
-            f"Capture cudagraph success, batch_size <={self.max_batch_size}   \
-            and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph."
+            f"Capture cudagraph success, batch_size <={self.max_batch_size} "
+            f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph."
         )

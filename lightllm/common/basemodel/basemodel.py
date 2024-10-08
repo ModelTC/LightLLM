@@ -53,7 +53,7 @@ class TpPartBaseModel:
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
         self.data_type = kvargs.get("data_type", "float16")
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
-        self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8196)
+        self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
 
         self._init_datatype()
