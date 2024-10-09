@@ -33,6 +33,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      # clean cache image
+      - name: Clean up Docker space
+        run: |
+          echo "Cleaning up Docker space..."
+          docker system prune -af
+          docker volume prune -f
+          docker image prune -af
+          docker container prune -f
+
       # Install the cosign tool except on PR
       # https://github.com/sigstore/cosign-installer
       - name: Install cosign
