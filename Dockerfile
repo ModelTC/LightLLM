@@ -3,8 +3,6 @@ ARG PYTORCH_VERSION=2.4.0
 ARG PYTHON_VERSION=3.9
 ARG CUDA_VERSION=11.8
 ARG MAMBA_VERSION=23.1.0-1
-ARG CUDA_CHANNEL=nvidia
-ARG INSTALL_CHANNEL=pytorch
 ARG TARGETPLATFORM
 
 ENV PATH=/opt/conda/bin:$PATH \
@@ -30,24 +28,16 @@ RUN case ${TARGETPLATFORM} in \
 RUN case ${TARGETPLATFORM} in \
     "linux/arm64")  exit 1 ;; \
     *)              /opt/conda/bin/conda update -y conda &&  \
-    /opt/conda/bin/conda install -c "${INSTALL_CHANNEL}" -c "${CUDA_CHANNEL}" -y "python=${PYTHON_VERSION}" pytorch==$PYTORCH_VERSION "pytorch-cuda=$(echo $CUDA_VERSION | cut -d'.' -f 1-2)" -c anaconda -c conda-forge ;; \
+    /opt/conda/bin/conda install -y "python=${PYTHON_VERSION}" ;; \
     esac && \
     /opt/conda/bin/conda clean -ya
 
-# workaround
-RUN mkdir ~/cuda-nvcc && cd ~/cuda-nvcc && \
-    curl -fsSL -o package.tar.bz2 https://conda.anaconda.org/nvidia/label/cuda-12.1.1/linux-64/cuda-nvcc-12.1.105-0.tar.bz2 && \
-    tar xf package.tar.bz2 &&\
-    mkdir -p /usr/local/cuda/bin && \
-    mkdir -p /usr/local/cuda/include && \
-    cp bin/ptxas /usr/local/cuda/bin/ptxas && \
-    curl -fsSL -o /usr/local/cuda/include/cuda.h https://raw.githubusercontent.com/openai/triton/d1ce4c495052a1ac06302213cae8eb5532a67259/python/triton/third_party/cuda/include/cuda.h \
-    && rm ~/cuda-nvcc -rf
 
 WORKDIR /root
 
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu118
+RUN pip install nvidia-nccl-cu12==2.20.5
 
 COPY . /lightllm
 RUN pip install -e /lightllm --no-cache-dir
