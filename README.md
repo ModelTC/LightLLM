@@ -88,6 +88,8 @@ The code has been tested with Pytorch>=1.3, CUDA 11.8, and Python 3.9. To instal
 ~~~shell
 # for cuda 11.8
 pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
+# this version nccl can support torch cuda graph 
+pip install nvidia-nccl-cu12==2.20.5
 ~~~
 
 ### Container
