@@ -5,6 +5,7 @@ from lightllm.common.basemodel import InferStateInfo
 from lightllm.models.bloom.layer_weights.pre_and_post_layer_weight import BloomPreAndPostLayerWeight
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
+from lightllm.models.llama.triton_kernel.embedding import embedding
 
 
 class BloomPreLayerInfer(PreLayerInferTpl):
@@ -25,22 +26,20 @@ class BloomPreLayerInfer(PreLayerInferTpl):
         total_token_num = infer_state.total_token_num
         input_ids = input_ids[0:total_token_num]
 
-        input_mask = torch.logical_or(self.vob_start_id_ > input_ids, input_ids >= self.vob_end_id_)
-        tmp_input_ids = input_ids - self.vob_start_id_
-        tmp_input_ids[input_mask] = 0
-        input_embdings = torch.embedding(layer_weight.wte_weight_, tmp_input_ids, padding_idx=-1)
-        input_embdings[input_mask] = 0.0
+        input_embdings = self.alloc_tensor(
+            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), data_type=layer_weight.data_type_
+        )
+        embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
         if self.world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings = self._norm(input_embdings, infer_state, layer_weight)
         return input_embdings
 
     def token_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: BloomPreAndPostLayerWeight):
-        input_mask = torch.logical_or(self.vob_start_id_ > input_ids, input_ids >= self.vob_end_id_)
-        tmp_input_ids = input_ids - self.vob_start_id_
-        tmp_input_ids[input_mask] = 0
-        input_embdings = torch.embedding(layer_weight.wte_weight_, tmp_input_ids, padding_idx=-1)
-        input_embdings[input_mask] = 0.0
+        input_embdings = self.alloc_tensor(
+            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), data_type=layer_weight.data_type_
+        )
+        embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
         if self.world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings = self._norm(input_embdings, infer_state, layer_weight)

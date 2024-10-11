@@ -7,6 +7,7 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PreLayerInferTpl
 from lightllm.utils.infer_utils import mark_cost_time
+from lightllm.models.llama.triton_kernel.embedding import embedding
 
 
 class LlamaPreLayerInfer(PreLayerInferTpl):
@@ -19,27 +20,19 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
         return
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
-        input_mask = self.alloc_tensor(input_ids.shape, data_type=torch.bool)
-        torch.logical_or(self.vob_start_id_ > input_ids, input_ids >= self.vob_end_id_, out=input_mask)
-        tmp_input_ids = self.alloc_tensor(input_ids.shape, data_type=input_ids.dtype)
-        torch.sub(input_ids, self.vob_start_id_, out=tmp_input_ids)
-        tmp_input_ids[input_mask] = 0
-        # to do 将 embedding 操作替换为可以 out 参数的算子，可以自己申请tensor进行传入。
-        input_embdings = torch.embedding(layer_weight.wte_weight_, tmp_input_ids, padding_idx=-1)
-        input_embdings[input_mask] = 0.0
+        input_embdings = self.alloc_tensor(
+            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), data_type=layer_weight.data_type_
+        )
+        embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
         if self.world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         return input_embdings
 
     def token_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
-        input_mask = self.alloc_tensor(input_ids.shape, data_type=torch.bool)
-        torch.logical_or(self.vob_start_id_ > input_ids, input_ids >= self.vob_end_id_, out=input_mask)
-        tmp_input_ids = self.alloc_tensor(input_ids.shape, data_type=input_ids.dtype)
-        torch.sub(input_ids, self.vob_start_id_, out=tmp_input_ids)
-        tmp_input_ids[input_mask] = 0
-        # to do 将 embedding 操作替换为可以 out 参数的算子，可以自己申请tensor进行传入。
-        input_embdings = torch.embedding(layer_weight.wte_weight_, tmp_input_ids, padding_idx=-1)
-        input_embdings[input_mask] = 0.0
+        input_embdings = self.alloc_tensor(
+            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), data_type=layer_weight.data_type_
+        )
+        embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
         if self.world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         return input_embdings
