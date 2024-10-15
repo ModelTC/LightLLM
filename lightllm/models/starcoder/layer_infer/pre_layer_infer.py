@@ -40,7 +40,7 @@ class StarcoderPreLayerInfer(PreLayerInfer):
             infer_state.position_ids, layer_weight.wpe_weight_, 0, layer_weight.wpe_weight_.shape[0], position_embeds
         )
 
-        return input_embdings + position_embeds
+        return input_embdings.add_(position_embeds)
 
     def token_forward(self, input_ids, infer_state: StarcoderInferStateInfo, layer_weight: PreAndPostLayerWeight):
         # import ipdb;ipdb.set_trace()
@@ -58,4 +58,4 @@ class StarcoderPreLayerInfer(PreLayerInfer):
             infer_state.position_ids, layer_weight.wpe_weight_, 0, layer_weight.wpe_weight_.shape[0], position_embeds
         )
 
-        return input_embdings + position_embeds
+        return input_embdings.add_(position_embeds)
