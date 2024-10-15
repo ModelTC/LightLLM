@@ -30,7 +30,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if infer_state.is_splitfuse:
             # for SplitFuse
             batch_size = infer_state.batch_size
-            last_input = self.alloc_tensor((batch_size, self.embed_dim_), data_type=input_embdings.dtype)
+            last_input = self.alloc_tensor((batch_size, self.embed_dim_), dtype=input_embdings.dtype)
             tmp_ = torch.cat(
                 [
                     torch.ones(infer_state.decode_req_num, dtype=torch.int32, device="cuda"),
@@ -54,13 +54,13 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
                 select_token_num += 1
 
             last_index = torch.tensor(select_index, dtype=torch.long, device=input_embdings.device)
-            last_input = self.alloc_tensor((select_token_num, self.embed_dim_), data_type=input_embdings.dtype)
+            last_input = self.alloc_tensor((select_token_num, self.embed_dim_), dtype=input_embdings.dtype)
             last_input[:, :] = input_embdings[last_index, :]
             return last_input, select_token_num
 
         if not infer_state.is_splitfuse and infer_state.is_prefill and not infer_state.return_all_prompt_logics:
             batch_size = infer_state.batch_size
-            last_input = self.alloc_tensor((batch_size, self.embed_dim_), data_type=input_embdings.dtype)
+            last_input = self.alloc_tensor((batch_size, self.embed_dim_), dtype=input_embdings.dtype)
             last_index = (
                 torch.cumsum(infer_state.b_seq_len - infer_state.b_ready_cache_len, dim=0, dtype=torch.long) - 1
             )
@@ -84,7 +84,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         last_input = self._norm(last_input, infer_state, layer_weight)
         last_input = last_input.permute(1, 0).view(-1, token_num)
         logic_batch = self.alloc_tensor(
-            (layer_weight.lm_head_weight_.shape[0], last_input.shape[1]), data_type=last_input.dtype
+            (layer_weight.lm_head_weight_.shape[0], last_input.shape[1]), dtype=last_input.dtype
         )
         torch.mm(layer_weight.lm_head_weight_, last_input, out=logic_batch)
 
@@ -92,7 +92,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if self.world_size_ == 1:
             gather_data = logic_batch
         else:
-            gather_data = self.alloc_tensor((self.vocab_size_, token_num), data_type=input_embdings_dtype)
+            gather_data = self.alloc_tensor((self.vocab_size_, token_num), dtype=input_embdings_dtype)
             split_indexes = np.linspace(0, self.vocab_size_, self.world_size_ + 1, dtype=np.int64)
             dist.all_gather(
                 [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.world_size_)],
@@ -101,7 +101,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
                 async_op=False,
             )
         logic_batch = None
-        ans_logics = self.alloc_tensor((token_num, self.vocab_size_), data_type=torch.float32, is_graph_out=True)
+        ans_logics = self.alloc_tensor((token_num, self.vocab_size_), dtype=torch.float32, is_graph_out=True)
         ans_logics[:, :] = gather_data.permute(1, 0)
         gather_data = None
         return ans_logics

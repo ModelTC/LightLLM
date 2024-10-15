@@ -129,11 +129,14 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
 
         def alloc_tensor(
             self,
-            shape: Union[torch.Size, Iterable[int]],
+            shape: Union[torch.Size, Tuple[int, ...]],
             data_type: torch.dtype,
             device: str = "cuda",
             is_graph_out: bool = False,
         ) -> torch.Tensor:
+            # shape 类型转换
+            if isinstance(shape, list):
+                shape = torch.Size(shape)
             # 是 cuda graph的时候，由cuda graph manager 接管
             if self.is_cuda_graph:
                 return self.inner_cuda_graph_manager.alloc_tensor_for_cuda_graph(

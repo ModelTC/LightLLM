@@ -13,6 +13,7 @@ def token_decode_attention_flash_decoding(
     qk_nope_head_dim,
     softmax_scale,
     out=None,
+    alloc_tensor_func=torch.empty,
 ):
     if kv_lora_rank > 128:
         BLOCK_SEQ = 256 // (kv_lora_rank // 128)
@@ -24,20 +25,15 @@ def token_decode_attention_flash_decoding(
     from lightllm.models.deepseek2.triton_kernel.flash_decoding_stage1 import flash_decode_stage1
     from lightllm.models.deepseek2.triton_kernel.flash_decoding_stage2 import flash_decode_stage2
 
-    o_tensor = torch.empty_like(q_nope) if out is None else out
-
-    if getattr(infer_state, "mid_o", None) is None:
-        infer_state.mid_o = torch.empty(
-            [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1, kv_lora_rank],
-            dtype=torch.float32,
-            device="cuda",
-        )
-        infer_state.mid_o_logexpsum = torch.empty(
-            [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1], dtype=torch.float32, device="cuda"
-        )
-
-    mid_o = infer_state.mid_o
-    mid_o_logexpsum = infer_state.mid_o_logexpsum
+    o_tensor = alloc_tensor_func(q_nope.shape, q_nope.dtype, q_nope.device) if out is None else out
+    mid_o = alloc_tensor_func(
+        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1, kv_lora_rank],
+        dtype=torch.float32,
+        device="cuda",
+    )
+    mid_o_logexpsum = alloc_tensor_func(
+        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1], dtype=torch.float32, device="cuda"
+    )
 
     flash_decode_stage1(
         q_nope.view(calcu_shape1),

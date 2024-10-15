@@ -2,7 +2,16 @@ import torch
 
 
 def token_decode_attention_flash_decoding(
-    q, infer_state, q_head_num, head_dim, cache_k, cache_k_scale, cache_v, cache_v_scale, out=None
+    q,
+    infer_state,
+    q_head_num,
+    head_dim,
+    cache_k,
+    cache_k_scale,
+    cache_v,
+    cache_v_scale,
+    out=None,
+    alloc_tensor_func=torch.empty,
 ):
     BLOCK_SEQ = 256
     batch_size = infer_state.batch_size
@@ -12,18 +21,15 @@ def token_decode_attention_flash_decoding(
     from lightllm_ppl_int4kv_flashdecoding_kernel import group8_int4kv_flashdecoding_stage1
     from .flash_decoding_stage2 import flash_decode_stage2
 
-    o_tensor = torch.empty_like(q) if out is None else out
+    o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
 
-    if getattr(infer_state, "mid_o", None) is None:
-        infer_state.mid_o = torch.empty(
-            [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1, head_dim], dtype=torch.float16, device="cuda"
-        )
-        infer_state.mid_o_logexpsum = torch.empty(
-            [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1], dtype=torch.float16, device="cuda"
-        )
+    mid_o = alloc_tensor_func(
+        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1, head_dim], dtype=torch.float16, device="cuda"
+    )
+    mid_o_logexpsum = alloc_tensor_func(
+        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1], dtype=torch.float16, device="cuda"
+    )
 
-    mid_o = infer_state.mid_o
-    mid_o_logexpsum = infer_state.mid_o_logexpsum
     group8_int4kv_flashdecoding_stage1(
         BLOCK_SEQ,
         mid_o,

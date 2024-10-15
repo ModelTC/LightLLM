@@ -14,16 +14,12 @@ def token_decode_attention_flash_decoding(
 
     o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
 
-    if getattr(infer_state, "mid_o", None) is None:
-        infer_state.mid_o = alloc_tensor_func(
-            [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1, head_dim], dtype=torch.float32, device="cuda"
-        )
-        infer_state.mid_o_logexpsum = alloc_tensor_func(
-            [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1], dtype=torch.float32, device="cuda"
-        )
-
-    mid_o = infer_state.mid_o
-    mid_o_logexpsum = infer_state.mid_o_logexpsum
+    mid_o = alloc_tensor_func(
+        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1, head_dim], dtype=torch.float32, device="cuda"
+    )
+    mid_o_logexpsum = alloc_tensor_func(
+        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1], dtype=torch.float32, device="cuda"
+    )
 
     flash_decode_stage1(
         q.view(calcu_shape1),

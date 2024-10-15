@@ -64,7 +64,7 @@ def embedding(input_ids, weight: torch.Tensor, vob_start_id, vob_end_id, out: to
 
 @torch.no_grad()
 def embedding_new(input_ids, weight, vob_start_id, vob_end_id):
-    # out = self.alloc_tensor((N_CTX, DIM), data_type=torch.float32)
+    # out = self.alloc_tensor((N_CTX, DIM), dtype=torch.float32)
     out = torch.empty((N_CTX, DIM), device="cuda", requires_grad=False)
 
     embedding(input_ids, weight, vob_start_id, vob_end_id, out)

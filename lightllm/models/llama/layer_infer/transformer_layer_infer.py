@@ -122,7 +122,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _get_qkv(
         self, input, cache_kv, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
-        q = self.alloc_tensor((input.size(0), layer_weight.q_weight_.size(1)), data_type=input.dtype)
+        q = self.alloc_tensor((input.size(0), layer_weight.q_weight_.size(1)), dtype=input.dtype)
         torch.mm(input, layer_weight.q_weight_, out=q)
         torch.mm(
             input,
@@ -503,7 +503,14 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ]
         return token_decode_attention_flash_decoding(
-            q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out
+            q,
+            infer_state,
+            self.tp_q_head_num_,
+            self.head_dim_,
+            cache_k,
+            cache_v,
+            out=out,
+            alloc_tensor_func=self.alloc_tensor,
         )
 
     def _token_decode_attention_ppl_int8kv_flashdecoding(
@@ -520,7 +527,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ]
         return token_decode_attention_flash_decoding(
-            q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_k_scale, cache_v, cache_v_scale, out=out
+            q,
+            infer_state,
+            self.tp_q_head_num_,
+            self.head_dim_,
+            cache_k,
+            cache_k_scale,
+            cache_v,
+            cache_v_scale,
+            out=out,
+            alloc_tensor_func=self.alloc_tensor,
         )
 
     def _token_decode_attention_ppl_int4kv_flashdecoding(
@@ -537,5 +553,14 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ]
         return token_decode_attention_flash_decoding(
-            q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_k_scale, cache_v, cache_v_scale, out=out
+            q,
+            infer_state,
+            self.tp_q_head_num_,
+            self.head_dim_,
+            cache_k,
+            cache_k_scale,
+            cache_v,
+            cache_v_scale,
+            out=out,
+            alloc_tensor_func=self.alloc_tensor,
         )

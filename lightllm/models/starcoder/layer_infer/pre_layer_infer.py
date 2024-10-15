@@ -27,14 +27,14 @@ class StarcoderPreLayerInfer(PreLayerInfer):
         input_ids = input_ids[0:total_token_num]
 
         input_embdings = self.alloc_tensor(
-            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), data_type=layer_weight.data_type_
+            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), dtype=layer_weight.data_type_
         )
         embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
         if self.world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
 
         position_embeds = self.alloc_tensor(
-            (infer_state.position_ids.shape[0], layer_weight.wpe_weight_.shape[1]), data_type=layer_weight.data_type_
+            (infer_state.position_ids.shape[0], layer_weight.wpe_weight_.shape[1]), dtype=layer_weight.data_type_
         )
         embedding(
             infer_state.position_ids, layer_weight.wpe_weight_, 0, layer_weight.wpe_weight_.shape[0], position_embeds
@@ -45,14 +45,14 @@ class StarcoderPreLayerInfer(PreLayerInfer):
     def token_forward(self, input_ids, infer_state: StarcoderInferStateInfo, layer_weight: PreAndPostLayerWeight):
         # import ipdb;ipdb.set_trace()
         input_embdings = self.alloc_tensor(
-            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), data_type=layer_weight.data_type_
+            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), dtype=layer_weight.data_type_
         )
         embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
         if self.world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
 
         position_embeds = self.alloc_tensor(
-            (infer_state.position_ids.shape[0], layer_weight.wpe_weight_.shape[1]), data_type=layer_weight.data_type_
+            (infer_state.position_ids.shape[0], layer_weight.wpe_weight_.shape[1]), dtype=layer_weight.data_type_
         )
         embedding(
             infer_state.position_ids, layer_weight.wpe_weight_, 0, layer_weight.wpe_weight_.shape[0], position_embeds

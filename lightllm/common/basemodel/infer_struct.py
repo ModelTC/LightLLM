@@ -43,7 +43,7 @@ class InferStateInfo:
     def copy_for_cuda_graph(self, new_infer_state):
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):
-                attr_ = getattr(self, attr_name)
+                attr_ = getattr(self, attr_name, None)
                 if attr_ is not None:
                     attr_.copy_(attr_value)
         return

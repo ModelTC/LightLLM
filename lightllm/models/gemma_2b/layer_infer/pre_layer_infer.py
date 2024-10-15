@@ -25,7 +25,7 @@ class Gemma_2bPreLayerInfer(PreLayerInferTpl):
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: Gemma_2bPreAndPostLayerWeight):
         input_embdings = self.alloc_tensor(
-            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), data_type=layer_weight.data_type_
+            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), dtype=layer_weight.data_type_
         )
         embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
         if self.world_size_ > 1:
@@ -35,7 +35,7 @@ class Gemma_2bPreLayerInfer(PreLayerInferTpl):
 
     def token_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: Gemma_2bPreAndPostLayerWeight):
         input_embdings = self.alloc_tensor(
-            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), data_type=layer_weight.data_type_
+            (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), dtype=layer_weight.data_type_
         )
         embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
         if self.world_size_ > 1:

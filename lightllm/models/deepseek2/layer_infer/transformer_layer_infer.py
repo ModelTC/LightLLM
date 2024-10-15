@@ -151,6 +151,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             self.qk_rope_head_dim,
             self.qk_nope_head_dim,
             self.softmax_scale,
+            alloc_tensor_func=self.alloc_tensor,
         )
 
     def _copy_kv_to_mem_cache_normal(self, buffer, mem_index, mem_manager):
