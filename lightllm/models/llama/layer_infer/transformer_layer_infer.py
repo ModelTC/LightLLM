@@ -412,7 +412,14 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ]
         return token_decode_attention_flash_decoding(
-            q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out
+            q,
+            infer_state,
+            self.tp_q_head_num_,
+            self.head_dim_,
+            cache_k,
+            cache_v,
+            out=out,
+            alloc_tensor_func=self.alloc_tensor,
         )
 
     def _token_decode_attention_gqa_flashdecoding(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
@@ -424,7 +431,14 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ]
         return gqa_token_decode_attention_flash_decoding(
-            q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out
+            q,
+            infer_state,
+            self.tp_q_head_num_,
+            self.head_dim_,
+            cache_k,
+            cache_v,
+            out=out,
+            alloc_tensor_func=self.alloc_tensor,
         )
 
     def _token_decode_attention_ppl_int8kv(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
