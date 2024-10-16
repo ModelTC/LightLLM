@@ -3,7 +3,6 @@ import triton
 import triton.language as tl
 
 
-@triton.autotune([triton.Config({"BLOCK_N": bn}) for bn in [32, 64, 128, 256, 512, 1024]], key=["BLOCK_DMODEL"])
 @triton.jit
 def embedding_kernel(
     weight,
@@ -11,40 +10,42 @@ def embedding_kernel(
     out,
     vob_start_id,
     vob_end_id,
-    stride_weight_size,
-    stride_weight_dim,
-    stride_out_size,
-    stride_out_dim,
+    stride_weight_seq,
+    stride_out_seq,
     n_ctx,
     hiden_size: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
-    BLOCK_N: tl.constexpr,
+    BLOCK_N: tl.constexpr,  # 32
+    BLOCK_NN: tl.constexpr,
 ):
     start_n = tl.program_id(0) * BLOCK_N
 
-    out += start_n * stride_out_size
-    input_ids += start_n
-
+    offs_nn = start_n + tl.arange(0, BLOCK_NN)
     offs_d = tl.arange(0, BLOCK_DMODEL)
-    block_end = min(BLOCK_N, n_ctx - start_n)
 
-    for i in range(0, block_end):
-        token_id = tl.load(input_ids + i)
-        if token_id >= vob_start_id and token_id < vob_end_id:
-            token_id -= vob_start_id
-
-            vec = tl.load(weight + token_id * stride_weight_size + offs_d * stride_weight_dim, mask=offs_d < hiden_size)
-            tl.store(out + i * stride_out_size + offs_d * stride_out_dim, vec, mask=offs_d < hiden_size)
+    for start_nn in range(0, BLOCK_N, BLOCK_NN):
+        start_nn = tl.multiple_of(start_nn, BLOCK_NN)
+        offs_seq = start_nn + offs_nn
+        n_ctx_mask = offs_seq < n_ctx
+        token_ids = tl.load(input_ids + offs_seq, mask=n_ctx_mask, other=vob_end_id)
+        id_mask = (token_ids >= vob_start_id) & (token_ids < vob_end_id)
+        token_ids = token_ids - vob_start_id
+        dim_mask = offs_d < hiden_size
+        load_mask = id_mask[:, None] & dim_mask[None, :]
+        store_mask = n_ctx_mask[:, None] & dim_mask[None, :]
+        vecs = tl.load(weight + token_ids[:, None] * stride_weight_seq + offs_d[None, :], mask=load_mask, other=0.0)
+        tl.store(out + offs_seq[:, None] * stride_out_seq + offs_d[None, :], vecs, mask=store_mask)
 
 
 @torch.no_grad()
 def embedding(input_ids, weight: torch.Tensor, vob_start_id, vob_end_id, out: torch.Tensor):
-    out[...] = 0.0
 
+    BLOCK_N = 64
+    BLOCK_NN = 1
     BLOCK_DMODEL = triton.next_power_of_2(weight.shape[1])
     n_ctx = input_ids.shape[0]
 
-    grid = lambda mate: (triton.cdiv(n_ctx, mate["BLOCK_N"]), 1, 1)
+    grid = (triton.cdiv(n_ctx, BLOCK_N), 1, 1)
 
     embedding_kernel[grid](
         weight,
@@ -53,12 +54,14 @@ def embedding(input_ids, weight: torch.Tensor, vob_start_id, vob_end_id, out: to
         vob_start_id,
         vob_end_id,
         weight.stride(0),
-        weight.stride(1),
         out.stride(0),
-        out.stride(1),
         n_ctx=n_ctx,
         hiden_size=weight.shape[1],
         BLOCK_DMODEL=BLOCK_DMODEL,
+        BLOCK_N=BLOCK_N,
+        BLOCK_NN=BLOCK_NN,
+        num_warps=1,
+        num_stages=1,
     )
 
 
@@ -87,10 +90,11 @@ def embedding_old(input_ids, wte_weight, vob_start_id, vob_end_id):
 if __name__ == "__main__":
 
     import time
+    import random
 
-    DIM = 3584
+    DIM = 4096
     VOB_SIZE = 151645
-    N_CTX = 10240
+    N_CTX = 10 * 1024
     TEST_COUNT = 1000
     max_diff = 0
 
@@ -102,6 +106,7 @@ if __name__ == "__main__":
     for TP in [1, 2, 4, 8]:
         for i in range(TEST_COUNT):
             for rank_id in range(TP):
+
                 input_ids = torch.randint(0, VOB_SIZE, (N_CTX,), device="cuda")
 
                 vob_start_id = VOB_SIZE // TP * rank_id
