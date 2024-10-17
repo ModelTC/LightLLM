@@ -44,6 +44,7 @@ class CudaGraph:
         graph_obj.replay()
         return graph_predict_logics
 
+    @torch.no_grad()
     def warmup(self, model):
         logger.info("Begin capture cudagraph, use the --disable_cudagraph to disable it.")
         for batch_size in range(self.max_batch_size, 0, -1):
@@ -70,6 +71,9 @@ class CudaGraph:
             prob_out = torch.softmax(logics, dim=-1)
             predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
             predict_ids = predict_ids.detach().cpu().numpy()
+            del logics
+            del prob_out
+            torch.cuda.empty_cache()
 
             # dummy decoding, capture the cudagraph
             b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
@@ -87,6 +91,11 @@ class CudaGraph:
             )
             model.mem_manager.free_all()
             model.req_manager.free_all()
+            # release local tensors
+            for var_name, var_value in list(locals().items()):
+                if isinstance(var_value, torch.Tensor):
+                    del locals()[var_name]
+            torch.cuda.empty_cache()
         logger.info(
             f"Capture cudagraph success, batch_size <={self.max_batch_size} "
             f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph."
