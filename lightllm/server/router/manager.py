@@ -42,8 +42,6 @@ class RouterManager:
         self.shared_can_use_token_num = SharedInt(f"{args.nccl_port}_mem_manger_can_use_token_num")
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
-        if self.args.use_dynamic_prompt_cache:
-            self.radix_cache_client = RadixCacheReadOnlyClient(str(args.nccl_port), self.max_total_token_num, tp_id=0)
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
         self.shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load")
@@ -106,11 +104,18 @@ class RouterManager:
                 "graph_max_batch_size": self.args.graph_max_batch_size,
                 "graph_max_len_in_batch": self.args.graph_max_len_in_batch,
                 "disable_cudagraph": self.args.disable_cudagraph,
+                "mem_fraction": self.args.mem_fraction,
             }
             init_model_ret.append(self.model_rpcs[rank_id].init_model(kvargs))
 
         await asyncio.gather(*init_model_ret)
-
+        if self.max_total_token_num is None:
+            self.max_total_token_num = await self.model_rpcs[0].get_max_total_token_num()
+            self.args.max_total_token_num = self.max_total_token_num
+        if self.args.use_dynamic_prompt_cache:
+            self.radix_cache_client = RadixCacheReadOnlyClient(
+                str(self.args.nccl_port), self.max_total_token_num, tp_id=0
+            )
         self.req_queue = build_req_queue(self.args, self)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
         return

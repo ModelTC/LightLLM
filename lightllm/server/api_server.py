@@ -150,6 +150,7 @@ async def generate(request: Request) -> Response:
     try:
         return await g_generate_func(request, g_id_gen, httpserver_manager)
     except Exception as e:
+        logger.error("An error occurred: %s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
 
@@ -159,6 +160,7 @@ async def generate_stream(request: Request) -> Response:
     try:
         return await g_generate_stream_func(request, g_id_gen, httpserver_manager)
     except Exception as e:
+        logger.error("An error occurred: %s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
 
@@ -356,8 +358,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_total_token_num",
         type=int,
-        default=6000,
+        default=None,
         help="the total token nums the gpu and model can support, equals = max_batch * (input_len + output_len)",
+    )
+    parser.add_argument(
+        "--mem_fraction",
+        type=float,
+        default=0.9,
+        help="""Memory usage ratio, default is 0.9, you can specify a smaller value if OOM occurs at runtime.
+        If max_total_token_num is not specified, it will be calculated automatically based on this value.""",
     )
     parser.add_argument(
         "--batch_max_tokens",
@@ -505,8 +514,10 @@ def main():
     logger.info(f"use tgi api: {args.use_tgi_api}")
 
     assert args.max_req_input_len < args.max_req_total_len
-    assert args.max_req_total_len <= args.max_total_token_num
     assert not (args.beam_mode and args.use_dynamic_prompt_cache), "Beam mode incompatible with dynamic prompt cache"
+    assert (
+        args.mem_fraction > 0 and args.mem_fraction < 1
+    ), f"Invalid mem_fraction {args.mem_fraction}, The expected value is between 0 and 1."
 
     # splitfuse_mode 和 cuda_graph 不能同时开启
     if args.splitfuse_mode:
@@ -526,18 +537,18 @@ def main():
     if not args.splitfuse_mode:
         # 普通模式下
         if args.batch_max_tokens is None:
-            batch_max_tokens = int(1 / 6 * args.max_total_token_num)
-            batch_max_tokens = max(batch_max_tokens, args.max_req_total_len)
-            args.batch_max_tokens = batch_max_tokens
+            args.batch_max_tokens = args.max_req_total_len
         else:
             assert args.batch_max_tokens >= args.max_req_total_len, "batch_max_tokens must >= max_req_total_len"
     else:
         # splitfuse 模式下
         # assert args.batch_max_tokens is not None, "need to set by yourself"
         if args.batch_max_tokens is None:
-            batch_max_tokens = int(1 / 6 * args.max_total_token_num)
-            batch_max_tokens = max(batch_max_tokens, args.splitfuse_block_size)
-            args.batch_max_tokens = batch_max_tokens
+            args.batch_max_tokens = min(args.max_req_total_len, 16 * args.splitfuse_block_size)
+
+        assert (
+            args.batch_max_tokens > args.splitfuse_block_size
+        ), "splitfuse_mode, batch_max_tokens must >= splitfuse_block_size"
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -563,6 +574,14 @@ def main():
                 start_cache_manager,
             ],
             start_args=[(cache_port, args)],
+        )
+        start_submodule_processes(
+            start_funcs=[
+                start_visual_process,
+            ],
+            start_args=[
+                (args, router_port, visual_port, cache_port),
+            ],
         )
 
     start_submodule_processes(
@@ -592,15 +611,6 @@ def main():
             (args, detokenization_port, httpserver_port),
         ],
     )
-    if args.enable_multimodal:
-        start_submodule_processes(
-            start_funcs=[
-                start_visual_process,
-            ],
-            start_args=[
-                (args, router_port, visual_port, cache_port),
-            ],
-        )
 
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_clear

@@ -57,5 +57,6 @@ class LlamaTpPartModelAWQuant(LlamaTpPartModel):
             head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
             layer_num=self.config["num_hidden_layers"],
             always_copy=True,
+            mem_fraction=self.mem_fraction,
         )
         return

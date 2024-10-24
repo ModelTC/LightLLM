@@ -108,6 +108,9 @@ class ModelRpcServer(rpyc.Service):
 
         return self.backend.remove_batch(batch_id)
 
+    def exposed_get_max_total_token_num(self):
+        return self.backend.get_max_total_token_num()
+
 
 class ModelRpcClient:
     def __init__(self, model_rpc, world_size, rpc_server_process=None):
@@ -136,6 +139,7 @@ class ModelRpcClient:
             self._filter_batch = async_wrap(self.model.filter_batch)
             self._merge_batch = async_wrap(self.model.merge_batch)
             self._remove_batch = async_wrap(self.model.remove_batch)
+            self._get_max_total_token_num = async_wrap(self.model.get_max_total_token_num)
         else:
             self._init_model = self.model.exposed_init_model
             self._add_batch = self.model.exposed_add_batch
@@ -145,6 +149,7 @@ class ModelRpcClient:
             self._filter_batch = self.model.exposed_filter_batch
             self._merge_batch = self.model.exposed_merge_batch
             self._remove_batch = self.model.exposed_remove_batch
+            self._get_max_total_token_num = self.model.exposed_get_max_total_token_num
         return
 
     async def init_model(self, kvargs):
@@ -207,6 +212,13 @@ class ModelRpcClient:
             return
         else:
             return
+
+    async def get_max_total_token_num(self):
+        ans = self._get_max_total_token_num()
+        if self.use_rpc:
+            return await ans
+        else:
+            return ans
 
 
 def _init_env(port):

@@ -162,7 +162,15 @@ python -m lightllm.server.api_server --model_dir /path/llama-7B     \
                                      --max_total_token_num 120000
 ~~~
 
-The parameter `max_total_token_num` is influenced by the GPU memory of the deployment environment. A larger value for this parameter allows for the processing of more concurrent requests, thereby increasing system concurrency. For more startup parameters, please refer to [api_server.py](lightllm/server/api_server.py) or [ApiServerArgs.md](docs/ApiServerArgs.md).
+The parameter `max_total_token_num` is influenced by the GPU memory of the deployment environment. You can also specify --mem_faction to have it calculated automatically.
+
+~~~shell
+python -m lightllm.server.api_server --model_dir /path/llama-7B     \
+                                     --host 0.0.0.0                 \
+                                     --port 8080                    \
+                                     --tp 1                         \
+                                     --mem_faction 0.9
+~~~
 
 To initiate a query in the shell:
 

@@ -54,6 +54,7 @@ class MistralTpPartModel(TpPartBaseModel):
             head_dim=head_dim,
             layer_num=self.config["num_hidden_layers"],
             always_copy=False,
+            mem_fraction=self.mem_fraction,
         )
         return
 

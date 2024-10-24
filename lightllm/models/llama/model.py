@@ -62,6 +62,7 @@ class LlamaTpPartModel(TpPartBaseModel):
             head_num=self.config["num_key_value_heads"] // self.world_size_,
             head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
             layer_num=self.config["num_hidden_layers"],
+            mem_fraction=self.mem_fraction,
         )
         return
 

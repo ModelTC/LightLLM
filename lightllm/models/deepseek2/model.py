@@ -48,6 +48,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
             head_num=1,
             head_dim=self.config["kv_lora_rank"] + self.config["qk_rope_head_dim"],
             layer_num=self.config["num_hidden_layers"],
+            mem_fraction=self.mem_fraction,
         )
         return
 

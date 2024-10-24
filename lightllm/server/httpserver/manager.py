@@ -49,7 +49,6 @@ class HttpServerManager:
 
         self.req_id_to_out_inf = {}  # value type (out_str, metadata, finished, event)
 
-        self.total_token_num = args.max_total_token_num
         self.max_req_input_len = args.max_req_input_len
         self.max_req_total_len = args.max_req_total_len
         self.metric_client = MetricClient(metric_port)
@@ -152,8 +151,6 @@ class HttpServerManager:
             raise ValueError(
                 f"the req total len (input len + output len) is too long > max_req_total_len:{self.max_req_total_len}"
             )
-        if req_total_len + 1 > self.total_token_num:
-            raise ValueError(f"the req token total len + 1 is too long > max_total_token_num:{self.total_token_num}")
         verify_time_end = time.time()
 
         req_status = ReqStatus(group_request_id, multimodal_params)

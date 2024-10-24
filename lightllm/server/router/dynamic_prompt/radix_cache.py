@@ -353,7 +353,7 @@ class RadixCacheReadOnlyClient:
     """
 
     def __init__(self, unique_name, total_token_num, tp_id):
-        self.shared_idx_manager = SharedLinkedListManager(unique_name, total_token_num, tp_id)
+        self.shared_idx_manager = SharedLinkedListManager(unique_name, total_token_num, tp_id, force_init=False)
         self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{tp_id}", (1,), dtype=np.int64)
         self.tree_total_tokens_num = SharedArray(f"{unique_name}_tree_total_tokens_num_{tp_id}", (1,), dtype=np.int64)
 

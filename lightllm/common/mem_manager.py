@@ -3,23 +3,25 @@ import os
 import torch
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 
 logger = init_logger(__name__)
 
 
 class MemoryManager:
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False):
+    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         self.size = size
-        self.dtype = dtype
         self.head_num = head_num
         self.head_dim = head_dim
         self.layer_num = layer_num
         self.always_copy = always_copy
-
+        self.dtype = dtype
+        # profile the max total token num if the size is None
+        self.profile_size(mem_fraction)
         # mem_state 修改为使用计数方式，方便后期实现token共享机制，实现beam search 等
-        self.mem_state = torch.zeros((size,), dtype=torch.int32, device="cuda")
-        self.indexes = torch.arange(0, size, dtype=torch.long, device="cuda")
-        self.can_use_mem_size = size
+        self.mem_state = torch.zeros((self.size,), dtype=torch.int32, device="cuda")
+        self.indexes = torch.arange(0, self.size, dtype=torch.long, device="cuda")
+        self.can_use_mem_size = self.size
 
         # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
         from torch.distributed.distributed_c10d import _default_pg_init_method
@@ -31,7 +33,34 @@ class MemoryManager:
         self.shared_can_use_token_num = SharedInt(f"{str(nccl_port)}_mem_manger_can_use_token_num")
 
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        self._init_buffers(size, dtype, head_num, head_dim, layer_num)
+        self._init_buffers(
+            self.size,
+            dtype,
+            head_num,
+            head_dim,
+            layer_num,
+        )
+
+    def get_cell_size(self):
+        return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
+
+    def profile_size(self, mem_fraction):
+        if self.size is not None:
+            return
+        import torch.distributed as dist
+
+        tp_rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        total_memory = get_total_gpu_memory()
+        available_memory = get_available_gpu_memory(tp_rank, world_size) - total_memory * (1 - mem_fraction)
+        cell_size = self.get_cell_size()
+        self.size = int(available_memory * 1024 ** 3 / cell_size)
+        logger.info(
+            f"{str(available_memory)} GB space is available after load the model weight\n"
+            f"{str(cell_size / 1024 ** 2)} MB is the size of one token kv cache\n"
+            f"{self.size} is the profiled max_total_token_num with the mem_fraction {mem_fraction}\n"
+        )
+        return
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.kv_buffer = [

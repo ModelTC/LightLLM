@@ -68,25 +68,26 @@ class SharedLinkedListManager:
     PRE_INDEX = 1
     NEXT_INDEX = 2
 
-    def __init__(self, unique_name, total_token_num, tp_id) -> None:
+    def __init__(self, unique_name, total_token_num, tp_id, force_init=True) -> None:
         self.size = total_token_num + 2  # 因为 0 号节点不分配，所以为了满足充分可用性需要 + 2.
         # 第二维对应信息 0 idx 1 pre index 2 next index 用于链表管理  3 tree_node parent node idx
         # 4 tree_node value len 5 tree node prefix total len
         self._shm_array = SharedArray(f"{unique_name} SharedLinkedList_{tp_id}", shape=(self.size, 6), dtype=np.int64)
         self._values = self._shm_array.arr
-        # idx
-        self._values[:, self.VALUE_INDEX] = np.arange(0, self.size, 1)
-        # pre
-        self._values[0, self.PRE_INDEX] = -1
-        self._values[1:, self.PRE_INDEX] = np.arange(0, self.size - 1, 1)
-        # next
-        self._values[0 : self.size - 1, self.NEXT_INDEX] = np.arange(1, self.size, 1)
-        self._values[self.size - 1, self.NEXT_INDEX] = -1
+        if force_init:
+            # idx
+            self._values[:, self.VALUE_INDEX] = np.arange(0, self.size, 1)
+            # pre
+            self._values[0, self.PRE_INDEX] = -1
+            self._values[1:, self.PRE_INDEX] = np.arange(0, self.size - 1, 1)
+            # next
+            self._values[0 : self.size - 1, self.NEXT_INDEX] = np.arange(1, self.size, 1)
+            self._values[self.size - 1, self.NEXT_INDEX] = -1
 
-        # tree node value
-        self._values[:, 3] = -1
-        self._values[:, 4] = 0
-        self._values[:, 5] = 0
+            # tree node value
+            self._values[:, 3] = -1
+            self._values[:, 4] = 0
+            self._values[:, 5] = 0
 
     def alloc(self):
         if self._values[0, self.NEXT_INDEX] != -1:

@@ -102,6 +102,7 @@ class ModeBackend:
             "graph_max_batch_size": kvargs.get("graph_max_batch_size", 16),
             "graph_max_len_in_batch": kvargs.get("graph_max_len_in_batch", 8196),
             "disable_cudagraph": kvargs.get("disable_cudagraph", False),
+            "mem_fraction": kvargs.get("mem_fraction", 0.9),
         }
 
         is_weight_only_quant = any("w6a16" in mode_ or "w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode)
@@ -225,9 +226,10 @@ class ModeBackend:
             raise e
 
         set_random_seed(2147483647)
-
         self.radix_cache = (
-            RadixCache(str(kvargs["nccl_port"]), max_total_token_num, self.tp_rank, mem_manager=self.model.mem_manager)
+            RadixCache(
+                str(kvargs["nccl_port"]), self.model.mem_manager.size, self.tp_rank, mem_manager=self.model.mem_manager
+            )
             if self.use_dynamic_prompt_cache
             else None
         )
@@ -239,6 +241,9 @@ class ModeBackend:
 
     def init_custom(self):
         pass
+
+    def get_max_total_token_num(self):
+        return self.model.mem_manager.size
 
     # @calculate_time(show=False, min_cost_ms=300)
     def prefill_batch(self, batch_id):
