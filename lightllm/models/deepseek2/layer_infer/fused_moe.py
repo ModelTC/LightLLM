@@ -27,8 +27,12 @@ import torch
 import triton
 import triton.language as tl
 from lightllm.utils.log_utils import init_logger
-import lightllm.models.deepseek2.layer_infer._custom_ops as ops
 from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
+
+try:
+    from lightllm_vllm_kernel import moe_align_block_size as moe_align_block_size_kernel
+except ImportError:
+    from lightllm.models.deepseek2.layer_infer._custom_ops import moe_align_block_size as moe_align_block_size_kernel
 
 
 logger = init_logger(__name__)
@@ -218,7 +222,7 @@ def moe_align_block_size(
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
     expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
-    ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids, expert_ids, num_tokens_post_pad)
+    moe_align_block_size_kernel(topk_ids, num_experts, block_size, sorted_ids, expert_ids, num_tokens_post_pad)
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
