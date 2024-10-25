@@ -73,7 +73,7 @@ class MemoryManager:
     @torch.no_grad()
     def alloc(self, need_size):
         if need_size > self.can_use_mem_size:
-            logger.warn(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
+            logger.warning(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
         can_use_index = torch.nonzero(self.mem_state == 0).view(-1)
         select_index = can_use_index[0:need_size]
@@ -85,7 +85,7 @@ class MemoryManager:
         if self.always_copy:
             return None
         if need_size > self.can_use_mem_size:
-            logger.warn(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
+            logger.warning(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
 
         can_use_index = torch.nonzero(self.mem_state == 0).view(-1)
