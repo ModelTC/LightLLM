@@ -1,11 +1,10 @@
 from setuptools import setup, find_packages
 
+package_data = {"lightllm": ["models/deepseek2/layer_infer/vllm_configs/*.json"]}
 setup(
     name="lightllm",
     version="2.0.0",
-    packages=find_packages(
-        exclude=("build", "include", "test", "dist", "docs", "benchmarks", "lightllm.egg-info")
-    ),
+    packages=find_packages(exclude=("build", "include", "test", "dist", "docs", "benchmarks", "lightllm.egg-info")),
     author="model toolchain",
     author_email="",
     description="lightllm for inference LLM",
@@ -27,6 +26,7 @@ setup(
         "rpyc",
         "ninja",
         "safetensors",
-        "triton"
+        "triton",
     ],
+    package_data=package_data,
 )
