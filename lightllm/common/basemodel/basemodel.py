@@ -16,6 +16,9 @@ from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv
 from lightllm.common.basemodel.triton_kernel.splitfuse_copy_kv_index_to_req import splitfuse_copy_kv_index_to_req
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 torch.backends.cudnn.enabled = True
 
@@ -39,6 +42,7 @@ class TpPartBaseModel:
         self.world_size_ = kvargs["world_size"]
         self.weight_dir_ = kvargs["weight_dir"]
         self.max_total_token_num = kvargs["max_total_token_num"]
+        self.batch_max_tokens = kvargs.get("batch_max_tokens", None)
         self.load_way = kvargs.get("load_way", "HF")
         self.mode = [m.replace("int4weight", "w4a16").replace("int8weight", "w8a16") for m in kvargs.get("mode", [])]
         self.weight_dict = kvargs.get("weight_dict", None)
@@ -69,6 +73,8 @@ class TpPartBaseModel:
         self._init_some_value()
         self._init_custom()
         self._init_cudagraph()
+        self._check_max_len_infer()
+        torch.cuda.empty_cache()
         return
 
     def _init_config(self):
@@ -454,3 +460,52 @@ class TpPartBaseModel:
         predict_logics = self.post_infer.splitfuse_forward(input_embs, infer_state, self.pre_post_weight)
         g_cache_manager.cache_env_out()
         return predict_logics
+
+    @final
+    @torch.no_grad()
+    def _check_max_len_infer(self):
+        disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
+        if disable_check_max_len_infer:
+            logger.info("disable_check_max_len_infer is true")
+            return
+
+        # 模拟最大长度进行 prefill，观察是否出现 OOM
+        try:
+            logger.info("begin check max_len infer")
+            dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int32, device="cuda")
+            b_req_idx = self.req_manager.alloc(1).int()
+            b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+            b_seq_len[:] = self.batch_max_tokens
+            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_start_loc = torch.arange(0, 1, dtype=torch.int32, device="cuda")
+            total_token_num = self.batch_max_tokens
+            logics = self.forward(
+                1,
+                total_token_num,
+                self.batch_max_tokens,
+                dummy_input_ids,
+                b_req_idx,
+                b_start_loc,
+                b_seq_len,
+                b_ready_cache_len=b_ready_cache_len,
+                is_prefill=True,
+                multimodal_params=[],
+            )
+            prob_out = torch.softmax(logics, dim=-1)
+            logics = None
+            torch.argmax(prob_out, dim=1, keepdim=True)
+            prob_out = None
+            self.req_manager.free_all()
+            self.mem_manager.free_all()
+            logger.info(f"check max_len {self.batch_max_tokens} infer ok")
+        except (RuntimeError, torch.OutOfMemoryError) as e:
+            logger.exception(str(e))
+            exception_str = (
+                "check max len infer fail, you can try:"
+                "1.Set the --mem_fraction or --max_total_token_num startup parameter to a smaller value."
+                "2.Set the --max_req_total_len to a smaller value."
+                "3.Set the --batch_max_tokens startup parameter to a smaller value."
+            )
+            logger.error(exception_str)
+            raise Exception(exception_str)
+        return

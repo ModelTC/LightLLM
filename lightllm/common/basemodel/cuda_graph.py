@@ -69,10 +69,10 @@ class CudaGraph:
                 multimodal_params=[],
             )
             prob_out = torch.softmax(logics, dim=-1)
+            logics = None
             predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
+            prob_out = None
             predict_ids = predict_ids.detach().cpu().numpy()
-            del logics
-            del prob_out
             torch.cuda.empty_cache()
 
             # dummy decoding, capture the cudagraph

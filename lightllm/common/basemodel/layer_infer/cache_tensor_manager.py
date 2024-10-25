@@ -50,6 +50,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self.graph_out_tensor: torch.Tensor = None
 
             self.use_count = use_count
+            self.managed_total_tensor_bytes = 0
             return
 
         def alloc_tensor_for_cuda_graph(
@@ -76,6 +77,10 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
                     logger.info(
                         f"pid {os.getpid()} cuda graph alloc graph out mem {shape} {data_type} {size} {max_size}"
                     )
+                    self.managed_total_tensor_bytes += (
+                        self.graph_out_tensor.element_size() * self.graph_out_tensor.numel()
+                    )
+                    logger.info(f"cuda graph managed_total_tensor_bytes: {self.managed_total_tensor_bytes}")
                 return self.graph_out_tensor[0:size].view(shape)
 
             for buf_node in self.bufnodes:
@@ -85,6 +90,9 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
 
             buf_tensor = torch.empty((max_size,), dtype=data_type, device=device, requires_grad=False)
             logger.info(f"pid {os.getpid()} cuda graph alloc mem {shape} {data_type} {size} {max_size}")
+            self.managed_total_tensor_bytes += buf_tensor.element_size() * buf_tensor.numel()
+            logger.info(f"cuda graph managed_total_tensor_bytes: {self.managed_total_tensor_bytes}")
+
             storage_weak_ptr = buf_tensor.untyped_storage()._weak_ref()
             buf_node = BufNode(buf_tensor, key, storage_weak_ptr)
             self.bufnodes.append(buf_node)
@@ -104,10 +112,12 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self.inner_cuda_graph_manager = None
             self.cuda_graph_cur_batch_size = None
             self.is_cuda_graph = False
+            self.managed_total_tensor_bytes = 0
 
         def cache_env_in(
             self, is_cuda_graph: bool = False, cur_batch_size: int = 0, cuda_graph_max_batch_size: int = 0
         ):
+            self.managed_total_tensor_bytes = 0
             setattr(torch.Tensor, "__del__", custom_del)
             self.is_cuda_graph = is_cuda_graph
             if self.is_cuda_graph:
@@ -170,6 +180,9 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
                 return ans
 
             buf_tensor = torch.empty((size,), dtype=data_type, device=device, requires_grad=False)
+            # 用于调试显存占用的重要日志
+            # self.managed_total_tensor_bytes +=  buf_tensor.element_size() * buf_tensor.numel()
+            # logger.info(f"gpu cache managed_total_tensor_bytes: {self.managed_total_tensor_bytes}")
             storage_weak_ptr = buf_tensor.untyped_storage()._weak_ref()
             buf_node = BufNode(buf_tensor, key, storage_weak_ptr)
             self.ptr_to_bufnode[storage_weak_ptr] = buf_node
