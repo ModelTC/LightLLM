@@ -479,8 +479,11 @@ def fused_experts(
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
+        # 注意 moe_align_block_size 函数不能使用框架自己的缓存tensor管理框架
+        # 主要是其申请的tensor大小没有与batch size的线性关系，导致与缓存tensor管理
+        # 框架存在了一些不兼容的情况
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            curr_topk_ids, config["BLOCK_SIZE_M"], E, alloc_tensor_func=alloc_tensor_func
+            curr_topk_ids, config["BLOCK_SIZE_M"], E, alloc_tensor_func=torch.empty
         )
 
         invoke_fused_moe_kernel(
