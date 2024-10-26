@@ -25,7 +25,7 @@ class BloomPostLayerInfer(PostLayerInferTpl):
 
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: BloomPreAndPostLayerWeight):
         batch_size = infer_state.batch_size
-        last_input = torch.empty(
+        last_input = self.alloc_tensor(
             (batch_size, self.embed_dim_), device=input_embdings.device, dtype=input_embdings.dtype
         )
         if infer_state.is_prefill:
@@ -45,7 +45,7 @@ class BloomPostLayerInfer(PostLayerInferTpl):
         if self.world_size_ == 1:
             gather_data = logic_batch
         else:
-            gather_data = torch.empty(
+            gather_data = self.alloc_tensor(
                 (self.vocab_size_, batch_size), device=logic_batch.device, dtype=input_embdings_dtype
             )
             split_size = self.vocab_size_ // self.world_size_

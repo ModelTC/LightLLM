@@ -10,13 +10,29 @@ from .token_attention_nopad_reduceV import token_att_fwd2
 
 @triton.jit
 def _fwd_kernel(
-    Q, K, V, sm_scale, Alibi, B_Loc, B_Seqlen, max_input_len,
+    Q,
+    K,
+    V,
+    sm_scale,
+    Alibi,
+    B_Loc,
+    B_Seqlen,
+    max_input_len,
     Out,
-    stride_qbs, stride_qh, stride_qd,
-    stride_kbs, stride_kh, stride_kd,
-    stride_vbs, stride_vh, stride_vd,
-    stride_obs, stride_oh, stride_od,
-    stride_b_loc_b, stride_b_loc_s,
+    stride_qbs,
+    stride_qh,
+    stride_qd,
+    stride_kbs,
+    stride_kh,
+    stride_kd,
+    stride_vbs,
+    stride_vh,
+    stride_vd,
+    stride_obs,
+    stride_oh,
+    stride_od,
+    stride_b_loc_b,
+    stride_b_loc_s,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -48,10 +64,21 @@ def _fwd_kernel(
     for start_n in range(0, cur_batch_seq_len, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        k_index = tl.load(B_Loc + off_b_loc + (start_n + offs_n) * stride_b_loc_s, mask=(start_n + offs_n) < cur_batch_seq_len, other=0)
-        k = tl.load(k_ptrs + k_index[:, None] * stride_kbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0)
+        k_index = tl.load(
+            B_Loc + off_b_loc + (start_n + offs_n) * stride_b_loc_s,
+            mask=(start_n + offs_n) < cur_batch_seq_len,
+            other=0,
+        )
+        k = tl.load(
+            k_ptrs + k_index[:, None] * stride_kbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0
+        )
 
-        qk = tl.zeros([BLOCK_N,], dtype=tl.float32)
+        qk = tl.zeros(
+            [
+                BLOCK_N,
+            ],
+            dtype=tl.float32,
+        )
         qk += tl.sum(q[None, :] * k, 1)
         qk *= sm_scale
 
@@ -77,7 +104,9 @@ def _fwd_kernel(
         acc = acc * acc_scale
         # update acc
         v_index = k_index
-        v = tl.load(v_ptrs + v_index[:, None] * stride_vbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0)
+        v = tl.load(
+            v_ptrs + v_index[:, None] * stride_vbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0
+        )
         # print(p)
         acc += tl.sum(p[:, None] * v, 0)
 
@@ -122,33 +151,35 @@ def _fwd_kernel(
 #     )
 #     return
 
+
 @torch.no_grad()
-def token_attention_fwd(q, k, v, o, alibi, req_to_tokens, b_req_idx, b_start_loc, b_seq_len, max_len_in_batch, total_token_num):
+def token_attention_fwd(
+    q,
+    k,
+    v,
+    o,
+    alibi,
+    req_to_tokens,
+    b_req_idx,
+    b_start_loc,
+    b_seq_len,
+    max_len_in_batch,
+    total_token_num,
+    alloc_tensor_func=torch.empty,
+):
     head_num = k.shape[1]
     batch_size = b_seq_len.shape[0]
     calcu_shape1 = (batch_size, head_num, k.shape[2])
 
-    att_m_tensor = torch.empty((head_num, total_token_num), dtype=q.dtype, device="cuda")
+    att_m_tensor = alloc_tensor_func((head_num, total_token_num), dtype=q.dtype, device="cuda")
 
-    token_att_fwd(q.view(calcu_shape1),
-                  k,
-                  att_m_tensor,
-                  alibi,
-                  req_to_tokens, 
-                  b_req_idx,
-                  b_start_loc,
-                  b_seq_len,
-                  max_len_in_batch)
-    prob = torch.empty_like(att_m_tensor)
+    token_att_fwd(
+        q.view(calcu_shape1), k, att_m_tensor, alibi, req_to_tokens, b_req_idx, b_start_loc, b_seq_len, max_len_in_batch
+    )
+    prob = alloc_tensor_func(att_m_tensor.shape, dtype=att_m_tensor.dtype, device=att_m_tensor.device)
     token_softmax_fwd(att_m_tensor, b_start_loc, b_seq_len, prob, max_len_in_batch)
     att_m_tensor = None
-    token_att_fwd2(prob,
-                   v,
-                   o.view(calcu_shape1),
-                   req_to_tokens, 
-                   b_req_idx,
-                   b_start_loc,
-                   b_seq_len)
+    token_att_fwd2(prob, v, o.view(calcu_shape1), req_to_tokens, b_req_idx, b_start_loc, b_seq_len)
     prob = None
     return
 
@@ -158,7 +189,7 @@ def torch_att(xq, xk, xv, bs, seqlen, num_head, head_dim):
     xk = xk.view(bs, seqlen, num_head, head_dim)
     xv = xv.view(bs, seqlen, num_head, head_dim)
 
-    logics = torch.sum(xq * xk, dim=3, keepdim=False) * 1 / (head_dim**0.5)
+    logics = torch.sum(xq * xk, dim=3, keepdim=False) * 1 / (head_dim ** 0.5)
     prob = torch.softmax(logics, dim=1)
     prob = prob.view(bs, seqlen, num_head, 1)
 

@@ -177,7 +177,7 @@ def fused_moe_kernel(
 
 
 def moe_align_block_size(
-    topk_ids: torch.Tensor, block_size: int, num_experts: int
+    topk_ids: torch.Tensor, block_size: int, num_experts: int, alloc_tensor_func=torch.empty
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -217,11 +217,11 @@ def moe_align_block_size(
         by block_size for proper block matrix operations.
     """
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-    sorted_ids = torch.empty((max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device)
+    sorted_ids = alloc_tensor_func((max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-    expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device)
-    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
+    expert_ids = alloc_tensor_func((max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device)
+    num_tokens_post_pad = alloc_tensor_func((1), dtype=torch.int32, device=topk_ids.device)
     moe_align_block_size_kernel(topk_ids, num_experts, block_size, sorted_ids, expert_ids, num_tokens_post_pad)
     return sorted_ids, expert_ids, num_tokens_post_pad
 
@@ -413,6 +413,7 @@ def fused_experts(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    alloc_tensor_func=torch.empty,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -441,11 +442,13 @@ def fused_experts(
 
     config = get_config_func(M)
 
-    intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N), device=hidden_states.device, dtype=hidden_states.dtype)
-    intermediate_cache2 = torch.empty(
+    intermediate_cache1 = alloc_tensor_func(
+        (M, topk_ids.shape[1], N), device=hidden_states.device, dtype=hidden_states.dtype
+    )
+    intermediate_cache2 = alloc_tensor_func(
         (M * topk_ids.shape[1], N // 2), device=hidden_states.device, dtype=hidden_states.dtype
     )
-    intermediate_cache3 = torch.empty(
+    intermediate_cache3 = alloc_tensor_func(
         (M, topk_ids.shape[1], w2.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype
     )
 
@@ -454,7 +457,9 @@ def fused_experts(
     if inplace:
         out_hidden_states = hidden_states
     else:
-        out_hidden_states = torch.empty_like(hidden_states)
+        out_hidden_states = alloc_tensor_func(
+            hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype
+        )
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE, min((chunk + 1) * CHUNK_SIZE, num_tokens))
@@ -475,7 +480,7 @@ def fused_experts(
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            curr_topk_ids, config["BLOCK_SIZE_M"], E
+            curr_topk_ids, config["BLOCK_SIZE_M"], E, alloc_tensor_func=alloc_tensor_func
         )
 
         invoke_fused_moe_kernel(

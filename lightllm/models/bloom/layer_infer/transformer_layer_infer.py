@@ -98,6 +98,7 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.b_seq_len,
             infer_state.max_len_in_batch,
             infer_state.total_token_num,
+            alloc_tensor_func=self.alloc_tensor,
         )
         return o_tensor
 

@@ -184,7 +184,15 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
 
         final_hidden_states = (
-            fused_experts(hidden_states, layer_weight.w1, layer_weight.w2, topk_weights, topk_ids, inplace=True)
+            fused_experts(
+                hidden_states,
+                layer_weight.w1,
+                layer_weight.w2,
+                topk_weights,
+                topk_ids,
+                inplace=True,
+                alloc_tensor_func=self.alloc_tensor,
+            )
             * self.routed_scaling_factor
         )
 

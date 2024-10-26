@@ -30,7 +30,7 @@ class CoherePostLayerInfer(PostLayerInferTpl):
         if infer_state.is_splitfuse:
             # for SplitFuse
             batch_size = infer_state.batch_size
-            last_input = torch.empty(
+            last_input = self.alloc_tensor(
                 (batch_size, self.embed_dim_), device=input_embdings.device, dtype=input_embdings.dtype
             )
             tmp_ = torch.cat(
@@ -57,7 +57,7 @@ class CoherePostLayerInfer(PostLayerInferTpl):
                 select_token_num += 1
 
             last_index = torch.tensor(select_index, dtype=torch.long, device=input_embdings.device)
-            last_input = torch.empty(
+            last_input = self.alloc_tensor(
                 (select_token_num, self.embed_dim_), device=input_embdings.device, dtype=input_embdings.dtype
             )
 
@@ -66,7 +66,7 @@ class CoherePostLayerInfer(PostLayerInferTpl):
 
         if not infer_state.is_splitfuse and infer_state.is_prefill and not infer_state.return_all_prompt_logics:
             batch_size = infer_state.batch_size
-            last_input = torch.empty(
+            last_input = self.alloc_tensor(
                 (batch_size, self.embed_dim_), device=input_embdings.device, dtype=input_embdings.dtype
             )
             last_index = (
@@ -99,7 +99,7 @@ class CoherePostLayerInfer(PostLayerInferTpl):
         if self.world_size_ == 1:
             gather_data = logic_batch
         else:
-            gather_data = torch.empty(
+            gather_data = self.alloc_tensor(
                 (self.vocab_size_, token_num), device=logic_batch.device, dtype=input_embdings_dtype
             )
             split_indexes = np.linspace(0, self.vocab_size_, self.world_size_ + 1, dtype=np.int64)

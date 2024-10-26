@@ -27,6 +27,7 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
             gating_output=router_logits,
             topk=self.num_experts_per_tok,
             renormalize=self.renormalize,
+            alloc_tensor_func=self.alloc_tensor,
         )
         # print(topk_weights, topk_ids)
 
@@ -37,4 +38,5 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
+            alloc_tensor_func=self.alloc_tensor,
         )
