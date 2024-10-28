@@ -17,18 +17,19 @@ class Qwen2TransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _get_qkv(
-        self, input, cache_kv, infer_state: LlamaInferStateInfo, layer_weight: Qwen2TransformerLayerWeight
+        self,
+        input: torch.Tensor,
+        cache_kv: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen2TransformerLayerWeight,
     ) -> torch.Tensor:
-        q = torch.addmm(
-            layer_weight.q_bias_,
-            input.view(-1, self.embed_dim_),
-            layer_weight.q_weight_,
-            beta=1.0,
-            alpha=1.0,
-        )
+        input = input.view(-1, self.embed_dim_)
+        dtype = input.dtype
+        q = self.alloc_tensor((input.shape[0], layer_weight.q_weight_.shape[1]), dtype=dtype)
+        torch.addmm(layer_weight.q_bias_, input, layer_weight.q_weight_, beta=1.0, alpha=1.0, out=q)
         torch.addmm(
             layer_weight.kv_bias_,
-            input.view(-1, self.embed_dim_),
+            input,
             layer_weight.kv_weight_,
             beta=1.0,
             alpha=1.0,

@@ -1,3 +1,4 @@
+from typing import Tuple
 import torch
 import torch.functional as F
 import torch.distributed as dist
@@ -63,28 +64,45 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
 
     def _get_qkv(
-        self, input, cache_kv, infer_state: LlamaInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
+        self,
+        input: torch.Tensor,
+        cache_kv,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Deepseek2TransformerLayerWeight,
     ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+        dtype = input.dtype
         if self.q_lora_rank is None:
-            q_nope = torch.mm(input.view(-1, self.embed_dim_), layer_weight.fuse_qk_weight_)
-            q_rope = torch.mm(input.view(-1, self.embed_dim_), layer_weight.q_rope_proj_)
+            q_nope = self.alloc_tensor((input.shape[0], layer_weight.fuse_qk_weight_.shape[1]), dtype=dtype)
+            torch.mm(input, layer_weight.fuse_qk_weight_, out=q_nope)
+            q_rope = self.alloc_tensor((input.shape[0], layer_weight.q_rope_proj_.shape[1]), dtype=dtype)
+            torch.mm(input, layer_weight.q_rope_proj_, out=q_rope)
         else:
-            q = torch.mm(input.view(-1, self.embed_dim_), layer_weight.q_a_proj_)
-            q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_, eps=self.eps_)
-            q_nope = torch.mm(q, layer_weight.fuse_qk_weight_)
-            q_rope = torch.mm(q, layer_weight.q_rope_proj_)
+            q = self.alloc_tensor((input.shape[0], layer_weight.q_a_proj_.shape[1]), dtype=dtype)
+            torch.mm(input, layer_weight.q_a_proj_, out=q)
+            rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_, eps=self.eps_, out=q)
+
+            q_nope = self.alloc_tensor((q.shape[0], layer_weight.fuse_qk_weight_.shape[1]), dtype=dtype)
+            torch.mm(q, layer_weight.fuse_qk_weight_, out=q_nope)
+            q_rope = self.alloc_tensor((q.shape[0], layer_weight.q_rope_proj_.shape[1]), dtype=dtype)
+            torch.mm(q, layer_weight.q_rope_proj_, out=q_rope)
 
         q_nope = q_nope.view(-1, self.tp_q_head_num_, self.kv_lora_rank)
         q_rope = q_rope.view(-1, self.tp_q_head_num_, self.qk_rope_head_dim)
 
         torch.mm(
-            input.view(-1, self.embed_dim_),
+            input,
             layer_weight.kv_a_proj_with_mqa_,
             out=cache_kv.view(-1, self.kv_lora_rank + self.qk_rope_head_dim),
         )
-        cache_kv[:, :, : self.kv_lora_rank] = rmsnorm_forward(
-            cache_kv[:, :, : self.kv_lora_rank].to(torch.float16), weight=layer_weight.kv_a_layernorm_, eps=self.eps_
+
+        rmsnorm_forward(
+            cache_kv[:, :, : self.kv_lora_rank],
+            weight=layer_weight.kv_a_layernorm_,
+            eps=self.eps_,
+            out=cache_kv[:, :, : self.kv_lora_rank],
         )
+
         rotary_emb_fwd(
             q_rope,
             cache_kv[:, :, self.kv_lora_rank :],
@@ -96,14 +114,19 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
-        o_tensor = torch.mm(input.view(-1, self.tp_q_head_num_ * self.kv_lora_rank), layer_weight.fuse_vo_weight_)
+        input = input.view(-1, self.tp_q_head_num_ * self.kv_lora_rank)
+        o_tensor = self.alloc_tensor(
+            (input.shape[0], layer_weight.fuse_vo_weight_.shape[1]), dtype=layer_weight.fuse_vo_weight_.dtype
+        )
+        torch.mm(input, layer_weight.fuse_vo_weight_, out=o_tensor)
         return o_tensor
 
     def _context_attention_kernel(
-        self, q, kv, infer_state: LlamaInferStateInfo, layer_weight, out=None
+        self, q: Tuple[torch.Tensor, torch.Tensor], kv, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
         q_nope, q_rope = q
-        o_tensor = torch.empty_like(q_nope) if out is None else out
+        o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
+
         if infer_state.use_dynamic_prompt_cache:
             kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
             context_attention_fwd(
@@ -173,7 +196,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.n_shared_experts is not None:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 
-        router_logits = torch.mm(input.view(-1, self.embed_dim_), layer_weight.moe_gate)
+        router_logits = self.alloc_tensor(
+            (hidden_states.shape[0], layer_weight.moe_gate.shape[1]), dtype=layer_weight.moe_gate.dtype
+        )
+        torch.mm(input.view(-1, self.embed_dim_), layer_weight.moe_gate, out=router_logits)
         topk_weights, topk_ids = grouped_topk(
             hidden_states,
             router_logits,
@@ -182,20 +208,21 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             num_expert_group=self.n_group,
             topk_group=self.topk_group,
         )
+        router_logits = None
 
-        final_hidden_states = (
-            fused_experts(
-                hidden_states,
-                layer_weight.w1,
-                layer_weight.w2,
-                topk_weights,
-                topk_ids,
-                inplace=True,
-                alloc_tensor_func=self.alloc_tensor,
-            )
-            * self.routed_scaling_factor
+        final_hidden_states = fused_experts(
+            hidden_states,
+            layer_weight.w1,
+            layer_weight.w2,
+            topk_weights,
+            topk_ids,
+            inplace=True,
+            alloc_tensor_func=self.alloc_tensor,
         )
 
+        final_hidden_states.mul_(self.routed_scaling_factor)
+
         if self.n_shared_experts is not None:
-            final_hidden_states = final_hidden_states + shared_output
+            final_hidden_states.add_(shared_output)
+
         return final_hidden_states.view(num_tokens, hidden_dim)
