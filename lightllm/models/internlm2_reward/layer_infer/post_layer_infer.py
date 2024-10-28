@@ -14,8 +14,6 @@ class Internlm2RewardPostLayerInfer(LlamaPostLayerInfer):
 
         input_embdings = None
         last_input = self._norm(last_input, infer_state, layer_weight)
-        last_input = rearrange(last_input, "batch embed_dim -> embed_dim batch").contiguous().reshape(-1, token_num)
-
-        score = torch.mm(layer_weight.lm_head_weight_, last_input)
+        score = torch.mm(last_input, layer_weight.lm_head_weight_)
 
         return score

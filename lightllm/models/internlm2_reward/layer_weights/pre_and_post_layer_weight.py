@@ -16,7 +16,7 @@ class Internlm2RewardPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
         if "model.tok_embeddings.weight" in weights:
             self.wte_weight_ = self._cuda(weights["model.tok_embeddings.weight"][split_start:split_end, :])
         if "v_head.weight" in weights:
-            self.lm_head_weight_ = self._cuda(weights["v_head.weight"])
+            self.lm_head_weight_ = self._cuda(weights["v_head.weight"]).transpose(0, 1)
         if "model.norm.weight" in weights:
             self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
 
