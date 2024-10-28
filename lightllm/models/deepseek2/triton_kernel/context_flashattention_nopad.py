@@ -177,6 +177,9 @@ def context_attention_fwd(
     else:
         BLOCK = 128 if not TESLA else 64
 
+    if q_nope.dtype == torch.float32:
+        BLOCK = BLOCK // 4
+
     sm_scale = softmax_scale
     batch, head = b_seq_len.shape[0], q_nope.shape[1]
     kv_group_num = q_nope.shape[1]  # deepseekv2 的 group 就是q的head数量，类似于MQA
@@ -369,6 +372,9 @@ def context_attention_fwd_no_prompt_cache(
         BLOCK = 64 if not TESLA else 32
     else:
         BLOCK = 128 if not TESLA else 64
+
+    if q_nope.dtype == torch.float32:
+        BLOCK = BLOCK // 4
 
     sm_scale = softmax_scale
     batch, head = b_seq_len.shape[0], q_nope.shape[1]

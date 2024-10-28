@@ -449,7 +449,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--data_type",
         type=str,
         choices=["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"],
-        default="float16",
+        default=None,
         help="the data type of the model weight",
     )
     parser.add_argument("--return_all_prompt_logprobs", action="store_true", help="return all prompt tokens logprobs")
@@ -561,6 +561,12 @@ def main():
         from lightllm.utils.config_utils import get_eos_token_ids
 
         args.eos_id = get_eos_token_ids(args.model_dir)
+
+    if args.data_type is None:
+        from lightllm.utils.config_utils import get_dtype
+
+        args.data_type = get_dtype(args.model_dir)
+        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     logger.info(f"all start args:{args}")
 
