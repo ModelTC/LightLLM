@@ -38,6 +38,9 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         img_start_loc = 0
         img_start_locs = []
 
+        device = layer_weight.wte_weight_.device
+        dtype = layer_weight.wte_weight_.dtype
+        hidden_size = layer_weight.wte_weight_.shape[1]
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"]:
                 # skip the same image
@@ -45,15 +48,11 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
                     continue
                 # pull the img_embeds by uid from shm
                 data = read_shm(get_shm_name_embed(img["uuid"]))
-                img_weight.append(bytes2tensor(data).reshape(img["token_num"], -1))
+                img_weight.append(bytes2tensor(data).cuda().reshape(img["token_num"], -1))
                 img_start_token_ids.append(img["token_id"])
                 img_token_lens.append(img["token_num"])
                 img_start_locs.append(img_start_loc)
                 img_start_loc += img["token_num"]
-
-        device = layer_weight.wte_weight_.device
-        dtype = layer_weight.wte_weight_.dtype
-        hidden_size = layer_weight.wte_weight_.shape[1]
         out = torch.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
         if len(img_weight) > 0:
             img_weight = torch.cat(img_weight, dim=0).to(device=device, dtype=dtype)

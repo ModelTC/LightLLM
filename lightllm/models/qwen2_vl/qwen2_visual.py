@@ -28,9 +28,7 @@ from typing import List, Union
 from torchvision import transforms as T
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, AutoTokenizer
-import requests
-from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
-import rpyc
+from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from io import BytesIO
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
@@ -112,7 +110,7 @@ class PatchEmbed(nn.Module):
         target_dtype = self.proj.weight.dtype
         hidden_states = hidden_states.view(
             -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
-        )
+        ).cuda()
         hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(-1, self.embed_dim)
         return hidden_states
 
@@ -382,11 +380,11 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
     def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         hidden_states = hidden_states.to(
             dtype=self.get_dtype(),
-            device=torch.device("cuda"),
+            device=self.device,
         )
         grid_thw = grid_thw.to(
             dtype=torch.int32,
-            device=torch.device("cuda"),
+            device=self.device,
         )
 
         hidden_states = self.patch_embed(hidden_states)
@@ -427,16 +425,21 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
 
         self.load_state_dict(weight_dict)
 
-    def encode(self, image_items: List[Union[str, Image.Image]]):
+    def encode(self, image_uuids: List):
         img_tensors = []
         valid_ids = []
         valid_id = 0
         img_grids = []
-        for i, url in enumerate(image_items):
-            if isinstance(url, Image.Image):
-                t = get_image(url)
-                image_inputs = self.processor.preprocess(images=t, return_tensors="pt")
-                pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16, device="cuda")
+        uuids = []
+
+        for i, url in enumerate(image_uuids):
+            if isinstance(url, int):
+                uuids.append(url)
+                image_data = read_shm(get_shm_name_data(url))
+                image_data = Image.open(BytesIO(image_data))
+                image_data = get_image(image_data)
+                image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
+                pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
                 image_grid_thw = image_inputs["image_grid_thw"]
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
@@ -455,10 +458,10 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.to(self.device, dtype=torch.float32)
-        image_grid_thw = grid_thw.to(self.device)
+        pixel_values = imgs.cuda().to(dtype=torch.float32)
+        image_grid_thw = grid_thw.cuda()
 
         pixel_values = pixel_values.type(self.get_dtype())
-        all_img_embeds = self.forward(pixel_values, grid_thw=image_grid_thw).to(self.device)
+        all_img_embeds = self.forward(pixel_values, grid_thw=image_grid_thw)
 
-        return [all_img_embeds[start:end] for start, end in valid_ids]
+        return all_img_embeds, uuids, valid_ids

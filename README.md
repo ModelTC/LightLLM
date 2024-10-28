@@ -71,7 +71,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 
 > InternVL-Chat(InternLM2) needs to set the parameter '--eos_id 92542 --trust_remote_code'.
 
-> Qwen2-VL-7b needs to set the parameter '--eos_id 151645 --trust_remote_code'.
+> Qwen2-VL-7b needs to set the parameter '--eos_id 151645 --trust_remote_code', and use 'pip install git+https://github.com/huggingface/transformers' to upgrade to the latest version.
 
 > Stablelm needs to set the parameter '--trust_remote_code'.
 

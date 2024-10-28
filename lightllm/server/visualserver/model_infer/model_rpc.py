@@ -2,6 +2,7 @@ import asyncio
 import numpy as np
 import rpyc
 import torch
+import os
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
@@ -12,29 +13,39 @@ from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.internlm_xcomposer.internlm_visual import InternVisionModel
 from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
+from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 
 
 class VisualModelRpcServer(rpyc.Service):
     def exposed_init_model(self, kvargs):
-        # 注册graceful 退出的处理
-        from lightllm.utils.graceful_utils import graceful_registry
-        import inspect
+        import torch
+        import torch.distributed as dist
 
-        graceful_registry(inspect.currentframe().f_code.co_name)
-
-        # import torch
-        # import torch.distributed as dist
-        # world_size = kvargs["world_size"]
-        # if world_size != 1:
-        #     kvargs = obtain(kvargs)
-        #     world_size = kvargs["world_size"]
-        # dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}',
-        # rank=self.tp_rank, world_size=world_size)
-        # torch.cuda.set_device(self.tp_rank)
+        self.vit_dp = kvargs["vit_dp"]
+        self.vit_tp = kvargs["vit_tp"]
+        self.dp_rank_id = kvargs["dp_rank_id"]
+        self.tp_rank_id = kvargs["tp_rank_id"]
+        self.cache_port = kvargs["cache_port"]
         weight_dir = kvargs["weight_dir"]
+        visual_gpu_ids = kvargs["visual_gpu_ids"]
+        visual_nccl_port = kvargs["visual_nccl_port"]
+        self.vit_rank_id = kvargs["vit_rank_id"]
+        self.cache_client = rpyc.connect("localhost", self.cache_port)
+
+        torch.cuda.set_device(visual_gpu_ids[self.vit_rank_id])
+        if self.vit_tp != 1:
+            dist.init_process_group(
+                backend="nccl",
+                init_method=f"tcp://127.0.0.1:{visual_nccl_port}",
+                rank=self.tp_rank_id,
+                world_size=self.vit_tp,
+            )
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
+
+        if self.vit_tp != 1:
+            raise ValueError(f"ERROR: Not support vit_tp value: {self.vit_tp}")
         try:
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":
@@ -46,14 +57,10 @@ class VisualModelRpcServer(rpyc.Service):
             elif self.model_type == "internlmxcomposer2":
                 self.model = InternVisionModel()
             elif self.model_type == "internvl_chat":
-                # tp_rank = kvargs['rank_id']
-                client_port = kvargs["client_port"]
-                data_type = kvargs["data_type"]
-                model_kvargs = {"weight_dir": weight_dir, "client_port": client_port, "data_type": data_type}
-                self.model = InternVLVisionModel(model_kvargs)
-
+                self.model = InternVLVisionModel()
             else:
                 raise Exception(f"can not support {self.model_type} now")
+
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
         except Exception as e:
@@ -69,20 +76,34 @@ class VisualModelRpcServer(rpyc.Service):
 
     # @calculate_time(show=True, min_cost_ms=150)
     @torch.no_grad()
-    def forward(self, images):
-        return self.model.encode(images)
+    def forward(self, images_uuids):
+        return self.model.encode(images_uuids)
 
     # @calculate_time(show=False, min_cost_ms=300)
-    def exposed_encode(self, images):
-        return self.forward(images)
+    def exposed_encode(self, images_uuids):
+        images_uuids = obtain(images_uuids)
+        all_img_embeds, uuids, valid_ids = self.forward(images_uuids)
+        all_img_embeds = all_img_embeds.to(torch.device("cpu"))
+        if self.tp_rank_id == 0:
+            if len(uuids) == 0:
+                return [all_img_embeds[start:end] for start, end in valid_ids]
+            else:
+                for i in range(len(uuids)):
+                    uid = uuids[i]
+                    if not self.cache_client.root.get_item_embed(uid):
+                        start, end = valid_ids[i]
+                        cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
+                        create_shm(get_shm_name_embed(uuids[i]), cur_embed_bytes)
+                        self.cache_client.root.set_item_embed(uuids[i])
+        return
 
 
 class VisualModelRpcClient:
-    def __init__(self, model_rpc, world_size, rpc_server_process=None):
+    def __init__(self, model_rpc, vit_tp, rpc_server_process=None):
         self.model: VisualModelRpcServer = model_rpc
-        self.world_size = world_size
+        self.vit_tp = vit_tp
         self.rpc_server_process = rpc_server_process
-        self.use_rpc = self.world_size != 1
+        self.use_rpc = True
         if self.use_rpc:
 
             def async_wrap(f):
@@ -111,14 +132,44 @@ class VisualModelRpcClient:
         else:
             return
 
-    async def encode(self, images):
-        ans = self._encode(images)
+    async def encode(self, uuids):
+        ans = self._encode(uuids)
         if self.use_rpc:
             return await ans
         else:
             return ans
 
 
-async def start_model_process(world_size):
-    if world_size == 1:
-        return VisualModelRpcClient(VisualModelRpcServer(), world_size)
+def _init_env(port):
+    # 注册graceful 退出的处理
+    from lightllm.utils.graceful_utils import graceful_registry
+    import inspect
+
+    graceful_registry(inspect.currentframe().f_code.co_name)
+
+    from rpyc.utils.server import ThreadedServer
+
+    t = ThreadedServer(VisualModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
+    t.start()
+    return
+
+
+async def start_model_process(port, vit_tp):
+    import multiprocessing
+
+    proc = multiprocessing.Process(target=_init_env, args=(port,))
+    proc.start()
+    await asyncio.sleep(2)
+    repeat_count = 0
+    while repeat_count < 20:
+        try:
+            con = rpyc.connect("localhost", port, config={"allow_pickle": True})
+            break
+        except BaseException:
+            await asyncio.sleep(1)
+        repeat_count += 1
+    if repeat_count == 20:
+        raise Exception("init rpc env error!")
+
+    assert proc.is_alive()
+    return VisualModelRpcClient(con.root, vit_tp, rpc_server_process=proc)

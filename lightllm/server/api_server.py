@@ -477,6 +477,21 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--push_interval", type=int, default=10, help="interval of pushing monitoring metrics")
     parser.add_argument(
+        "--visual_infer_batch_size", type=int, default=4, help="number of images to process in each inference batch"
+    )
+    parser.add_argument(
+        "--visual_gpu_ids", nargs="+", type=int, default=[0], help="List of GPU IDs to use, e.g., 0 1 2"
+    )
+    parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
+    parser.add_argument("--visual_dp", type=int, default=1, help="number of data parallel instances for ViT")
+    parser.add_argument(
+        "--visual_nccl_ports",
+        nargs="+",
+        type=int,
+        default=[29500],
+        help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
+    )
+    parser.add_argument(
         "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"
     )
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
@@ -534,6 +549,24 @@ def main():
     if args.beam_mode or args.diverse_mode:
         assert args.router_token_ratio == 0.0
 
+    # 检查GPU数量是否足够
+    total_required_gpus = args.visual_dp * args.visual_tp
+    if len(args.visual_gpu_ids) < total_required_gpus:
+        raise ValueError(
+            f"Not enough GPUs specified. You need at least {total_required_gpus}, but got {len(args.visual_gpu_ids)}."
+        )
+    else:
+        args.visual_gpu_ids = args.visual_gpu_ids[:total_required_gpus]
+
+    # 检查visual_nccl_port数量是否足够
+    if len(args.visual_nccl_ports) < args.visual_dp:
+        raise ValueError(
+            f"Not enough visual_nccl_ports specified. You need at least {args.visual_dp}, "
+            f"but got ({len(args.visual_nccl_ports)})."
+        )
+    else:
+        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
+
     if not args.splitfuse_mode:
         # 普通模式下
         if args.batch_max_tokens is None:
@@ -570,9 +603,19 @@ def main():
 
     logger.info(f"all start args:{args}")
 
-    can_use_ports = alloc_can_use_network_port(num=6 + args.tp, used_nccl_port=args.nccl_port)
+    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port]
+    can_use_ports = alloc_can_use_network_port(
+        num=6 + args.tp + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+    )
     router_port, detokenization_port, httpserver_port, visual_port, cache_port, metric_port = can_use_ports[0:6]
-    model_rpc_ports = can_use_ports[6:]
+    model_rpc_ports = can_use_ports[6 : 6 + args.tp]
+    can_use_ports = can_use_ports[6 + args.tp :]
+
+    visual_model_tp_ports = []
+    for _ in range(args.visual_dp):
+        tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
+        can_use_ports = can_use_ports[args.visual_tp :]
+        visual_model_tp_ports.append(tp_ports_for_dp)
 
     if args.enable_multimodal:
         start_submodule_processes(
@@ -586,7 +629,7 @@ def main():
                 start_visual_process,
             ],
             start_args=[
-                (args, router_port, visual_port, cache_port),
+                (args, router_port, visual_port, cache_port, visual_model_tp_ports),
             ],
         )
 
@@ -617,7 +660,6 @@ def main():
             (args, detokenization_port, httpserver_port),
         ],
     )
-
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_clear
 

@@ -5,6 +5,12 @@ import os
 from PIL import Image
 from typing import List, Union
 from safetensors import safe_open
+from io import BytesIO
+from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
+from lightllm.utils.log_utils import init_logger
+
+
+logger = init_logger(__name__)
 
 
 class LlavaVisionModel:
@@ -31,6 +37,7 @@ class LlavaVisionModel:
 
     def load_hf_model(self, config, weight_dir):
         from transformers import AutoConfig, AutoProcessor, LlavaForConditionalGeneration
+
         config = AutoConfig.from_pretrained(weight_dir, trust_remote_code=True)
         self.select_layer = config.vision_feature_layer
         self.select_feature = config.vision_feature_select_strategy
@@ -48,12 +55,16 @@ class LlavaVisionModel:
         self.projector_weights = {}
         for f in os.listdir(weight_dir):
             if f.endswith(".safetensors"):
-                d = safe_open(os.path.join(weight_dir, f), 'pt', 'cpu')
+                d = safe_open(os.path.join(weight_dir, f), "pt", "cpu")
                 for k in d.keys():
                     if "multi_modal_projector.linear_1" in k:
-                        self.projector_weights[k.replace("multi_modal_projector.linear_1", "model.mm_projector.0")] = d.get_tensor(k).half()
+                        self.projector_weights[
+                            k.replace("multi_modal_projector.linear_1", "model.mm_projector.0")
+                        ] = d.get_tensor(k).half()
                     if "multi_modal_projector.linear_2" in k:
-                        self.projector_weights[k.replace("multi_modal_projector.linear_2", "model.mm_projector.2")] = d.get_tensor(k).half()
+                        self.projector_weights[
+                            k.replace("multi_modal_projector.linear_2", "model.mm_projector.2")
+                        ] = d.get_tensor(k).half()
 
     def load_bin_model(self, config, weight_dir):
         self.select_layer = config.get("mm_vision_select_layer", -2)
@@ -68,6 +79,7 @@ class LlavaVisionModel:
             vision_path = os.path.join(weight_dir, vision_path)
 
         from transformers import CLIPVisionModel, CLIPImageProcessor
+
         self.image_processor = CLIPImageProcessor.from_pretrained(vision_path)
         self.vision_tower = CLIPVisionModel.from_pretrained(vision_path).half()
 
@@ -84,13 +96,11 @@ class LlavaVisionModel:
         self.vision_tower = self.vision_tower.cuda()
         for k, v in self.projector_weights.items():
             self.projector_weights[k] = v.cuda()
-        self.device = torch.device("cuda")
         return self
 
     # batch images infer
     def forward(self, x):
-        x = x.half().to(device=self.device)
-
+        x = x.half().cuda()
         x = self.vision_tower(x, output_hidden_states=True)
         x = x.hidden_states[self.select_layer]
         if self.select_feature == "patch" or self.select_feature == "default":
@@ -113,17 +123,30 @@ class LlavaVisionModel:
         x = x.view(B, L, -1)
         return x
 
-    def encode(self, image_items: List[Union[str, Image.Image]]):
-        images = []
-        for item in image_items:
-            if isinstance(item, Image.Image):
-                image = item
-            elif item.startswith("http://") or item.startswith("https://"):
-                import requests
-                image = Image.open(requests.get(item, stream=True).raw)
-            else:
-                image = Image.open(item)
-            images.append(image.convert("RGB"))
+    def encode(self, image_uuids: List):
+        img_tensors = []
+        uuids = []
+        valid_id = 0
+        valid_ids = []
 
-        images = self.image_processor.preprocess(images, return_tensors="pt")["pixel_values"]
-        return self.forward(images)
+        for i, item in enumerate(image_uuids):
+            if isinstance(item, int):
+                uuids.append(item)
+                image_data = read_shm(get_shm_name_data(item))
+                image_data = Image.open(BytesIO(image_data)).convert("RGB")
+                t = self.image_processor.preprocess(image_data, return_tensors="pt")["pixel_values"]
+                img_tensors.append(t)
+            else:
+                raise Exception("Unsupport input types: {} for {}".format(type(item), item))
+
+            cur_num = img_tensors[-1].shape[0]
+            valid_ids.append([valid_id, valid_id + cur_num])
+            valid_id += cur_num
+
+        if len(img_tensors) <= 0:
+            return None
+
+        img = torch.cat(img_tensors, dim=0)
+        all_img_embeds = self.forward(img)
+
+        return all_img_embeds, uuids, valid_ids

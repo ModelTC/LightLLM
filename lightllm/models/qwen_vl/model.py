@@ -8,7 +8,6 @@ from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 
 # Warp of the origal tokenizer
 class QWenVLTokenizer:
-
     def __init__(self, tokenizer, model_cfg):
         self.tokenizer = tokenizer
         # <img>: 151857
@@ -18,7 +17,7 @@ class QWenVLTokenizer:
         self.image_end_tag = tokenizer.image_end_tag
         self.image_end_id = tokenizer.img_end_id
         # <imgpad>: 151859
-        self.image_length = model_cfg['visual'].get("n_queries", 256)
+        self.image_length = model_cfg["visual"].get("n_queries", 256)
 
     def _list_find(self, input_list, target, start_idx):
         cur_list = input_list[start_idx:]
@@ -34,18 +33,18 @@ class QWenVLTokenizer:
         parts = prompt.split(self.image_start_tag)
         prompt = parts[0]
         for idx, part in enumerate(parts[1:]):
-            prompt += f'Picture {idx + 1}:' + self.image_start_tag + part
+            prompt += f"Picture {idx + 1}:" + self.image_start_tag + part
         parts = prompt.split(self.image_end_tag)
         prompt = parts[0]
         for part in parts[1:]:
-            prompt += self.image_end_tag + '\n' + part
+            prompt += self.image_end_tag + "\n" + part
         return prompt
 
     # only change the impl of the encode func:
     def encode(self, prompt, multimodal_params: MultimodalParams = None):
         prompt = unicodedata.normalize("NFC", prompt)
         prompt = self._format_prompt(prompt)
-        origin_ids = self.tokenizer.tokenizer.encode(prompt, allowed_special='all', disallowed_special=())
+        origin_ids = self.tokenizer.tokenizer.encode(prompt, allowed_special="all", disallowed_special=())
 
         input_ids = []
         image_id = 0
@@ -55,7 +54,7 @@ class QWenVLTokenizer:
             start = self._list_find(origin_ids, self.image_start_id, end)
             if start == -1:
                 break
-            input_ids.extend(origin_ids[end: start])
+            input_ids.extend(origin_ids[end:start])
             end = self._list_find(origin_ids, self.image_end_id, start)
             if end == -1:
                 raise ValueError("Unclosed image token")
@@ -70,14 +69,14 @@ class QWenVLTokenizer:
             end += 1
             image_id += 1
 
-        input_ids.extend(origin_ids[end: ])
+        input_ids.extend(origin_ids[end:])
         if multimodal_params:
             image_cnt = len(multimodal_params.images)
             assert image_cnt == image_id, "invalid image tag num: {} vs {}!".format(image_cnt, image_id)
         return input_ids
 
     def __getattr__(self, name):
-        if name != 'encode':
+        if name != "encode":
             return getattr(self.tokenizer, name)
         return self.encode
 
