@@ -23,7 +23,7 @@ class RewardModelBackend(ContinuesBatchBackend):
         kwargs, run_reqs = prepare_prefill_inputs(batch, self.radix_cache, self.is_multimodal)
 
         scores: torch.Tensor = self.model.forward(**kwargs)
-        scores = scores.detach().cpu().numpy()
+        scores = scores[0].detach().cpu().numpy()
 
         next_token_id = 1
         next_token_logprob = 1.0
@@ -36,7 +36,7 @@ class RewardModelBackend(ContinuesBatchBackend):
             req_obj.out_token_id_count[next_token_id] += 1
             req_obj.finish_status = FinishStatus.FINISHED_STOP
 
-            metadata = {"id": int(next_token_id), "logprob": float(next_token_logprob), "score": float(score[0])}
+            metadata = {"id": int(next_token_id), "logprob": float(next_token_logprob), "score": float(score)}
 
             output_dict[req_obj.r_id] = (
                 req_obj.req_status,

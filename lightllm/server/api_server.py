@@ -539,7 +539,14 @@ def main():
         assert args.disable_cudagraph
 
     # 这些模式不能同时设置。
-    assert [args.splitfuse_mode, args.beam_mode, args.diverse_mode, args.token_healing_mode].count(True) <= 1
+    assert [
+        args.splitfuse_mode,
+        args.beam_mode,
+        args.diverse_mode,
+        args.token_healing_mode,
+        args.use_reward_model,
+        args.return_all_prompt_logprobs,
+    ].count(True) <= 1
     # 部分模式目前还无法与dynamic_prompt_cache一起跑，to do。
     if args.use_dynamic_prompt_cache:
         assert args.beam_mode is False
