@@ -32,7 +32,12 @@ from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 try:
     from lightllm_vllm_kernel import moe_align_block_size as moe_align_block_size_kernel
 except ImportError:
-    from lightllm.models.deepseek2.layer_infer._custom_ops import moe_align_block_size as moe_align_block_size_kernel
+    try:
+        from vllm._custom_ops import moe_align_block_size as moe_align_block_size_kernel
+    except ImportError:
+        from lightllm.models.deepseek2.layer_infer._custom_ops import (
+            moe_align_block_size as moe_align_block_size_kernel,
+        )
 
 
 logger = init_logger(__name__)
