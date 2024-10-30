@@ -55,3 +55,13 @@ for i in range(20):
     }
     thread = RequestThread(url, headers, data)
     thread.start()
+
+time.sleep(10)
+
+for i in range(20):
+    data = {
+        "inputs": "Are dog a man? ",
+        "parameters": {"do_sample": False, "ignore_eos": True, "max_new_tokens": 200, "allowed_token_ids": [2, 3]},
+    }
+    thread = RequestThread(url, headers, data)
+    thread.start()

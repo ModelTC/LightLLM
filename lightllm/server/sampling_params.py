@@ -32,6 +32,10 @@ class SamplingParams:
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
         input_penalty: bool = DEFAULT_INPUT_PENALTY,
         regular_constraint: Optional[str] = None,  # Regular expressions constrain the output.
+        # If provided, the engine will construct a logits,
+        # processor which only retains scores for the given token ids. Defaults to None.
+        # allowed_token_ids only can be used in "--simple_constraint_mode" started server.
+        allowed_token_ids: Optional[List[int]] = None,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -51,6 +55,7 @@ class SamplingParams:
         self.add_spaces_between_special_tokens = add_spaces_between_special_tokens
         self.print_eos_token = print_eos_token
         self.regular_constraint = regular_constraint
+        self.allowed_token_ids = allowed_token_ids
         if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -131,6 +136,18 @@ class SamplingParams:
 
         self._verify_stop_sentences()
 
+        self._verify_allowed_token_ids()
+
+        return
+
+    def _verify_allowed_token_ids(self):
+        if self.allowed_token_ids is not None:
+            if (not isinstance(self.allowed_token_ids, list)) or (
+                not all(isinstance(token_id, int) for token_id in self.allowed_token_ids)
+            ):
+                raise ValueError(f"allowed_token_ids need format List[int], but get {self.allowed_token_ids}")
+            if self.regular_constraint is not None:
+                raise ValueError("allowed_token_ids and regular_constraint can not be used in same time")
         return
 
     def _verify_stop_sentences(self):
@@ -187,4 +204,5 @@ class SamplingParams:
         ret["best_of"] = self.best_of
         ret["input_penalty"] = self.input_penalty
         ret["regular_constraint"] = self.regular_constraint
+        ret["allowed_token_ids"] = self.allowed_token_ids
         return ret

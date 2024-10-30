@@ -39,6 +39,7 @@ class InferSamplingParams:
         stop_sequences: List[List[int]] = [],
         input_penalty: bool = False,
         regular_constraint: Optional[str] = None,
+        allowed_token_ids: Optional[List[int]] = None,
     ) -> None:
         self.best_of = best_of
         self.do_sample = do_sample
@@ -60,7 +61,16 @@ class InferSamplingParams:
         self.regular_constraint = regular_constraint
         self.regex_guide = None
         self.fsm_current_state: int = 0
+        self.allowed_token_ids = allowed_token_ids
+        # this check is not very good to placed here. to do...
+        if self.allowed_token_ids is not None:
+            if not all(e < vocab_size for e in self.allowed_token_ids):
+                logger.error("allowed_token_ids contain tokenid >= vobsize, we remove these token ids")
+                self.allowed_token_ids = [e for e in self.allowed_token_ids if e < vocab_size]
         return
+
+    def has_constraint_setting(self) -> bool:
+        return self.regular_constraint is not None or self.allowed_token_ids is not None
 
 
 class InferReq:

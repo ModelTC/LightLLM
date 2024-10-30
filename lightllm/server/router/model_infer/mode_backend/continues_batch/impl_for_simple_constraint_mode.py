@@ -92,7 +92,7 @@ class SimpleConstraintBackend(ContinuesBatchBackend):
 
         logits = self.model.forward(**kwargs)
 
-        all_has_no_constraint = all([e.sampling_param.regular_constraint is None for e in run_reqs])
+        all_has_no_constraint = all([not e.sampling_param.has_constraint_setting() for e in run_reqs])
         if not all_has_no_constraint:
             mask = torch.ones_like(logits, dtype=torch.bool)
             for i, run_obj in enumerate(run_reqs):
@@ -146,6 +146,8 @@ class SimpleConstraintBackend(ContinuesBatchBackend):
             regex_guide: RegexGuide = sample_params.regex_guide
             ok_token_id_list = regex_guide.get_next_instruction(sample_params.fsm_current_state).tokens
             mask[i, ok_token_id_list] = False
+        elif sample_params.allowed_token_ids is not None:
+            mask[i, sample_params.allowed_token_ids] = False
         else:
             mask[i, :] = False
         return
