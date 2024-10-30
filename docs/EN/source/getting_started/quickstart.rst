@@ -15,7 +15,7 @@ Deploying a model with Lightllm is very straightforward and requires only two st
 1. Prepare the Model File
 -------------------------
 
-The following content will demonstrate Lightllm's support for large language models using `Qwen2-0.5B <https://huggingface.co/Qwen/Qwen2-0.5B>`_. You can refer to the article: `How to Quickly Download Hugging Face Models — A Summary of Methods <https://zhuanlan.zhihu.com/p/663712983>`_ for methods to download models.
+The following content will demonstrate Lightllm's support for large language models using `Llama-2-7b-chat <https://huggingface.co/meta-llama/Llama-2-7b-chat>`_. You can refer to the article: `How to Quickly Download Hugging Face Models — A Summary of Methods <https://zhuanlan.zhihu.com/p/663712983>`_ for methods to download models.
 
 Here is an example of how to download the model:
 
@@ -35,7 +35,7 @@ Here is an example of how to download the model:
 
 .. code-block:: console
     
-    $ huggingface-cli download Qwen/Qwen2-0.5B --local-dir Qwen2-0.5
+    $ huggingface-cli download meta-llama/Llama-2-7b-chat --local-dir Llama-2-7b-chat
 
 .. tip::
     The above code for downloading the model requires a stable internet connection and may take some time. You can use alternative download methods or other supported models as substitutes. For the latest list of supported models, please refer to the `project homepage <https://github.com/ModelTC/lightllm>`_.
@@ -44,20 +44,14 @@ Here is an example of how to download the model:
 2. Start the Model Service
 ---------------------------
 
-After downloading the Qwen2-0.5B model, use the following command in the terminal to deploy the API service:
+After downloading the Llama-2-7b-chat model, use the following command in the terminal to deploy the API service:
 
 .. code-block:: console
 
-    $ python -m lightllm.server.api_server --model_dir ~/models/Qwen2-0.5B  \
-    $                                       --host 0.0.0.0                  \
-    $                                       --port 8080                     \
-    $                                       --tp 1                          \
-    $                                       --max_total_token_num 120000    \
-    $                                       --trust_remote_code             \
-    $                                       --eos_id 151643   
+    $ python -m lightllm.server.api_server --model_dir ~/models/Llama-2-7b-chat
 
 .. note::
-    The ``--model_dir`` parameter in the above command should be changed to the actual path of your model on your machine. The ``--eos_id 151643`` parameter is specific to the Qwen model; remove this parameter for other models.
+    The ``--model_dir`` parameter in the above command should be changed to the actual path of your model on your machine. 
 
 3. (Optional) Test the Model Service
 --------------------------------------
@@ -66,7 +60,7 @@ In a new terminal, use the following command to test the model service:
 
 .. code-block:: console
 
-    $ curl http://localhost:8080/generate \
+    $ curl http://localhost:8000/generate \
     $      -H "Content-Type: application/json" \
     $      -d '{
     $            "inputs": "What is AI?",

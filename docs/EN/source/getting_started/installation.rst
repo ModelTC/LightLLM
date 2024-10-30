@@ -71,7 +71,9 @@ You can also install Lightllm from source:
     $ cd lightllm
     $
     $ # Install Lightllm's dependencies
-    $ pip install -r requirements.txt
+    $ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
+    $
+    $ pip install nvidia-nccl-cu12==2.20.5
     $
     $ # Install Lightllm
     $ python setup.py install
@@ -79,11 +81,11 @@ You can also install Lightllm from source:
 .. note::
 
     The Lightllm code has been tested on various GPUs, including V100, A100, A800, 4090, and H800.
-    If you are using A100, A800, or similar GPUs, it is recommended to install triton==2.1.0:
+    If you are using A100, A800, or similar GPUs, it is recommended to install triton==3.0.0:
 
     .. code-block:: console
 
-        $ pip install triton==2.1.0 --no-deps
+        $ pip install triton==3.0.0 --no-deps
 
     If you are using H800, V100, or similar GPUs, it is recommended to install triton-nightly:
 

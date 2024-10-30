@@ -9,19 +9,14 @@ Qwen2-0.5B
 .. code-block:: console
 
     $ python -m lightllm.server.api_server --model_dir ~/models/Qwen2-0.5B  \
-    $                                       --host 0.0.0.0                  \
-    $                                       --port 8080                     \
-    $                                       --tp 1                          \
-    $                                       --max_total_token_num 120000    \
-    $                                       --trust_remote_code             \
-    $                                       --eos_id 151643
+    $                                       --trust_remote_code             
 
 **Test Server**
 
 
 .. code-block:: console
 
-    $ curl http://localhost:8080/generate \
+    $ curl http://localhost:8000/generate \
     $      -H "Content-Type: application/json" \
     $      -d '{
     $            "inputs": "What is AI?",
@@ -40,12 +35,8 @@ Qwen-VL-Chat
 .. code-block:: console
 
     $ python -m lightllm.server.api_server --model_dir ~/models/Qwen-VL-Chat  \
-    $                                       --host 0.0.0.0                  \
-    $                                       --port 8080                     \
-    $                                       --tp 1                          \
-    $                                       --max_total_token_num 120000    \
     $                                       --trust_remote_code             \
-    $                                       --enable_multimodal
+    $                                       --enable_multimodal            
 
 **Test Server**
 
@@ -79,7 +70,7 @@ Qwen-VL-Chat
             }
         }
 
-        url = "http://127.0.0.1:8080/generate"
+        url = "http://127.0.0.1:8000/generate"
         headers = {'Content-Type': 'application/json'}
         response = requests.post(url, headers=headers, data=json.dumps(data))
         return response
@@ -114,11 +105,7 @@ llama2-70b-chat
 
 .. code-block:: console
 
-    $ python -m lightllm.server.api_server --model_dir ~/models/llama2-70b-chat  \
-    $                                       --host 0.0.0.0                       \
-    $                                       --port 8080                          \
-    $                                       --tp 4                               \
-    $                                       --max_total_token_num 120000         
+    $ python -m lightllm.server.api_server --model_dir ~/models/llama2-70b-chat --tp 4                                
 
 .. tip::
 
@@ -128,7 +115,7 @@ llama2-70b-chat
 
 .. code-block:: console
 
-    $ curl http://localhost:8080/generate \
+    $ curl http://localhost:8000/generate \
     $      -H "Content-Type: application/json" \
     $      -d '{
     $            "inputs": "What is LLM?",
@@ -147,10 +134,6 @@ internlm2-1_8b
 .. code-block:: console
 
     $ python -m lightllm.server.api_server --model_dir ~/models/internlm2-1_8b  \
-    $                                       --host 0.0.0.0                       \
-    $                                       --port 8080                          \
-    $                                       --tp 1                               \
-    $                                       --max_total_token_num 120000         \
     $                                       --splitfuse_mode                     \
     $                                       --trust_remote_code               
 
@@ -163,7 +146,7 @@ internlm2-1_8b
 
 .. code-block:: console
 
-    $ curl http://localhost:8080/generate \
+    $ curl http://localhost:8000/generate \
     $      -H "Content-Type: application/json" \
     $      -d '{
     $            "inputs": "What is LLM?",
@@ -182,10 +165,6 @@ internlm2-1_8b-reward
 .. code-block:: console
 
     $ python -m lightllm.server.api_server --model_dir ~/models/internlm2-1_8b-reward  \
-    $                                       --host 0.0.0.0                       \
-    $                                       --port 8080                          \
-    $                                       --tp 1                               \
-    $                                       --max_total_token_num 120000         \
     $                                       --use_reward_model                    \
     $                                       --trust_remote_code               
 
@@ -203,7 +182,7 @@ internlm2-1_8b-reward
 
     query = "<|im_start|>user\nHello! What's your name?<|im_end|>\n<|im_start|>assistant\nMy name is InternLM2! A helpful AI assistant. What can I do for you?<|im_end|>\n<|reward|>"
 
-    url = "http://127.0.0.1:8080/get_score"
+    url = "http://127.0.0.1:8000/get_score"
     headers = {'Content-Type': 'application/json'}
 
     data = {
