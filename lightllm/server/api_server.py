@@ -435,7 +435,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
     parser.add_argument("--simple_constraint_mode", action="store_true", help="output constraint mode")
-
+    parser.add_argument(
+        "--first_token_constraint_mode",
+        action="store_true",
+        help="""constraint the first token allowed range,
+                        use env FIRST_ALLOWED_TOKENS to set the range, like FIRST_ALLOWED_TOKENS=1,2 ..""",
+    )
     parser.add_argument(
         "--enable_multimodal", action="store_true", help="Whether or not to allow to load additional multimodal models."
     )
@@ -546,6 +551,7 @@ def main():
         args.token_healing_mode,
         args.use_reward_model,
         args.return_all_prompt_logprobs,
+        args.first_token_constraint_mode,
     ].count(True) <= 1
     # 部分模式目前还无法与dynamic_prompt_cache一起跑，to do。
     if args.use_dynamic_prompt_cache:

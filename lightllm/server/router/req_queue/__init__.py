@@ -14,5 +14,7 @@ def build_req_queue(args, router):
         return ContinuesBatchQueue(args, router)
     if args.simple_constraint_mode:
         return ContinuesBatchQueue(args, router)
+    if args.first_token_constraint_mode:
+        return ContinuesBatchQueue(args, router)
 
     return ContinuesBatchQueue(args, router)

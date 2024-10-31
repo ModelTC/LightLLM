@@ -91,6 +91,7 @@ class RouterManager:
                 "max_req_num": self.args.running_max_req_size + 8,
                 "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
                 "nccl_port": self.args.nccl_port,
+                "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
                 "is_splitfuse_mode": self.is_splitfuse_mode,
                 "splitfuse_block_size": self.splitfuse_block_size,
                 "is_token_healing": self.args.token_healing_mode,
