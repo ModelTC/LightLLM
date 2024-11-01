@@ -1,7 +1,17 @@
 ## Build the docs
 
 ```bash
+# Install lightllm
+
+# git clone https://github.com/ModelTC/lightllm.git
+# cd lightllm
+pip install --no-deps .  
+```
+
+```bash
 # Install dependencies.
+
+# cd docs/CN
 pip install -r requirements-docs.txt
 
 # Build the docs.

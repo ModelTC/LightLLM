@@ -8,8 +8,5 @@ sphinxcontrib.openapi
 
 # packages to install to build the documentation
 pydantic
--f https://download.pytorch.org/whl/cpu
-torch
-py-cpuinfo
-transformers
 openai # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
+numpy
