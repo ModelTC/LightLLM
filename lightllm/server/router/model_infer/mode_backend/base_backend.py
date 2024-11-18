@@ -50,6 +50,8 @@ from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferBatch, InferReq, InferSamplingParams, requests_mapping
+from lightllm.server.router.token_load import TokenLoad
+from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 
 
 class ModeBackend:
@@ -62,6 +64,9 @@ class ModeBackend:
 
         world_size = kvargs["world_size"]
         self.args = kvargs.get("args", None)
+        # p d 分离模式下会有特殊的一些初始化, 所以需要传递
+        # 模式参数到模型的初始化过程中进行控制
+        self.run_mode = "normal" if self.args is None else self.args.run_mode
         self.is_multimodal = False
         self.tp_rank = kvargs["rank_id"]
         self.world_size = kvargs["world_size"]
@@ -77,12 +82,24 @@ class ModeBackend:
         self.logger = init_logger(__name__)
 
         self.weight_dir = kvargs["weight_dir"]
+        nccl_port_str = str(kvargs["nccl_port"])
+        self.shared_token_load = TokenLoad(f"{nccl_port_str}_shared_token_load", 1)
+        # p d 分离模式，decode节点才会使用的参数
+        self.pd_rpyc_port = kvargs.get("pd_rpyc_port", None)
         max_total_token_num = kvargs["max_total_token_num"]
 
         dist.init_process_group(
             "nccl", init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}', rank=self.tp_rank, world_size=world_size
         )
         torch.cuda.set_device(self.tp_rank)
+
+        # 为 p d 分离模式添加的全局锁管理，用于做一些同步操作。 一定需要在
+        # init_process_group 之后调用
+        g_infer_state_lock.obj = InferStateLock(name=nccl_port_str)
+        self.infer_state_lock = g_infer_state_lock
+        # 防止InferStateLock 中的全局共享信息被重复异常初始化,导致同步异常的问题。
+        # 所以做一次barrier等待
+        dist.barrier()
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
@@ -104,6 +121,7 @@ class ModeBackend:
             "disable_cudagraph": kvargs.get("disable_cudagraph", False),
             "mem_fraction": kvargs.get("mem_fraction", 0.9),
             "batch_max_tokens": kvargs.get("batch_max_tokens", None),
+            "run_mode": self.run_mode,
         }
 
         is_weight_only_quant = any("w6a16" in mode_ or "w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode)
@@ -219,11 +237,8 @@ class ModeBackend:
                     self.is_multimodal = True
                 else:
                     raise Exception(f"can not support {self.model_type} now")
-        except Exception as e:
-            self.logger.error(f"load model error: {str(e)} {e} {type(e)}")
-            import traceback
-
-            traceback.print_exc()
+        except BaseException as e:
+            self.logger.exception(str(e))
             raise e
 
         set_random_seed(2147483647)
@@ -256,6 +271,7 @@ class ModeBackend:
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def add_batch(self, batch_id, reqs):
+        g_infer_state_lock.acquire()
         batch_data = InferBatch.init_batch(
             batch_id,
             reqs,
@@ -266,6 +282,7 @@ class ModeBackend:
             self.radix_cache,
         )
         self.cache[batch_id] = batch_data
+        g_infer_state_lock.release()
 
         # 将更新后的状态返回给调用方用于router中请求的状态
         ans = {}
@@ -284,17 +301,21 @@ class ModeBackend:
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def filter_batch(self, batch_id, req_id_list, finished_req_id_list):
+        g_infer_state_lock.acquire()
         batch = self.cache.pop(batch_id)
         filter_batch = batch.filter(req_id_list, finished_req_id_list)
         del batch
         self.cache[batch_id] = filter_batch
+        g_infer_state_lock.release()
         return
 
     def pause_reqs(self, batch_id, req_list):
+        g_infer_state_lock.acquire()
         batch1 = self.cache.pop(batch_id)
         batch2 = batch1.pause_reqs(req_list)
         self.cache[batch_id] = batch2
         del batch1
+        g_infer_state_lock.release()
         return
 
     # @calculate_time(show=True, min_cost_ms=0.1)
@@ -309,7 +330,9 @@ class ModeBackend:
 
     # @calculate_time(show=True, min_cost_ms=10)
     def remove_batch(self, batch_id):
+        g_infer_state_lock.acquire()
         batch = self.cache.pop(batch_id)
         batch.free_self()
         del batch
+        g_infer_state_lock.release()
         return

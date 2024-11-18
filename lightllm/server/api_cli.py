@@ -3,8 +3,35 @@ import argparse
 
 def make_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--run_mode",
+        type=str,
+        choices=["normal", "prefill", "decode", "pd_master"],
+        default="normal",
+        help="set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode",
+    )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+
+    parser.add_argument(
+        "--pd_master_ip",
+        type=str,
+        default="127.0.0.1",
+        help="when run_mode set to prefill or decode, you need set this pd_mater_ip",
+    )
+    parser.add_argument(
+        "--pd_master_port",
+        type=int,
+        default=1212,
+        help="when run_mode set to prefill or decode, you need set this pd_mater_port",
+    )
+    parser.add_argument(
+        "--pd_decode_rpyc_port",
+        type=int,
+        default=42000,
+        help="p d mode, decode node used for kv move manager rpyc server port",
+    )
 
     parser.add_argument(
         "--model_name",
@@ -60,7 +87,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
     )
     parser.add_argument("--tp", type=int, default=1, help="model tp parral size, the default is 1")
-    parser.add_argument("--max_req_input_len", type=int, default=2048, help="the max value for req input tokens num")
     parser.add_argument(
         "--max_req_total_len", type=int, default=2048 + 1024, help="the max value for req_input_len + req_output_len"
     )
@@ -145,10 +171,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         choices=[None, "head", "center"],
         default=None,
-        help="""use to select the handle way when input token len > max_req_input_len.
-                        None : raise Exception
-                        head : remove some head tokens to make input token len <= max_req_input_len
-                        center : remove some tokens in center loc to make input token len <= max_req_input_len""",
+        help="""use to select the handle way when input_token_len + max_new_tokens > max_req_total_len.
+        None : raise Exception
+        head : remove some head tokens to make input_token_len + max_new_tokens <= max_req_total_len
+        center : remove some tokens in center loc to make input_token_len + max_new_tokens <= max_req_total_len""",
     )
     parser.add_argument("--use_tgi_api", action="store_true", help="use tgi input and ouput format")
     parser.add_argument(

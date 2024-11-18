@@ -5,6 +5,7 @@ from fastapi.responses import Response, StreamingResponse, JSONResponse
 from fastapi.encoders import jsonable_encoder
 from .sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
+from .httpserver.manager import HttpServerManager
 import json
 
 
@@ -51,7 +52,7 @@ def format_tgi_params(params):
     return params
 
 
-async def tgi_generate_impl(request: Request, g_id_gen, httpserver_manager) -> Response:
+async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerManager) -> Response:
 
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
@@ -61,12 +62,8 @@ async def tgi_generate_impl(request: Request, g_id_gen, httpserver_manager) -> R
     sampling_params.verify()
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
-    multimodal_params.verify_and_preload()
 
-    group_request_id = g_id_gen.generate_id()
-    results_generator = httpserver_manager.generate(
-        prompt, sampling_params, group_request_id, multimodal_params, request=request
-    )
+    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
 
     # Non-streaming case
     final_output_dict = collections.defaultdict(list)
@@ -77,11 +74,6 @@ async def tgi_generate_impl(request: Request, g_id_gen, httpserver_manager) -> R
     prompt_token_ids = None
     is_first_metadata = True
     async for sub_req_id, request_output, metadata, finish_status in results_generator:
-        if await request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await httpserver_manager.abort(group_request_id)
-            return Response(status_code=499)
-
         # when set "--return_all_prompt_logprobs", the first token metadata will contains
         # prompt_logprobs and prompt_token_ids
         if is_first_metadata:
@@ -124,7 +116,7 @@ async def tgi_generate_impl(request: Request, g_id_gen, httpserver_manager) -> R
     return JSONResponse(content=json_compatible_item_data)
 
 
-async def tgi_generate_stream_impl(request: Request, g_id_gen, httpserver_manager) -> Response:
+async def tgi_generate_stream_impl(request: Request, httpserver_manager: HttpServerManager) -> Response:
 
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
@@ -136,12 +128,8 @@ async def tgi_generate_stream_impl(request: Request, g_id_gen, httpserver_manage
         raise Exception("stream api only support best_of == 1")
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
-    multimodal_params.verify_and_preload()
 
-    group_request_id = g_id_gen.generate_id()
-    results_generator = httpserver_manager.generate(
-        prompt, sampling_params, group_request_id, multimodal_params, request=request
-    )
+    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -171,10 +159,5 @@ async def tgi_generate_stream_impl(request: Request, g_id_gen, httpserver_manage
 
             yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")
 
-    async def abort_request() -> None:
-        await httpserver_manager.abort(group_request_id)
-
     background_tasks = BackgroundTasks()
-    # Abort the request if the client disconnects.
-    background_tasks.add_task(abort_request)
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)

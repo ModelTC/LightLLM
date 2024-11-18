@@ -40,6 +40,7 @@ class InferSamplingParams:
         input_penalty: bool = False,
         regular_constraint: Optional[str] = None,
         allowed_token_ids: Optional[List[int]] = None,
+        move_kv_to_decode_node: Optional[bool] = None,
     ) -> None:
         self.best_of = best_of
         self.do_sample = do_sample
@@ -62,6 +63,8 @@ class InferSamplingParams:
         self.regex_guide = None
         self.fsm_current_state: int = 0
         self.allowed_token_ids = allowed_token_ids
+        # p d mode use params
+        self.move_kv_to_decode_node = move_kv_to_decode_node
         # this check is not very good to placed here. to do...
         if self.allowed_token_ids is not None:
             if not all(e < vocab_size for e in self.allowed_token_ids):
@@ -313,7 +316,7 @@ class InferBatch:
                         value_tensor = value_tensor.long().cuda()
                         mem_manager.add_refs(value_tensor)  # 加 refs
                         req_manager.req_to_token_indexs[r_obj.req_idx, 0:ready_cache_len] = value_tensor
-                        r_obj.cur_kv_len = ready_cache_len
+                        r_obj.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64
 
             # 初始化之后 所有请求状态置换为 RUNNING 状态
             r_obj.req_status = ReqRunStatus.RUNNING
@@ -420,7 +423,8 @@ class InferBatch:
             req.req_status = pause_way
             self.request_ids.remove(request_id)
             if pause_way == ReqRunStatus.PAUSED_AND_OFFLOAD:
-                self._free_a_req_mem(free_token_index, req)
+                # 不支持多输出的情况
+                self._free_a_req_mem(free_token_index, req, is_group_finished=True)
                 req.cur_kv_len = 0
 
         if len(free_token_index) != 0:

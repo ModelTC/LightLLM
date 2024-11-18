@@ -67,7 +67,7 @@ class Monitor:
         self.create_counter("lightllm_request_failure")
         self.create_counter("lightllm_batch_inference_count", labelnames=["method"])
 
-        max_req_input_len = args.max_req_input_len
+        max_req_input_len = args.max_req_total_len
         input_len_buckets = [max_req_input_len / 100.0 * (i + 1) for i in range(-1, 100)]
         self.create_histogram("lightllm_request_input_length", input_len_buckets)
         self.create_histogram("lightllm_cache_length", input_len_buckets)

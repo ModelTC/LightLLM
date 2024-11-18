@@ -57,8 +57,14 @@ def splitfuse_prepare_decode_inputs(batch: InferBatch, splitfuse_block_size, rad
         input_ids.extend(req.input_token_ids[seq_len - split_len : seq_len])
 
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cuda")
+
+    if radix_cache is not None:
+        radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
+    mem_indexes = batch.req_manager.mem_manager.alloc(input_ids.shape[0])
+
     kwargs = {
         "input_ids": input_ids,
+        "mem_indexes": mem_indexes,
         "decode_req_num": decode_req_num,
         "decode_total_token_num": decode_total_token_num,
         "decode_b_req_idx": torch.tensor(decode_b_req_idx, dtype=torch.int32, device="cuda"),
@@ -74,9 +80,5 @@ def splitfuse_prepare_decode_inputs(batch: InferBatch, splitfuse_block_size, rad
         "prefill_max_split_seq_len_in_batch": prefill_max_split_seq_len_in_batch,
         "prefill_b_seq_len": torch.tensor(prefill_b_seq_len, dtype=torch.int32, device="cuda"),
     }
-
-    # dynamic prompt cache 准备 token
-    if radix_cache is not None:
-        radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
 
     return kwargs, decode_reqs, prefill_reqs

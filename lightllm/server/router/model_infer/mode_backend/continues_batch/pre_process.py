@@ -5,6 +5,7 @@ from lightllm.server.io_struct import ReqRunStatus
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 
 # @calculate_time(show=True, min_cost_ms=1)
 def prepare_prefill_inputs(batch: InferBatch, radix_cache: RadixCache, is_multimodal=False):
@@ -46,11 +47,20 @@ def prepare_prefill_inputs(batch: InferBatch, radix_cache: RadixCache, is_multim
     nopad_b_start_loc = torch.tensor(nopad_b_start_loc, dtype=torch.int32, device="cuda")
     nopad_b_seq_len = torch.tensor(nopad_b_seq_len, dtype=torch.int32, device="cuda")
     b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cuda")
+
+    # dynamic prompt cache 准备 token
+    g_infer_state_lock.acquire()
+    if radix_cache is not None:
+        radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
+    mem_indexes = batch.req_manager.mem_manager.alloc(input_ids.shape[0])
+    g_infer_state_lock.release()
+
     kwargs = {
         "batch_size": len(batch),
         "total_token_num": nopad_total_token_num,
         "max_len_in_batch": nopad_max_len_in_batch,
         "input_ids": input_ids,
+        "mem_indexes": mem_indexes,
         "b_req_idx": nopad_b_req_idx,
         "b_start_loc": nopad_b_start_loc,
         "b_seq_len": nopad_b_seq_len,
@@ -59,10 +69,6 @@ def prepare_prefill_inputs(batch: InferBatch, radix_cache: RadixCache, is_multim
     }
     if is_multimodal:
         kwargs["multimodal_params"] = batch_multimodal_params
-
-    # dynamic prompt cache 准备 token
-    if radix_cache is not None:
-        radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
 
     return kwargs, run_reqs
 
@@ -96,18 +102,23 @@ def prepare_decode_inputs(batch: InferBatch, radix_cache: RadixCache):
     nopad_b_req_idx = torch.tensor(nopad_b_req_idx, dtype=torch.int32, device="cuda")
     nopad_b_start_loc = torch.tensor(nopad_b_start_loc, dtype=torch.int32, device="cuda")
     nopad_b_seq_len = torch.tensor(nopad_b_seq_len, dtype=torch.int32, device="cuda")
+
+    # dynamic prompt cache 准备 token
+    g_infer_state_lock.acquire()
+    if radix_cache is not None:
+        radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
+    mem_indexes = batch.req_manager.mem_manager.alloc(input_ids.shape[0])
+    g_infer_state_lock.release()
+
     kwargs = {
         "batch_size": len(batch),
         "total_token_num": nopad_total_token_num,
         "max_len_in_batch": nopad_max_len_in_batch,
         "input_ids": input_ids,
+        "mem_indexes": mem_indexes,
         "b_req_idx": nopad_b_req_idx,
         "b_start_loc": nopad_b_start_loc,
         "b_seq_len": nopad_b_seq_len,
         "is_prefill": False,
     }
-    # dynamic prompt cache 准备 token
-    if radix_cache is not None:
-        radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
-
     return kwargs, run_reqs

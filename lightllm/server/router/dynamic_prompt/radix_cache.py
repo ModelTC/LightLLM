@@ -133,7 +133,9 @@ class RadixCache:
         if value is None:
             value = key
 
-        assert len(key) == len(value) and len(key) >= 1
+        assert len(key) == len(value)  # and len(key) >= 1
+        if len(key) == 0:
+            return 0
         return self._insert_helper(self.root_node, key, value)
 
     def _insert_helper(self, node: TreeNode, key, value):
@@ -302,12 +304,23 @@ class RadixCache:
         self.refed_tokens_num.arr[0] = 0
         return
 
-    def dec_node_ref_counter(self, node):
+    def dec_node_ref_counter(self, node: TreeNode):
+        if node is None:
+            return
+        # 如果减引用的是叶节点，需要先从 evict_tree_set 中移除
+        old_node = node
+        if old_node.is_leaf():
+            self.evict_tree_set.discard(old_node)
+
         while node is not None:
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
             node.ref_counter -= 1
             node = node.parent
+
+        # 加回。
+        if old_node.is_leaf():
+            self.evict_tree_set.add(old_node)
         return
 
     def get_refed_tokens_num(self):

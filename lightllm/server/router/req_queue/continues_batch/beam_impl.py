@@ -50,7 +50,9 @@ class BeamContinuesBatchQueue(BaseQueue):
             new_batch_first_router_need_tokens += req.cur_output_len
         new_batch_first_router_need_tokens += req.input_len
 
-        ok_token_num = need_max_token_num < self.max_total_tokens
+        ok_token_num = (
+            need_max_token_num + self.router.shared_token_load.get_frozened_token_count() < self.max_total_tokens
+        )
 
         if req.req_status != ReqRunStatus.PAUSED_AND_OFFLOAD:
             ok_req_num = len(self.cache_len_list) + len(self.pause_req_dict) <= self.running_max_req_size
@@ -64,7 +66,10 @@ class BeamContinuesBatchQueue(BaseQueue):
         ok_prefill = new_batch_first_router_need_tokens <= self.batch_max_tokens
 
         if ok_token_num and ok_req_num and ok_prefill:
-            self.router.shared_token_load.set_dynamic_max_load(need_max_token_num / self.max_total_tokens)
+            self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num)
+            self.router.shared_token_load.set_dynamic_max_load(
+                (need_max_token_num + self.router.shared_token_load.get_frozened_token_count()) / self.max_total_tokens
+            )
             return True, new_batch_first_router_need_tokens
         else:
             return False, new_batch_first_router_need_tokens
@@ -136,9 +141,7 @@ class BeamContinuesBatchQueue(BaseQueue):
             else:
                 return False
 
-    def calcu_batch_token_load(self, current_batch: Batch):
-        if current_batch is None:
-            return 0.0
+    def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):
         is_busy = self.is_busy()
         self._init_cache_list(current_batch, is_busy)
         self.cache_len_list.sort(key=lambda x: -x[1][1])
@@ -155,4 +158,7 @@ class BeamContinuesBatchQueue(BaseQueue):
                 assert cur_input_len - req.input_len >= 0
                 cumsum_len += cur_input_len - req.input_len  # 减去共享的部分
                 need_max_token_num = max(need_max_token_num, cumsum_len + index * cur_ouput_len)
-        return need_max_token_num / self.max_total_tokens
+        return (
+            need_max_token_num,
+            (need_max_token_num + self.router.shared_token_load.get_frozened_token_count()) / self.max_total_tokens,
+        )

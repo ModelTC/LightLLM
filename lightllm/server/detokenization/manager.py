@@ -9,6 +9,7 @@ from ..io_struct import BatchTokenIdOut, ReqDetokenizationState, BatchStrOut, Ab
 from ..req_id_generator import convert_sub_id_to_group_id
 from typing import Union
 from .decode import decode_token
+from .decode_mode_fix import decode_mode_fix
 from ..tokenizer import get_tokenizer
 import traceback
 
@@ -21,6 +22,7 @@ logger = init_logger(__name__)
 class DeTokenizationManager:
     def __init__(
         self,
+        args,
         eos_id,
         model_weightdir,
         tokenizor_mode,
@@ -28,6 +30,7 @@ class DeTokenizationManager:
         httpserver_port,
         trust_remote_code,
     ):
+        self.args = args
         context = zmq.asyncio.Context(2)
         self.recv_from_router = context.socket(zmq.PULL)
         self.recv_from_router.bind(f"tcp://127.0.0.1:{detokenization_port}")
@@ -40,6 +43,7 @@ class DeTokenizationManager:
         self.req_id_to_out = {}
         self.eos_id = eos_id
         self._init_get_token_id_to_token_str()
+        self.is_decode_mode = self.args.run_mode == "decode"
 
     def _init_get_token_id_to_token_str(self):
         self.token_id_to_token = {token_id: token for token, token_id in self.tokenizer.get_vocab().items()}
@@ -55,6 +59,9 @@ class DeTokenizationManager:
                     recv_obj, (BatchTokenIdOut, ReqDetokenizationState, AbortReq)
                 ), f"type is not right {type(recv_obj)}"
                 if isinstance(recv_obj, ReqDetokenizationState):
+                    if self.is_decode_mode:
+                        recv_obj = decode_mode_fix(recv_obj, self.tokenizer, self.eos_id)
+
                     # 将解序列对象复制 best_of 份， 并为其生成请求id
                     for delta_id in range(recv_obj.best_of):
                         recv_obj.request_id = recv_obj.group_req_id + delta_id
@@ -129,6 +136,7 @@ def start_detokenization_process(args, detokenization_port, httpserver_port, pip
 
     try:
         router = DeTokenizationManager(
+            args,
             args.eos_id,
             args.model_dir,
             args.tokenizer_mode,

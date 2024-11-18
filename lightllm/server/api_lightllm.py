@@ -4,10 +4,11 @@ from fastapi import BackgroundTasks, Request
 from fastapi.responses import Response, StreamingResponse
 from .sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
-import json
+from .httpserver.manager import HttpServerManager
+import ujson as json
 
 
-async def lightllm_get_score(request: Request, g_id_gen, httpserver_manager) -> Response:
+async def lightllm_get_score(request: Request, httpserver_manager: HttpServerManager) -> Response:
     request_dict = await request.json()
     prompt = request_dict.pop("chat")
     sample_params_dict = {"max_new_tokens": 1}
@@ -15,11 +16,7 @@ async def lightllm_get_score(request: Request, g_id_gen, httpserver_manager) -> 
     sampling_params.verify()
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
-    multimodal_params.verify_and_preload()
-    group_request_id = g_id_gen.generate_id()
-    results_generator = httpserver_manager.generate(
-        prompt, sampling_params, group_request_id, multimodal_params, request=request
-    )
+    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
 
     ret = {}
     # n === 1
@@ -31,7 +28,7 @@ async def lightllm_get_score(request: Request, g_id_gen, httpserver_manager) -> 
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
 
 
-async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> Response:
+async def lightllm_generate(request: Request, httpserver_manager: HttpServerManager) -> Response:
 
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
@@ -41,12 +38,8 @@ async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> R
     sampling_params.verify()
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
-    multimodal_params.verify_and_preload()
 
-    group_request_id = g_id_gen.generate_id()
-    results_generator = httpserver_manager.generate(
-        prompt, sampling_params, group_request_id, multimodal_params, request=request
-    )
+    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
 
     # Non-streaming case
     final_output_dict = collections.defaultdict(list)
@@ -103,7 +96,7 @@ async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> R
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
 
 
-async def lightllm_generate_stream(request: Request, g_id_gen, httpserver_manager) -> Response:
+async def lightllm_generate_stream(request: Request, httpserver_manager: HttpServerManager) -> Response:
 
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
@@ -116,12 +109,7 @@ async def lightllm_generate_stream(request: Request, g_id_gen, httpserver_manage
 
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
-    multimodal_params.verify_and_preload()
-
-    group_request_id = g_id_gen.generate_id()
-    results_generator = httpserver_manager.generate(
-        prompt, sampling_params, group_request_id, multimodal_params, request=request
-    )
+    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -143,10 +131,30 @@ async def lightllm_generate_stream(request: Request, g_id_gen, httpserver_manage
 
             yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")
 
-    async def abort_request() -> None:
-        await httpserver_manager.abort(group_request_id)
+    background_tasks = BackgroundTasks()
+    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+
+
+async def lightllm_pd_generate_stream(request: Request, httpserver_manager: HttpServerManager) -> Response:
+
+    request_dict = await request.json()
+    prompt = request_dict.pop("inputs")
+    sample_params_dict = request_dict["parameters"]
+    _ = sample_params_dict.pop("return_details", False)
+    sampling_params = SamplingParams(**sample_params_dict)
+    sampling_params.verify()
+    if sampling_params.best_of != 1:
+        raise Exception("stream api only support best_of == 1")
+
+    multimodal_params_dict = request_dict.get("multimodal_params", {})
+    multimodal_params = MultimodalParams(**multimodal_params_dict)
+    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
+
+    # Streaming case
+    async def stream_results() -> AsyncGenerator[bytes, None]:
+        async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            ret = [sub_req_id, request_output, metadata, finish_status.value]
+            yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")
 
     background_tasks = BackgroundTasks()
-    # Abort the request if the client disconnects.
-    background_tasks.add_task(abort_request)
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)

@@ -1,9 +1,12 @@
 from .continues_batch.impl import ContinuesBatchQueue
 from .continues_batch.beam_impl import BeamContinuesBatchQueue
 from .splitfuse.impl import SplitFuseQueue
+from .continues_batch.pd_decode_impl import ContinuesBatchQueueForPDDecode
 
 
 def build_req_queue(args, router):
+    if args.run_mode == "decode":
+        return ContinuesBatchQueueForPDDecode(args, router)
     if args.splitfuse_mode:
         return SplitFuseQueue(args, router)
     if args.beam_mode:

@@ -52,6 +52,7 @@ class CudaGraph:
             prefill_input_len = 1
             dummy_input_ids = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
             b_req_idx = model.req_manager.alloc(batch_size).int()
+            mem_indexes = model.mem_manager.alloc(len(dummy_input_ids))
             b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
             b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
             b_start_loc = torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
@@ -61,6 +62,7 @@ class CudaGraph:
                 total_token_num,
                 prefill_input_len,
                 dummy_input_ids,
+                mem_indexes,
                 b_req_idx,
                 b_start_loc,
                 b_seq_len,
@@ -68,6 +70,7 @@ class CudaGraph:
                 is_prefill=True,
                 multimodal_params=[],
             )
+            mem_indexes = None
             prob_out = torch.softmax(logics, dim=-1)
             logics = None
             predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
@@ -79,16 +82,19 @@ class CudaGraph:
             b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
             total_token_num += batch_size
             b_seq_len += 1
+            mem_indexes = model.mem_manager.alloc(len(predict_ids))
             logics = model.forward(
                 batch_size,
                 total_token_num,
                 prefill_input_len + 1,
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
+                mem_indexes,
                 b_req_idx,
                 b_start_loc,
                 b_seq_len,
                 is_prefill=False,
             )
+            mem_indexes = None
             model.mem_manager.free_all()
             model.req_manager.free_all()
             # release local tensors

@@ -3,11 +3,13 @@ import time
 import uuid
 import uvloop
 import asyncio
+import torch
 import rpyc
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
 import zmq.asyncio
+import torch.multiprocessing as mp
 from typing import Dict, List, Optional
 from ..sampling_params import SamplingParams
 from ..io_struct import Req, NormalReq, SplitFuseReq, TokenHealingReq, Batch
@@ -26,6 +28,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.server.metrics.manager import MetricClient
+from lightllm.common.basemodel.infer_lock import g_router_lock
 
 logger = init_logger(__name__)
 
@@ -44,7 +47,9 @@ class RouterManager:
         self.radix_cache_client = None
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
-        self.shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load")
+        self.shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load", 1)
+        self.shared_token_load.set_estimated_peak_token_count(0)
+        self.shared_token_load.set_frozened_token_count(0)
         self.shared_token_load.set_current_load(0.0)
         self.shared_token_load.set_logical_max_load(0.0)
         self.shared_token_load.set_dynamic_max_load(0.0)
@@ -69,13 +74,32 @@ class RouterManager:
 
         self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
         self.metric_client = MetricClient(metric_port)
+        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
+        # p d 分离模式下，需要调度锁来同步调度端和推理端的一些数据操作
+        # 主要是为了防止调度失误，造成 OOM 等错误
+        self.router_lock = mp.Lock()
+        g_router_lock.obj = self.router_lock
         return
 
     async def wait_to_model_ready(self):
         # 初始化模型
         self.model_rpcs: List[ModelRpcClient] = []
+        # 用于 kv move 管理进程 和 推理进程进行tensor信息的交互。
+        self.info_queues: List[torch.multiprocessing.Queue] = [
+            torch.multiprocessing.Queue() for _ in range(self.world_size)
+        ]
+        self.mem_queues: List[torch.multiprocessing.Queue] = [
+            torch.multiprocessing.Queue() for _ in range(self.world_size)
+        ]
         for rank_id in range(self.world_size):
-            rpc_model = await start_model_process(port=self.model_rpc_ports[rank_id], world_size=self.world_size)
+            rpc_model = await start_model_process(
+                args=self.args,
+                port=self.model_rpc_ports[rank_id],
+                world_size=self.world_size,
+                info_queue=self.info_queues[rank_id],
+                mem_queue=self.mem_queues[rank_id],
+                router_lock=self.router_lock,
+            )
             self.model_rpcs.append(rpc_model)
 
         init_model_ret = []
@@ -107,6 +131,7 @@ class RouterManager:
                 "disable_cudagraph": self.args.disable_cudagraph,
                 "mem_fraction": self.args.mem_fraction,
                 "batch_max_tokens": self.args.batch_max_tokens,
+                "pd_rpyc_port": self.args.pd_tp_infer_rpyc_ports[rank_id],  # 非 pd 模式可以不设置
             }
             init_model_ret.append(self.model_rpcs[rank_id].init_model(kvargs))
 
@@ -120,6 +145,23 @@ class RouterManager:
             )
         self.req_queue = build_req_queue(self.args, self)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
+
+        if self.args.run_mode == "prefill":
+            # 启动 prefill kv move 管理进程
+            from lightllm.server.router.model_infer.mode_backend.continues_batch.prefill_node_impl import (
+                start_prefill_kv_move_manager_process,
+            )
+
+            start_prefill_kv_move_manager_process(self.args, self.info_queues, self.mem_queues)
+
+        if self.args.run_mode == "decode":
+            # 启动 decode kv move 管理进程
+            from lightllm.server.router.model_infer.mode_backend.continues_batch.decode_node_impl import (
+                start_decode_kv_move_manager_process,
+            )
+
+            start_decode_kv_move_manager_process(self.args, self.info_queues, self.mem_queues)
+
         return
 
     def add_req(
@@ -191,9 +233,7 @@ class RouterManager:
                         f"token used ratio: {token_ratio1} not contain prompt cache tree unrefed tokens\n"
                         f"token used ratio: {token_ratio2} contain prompt cache tree unrefed tokens"
                     )
-                    self.shared_token_load.set_current_load(token_ratio1)
-                    self.req_queue.update_token_load(self.running_batch)
-                    pass
+                self.req_queue.update_token_load(self.running_batch, force_update=False)
                 self.stats_tool.print_stats()
                 self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
                 self.metric_client.gauge_set("lightllm_batch_pause_size", len(self.req_queue.pause_req_dict))
@@ -203,8 +243,7 @@ class RouterManager:
                     int(self.shared_token_load.get_dynamic_max_load() * self.max_total_token_num),
                 )
             else:
-                self.shared_token_load.set_dynamic_max_load(0.0)
-                self.shared_token_load.set_current_load(0.0)
+                self.req_queue.update_token_load(self.running_batch, force_update=True)
                 if counter_count % 300 == 0:
                     self.metric_client.gauge_set("lightllm_batch_current_size", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
@@ -405,6 +444,10 @@ class RouterManager:
         return
 
     def _can_decode(self, batch: Batch):
+        # p d 分离模式下，目前只能使用保守调度，保证请求放入进行decode的时候
+        # 显存token肯定是够用的
+        if self.is_pd_run_mode:
+            return True
         return batch.batch_decode_need_tokens + self.get_used_tokens() <= self.max_total_token_num
 
     def _send_to_detokenization_proc(self, batch: Batch, req_ans):

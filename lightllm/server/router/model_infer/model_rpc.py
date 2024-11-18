@@ -1,5 +1,7 @@
 import asyncio
 import rpyc
+import torch
+import torch.multiprocessing as mp
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from rpyc.utils.classic import obtain
@@ -13,6 +15,8 @@ from lightllm.server.router.model_infer.mode_backend import (
     TokenHealingBackend,
     SimpleConstraintBackend,
     FirstTokenConstraintBackend,
+    ContinuesBatchBackendForPrefillNode,
+    ContinuesBatchBackendForDecodeNode,
 )
 from lightllm.utils.log_utils import init_logger
 
@@ -20,6 +24,13 @@ logger = init_logger(__name__)
 
 
 class ModelRpcServer(rpyc.Service):
+    def __init__(self, args, info_queue: mp.Queue, mem_queue: mp.Queue):
+        super().__init__()
+        self.args = args
+        self.info_queue = info_queue
+        self.mem_queue = mem_queue
+        return
+
     def exposed_init_model(self, kvargs):
         self.world_size = kvargs["world_size"]
         if self.world_size != 1:
@@ -35,11 +46,18 @@ class ModelRpcServer(rpyc.Service):
         is_first_token_constraint_mode = kvargs.get("is_first_token_constraint_mode", False)
         if kvargs.get("args", None) is not None:
             is_simple_constraint_mode = kvargs.get("args", None).simple_constraint_mode
+            is_prefill_node = kvargs.get("args", None).run_mode == "prefill"
+            is_decode_node = kvargs.get("args", None).run_mode == "decode"
         else:
             is_simple_constraint_mode = False
+            is_prefill_node = False
+            is_decode_node = False
         # use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
-
-        if use_reward_model:
+        if is_prefill_node:
+            self.backend = ContinuesBatchBackendForPrefillNode(self.info_queue, self.mem_queue)
+        elif is_decode_node:
+            self.backend = ContinuesBatchBackendForDecodeNode(self.info_queue, self.mem_queue)
+        elif use_reward_model:
             self.backend = RewardModelBackend()
         elif is_splitfuse_mode:
             self.backend = SplitFuseBackend()
@@ -225,28 +243,31 @@ class ModelRpcClient:
             return ans
 
 
-def _init_env(port):
+def _init_env(args, port, info_queue, mem_queue, router_lock):
     # 注册graceful 退出的处理
     from lightllm.utils.graceful_utils import graceful_registry
     import inspect
 
     graceful_registry(inspect.currentframe().f_code.co_name)
 
+    # 将调度锁注册到全局的共享变量中
+    from lightllm.common.basemodel.infer_lock import g_router_lock
+
+    g_router_lock.obj = router_lock
+
     from rpyc.utils.server import ThreadedServer
 
-    t = ThreadedServer(ModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
+    t = ThreadedServer(ModelRpcServer(args, info_queue, mem_queue), port=port, protocol_config={"allow_pickle": True})
     t.start()
     return
 
 
-async def start_model_process(port, world_size):
+async def start_model_process(args, port, world_size, info_queue: mp.Queue, mem_queue: mp.Queue, router_lock: mp.Queue):
     # 单卡时不使用 rpc
     if world_size == 1:
-        return ModelRpcClient(ModelRpcServer(), world_size)
+        return ModelRpcClient(ModelRpcServer(args, info_queue, mem_queue), world_size)
 
-    import multiprocessing
-
-    proc = multiprocessing.Process(target=_init_env, args=(port,))
+    proc = mp.Process(target=_init_env, args=(args, port, info_queue, mem_queue, router_lock))
     proc.start()
     await asyncio.sleep(2)
     repeat_count = 0

@@ -1,10 +1,14 @@
 import time
 import asyncio
 import enum
+from dataclasses import dataclass
 from .sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from typing import Dict, List, Optional, Tuple, Union
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class ReqRunStatus(enum.Enum):

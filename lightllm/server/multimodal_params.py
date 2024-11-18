@@ -26,6 +26,8 @@ class ImageItem:
         try:
             if self._type == "url":
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
+                # 这个地方获取数据有问题，应该修改为异步协程方式获取，否则会阻塞原有的线程
+                # to do
                 ret = requests.get(self._data, timeout=timeout)
                 img_data = ret.content
             elif self._type == "base64":
@@ -56,6 +58,15 @@ class ImageItem:
         ret["token_num"] = self.token_num
         return ret
 
+    def to_origin_dict(self):
+        """
+        将内容转换为原始请求的形式，主要用于请求转发
+        """
+        ret = {}
+        ret["type"] = self._type
+        ret["data"] = self._data
+        return ret
+
 
 class MultimodalParams:
     def __init__(
@@ -73,4 +84,12 @@ class MultimodalParams:
     def to_dict(self):
         ret = {}
         ret["images"] = [i.to_dict() for i in self.images]
+        return ret
+
+    def to_origin_dict(self):
+        """
+        将内容转换为原始请求的形式，主要用于请求转发
+        """
+        ret = {}
+        ret["images"] = [i.to_origin_dict() for i in self.images]
         return ret
