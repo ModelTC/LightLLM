@@ -7,7 +7,7 @@ import socket
 import pickle
 import inspect
 import setproctitle
-from typing import List
+from typing import List, Union
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 
@@ -18,6 +18,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 from rpyc.utils.classic import obtain
 
 
@@ -58,6 +59,9 @@ class VisualManager:
         self.args = args
         self.visual_model_rpc_ports = visual_model_rpc_ports
         self.shm_req_manager = ShmReqManager()
+        self.profiler: "ProcessProfiler|None" = (
+            ProcessProfiler(args.enable_profiling, name="lightllm-visual_server") if args.enable_profiling else None
+        )
 
     async def wait_to_model_ready(self):
 
@@ -90,6 +94,7 @@ class VisualManager:
                     "quant_type": self.args.vit_quant_type,
                     "quant_cfg": self.args.vit_quant_cfg,
                     "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
+                    "profiler": self.args.enable_profiling,
                 }
                 init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)
@@ -171,9 +176,19 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                    recv_req: Union[GroupReqIndexes, ProfilerCmd] = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
                         self.waiting_reqs.append(recv_req)
+                    elif isinstance(recv_req, ProfilerCmd):
+                        self.profiler.cmd(recv_req)
+                        tasks = []
+                        for vit_dp_rank in range(self.vit_dp):
+                            for vit_tp_rank in range(self.vit_tp):
+                                task = asyncio.create_task(
+                                    self.model_rpcs[vit_dp_rank][vit_tp_rank].profiler_cmd(recv_req)
+                                )
+                                tasks.append(task)
+                        await asyncio.gather(*tasks)
                     else:
                         assert False, f"Error Req Inf {recv_req}"
                 self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)

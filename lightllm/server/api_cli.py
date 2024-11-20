@@ -537,4 +537,19 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
+    parser.add_argument(
+        "--enable_profiling",
+        type=str,
+        choices=["torch_profiler", "nvtx"],
+        default=None,
+        help="""Enable profiler support.
+                This will expose '/profiler_start' and '/profiler_stop' API,
+                below profiling features will only been enabled in this range.
+                Options:
+                'torch_profiler': will setup torch.profiler.profile(), traces file will been saved to './trace',
+                or set by 'LIGHTLLM_TRACE_DIR' env;
+                'nvtx': will add NVTX marks for external profiler like NVIDIA Nsight System
+                (you should setup it by youself).
+                A NVTX named 'LIGHTLLM_PROFILE' will been added within the profiling range.""",
+    )
     return parser
