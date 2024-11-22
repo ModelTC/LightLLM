@@ -11,9 +11,7 @@ from lightllm.models.mistral.infer_struct import MistralInferStateInfo
 from lightllm.models.mistral.layer_infer.transformer_layer_infer import MistralTransformerLayerInfer
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 
-from lightllm.common.mem_utils import MemoryManager
-from lightllm.common.infer_utils import init_req_to_token_indexes
-from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
+from lightllm.common.mem_utils import select_mem_manager_class
 
 
 class MistralTpPartModel(TpPartBaseModel):
@@ -47,13 +45,12 @@ class MistralTpPartModel(TpPartBaseModel):
         # Dealing with head_dim_!=n_embed // num_attention_heads scenarios, such as mistral 13B
         head_dim = self.config["hidden_size"] // self.config["num_attention_heads"]
         head_dim = self.config.get("head_dim", head_dim)
-        self.mem_manager = MemoryManager(
-            self.max_total_token_num,  # [SYM] should be sliding window?
+        self.mem_manager = select_mem_manager_class(self.mode)(
+            self.max_total_token_num,
             dtype=self.data_type,
             head_num=self.config["num_key_value_heads"] // self.world_size_,
             head_dim=head_dim,
             layer_num=self.config["num_hidden_layers"],
-            always_copy=False,
             mem_fraction=self.mem_fraction,
         )
         return

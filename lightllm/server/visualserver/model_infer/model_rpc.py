@@ -10,7 +10,6 @@ from lightllm.server.router.model_infer.infer_batch import InferBatch
 from rpyc.utils.classic import obtain
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
-from lightllm.models.internlm_xcomposer.internlm_visual import InternVisionModel
 from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
@@ -54,8 +53,6 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = Qwen2VisionTransformerPretrainedModel(**model_cfg["vision_config"]).eval().bfloat16()
             elif self.model_type == "llava":
                 self.model = LlavaVisionModel()
-            elif self.model_type == "internlmxcomposer2":
-                self.model = InternVisionModel()
             elif self.model_type == "internvl_chat":
                 self.model = InternVLVisionModel()
             else:

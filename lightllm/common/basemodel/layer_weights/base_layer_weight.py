@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import threading
+from lightllm.common.basemodel.layer_weights.meta_weights import BaseWeight
 
 
 class BaseLayerWeight:
@@ -12,7 +13,10 @@ class BaseLayerWeight:
         """
         load weights
         """
-        pass
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name, None)
+            if isinstance(attr, BaseWeight):
+                attr.load_hf_weights(weights)
 
     def init_static_params(self):
         """
@@ -24,29 +28,13 @@ class BaseLayerWeight:
         """
         verify all load is ok
         """
-        raise Exception("must verify weights load ok")
-        pass
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name)
+            if isinstance(attr, BaseWeight):
+                assert attr.verify_load(), f"Loading {attr_name} of layers {self.layer_num_} fails."
 
     def _cuda(self, cpu_tensor):
         if self.tp_rank_ is None:
             return cpu_tensor.contiguous().to(self.data_type_).cuda()
         else:
             return cpu_tensor.contiguous().to(self.data_type_).cuda(self.tp_rank_)
-
-    def _try_cat_to(self, source_tensor_names, dest_name, cat_dim, handle_func=None):
-        if all(hasattr(self, src_name) for src_name in source_tensor_names) and not hasattr(self, dest_name):
-            with self.lock:
-                if all(hasattr(self, src_name) for src_name in source_tensor_names) and not hasattr(self, dest_name):
-                    assert all(
-                        not getattr(self, name, None).is_cuda for name in source_tensor_names
-                    ), "all not cuda tensor"
-                    tensors = [getattr(self, name, None) for name in source_tensor_names]
-                    ans = torch.cat(tensors, dim=cat_dim)
-                    if handle_func is not None:
-                        ans = handle_func(ans)
-                    else:
-                        ans = self._cuda(ans)
-                    setattr(self, dest_name, ans)
-                    for name in source_tensor_names:
-                        delattr(self, name)
-        return

@@ -21,6 +21,8 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     transformer_layer_infer_class = Deepseek2TransformerLayerInfer
 
     def __init__(self, kvargs):
+        self.disable_qk_absorb = os.getenv("DISABLE_QK_ABSORB", "False").upper() in ["ON", "TRUE", "1"]
+        self.disable_vo_absorb = os.getenv("DISABLE_VO_ABSORB", "False").upper() in ["ON", "TRUE", "1"]
         super().__init__(kvargs)
         return
 
@@ -52,13 +54,21 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         )
         return
 
-    def _init__weights(self):
+    def _init_weights(self):
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.tp_rank_, self.world_size_, self.data_type, network_config=self.config, mode=self.mode
         )
         self.trans_layers_weight = [
             self.transformer_weight_class(
-                i, self.tp_rank_, self.world_size_, self.data_type, network_config=self.config, mode=self.mode
+                i,
+                self.tp_rank_,
+                self.world_size_,
+                self.data_type,
+                network_config=self.config,
+                mode=self.mode,
+                quant_cfg=self.quant_cfg,
+                disable_qk_absorb=self.disable_qk_absorb,
+                disable_vo_absorb=self.disable_vo_absorb,
             )
             for i in range(self.config["n_layer"])
         ]
@@ -71,6 +81,27 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         )
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
+        return
+
+    def _init_infer_layer(self):
+        self.pre_infer = self.pre_layer_infer_class(
+            tp_rank=self.tp_rank_, world_size=self.world_size_, network_config=self.config, mode=self.mode
+        )
+        self.post_infer = self.post_layer_infer_class(
+            tp_rank=self.tp_rank_, world_size=self.world_size_, network_config=self.config, mode=self.mode
+        )
+        self.layers_infer = [
+            self.transformer_layer_infer_class(
+                i,
+                tp_rank=self.tp_rank_,
+                world_size=self.world_size_,
+                network_config=self.config,
+                mode=self.mode,
+                disable_qk_absorb=self.disable_qk_absorb,
+                disable_vo_absorb=self.disable_vo_absorb,
+            )
+            for i in range(self.config["n_layer"])
+        ]
         return
 
     def _init_to_get_yarn_rotary(self):

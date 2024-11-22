@@ -3,20 +3,22 @@ from multiprocessing import Queue
 import multiprocessing
 
 
-def test_model_inference(world_size, model_dir, model_class, batch_size, input_len, output_len, mode):
+def test_model_inference(world_size, model_class, batch_size, input_len, output_len, extra_model_kvargs):
     ans_queue = Queue()
     workers = []
     for rank_id in range(world_size):
         model_kvargs = {
             "tp_rank": rank_id,
             "world_size": world_size,
-            "weight_dir": model_dir,
-            "max_total_token_num": batch_size * (input_len + output_len),
             "load_way": "HF",
-            "mode": mode,
-            "max_req_num": batch_size,
+            "max_total_token_num": None,
+            "mem_faction": 0.9,
+            "max_req_num": max(batch_size, 1000),
+            "batch_max_tokens": input_len,
+            "run_mode": "normal",
             "max_seq_length": (input_len + output_len),
         }
+        model_kvargs.update(extra_model_kvargs)
 
         proc = multiprocessing.Process(
             target=tppart_model_infer, args=(model_class, model_kvargs, batch_size, input_len, output_len, ans_queue)
@@ -63,10 +65,12 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         b_seq_len[i] = input_len
 
     total_token_num = input_len * batch_size
+    mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0])
     logics = model_part.forward(
         batch_size,
         total_token_num,
         input_len,
+        mem_indexes,
         test_data,
         b_req_idx,
         b_start_loc,
@@ -82,10 +86,12 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
         total_token_num += batch_size
         b_seq_len += 1
+        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0])
         logics = model_part.forward(
             batch_size,
             total_token_num,
             input_len + i + 1,
+            mem_indexes,
             torch.from_numpy(predict_ids).cuda().reshape(-1),
             b_req_idx,
             b_start_loc,
@@ -123,10 +129,12 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         b_seq_len[i] = input_len
 
     total_token_num = batch_size * input_len
+    mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0])
     logics = model_part.forward(
         batch_size,
         total_token_num,
         input_len,
+        mem_indexes,
         test_data,
         b_req_idx,
         b_start_loc,
@@ -148,11 +156,12 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
         total_token_num += batch_size
         b_seq_len += 1
-
+        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0])
         logics = model_part.forward(
             batch_size,
             total_token_num,
             input_len + i + 1,
+            mem_indexes,
             torch.from_numpy(predict_ids).cuda().reshape(-1),
             b_req_idx,
             b_start_loc,

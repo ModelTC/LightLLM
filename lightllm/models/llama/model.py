@@ -97,7 +97,13 @@ class LlamaTpPartModel(TpPartBaseModel):
         )
         self.trans_layers_weight = [
             self.transformer_weight_class(
-                i, self.tp_rank_, self.world_size_, self.data_type, network_config=self.config, mode=self.mode
+                i,
+                self.tp_rank_,
+                self.world_size_,
+                self.data_type,
+                network_config=self.config,
+                mode=self.mode,
+                quant_cfg=self.quant_cfg,
             )
             for i in range(self.config["n_layer"])
         ]

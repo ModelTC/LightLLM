@@ -16,7 +16,6 @@ from lightllm.common.build_utils import repair_config
 import torch
 from PIL import Image
 from .vision_process import smart_resize
-from lightllm.models.qwen2.layer_infer import transformer_layer_infer
 from lightllm.models.qwen2.layer_weights import transformer_layer_weight, pre_and_post_layer_weight
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 import os

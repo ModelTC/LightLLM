@@ -7,6 +7,7 @@ import triton.language as tl
 @triton.jit
 def _silu_and_mul_kernel(
     input_ptr,
+    output_ptr,
     stride_input_m,
     stride_input_n,
     stride_output_m,
@@ -46,17 +47,17 @@ def _silu_and_mul_kernel(
     gate = gate.to(input_ptr.dtype.element_ty)
 
     tl.store(
-        input_ptr + res_offsets,
+        output_ptr + res_offsets,
         up * gate,
         mask=(output_n_offsets < size_n)[None, :] * (output_m_offsets < size_m)[:, None],
     )
 
 
-def silu_and_mul_fwd(input):
+def silu_and_mul_fwd(input, output):
     stride_input_m = input.stride(0)
     stride_input_n = input.stride(1)
-    stride_output_m = input.stride(0)
-    stride_output_n = input.stride(1)
+    stride_output_m = output.stride(0)
+    stride_output_n = output.stride(1)
     size_m = input.shape[0]
     size_n = input.shape[-1] // 2
     BLOCK_M = 128
@@ -67,6 +68,7 @@ def silu_and_mul_fwd(input):
     )
     _silu_and_mul_kernel[grid](
         input,
+        output,
         stride_input_m,
         stride_input_n,
         stride_output_m,
@@ -76,7 +78,7 @@ def silu_and_mul_fwd(input):
         BLOCK_M,
         BLOCK_N,
     )
-    return input[:, 0 : (input.shape[-1] // 2)]
+    return
 
 
 def torch_silu_and_mul(input: torch.Tensor):

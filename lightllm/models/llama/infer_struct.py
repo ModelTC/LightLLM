@@ -14,6 +14,7 @@ class LlamaInferStateInfo(InferStateInfo):
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         if self.is_prefill:
             b_seq_len_numpy = self.b_seq_len.cpu().numpy()
+            self.max_seq_len = b_seq_len_numpy.max()
             b_ready_cache_len_numpy = self.b_ready_cache_len.cpu().numpy()
             position_ids = torch.from_numpy(
                 np.concatenate(
@@ -31,4 +32,3 @@ class LlamaInferStateInfo(InferStateInfo):
             self.other_kv_index = self.req_manager.req_to_token_indexs[self.b_req_idx[0], 0].item()
             # b_loc[0, max_len_in_batch - 1].item()
         return
-

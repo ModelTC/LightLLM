@@ -16,6 +16,7 @@ from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv
 from lightllm.common.basemodel.triton_kernel.splitfuse_copy_kv_index_to_req import splitfuse_copy_kv_index_to_req
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
+from lightllm.common.quantization import Quantcfg
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 
@@ -46,7 +47,7 @@ class TpPartBaseModel:
         self.max_total_token_num = kvargs["max_total_token_num"]
         self.batch_max_tokens = kvargs.get("batch_max_tokens", None)
         self.load_way = kvargs.get("load_way", "HF")
-        self.mode = [m.replace("int4weight", "w4a16").replace("int8weight", "w8a16") for m in kvargs.get("mode", [])]
+        self.mode = kvargs.get("mode", [])
         self.weight_dict = kvargs.get("weight_dict", None)
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
@@ -61,12 +62,15 @@ class TpPartBaseModel:
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
+        self.quant_type = kvargs.get("quant_type", None)
+        self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
 
         self._init_datatype()
         self._init_config()
         self._verify_must()
         self._verify_params()
+        self._init_quant()
         self._init_weights()
         self._init_mem_manager()
         self._init_kv_move_buffer()
@@ -101,13 +105,23 @@ class TpPartBaseModel:
         assert self.config["num_key_value_heads"] % self.world_size_ == 0
         return
 
+    def _init_quant(self):
+        self.quant_cfg = Quantcfg(self.config["n_layer"], self.quant_type, self.quant_cfg_path)
+        logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
+
     def _init_weights(self):
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.tp_rank_, self.world_size_, self.data_type, network_config=self.config, mode=self.mode
         )
         self.trans_layers_weight = [
             self.transformer_weight_class(
-                i, self.tp_rank_, self.world_size_, self.data_type, network_config=self.config, mode=self.mode
+                i,
+                self.tp_rank_,
+                self.world_size_,
+                self.data_type,
+                network_config=self.config,
+                mode=self.mode,
+                quant_cfg=self.quant_cfg,
             )
             for i in range(self.config["n_layer"])
         ]

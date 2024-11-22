@@ -99,16 +99,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=[],
         nargs="+",
         help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_fp16 | triton_flashdecoding
-                        | triton_gqa_attention | triton_gqa_flashdecoding
-                        | triton_w4a16 | triton_w8a16 | triton_w8a8 | lmdeploy_w4a16
-                        | ppl_w4a16 | ppl_w8a8 | ppl_w8a8_mixdown],
+                        | triton_gqa_attention | triton_gqa_flashdecoding,
                         triton_flashdecoding mode is for long context, current support llama llama2 qwen;
                         triton_gqa_attention and triton_gqa_flashdecoding is fast kernel for model which use GQA;
                         triton_int8kv mode use int8 to store kv cache, can increase token capacity, use triton kernel;
                         ppl_int8kv mode use int8 to store kv cache, and use ppl fast kernel;
                         ppl_fp16 mode use ppl fast fp16 decode attention kernel;
-                        triton_int8weight and triton_int4weight and lmdeploy_int4weight or ppl_int4weight mode
-                        use int8 and int4 to store weights;
                         you need to read source code to make sure the supported detail mode for all models""",
     )
     parser.add_argument(
@@ -218,5 +214,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=8192,
         help="""Maximum sequence length that can be captured by the cuda graph for decodign stage.
                 The default value is 8192. It will turn into eagar mode if encounters a larger value. """,
+    )
+    parser.add_argument(
+        "--quant_type",
+        type=str,
+        default=None,
+        help="""Quantization method: ppl-w4a16-128 | flashllm-w6a16
+                        | ao-int4wo-[32,64,128,256] | ao-int8wo | ao-fp8w8a16 | ao-fp6w6a16
+                        | vllm-w8a8 | vllm-fp8w8a8""",
+    )
+    parser.add_argument(
+        "--quant_cfg",
+        type=str,
+        default=None,
+        help="""Path of quantization config. It can be used for mixed quantization.
+            Examples can be found in lightllm/common/quantization/configs.""",
     )
     return parser

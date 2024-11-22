@@ -21,7 +21,7 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
-        router_logits = torch.mm(input.view(-1, self.embed_dim_), layer_weight.moe_gate)
+        router_logits = layer_weight.moe_gate.mm(input.view(-1, self.embed_dim_))
         topk_weights, topk_ids = fused_topk(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -33,8 +33,8 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         return fused_experts(
             hidden_states=hidden_states,
-            w1=layer_weight.w1,
-            w2=layer_weight.w2,
+            w1=layer_weight.experts.w1,
+            w2=layer_weight.experts.w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,

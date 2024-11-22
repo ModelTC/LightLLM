@@ -4,12 +4,14 @@ import triton
 import triton.language as tl
 
 # copy from xformers impl.
-_kAlpha = math.sqrt(2.0 / math.pi)
+_kAlpha = triton.language.constexpr(math.sqrt(2.0 / math.pi))
+
 
 @triton.jit
 def tanh(x):
     # Tanh is just a scaled sigmoid
     return 2 * tl.sigmoid(2 * x) - 1
+
 
 @triton.jit
 def gelu(x):
@@ -20,9 +22,11 @@ def gelu(x):
     """
     return 0.5 * x * (1 + tanh(_kAlpha * (x + 0.044715 * x * x * x)))
 
+
 @triton.jit
 def _gelu_and_mul_kernel(
     input_ptr,
+    output_ptr,
     stride_input_m,
     stride_input_n,
     stride_output_m,
@@ -59,17 +63,17 @@ def _gelu_and_mul_kernel(
     gate = gate.to(input_ptr.dtype.element_ty)
 
     tl.store(
-        input_ptr + res_offsets,
+        output_ptr + res_offsets,
         up * gate,
         mask=(output_n_offsets < size_n)[None, :] * (output_m_offsets < size_m)[:, None],
     )
 
 
-def gelu_and_mul_fwd(input):
+def gelu_and_mul_fwd(input, output):
     stride_input_m = input.stride(0)
     stride_input_n = input.stride(1)
-    stride_output_m = input.stride(0)
-    stride_output_n = input.stride(1)
+    stride_output_m = output.stride(0)
+    stride_output_n = output.stride(1)
     size_m = input.shape[0]
     size_n = input.shape[-1] // 2
     BLOCK_M = 128
@@ -80,6 +84,7 @@ def gelu_and_mul_fwd(input):
     )
     _gelu_and_mul_kernel[grid](
         input,
+        output,
         stride_input_m,
         stride_input_n,
         stride_output_m,
@@ -89,7 +94,7 @@ def gelu_and_mul_fwd(input):
         BLOCK_M,
         BLOCK_N,
     )
-    return input[:, 0 : (input.shape[-1] // 2)]
+    return output
 
 
 def torch_gelu_and_mul(input: torch.Tensor):

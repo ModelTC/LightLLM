@@ -41,14 +41,16 @@ class CohereTransformerLayerInfer(TransformerLayerCohereInferTpl):
     def _bind_rotary_emb_fwd(self):
         self._rotary_emb_fwd = partial(CohereTransformerLayerInfer._rotary_emb_fwd, self)
 
-    def _att_norm(self, input, infer_state, layer_weight):
-        return layernorm_forward(input.unsqueeze(1), layer_weight.att_norm_weight_.unsqueeze(0), self.eps_).squeeze(1)
+    def _att_norm(self, input, infer_state, layer_weight: CohereTransformerLayerWeight):
+        return layernorm_forward(
+            input.unsqueeze(1), layer_weight.att_norm_weight_.weight.unsqueeze(0), self.eps_
+        ).squeeze(1)
 
-    def _q_norm(self, input, infer_state, layer_weight):
-        return layernorm_forward(input, layer_weight.q_norm_weight_, self.eps_)
+    def _q_norm(self, input, infer_state, layer_weight: CohereTransformerLayerWeight):
+        return layernorm_forward(input, layer_weight.q_norm_weight_.weight, self.eps_)
 
-    def _k_norm(self, input, infer_state, layer_weight):
-        return layernorm_forward(input, layer_weight.k_norm_weight_, self.eps_)
+    def _k_norm(self, input, infer_state, layer_weight: CohereTransformerLayerWeight):
+        return layernorm_forward(input, layer_weight.k_norm_weight_.weight, self.eps_)
 
     def _bind_norm(self):
         self._att_norm = partial(CohereTransformerLayerInfer._att_norm, self)
@@ -62,16 +64,21 @@ class CohereTransformerLayerInfer(TransformerLayerCohereInferTpl):
     def _get_o(
         self, input, infer_state: CohereInferStateInfo, layer_weight: CohereTransformerLayerWeight
     ) -> torch.Tensor:
-        o_tensor = torch.mm(input.view(-1, self.tp_o_head_num_ * self.head_dim_), layer_weight.o_weight_)
+        input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
+        # o_tensor = layer_weight.mm_op.apply(input, layer_weight.o_weight_)
+        o_tensor = layer_weight.o_proj.mm(input)
         return o_tensor
 
     def _ffn(
         self, input, infer_state: CohereInferStateInfo, layer_weight: CohereTransformerLayerWeight
     ) -> torch.Tensor:
-        up_gate_out = torch.mm(input.view(-1, self.embed_dim_), layer_weight.gate_up_proj)
-        ffn1_out = silu_and_mul_fwd(up_gate_out)
+        input = input.view(-1, self.embed_dim_)
+        up_gate_out = layer_weight.gate_up_proj.mm(input)
+        ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
+        silu_and_mul_fwd(up_gate_out, ffn1_out)
         input = None
         up_gate_out = None
-        ffn2_out = torch.mm(ffn1_out, layer_weight.down_proj)
+        # ffn2_out = layer_weight.mm_op.apply(ffn1_out, layer_weight.down_proj)
+        ffn2_out = layer_weight.down_proj.mm(ffn1_out)
         ffn1_out = None
         return ffn2_out

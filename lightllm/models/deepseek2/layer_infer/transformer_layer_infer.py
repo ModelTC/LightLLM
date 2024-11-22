@@ -9,6 +9,7 @@ from lightllm.models.deepseek2.triton_kernel.context_flashattention_nopad import
     context_attention_fwd,
     context_attention_fwd_no_prompt_cache,
 )
+
 from lightllm.models.deepseek2.triton_kernel.flash_decoding import token_decode_attention_flash_decoding
 from lightllm.models.deepseek2.layer_infer.fused_moe import fused_experts, grouped_topk
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
@@ -20,7 +21,9 @@ from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 
 
 class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
+    def __init__(
+        self, layer_num, tp_rank, world_size, network_config, mode=[], disable_qk_absorb=False, disable_vo_absorb=False
+    ):
         self.tp_k_head_num_ = 1
         self.tp_v_head_num_ = 1
         self.qk_nope_head_dim = network_config["qk_nope_head_dim"]
@@ -32,6 +35,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             and layer_num >= network_config["first_k_dense_replace"]
             and layer_num % network_config["moe_layer_freq"] == 0
         )
+        self.disable_qk_absorb = disable_qk_absorb
+        self.disable_vo_absorb = disable_vo_absorb
 
         self.n_shared_experts = network_config["n_shared_experts"]
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
@@ -71,34 +76,34 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Deepseek2TransformerLayerWeight,
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
-        dtype = input.dtype
-        if self.q_lora_rank is None:
-            q_nope = self.alloc_tensor((input.shape[0], layer_weight.fuse_qk_weight_.shape[1]), dtype=dtype)
-            torch.mm(input, layer_weight.fuse_qk_weight_, out=q_nope)
-            q_rope = self.alloc_tensor((input.shape[0], layer_weight.q_rope_proj_.shape[1]), dtype=dtype)
-            torch.mm(input, layer_weight.q_rope_proj_, out=q_rope)
+        if not self.disable_qk_absorb:
+            if self.q_lora_rank is None:
+                q_nope = layer_weight.fuse_qk_weight_.mm(input)
+                q_rope = layer_weight.q_rope_proj_.mm(input)
+            else:
+                q = layer_weight.q_a_proj_.mm(input)
+                rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_, out=q)
+                q_nope = layer_weight.fuse_qk_weight_.mm(q)
+                q_rope = layer_weight.q_rope_proj_.mm(q)
+            q_nope = q_nope.view(-1, self.tp_q_head_num_, self.kv_lora_rank)
+            q_rope = q_rope.view(-1, self.tp_q_head_num_, self.qk_rope_head_dim)
         else:
-            q = self.alloc_tensor((input.shape[0], layer_weight.q_a_proj_.shape[1]), dtype=dtype)
-            torch.mm(input, layer_weight.q_a_proj_, out=q)
-            rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_, eps=self.eps_, out=q)
+            if self.q_lora_rank is None:
+                q = layer_weight.q_weight_.mm(input)
+            else:
+                q = layer_weight.q_a_proj_.mm(input)
+                rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_, out=q)
+                q = layer_weight.q_b_proj_.mm(q)
 
-            q_nope = self.alloc_tensor((q.shape[0], layer_weight.fuse_qk_weight_.shape[1]), dtype=dtype)
-            torch.mm(q, layer_weight.fuse_qk_weight_, out=q_nope)
-            q_rope = self.alloc_tensor((q.shape[0], layer_weight.q_rope_proj_.shape[1]), dtype=dtype)
-            torch.mm(q, layer_weight.q_rope_proj_, out=q_rope)
+            q = q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim)
+            q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
-        q_nope = q_nope.view(-1, self.tp_q_head_num_, self.kv_lora_rank)
-        q_rope = q_rope.view(-1, self.tp_q_head_num_, self.qk_rope_head_dim)
-
-        torch.mm(
-            input,
-            layer_weight.kv_a_proj_with_mqa_,
-            out=cache_kv.view(-1, self.kv_lora_rank + self.qk_rope_head_dim),
-        )
+        layer_weight.kv_a_proj_with_mqa_.mm(input, out=cache_kv.view(-1, self.kv_lora_rank + self.qk_rope_head_dim))
 
         rmsnorm_forward(
             cache_kv[:, :, : self.kv_lora_rank],
-            weight=layer_weight.kv_a_layernorm_,
+            weight=layer_weight.kv_a_layernorm_.weight,
             eps=self.eps_,
             out=cache_kv[:, :, : self.kv_lora_rank],
         )
@@ -114,11 +119,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
-        input = input.view(-1, self.tp_q_head_num_ * self.kv_lora_rank)
-        o_tensor = self.alloc_tensor(
-            (input.shape[0], layer_weight.fuse_vo_weight_.shape[1]), dtype=layer_weight.fuse_vo_weight_.dtype
-        )
-        torch.mm(input, layer_weight.fuse_vo_weight_, out=o_tensor)
+        if not self.disable_vo_absorb:
+            input = input.view(-1, self.tp_q_head_num_ * self.kv_lora_rank)
+            o_tensor = layer_weight.fuse_vo_weight_.mm(input)
+        else:
+            input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
+            o_tensor = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.qk_nope_head_dim))
         return o_tensor
 
     def _context_attention_kernel(
@@ -196,33 +202,20 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.n_shared_experts is not None:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 
-        router_logits = self.alloc_tensor(
-            (hidden_states.shape[0], layer_weight.moe_gate.shape[1]), dtype=layer_weight.moe_gate.dtype
-        )
-        torch.mm(input.view(-1, self.embed_dim_), layer_weight.moe_gate, out=router_logits)
-        topk_weights, topk_ids = grouped_topk(
+        router_logits = layer_weight.moe_gate.mm(hidden_states)
+        layer_weight.experts.experts(
             hidden_states,
-            router_logits,
-            self.num_experts_per_tok,
+            router_logits=router_logits,
+            top_k=self.num_experts_per_tok,
             renormalize=self.norm_topk_prob,
-            num_expert_group=self.n_group,
+            use_grouped_topk=self.n_group,
             topk_group=self.topk_group,
-        )
-        router_logits = None
-
-        final_hidden_states = fused_experts(
-            hidden_states,
-            layer_weight.w1,
-            layer_weight.w2,
-            topk_weights,
-            topk_ids,
-            inplace=True,
-            alloc_tensor_func=self.alloc_tensor,
+            num_expert_group=self.n_group,
         )
 
-        final_hidden_states.mul_(self.routed_scaling_factor)
+        hidden_states.mul_(self.routed_scaling_factor)
 
         if self.n_shared_experts is not None:
-            final_hidden_states.add_(shared_output)
+            hidden_states.add_(shared_output)
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        return hidden_states.view(num_tokens, hidden_dim)

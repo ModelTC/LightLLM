@@ -13,32 +13,18 @@ from rpyc.utils.classic import obtain
 
 from lightllm.models.bloom.model import BloomTpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.llama_wquant.model import LlamaTpPartModelWQuant
-from lightllm.models.llama_awquant.model import LlamaTpPartModelAWQuant
-from lightllm.models.llama_quik.model import LlamaTpPartModelQuik
-from lightllm.models.qwen2_wquant.model import QWen2TpPartModelWQuant
 from lightllm.models.starcoder.model import StarcoderTpPartModel
-from lightllm.models.starcoder_wquant.model import StarcoderTpPartModelWQuant
 from lightllm.models.starcoder2.model import Starcoder2TpPartModel
 from lightllm.models.qwen.model import QWenTpPartModel
-from lightllm.models.qwen_wquant.model import QWenTpPartModelWQuant
-from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
-from lightllm.models.baichuan13b.model import Baichuan13bTpPartModel
-from lightllm.models.baichuan2_7b.model import Baichuan2_7bTpPartModel
-from lightllm.models.baichuan2_13b.model import Baichuan2_13bTpPartModel
 from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
 from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.models.stablelm.model import StablelmTpPartModel
 from lightllm.models.internlm2.model import Internlm2TpPartModel
 from lightllm.models.internlm2_reward.model import Internlm2RewardTpPartModel
-from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
-from lightllm.models.internlm2_wquant.model import Internlm2TpPartModelWQuant
-from lightllm.models.yi.model import YiTpPartModel
 from lightllm.models.mistral.model import MistralTpPartModel
 from lightllm.models.minicpm.model import MiniCPMTpPartModel
 from lightllm.models.llava.model import LlavaTpPartModel
 from lightllm.models.qwen_vl.model import QWenVLTpPartModel
-from lightllm.models.internlm_xcomposer.model import InternlmComposerTpPartModel
 from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
 from lightllm.models.phi3.model import Phi3TpPartModel
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
@@ -121,123 +107,72 @@ class ModeBackend:
             "disable_cudagraph": kvargs.get("disable_cudagraph", False),
             "mem_fraction": kvargs.get("mem_fraction", 0.9),
             "batch_max_tokens": kvargs.get("batch_max_tokens", None),
+            "quant_type": kvargs.get("quant_type", None),
+            "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
         }
 
-        is_weight_only_quant = any("w6a16" in mode_ or "w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode)
-        is_weight_activation_quant = any("w8a8" in mode_ for mode_ in self.mode)
-        is_quik_activation_weight_quant = any("quik_activation_weight" in mode_ for mode_ in self.mode)
-
         try:
             self.model_type = model_cfg.get("model_type", "")
-
-            if is_quik_activation_weight_quant:
-                if self.model_type == "llama":
-                    # Supports both w4a4 and w8a8 modes, with automatic mode selection upon model loading.
-                    self.model = LlamaTpPartModelQuik(model_kvargs)
-                else:
-                    raise Exception(f"quik_activation_weight_quant can not support {self.model_type}")
-
-            elif is_weight_activation_quant:
-                if self.model_type == "llama":
-                    self.model = LlamaTpPartModelAWQuant(model_kvargs)
-                else:
-                    raise Exception(f"weight_activation_quant can not support {self.model_type}")
-
-            elif is_weight_only_quant:
-                if self.model_type == "llama":
-                    self.model = LlamaTpPartModelWQuant(model_kvargs)
-                elif self.model_type == "qwen":
-                    self.model = QWenTpPartModelWQuant(model_kvargs)
-                elif self.model_type == "gpt_bigcode":
-                    self.model = StarcoderTpPartModelWQuant(model_kvargs)
-                elif self.model_type == "internlm":
-                    self.model = InternlmTpPartModelWQuant(model_kvargs)
-                elif self.model_type == "internlm2":
-                    self.model = Internlm2TpPartModelWQuant(model_kvargs)
-                elif self.model_type == "qwen2":
-                    self.model = QWen2TpPartModelWQuant(model_kvargs)
-                else:
-                    raise Exception(f"weight_only_quant can not support {self.model_type}")
-
-            else:  # no quant
-                if self.model_type == "bloom":
-                    self.model = BloomTpPartModel(model_kvargs)
-                elif self.model_type == "llama":
-                    self.model = LlamaTpPartModel(model_kvargs)
-                elif self.model_type == "qwen":
-                    if "visual" in model_cfg:
-                        self.model = QWenVLTpPartModel(model_kvargs)
-                        self.is_multimodal = True
-                    else:
-                        self.model = QWenTpPartModel(model_kvargs)
-                elif self.model_type == "baichuan":
-                    if model_cfg["hidden_size"] == 4096:
-                        if model_cfg["architectures"][0] == "BaichuanForCausalLM":
-                            self.model = Baichuan2_7bTpPartModel(model_kvargs)
-                        else:
-                            self.model = Baichuan7bTpPartModel(model_kvargs)
-                    elif model_cfg["hidden_size"] == 5120:
-                        if model_cfg["architectures"][0] == "BaichuanForCausalLM":
-                            self.model = Baichuan2_13bTpPartModel(model_kvargs)
-                        else:
-                            self.model = Baichuan13bTpPartModel(model_kvargs)
-                    else:
-                        raise Exception("can not support baichuan format")
-                elif self.model_type == "gpt_bigcode":
-                    self.model = StarcoderTpPartModel(model_kvargs)
-                elif self.model_type == "starcoder2":
-                    self.model = Starcoder2TpPartModel(model_kvargs)
-                elif self.model_type == "chatglm":
-                    self.model = ChatGlm2TpPartModel(model_kvargs)
-                elif self.model_type == "internlm":
-                    self.model = InternlmTpPartModel(model_kvargs)
-                elif self.model_type == "internlm2":
-                    if model_cfg["architectures"][0] == "InternLM2ForRewardModel":
-                        self.model = Internlm2RewardTpPartModel(model_kvargs)
-                    else:
-                        self.model = Internlm2TpPartModel(model_kvargs)
-                elif self.model_type == "Yi":
-                    self.model = YiTpPartModel(model_kvargs)
-                elif self.model_type == "mistral":
-                    self.model = MistralTpPartModel(model_kvargs)
-                elif self.model_type == "stablelm":
-                    self.model = StablelmTpPartModel(model_kvargs)
-                elif self.model_type == "mixtral":
-                    self.model = MixtralTpPartModel(model_kvargs)
-                elif self.model_type == "minicpm" or model_cfg["architectures"][0] == "MiniCPMForCausalLM":
-                    self.model = MiniCPMTpPartModel(model_kvargs)
-                elif self.model_type == "llava":
-                    self.model = LlavaTpPartModel(model_kvargs)
-                    self.is_multimodal = True
-                elif self.model_type == "internlmxcomposer2":
-                    self.model = InternlmComposerTpPartModel(model_kvargs)
-                    self.is_multimodal = True
-                elif self.model_type == "qwen2":
-                    self.model = Qwen2TpPartModel(model_kvargs)
-                elif self.model_type == "qwen2_vl":
-                    self.model = Qwen2VLTpPartModel(model_kvargs)
-                    self.is_multimodal = True
-                elif self.model_type == "gemma":
-                    self.model = Gemma_2bTpPartModel(model_kvargs)
-                elif self.model_type == "cohere":
-                    self.model = CohereTpPartModel(model_kvargs)
-                elif self.model_type == "phi3":
-                    self.model = Phi3TpPartModel(model_kvargs)
-                elif self.model_type == "deepseek_v2":
-                    self.model = Deepseek2TpPartModel(model_kvargs)
-                elif self.model_type == "internvl_chat":
-                    llm_model_type = model_cfg.get("llm_config").get("model_type")
-                    if llm_model_type == "phi3":
-                        self.model = InternVLPhi3TpPartModel(model_kvargs)
-                    elif llm_model_type == "internlm2":
-                        self.model = InternVLInternlm2TpPartModel(model_kvargs)
-                    elif llm_model_type == "llama":
-                        self.model = InternVLLlamaTpPartModel(model_kvargs)
+            if self.model_type == "bloom":
+                self.model = BloomTpPartModel(model_kvargs)
+            elif self.model_type == "llama":
+                self.model = LlamaTpPartModel(model_kvargs)
+            elif self.model_type == "qwen":
+                if "visual" in model_cfg:
+                    self.model = QWenVLTpPartModel(model_kvargs)
                     self.is_multimodal = True
                 else:
-                    raise Exception(f"can not support {self.model_type} now")
-        except BaseException as e:
+                    self.model = QWenTpPartModel(model_kvargs)
+            elif self.model_type == "gpt_bigcode":
+                self.model = StarcoderTpPartModel(model_kvargs)
+            elif self.model_type == "starcoder2":
+                self.model = Starcoder2TpPartModel(model_kvargs)
+            elif self.model_type == "chatglm":
+                self.model = ChatGlm2TpPartModel(model_kvargs)
+            elif self.model_type == "internlm":
+                self.model = InternlmTpPartModel(model_kvargs)
+            elif self.model_type == "internlm2":
+                if model_cfg["architectures"][0] == "InternLM2ForRewardModel":
+                    self.model = Internlm2RewardTpPartModel(model_kvargs)
+                else:
+                    self.model = Internlm2TpPartModel(model_kvargs)
+            elif self.model_type == "mistral":
+                self.model = MistralTpPartModel(model_kvargs)
+            elif self.model_type == "stablelm":
+                self.model = StablelmTpPartModel(model_kvargs)
+            elif self.model_type == "mixtral":
+                self.model = MixtralTpPartModel(model_kvargs)
+            elif self.model_type == "minicpm" or model_cfg["architectures"][0] == "MiniCPMForCausalLM":
+                self.model = MiniCPMTpPartModel(model_kvargs)
+            elif self.model_type == "llava":
+                self.model = LlavaTpPartModel(model_kvargs)
+                self.is_multimodal = True
+            elif self.model_type == "qwen2":
+                self.model = Qwen2TpPartModel(model_kvargs)
+            elif self.model_type == "qwen2_vl":
+                self.model = Qwen2VLTpPartModel(model_kvargs)
+                self.is_multimodal = True
+            elif self.model_type == "gemma":
+                self.model = Gemma_2bTpPartModel(model_kvargs)
+            elif self.model_type == "cohere":
+                self.model = CohereTpPartModel(model_kvargs)
+            elif self.model_type == "phi3":
+                self.model = Phi3TpPartModel(model_kvargs)
+            elif self.model_type == "deepseek_v2":
+                self.model = Deepseek2TpPartModel(model_kvargs)
+            elif self.model_type == "internvl_chat":
+                llm_model_type = model_cfg.get("llm_config").get("model_type")
+                if llm_model_type == "phi3":
+                    self.model = InternVLPhi3TpPartModel(model_kvargs)
+                elif llm_model_type == "internlm2":
+                    self.model = InternVLInternlm2TpPartModel(model_kvargs)
+                elif llm_model_type == "llama":
+                    self.model = InternVLLlamaTpPartModel(model_kvargs)
+                self.is_multimodal = True
+            else:
+                raise Exception(f"can not support {self.model_type} now")
+        except Exception as e:
             self.logger.exception(str(e))
             raise e
 

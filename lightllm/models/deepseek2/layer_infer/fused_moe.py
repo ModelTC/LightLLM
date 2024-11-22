@@ -509,7 +509,7 @@ def fused_experts(
             use_fp8=use_fp8,
         )
 
-        intermediate_cache2[:] = silu_and_mul_fwd(intermediate_cache1.view(-1, N))
+        silu_and_mul_fwd(intermediate_cache1.view(-1, N), intermediate_cache2)
 
         invoke_fused_moe_kernel(
             intermediate_cache2,

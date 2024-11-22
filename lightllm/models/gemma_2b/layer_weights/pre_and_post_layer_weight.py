@@ -16,11 +16,8 @@ class Gemma_2bPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
         if "model.embed_tokens.weight" in weights:
             # print(weights['model.embed_tokens.weight'].shape)
             self.wte_weight_ = self._cuda(weights["model.embed_tokens.weight"][split_start:split_end, :])
-        if "lm_head.weight" in weights:
-            # print(weights['lm_head.weight'].shape)
-            self.lm_head_weight_ = self._cuda(weights["lm_head.weight"][split_start:split_end, :])
-        else:
             self.lm_head_weight_ = self.wte_weight_
+
         if "model.norm.weight" in weights:
             self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
             self.final_norm_weight_ = self.final_norm_weight_ + 1

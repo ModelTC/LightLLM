@@ -29,12 +29,11 @@ class Phi3TransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _get_qkv(self, input_emb, cache_kv, infer_state: LlamaInferStateInfo, layer_weight: Phi3TransformerLayerWeight):
-        q = torch.mm(input_emb.view(-1, self.embed_dim_), layer_weight.q_weight_)
-        torch.mm(
+        q = layer_weight.q_proj.mm(input_emb.view(-1, self.embed_dim_))
+        cache_kv = layer_weight.kv_proj.mm(
             input_emb.view(-1, self.embed_dim_),
-            layer_weight.kv_weight_,
             out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_),
-        )
+        ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, 0 : self.tp_k_head_num_, :],
@@ -43,14 +42,14 @@ class Phi3TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         return q, cache_kv
 
-    def _copy_kv_to_mem_cache(self, buffer, mem_index, mem_manager):
+    def _copy_kv_to_mem_cache_normal(self, buffer, mem_index, mem_manager):
         destindex_copy_kv(buffer, mem_index, mem_manager.kv_buffer[self.layer_num_])
         return
 
     def _context_attention_kernel(
         self, q, kv, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
-        o_tensor = torch.empty_like(q) if out is None else out
+        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
         if infer_state.use_dynamic_prompt_cache:
             kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
             context_attention_fwd(

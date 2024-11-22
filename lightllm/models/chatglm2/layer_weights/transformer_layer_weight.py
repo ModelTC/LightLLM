@@ -1,117 +1,77 @@
 import torch
 import math
-import numpy as np
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight
 
 
 class ChatGLM2TransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[]):
-        super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
-        assert network_config["num_attention_heads"] % self.world_size_ == 0
-
-    def verify_load(self):
-        errors = "weights load not ok"
-        weights = [
-            self.att_norm_weight_,
-            self.q_weight_,
-            self.kv_weight_,
-            self.q_bias_,
-            self.kv_bias_,
-            self.o_weight_,
-            self.ffn_norm_weight_,
-            self.gate_up_proj,
-            self.down_proj,
-        ]
-        for i in range(len(weights)):
-            assert weights[i] is not None, "index:" + str(i) + " " + errors
+    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[], quant_cfg=None):
+        super().__init__(
+            layer_num,
+            tp_rank,
+            world_size,
+            data_type,
+            network_config,
+            mode,
+            quant_cfg,
+        )
         return
 
-    def _load_qkvo_weights(self, weights):
-        # input layernorm params
-        if f"transformer.encoder.layers.{self.layer_num_}.input_layernorm.weight" in weights:
-            self.att_norm_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.input_layernorm.weight"]
-            self.att_norm_weight_ = self._cuda(self.att_norm_weight_)
+    def _preprocess_weight(self, weights):
+        n_kv_embed = self.head_dim * self.n_kv_head
+        qkv_weight_name = f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.weight"
+        if qkv_weight_name in weights:
+            qkv_weight_ = weights[qkv_weight_name]
+            weights[self._q_weight_name] = qkv_weight_[: self.n_embed, :]
+            weights[self._k_weight_name] = qkv_weight_[self.n_embed : self.n_embed + n_kv_embed, :]
+            weights[self._v_weight_name] = qkv_weight_[self.n_embed + n_kv_embed : self.n_embed + 2 * n_kv_embed, :]
+            del weights[qkv_weight_name]
 
-        # attention params
-        n_embed = self.network_config_["hidden_size"]
-        head_dim = self.network_config_["hidden_size"] // self.network_config_["num_attention_heads"]
-        multi_query_group_num = self.network_config_["multi_query_group_num"]
-        tp_kv_head_dim = multi_query_group_num // self.world_size_ * head_dim
-        split_n_embed = n_embed // self.world_size_
-        if f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.weight" in weights:
-            qkv_weight_ = (
-                weights[f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.weight"]
-                .transpose(0, 1)
-                .contiguous()
-                .to(self.data_type_)
-            )
-            self.q_weight_ = qkv_weight_[:, :n_embed][
-                :, split_n_embed * self.tp_rank_ : split_n_embed * (self.tp_rank_ + 1)
-            ]
-            self.q_weight_ = self._cuda(self.q_weight_)
-            k_weight_ = qkv_weight_[:, n_embed : n_embed + head_dim * multi_query_group_num]
-            self.k_weight_ = k_weight_[:, tp_kv_head_dim * self.tp_rank_ : tp_kv_head_dim * (self.tp_rank_ + 1)]
+        qkv_bias_name = f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.bias"
+        if qkv_bias_name in weights:
+            qkv_bias_ = weights[qkv_bias_name]
+            weights[self._q_bias_name] = qkv_bias_[: self.n_embed]
+            weights[self._k_bias_name] = qkv_bias_[self.n_embed : self.n_embed + n_kv_embed]
+            weights[self._v_bias_name] = qkv_bias_[self.n_embed + n_kv_embed : self.n_embed + 2 * n_kv_embed]
+            del weights[qkv_bias_name]
 
-            v_weight_ = qkv_weight_[
-                :, n_embed + multi_query_group_num * head_dim : n_embed + 2 * multi_query_group_num * head_dim
-            ]
-            self.v_weight_ = v_weight_[:, tp_kv_head_dim * self.tp_rank_ : tp_kv_head_dim * (self.tp_rank_ + 1)]
+        gate_up_weight_name = f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_h_to_4h.weight"
+        if gate_up_weight_name in weights:
+            gate_up_weight_ = weights[gate_up_weight_name]
+            weights[self._gate_weight_name] = gate_up_weight_[: self.n_inter, :]
+            weights[self._up_weight_name] = gate_up_weight_[self.n_inter : 2 * self.n_inter, :]
+            del weights[gate_up_weight_name]
 
-        self._try_cat_to(["k_weight_", "v_weight_"], "kv_weight_", cat_dim=1)
+    def _parse_config(self):
+        self.n_embed = self.network_config_["hidden_size"]
+        self.n_head = self.network_config_["num_attention_heads"]
+        self.n_inter = self.network_config_["ffn_hidden_size"]
+        self.n_kv_head = self.network_config_["multi_query_group_num"]
+        self.head_dim = self.network_config_.get("head_dim", self.n_embed // self.n_head)
 
-        if f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.bias" in weights:
-
-            qkv_bias_ = weights[f"transformer.encoder.layers.{self.layer_num_}.self_attention.query_key_value.bias"].to(
-                self.data_type_
-            )
-            self.q_bias_ = qkv_bias_[:n_embed][split_n_embed * self.tp_rank_ : split_n_embed * (self.tp_rank_ + 1)]
-            self.q_bias_ = self._cuda(self.q_bias_)
-            k_bias_ = qkv_bias_[n_embed : n_embed + head_dim * multi_query_group_num]
-            self.k_bias_ = k_bias_[tp_kv_head_dim * self.tp_rank_ : tp_kv_head_dim * (self.tp_rank_ + 1)]
-            v_bias_ = qkv_bias_[
-                n_embed + multi_query_group_num * head_dim : n_embed + 2 * multi_query_group_num * head_dim
-            ]
-            self.v_bias_ = v_bias_[tp_kv_head_dim * self.tp_rank_ : tp_kv_head_dim * (self.tp_rank_ + 1)]
-
-        self._try_cat_to(["k_bias_", "v_bias_"], "kv_bias_", cat_dim=0)
-
-        # attention output dense params
-        if f"transformer.encoder.layers.{self.layer_num_}.self_attention.dense.weight" in weights:
-            self.o_weight_ = weights[f"transformer.encoder.layers.{self.layer_num_}.self_attention.dense.weight"]
-            self.o_weight_ = self.o_weight_[:, split_n_embed * self.tp_rank_ : split_n_embed * (self.tp_rank_ + 1)]
-            self.o_weight_ = self.o_weight_.transpose(0, 1)
-            self.o_weight_ = self._cuda(self.o_weight_)
-
-    def _load_ffn_weights(self, weights):
-        if f"transformer.encoder.layers.{self.layer_num_}.post_attention_layernorm.weight" in weights:
-            self.ffn_norm_weight_ = weights[
-                f"transformer.encoder.layers.{self.layer_num_}.post_attention_layernorm.weight"
-            ]
-            self.ffn_norm_weight_ = self._cuda(self.ffn_norm_weight_)
-
-        # ffn params
-        ffn_hidden_size = self.network_config_["ffn_hidden_size"]
-        split_inter_size = ffn_hidden_size // self.world_size_
-        if f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_h_to_4h.weight" in weights:
-            tweights = weights[f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_h_to_4h.weight"].to(
-                self.data_type_
-            )
-            gate_proj = tweights[:ffn_hidden_size, :]
-            gate_proj = gate_proj[split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1), :]
-            self.gate_proj = gate_proj.transpose(0, 1)
-
-            up_proj = tweights[ffn_hidden_size : 2 * ffn_hidden_size, :]
-            up_proj = up_proj[split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1), :]
-            self.up_proj = up_proj.transpose(0, 1)
-
-            self._try_cat_to(["gate_proj", "up_proj"], "gate_up_proj", cat_dim=1)
-
-        if f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_4h_to_h.weight" in weights:
-            self.down_proj = weights[f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_4h_to_h.weight"].to(
-                self.data_type_
-            )
-            self.down_proj = self.down_proj[
-                :, split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1)
-            ].transpose(0, 1)
-            self.down_proj = self._cuda(self.down_proj)
+    def load_hf_weights(self, weights):
+        self._preprocess_weight(weights)
+        super().load_hf_weights(weights)
         return
+
+    def _init_weight_names(self):
+        self._q_weight_name = f"transformer.encoder.layers.{self.layer_num_}.self_attention.q_proj.weight"
+        self._q_bias_name = f"transformer.encoder.layers.{self.layer_num_}.self_attention.q_proj.bias"
+        self._k_weight_name = f"transformer.encoder.layers.{self.layer_num_}.self_attention.k_proj.weight"
+        self._k_bias_name = f"transformer.encoder.layers.{self.layer_num_}.self_attention.k_proj.bias"
+        self._v_weight_name = f"transformer.encoder.layers.{self.layer_num_}.self_attention.v_proj.weight"
+        self._v_bias_name = f"transformer.encoder.layers.{self.layer_num_}.self_attention.v_proj.bias"
+        self._o_weight_name = f"transformer.encoder.layers.{self.layer_num_}.self_attention.dense.weight"
+        self._o_bias_name = None
+
+        self._gate_weight_name = f"transformer.encoder.layers.{self.layer_num_}.mlp.gate_proj.weight"
+        self._gate_bias_name = None
+        self._up_weight_name = f"transformer.encoder.layers.{self.layer_num_}.mlp.up_proj.weight"
+        self._up_bias_name = None
+        self._down_weight_name = f"transformer.encoder.layers.{self.layer_num_}.mlp.dense_4h_to_h.weight"
+        self._down_bias_name = None
+
+        self._att_norm_weight_name = f"transformer.encoder.layers.{self.layer_num_}.input_layernorm.weight"
+        self._att_norm_bias_name = None
+        self._ffn_norm_weight_name = f"transformer.encoder.layers.{self.layer_num_}.post_attention_layernorm.weight"
+        self._ffn_norm_bias_name = None
