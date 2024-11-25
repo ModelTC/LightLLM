@@ -25,6 +25,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.net_utils import get_hostname_ip
+from lightllm.utils.config_utils import get_vocab_size
 
 logger = init_logger(__name__)
 
@@ -65,6 +66,9 @@ class HttpServerManager:
         assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL]
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
+        # 有的模型的vocab size 读取tokenizer和config.json中不一致
+        self.vocab_size = max(get_vocab_size(args.model_dir), self.tokenizer.vocab_size)
+
         return
 
     # connect cache server, calculate md5, alloc resource, return uuid
@@ -197,7 +201,7 @@ class HttpServerManager:
         # 这里的校验对多模态不是很充分, to do
         if all(isinstance(e, int) for e in prompt):
             if not self.enable_multimodal:
-                if all(e < self.tokenizer.vocab_size for e in prompt):
+                if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:
                     raise ValueError("prompt List[int] format contain id > vocab_size")

@@ -57,18 +57,7 @@ def _init_env(
                     logger.info(f"trans start: {move_task.to_prefill_log_info()}")
                     token_indexes = move_task.prefill_token_indexes[-move_task.move_kv_len :]
                     cur_mem = mem_managers[device_index]
-                    for i, mem in enumerate(mem_managers):
-                        for layer_index in range(mem.layer_num):
-                            move_buffer = mem.read_from_layer_buffer(token_indexes, layer_index)
-                            if i == device_index:
-                                dist.send(move_buffer, dst=1)
-                            else:
-                                move_size = move_buffer.numel()
-                                new_move_buffer = cur_mem.kv_move_buffer.view(-1)[0:move_size].view(move_buffer.shape)
-                                from torch.cuda import comm
-
-                                comm.broadcast(move_buffer, out=[new_move_buffer])
-                                dist.send(new_move_buffer, dst=1)
+                    cur_mem.send_to_decode_node(token_indexes, mem_managers)
                     logger.info(f"trans finished: {move_task.to_prefill_log_info()}")
                 torch.cuda.synchronize()
                 logger.info(f"trans cost time: {(time.time() - start)}, {move_task.to_prefill_log_info()}")

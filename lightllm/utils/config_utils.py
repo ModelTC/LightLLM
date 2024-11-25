@@ -21,6 +21,18 @@ def get_eos_token_ids(model_path: str):
     assert False, "error eos_token_id format in config.json"
 
 
+def get_vocab_size(model_path: str):
+    try:
+        config_json = get_config_json(model_path)
+        vocab_size = config_json["vocab_size"]
+        if not isinstance(vocab_size, int):
+            vocab_size = int(vocab_size)
+        return vocab_size
+    except:
+        logger.error("can not get vocab_size from config.json, return 0")
+        return 0
+
+
 def get_dtype(model_path: str):
     config_json = get_config_json(model_path)
     try:
