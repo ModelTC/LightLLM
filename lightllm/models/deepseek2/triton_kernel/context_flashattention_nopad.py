@@ -6,6 +6,7 @@ import math
 import torch.nn.functional as F
 
 TESLA = "Tesla" in torch.cuda.get_device_name(0)
+CUDA_CAPABILITY = torch.cuda.get_device_capability()
 
 
 @triton.jit
@@ -173,7 +174,7 @@ def context_attention_fwd(
     assert q_rope_dim in {16, 32, 64, 128, 256}
 
     if q_nope_dim >= 512:
-        BLOCK = 64 if not TESLA else 32
+        BLOCK = 32 if TESLA or CUDA_CAPABILITY[0] >= 9 else 64
     else:
         BLOCK = 128 if not TESLA else 64
 
@@ -369,7 +370,7 @@ def context_attention_fwd_no_prompt_cache(
     assert q_rope_dim in {16, 32, 64, 128, 256}
 
     if q_nope_dim >= 512:
-        BLOCK = 64 if not TESLA else 32
+        BLOCK = 32 if TESLA or CUDA_CAPABILITY[0] >= 9 else 64
     else:
         BLOCK = 128 if not TESLA else 64
 

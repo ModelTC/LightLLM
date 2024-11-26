@@ -1,5 +1,6 @@
 import socket
 import subprocess
+import ipaddress
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -46,3 +47,11 @@ def get_hostname_ip():
     except subprocess.CalledProcessError as e:
         logger.exception(f"Error executing command: {e}")
         return None
+
+
+def is_valid_ipv6_address(address: str) -> bool:
+    try:
+        ipaddress.IPv6Address(address)
+        return True
+    except ValueError:
+        return False

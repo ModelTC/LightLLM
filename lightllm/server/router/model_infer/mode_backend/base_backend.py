@@ -38,6 +38,15 @@ from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferBatch, InferReq, InferSamplingParams, requests_mapping
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
+from lightllm.distributed import (
+    get_tp_group,
+    init_distributed_environment,
+    initialize_model_parallel,
+    get_tensor_model_parallel_world_size,
+    get_tensor_model_parallel_rank,
+    all_reduce,
+)
+import torch.distributed as dist
 
 
 class ModeBackend:
@@ -46,9 +55,7 @@ class ModeBackend:
 
     def init_model(self, kvargs):
         import torch
-        import torch.distributed as dist
 
-        world_size = kvargs["world_size"]
         self.args = kvargs.get("args", None)
         # p d 分离模式下会有特殊的一些初始化, 所以需要传递
         # 模式参数到模型的初始化过程中进行控制
@@ -63,6 +70,7 @@ class ModeBackend:
         self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
+        self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
 
         self.cache = {}
         self.logger = init_logger(__name__)
@@ -74,10 +82,29 @@ class ModeBackend:
         self.pd_rpyc_port = kvargs.get("pd_rpyc_port", None)
         max_total_token_num = kvargs["max_total_token_num"]
 
-        dist.init_process_group(
-            "nccl", init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}', rank=self.tp_rank, world_size=world_size
-        )
         torch.cuda.set_device(self.tp_rank)
+        LIGHTLLM_DISTRIBUTED_ENABLE = os.getenv("LIGHTLLM_DISTRIBUTED_ENABLE", not self.disable_cudagraph)
+        if LIGHTLLM_DISTRIBUTED_ENABLE:
+            # Multiple nodes are not currently supported, so local_rank == rank
+            init_distributed_environment(
+                backend="nccl",
+                world_size=self.world_size,
+                rank=self.tp_rank,
+                distributed_init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}',
+            )
+            initialize_model_parallel(tensor_model_parallel_size=self.world_size)
+            self.tp_group = get_tp_group()
+
+            dist.all_reduce = all_reduce
+            dist.get_rank = get_tensor_model_parallel_rank
+            dist.get_world_size = get_tensor_model_parallel_world_size
+        else:
+            dist.init_process_group(
+                "nccl",
+                init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}',
+                rank=self.tp_rank,
+                world_size=self.world_size,
+            )
 
         # 为 p d 分离模式添加的全局锁管理，用于做一些同步操作。 一定需要在
         # init_process_group 之后调用
@@ -85,7 +112,10 @@ class ModeBackend:
         self.infer_state_lock = g_infer_state_lock
         # 防止InferStateLock 中的全局共享信息被重复异常初始化,导致同步异常的问题。
         # 所以做一次barrier等待
-        dist.barrier()
+        if LIGHTLLM_DISTRIBUTED_ENABLE:
+            self.tp_group.barrier()
+        else:
+            dist.barrier()
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 

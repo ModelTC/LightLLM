@@ -37,17 +37,23 @@ def test_model_inference(world_size, model_class, batch_size, input_len, output_
 
 def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_len, ans_queue):
     import torch
-    import torch.distributed as dist
+    from lightllm.distributed import (
+        get_tp_group,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
 
     rank_id = model_kvargs["tp_rank"]
     world_size = model_kvargs["world_size"]
 
-    dist.init_process_group("nccl", init_method="tcp://127.0.0.1:28765", rank=rank_id, world_size=world_size)
+    init_distributed_environment(
+        backend="nccl", world_size=world_size, rank=rank_id, distributed_init_method="tcp://127.0.0.1:28765"
+    )
+    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    tp_group = get_tp_group()
     torch.cuda.set_device(rank_id)
 
-    import torch.distributed as dist
-
-    dist.barrier()
+    tp_group.barrier()
     torch.cuda.empty_cache()
 
     model_part = model_class(model_kvargs)
@@ -113,7 +119,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
     b_start_loc = None
     b_seq_len = None
 
-    dist.barrier()
+    tp_group.barrier()
     import time
 
     torch.cuda.synchronize()
