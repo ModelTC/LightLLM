@@ -27,10 +27,10 @@ def gqa_token_decode_attention_flash_decoding(
     o_tensor = alloc_tensor_func(q_nope.shape, q_nope.dtype, q_nope.device) if out is None else out
 
     mid_o = alloc_tensor_func(
-        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1, kv_lora_rank], dtype=q_nope.dtype, device="cuda"
+        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1, kv_lora_rank], dtype=torch.float32, device="cuda"
     )
     mid_o_logexpsum = alloc_tensor_func(
-        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1], dtype=q_nope.dtype, device="cuda"
+        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 1], dtype=torch.float32, device="cuda"
     )
 
     flash_decode_stage1(

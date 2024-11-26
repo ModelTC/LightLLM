@@ -12,7 +12,7 @@ def test_model_inference(world_size, model_class, batch_size, input_len, output_
             "world_size": world_size,
             "load_way": "HF",
             "max_total_token_num": None,
-            "mem_faction": 0.9,
+            "mem_faction": 0.8,
             "max_req_num": max(batch_size, 1000),
             "batch_max_tokens": input_len,
             "run_mode": "normal",
@@ -59,6 +59,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
     model_part = model_class(model_kvargs)
     # warm up
     test_data = np.vstack([np.arange(5, input_len + 5) for _ in range(batch_size)])
+    test_data[:, 0] = 100000
     test_data = test_data.reshape(-1)
     test_data = torch.from_numpy(test_data).cuda()
 
@@ -76,8 +77,8 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         batch_size,
         total_token_num,
         input_len,
-        mem_indexes,
         test_data,
+        mem_indexes,
         b_req_idx,
         b_start_loc,
         b_seq_len,
@@ -97,8 +98,8 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
             batch_size,
             total_token_num,
             input_len + i + 1,
-            mem_indexes,
             torch.from_numpy(predict_ids).cuda().reshape(-1),
+            mem_indexes,
             b_req_idx,
             b_start_loc,
             b_seq_len,
@@ -140,8 +141,8 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         batch_size,
         total_token_num,
         input_len,
-        mem_indexes,
         test_data,
+        mem_indexes,
         b_req_idx,
         b_start_loc,
         b_seq_len,
@@ -167,8 +168,8 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
             batch_size,
             total_token_num,
             input_len + i + 1,
-            mem_indexes,
             torch.from_numpy(predict_ids).cuda().reshape(-1),
+            mem_indexes,
             b_req_idx,
             b_start_loc,
             b_seq_len,

@@ -31,46 +31,24 @@ def _fwd_kernel_destindex_copy_kv(
     kv_rope_head_num,
     BLOCK_DMODEL_NOPE: tl.constexpr,
     BLOCK_DMODEL_ROPE: tl.constexpr,
-    BLOCK_HEAD: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
-    offs_h = tl.arange(0, BLOCK_HEAD)
     offs_d_nope = tl.arange(0, BLOCK_DMODEL_NOPE)
     offs_d_rope = tl.arange(0, BLOCK_DMODEL_ROPE)
 
     dest_index = tl.load(Dest_loc + cur_index)
 
-    kv_nope_ptrs = (
-        KV_nope
-        + cur_index * stride_kv_nope_bs
-        + stride_kv_nope_h * offs_h[:, None]
-        + stride_kv_nope_d * offs_d_nope[None, :]
-    )
-    kv_rope_ptrs = (
-        KV_rope
-        + cur_index * stride_kv_rope_bs
-        + stride_kv_rope_h * offs_h[:, None]
-        + stride_kv_rope_d * offs_d_rope[None, :]
-    )
+    kv_nope_ptrs = KV_nope + cur_index * stride_kv_nope_bs + stride_kv_nope_d * offs_d_nope[None, :]
+    kv_rope_ptrs = KV_rope + cur_index * stride_kv_rope_bs + stride_kv_rope_d * offs_d_rope[None, :]
 
-    o_nope_ptrs = (
-        O_nope
-        + dest_index * stride_o_nope_bs
-        + stride_o_nope_h * offs_h[:, None]
-        + stride_o_nope_d * offs_d_nope[None, :]
-    )
-    o_rope_ptrs = (
-        O_rope
-        + dest_index * stride_o_rope_bs
-        + stride_o_rope_h * offs_h[:, None]
-        + stride_o_rope_d * offs_d_rope[None, :]
-    )
+    o_nope_ptrs = O_nope + dest_index * stride_o_nope_bs + stride_o_nope_d * offs_d_nope[None, :]
+    o_rope_ptrs = O_rope + dest_index * stride_o_rope_bs + stride_o_rope_d * offs_d_rope[None, :]
 
-    kv_nope = tl.load(kv_nope_ptrs, mask=offs_h[:, None] < kv_nope_head_num, other=0.0)
-    kv_rope = tl.load(kv_rope_ptrs, mask=offs_h[:, None] < kv_rope_head_num, other=0.0)
+    kv_nope = tl.load(kv_nope_ptrs)
+    kv_rope = tl.load(kv_rope_ptrs)
 
-    tl.store(o_nope_ptrs, kv_nope, mask=offs_h[:, None] < kv_nope_head_num)
-    tl.store(o_rope_ptrs, kv_rope, mask=offs_h[:, None] < kv_rope_head_num)
+    tl.store(o_nope_ptrs, kv_nope)
+    tl.store(o_rope_ptrs, kv_rope)
     return
 
 
@@ -87,10 +65,6 @@ def destindex_copy_kv(KV_nope, KV_rope, DestLoc, O_nope, O_rope):
     assert KV_nope.shape[2] == O_nope.shape[2]
     assert KV_rope.shape[1] == O_rope.shape[1]
     assert KV_rope.shape[2] == O_rope.shape[2]
-
-    assert _is_power_of_two(kv_nope_head_dim) and _is_power_of_two(kv_rope_head_dim)
-
-    BLOCK_HEAD = triton.next_power_of_2(max(kv_nope_head_num, kv_rope_head_num))
     grid = (seq_len,)
     num_warps = 1
 
@@ -116,7 +90,6 @@ def destindex_copy_kv(KV_nope, KV_rope, DestLoc, O_nope, O_rope):
         kv_rope_head_num,
         BLOCK_DMODEL_NOPE=kv_nope_head_dim,
         BLOCK_DMODEL_ROPE=kv_rope_head_dim,
-        BLOCK_HEAD=BLOCK_HEAD,
         num_warps=num_warps,
         num_stages=1,
     )

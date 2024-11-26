@@ -28,7 +28,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 def get_model(weight_dir):
     model_cfg = get_config_json(weight_dir)
     model_type = model_cfg["model_type"]
-    print(model_type)
     if model_type == "bloom":
         model_cls = BloomTpPartModel
     elif model_type == "llama":
@@ -69,17 +68,17 @@ def get_model(weight_dir):
 
 class TestModelInfer(unittest.TestCase):
     def test_model_infer(self):
-        model_dir = "/nvme/ci_performance/models/Meta-Llama-3.1-8B-Instruct/"
+        model_dir = "/nvme/ci_performance/models/DeepSeek-V2-Lite-Chat/"
         model_class = get_model(model_dir)
         data_type = get_dtype(model_dir)
-        mode = ""
+        mode = "triton_gqa_flashdecoding"
         world_size = 1
         batch_size = 1
-        input_len = 64
-        output_len = 64
+        input_len = 1024
+        output_len = 128
         disable_cudagraph = False
         graph_max_batch_size = batch_size
-        graph_max_len_in_batch = 8192
+        graph_max_len_in_batch = 2048
         quant_type = None
         quant_cfg = None
         extra_model_kvargs = {
