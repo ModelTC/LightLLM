@@ -36,15 +36,18 @@ def _fwd_kernel_flash_decode_stage1(
     stride_mid_o_eb,
     stride_mid_o_eh,
     stride_mid_o_es,
+    Q_HEAD_NUM: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_ROPE_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    cur_batch = tl.program_id(0)
-    cur_head = tl.program_id(1)
-    seq_start_block = tl.program_id(2)
-    cur_kv_head = 0
+    seq_start_block = tl.program_id(0)
+    cur_q_head = tl.program_id(1)
+    cur_batch = tl.program_id(2)
+
+    cur_q_head_offs = tl.arange(0, Q_HEAD_NUM)
+    cur_q_head_range = cur_q_head * Q_HEAD_NUM + cur_q_head_offs
 
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_rope_d = tl.arange(0, BLOCK_ROPE_DMODEL)
@@ -53,9 +56,10 @@ def _fwd_kernel_flash_decode_stage1(
     cur_batch_start_index = seq_start_block * BLOCK_SEQ
     cur_batch_end_index = tl.minimum(cur_batch_seq_len, cur_batch_start_index + BLOCK_SEQ)
 
-    off_q = cur_batch * stride_q_bs + cur_head * stride_q_h + offs_d
-    off_q_rope = cur_batch * stride_q_rope_bs + cur_head * stride_q_rope_h + offs_rope_d
-
+    off_q = cur_batch * stride_q_bs + cur_q_head_range[:, None] * stride_q_h + offs_d[None, :]
+    off_rope_q = cur_batch * stride_q_rope_bs + cur_q_head_range[:, None] * stride_q_rope_h + offs_rope_d[None, :]
+    q = tl.load(Q_nope + off_q)
+    q_rope = tl.load(Q_rope + off_rope_q)
     block_n_size = (
         tl.where(
             cur_batch_end_index - cur_batch_start_index <= 0,
@@ -66,14 +70,9 @@ def _fwd_kernel_flash_decode_stage1(
     )
 
     offs_n = cur_batch_start_index + tl.arange(0, BLOCK_N)
-
-    q = tl.load(Q_nope + off_q)
-    q_rope = tl.load(Q_rope + off_q_rope)
-
-    sum_exp = 0.0
-    max_logic = -float("inf")
-    acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
-
+    sum_exp = tl.zeros([Q_HEAD_NUM], dtype=tl.float32)
+    max_logic = tl.zeros([Q_HEAD_NUM], dtype=tl.float32) - float("inf")
+    acc = tl.zeros([Q_HEAD_NUM, BLOCK_DMODEL], dtype=tl.float32)
     for start_n in range(0, block_n_size, 1):
         offs_n_new = start_n * BLOCK_N + offs_n
         kv_loc = tl.load(
@@ -81,33 +80,44 @@ def _fwd_kernel_flash_decode_stage1(
             mask=offs_n_new < cur_batch_end_index,
             other=0,
         )
-        off_kv = kv_loc[:, None] * stride_kv_bs + cur_kv_head * stride_kv_h + offs_d[None, :]
-        off_kv_rope = kv_loc[:, None] * stride_kv_rope_bs + cur_kv_head * stride_kv_rope_h + offs_rope_d[None, :]
-        kv = tl.load(KV_nope + off_kv, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
-        kv_rope = tl.load(KV_rope + off_kv_rope, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
-        att_value = tl.sum(q[None, :] * kv, 1)
-        att_value += tl.sum(q_rope[None, :] * kv_rope, 1)
-        att_value *= sm_scale
-        att_value = tl.where(offs_n_new < cur_batch_end_index, att_value, float("-inf"))
-        v = kv
+        off_kv = kv_loc[None, :] * stride_kv_bs + offs_d[:, None]
+        kv = tl.load(KV_nope + off_kv, mask=offs_n_new[None, :] < cur_batch_end_index, other=0.0)
+        att_value = tl.dot(q, kv)
+        off_rope_kv = kv_loc[None, :] * stride_kv_rope_bs + offs_rope_d[:, None]
+        rope_kv = tl.load(KV_rope + off_rope_kv, mask=offs_n_new[None, :] < cur_batch_end_index, other=0.0)
+        att_value += tl.dot(q_rope, rope_kv)
 
-        cur_max_logic = tl.max(att_value, axis=0)
+        att_value *= sm_scale
+        att_value = tl.where(offs_n_new[None, :] < cur_batch_end_index, att_value, float("-inf"))
+
+        cur_max_logic = tl.max(att_value, axis=1)
         new_max_logic = tl.maximum(cur_max_logic, max_logic)
 
-        exp_logic = tl.exp(att_value - new_max_logic)
+        exp_logic = tl.exp(att_value - new_max_logic[:, None])
         logic_scale = tl.exp(max_logic - new_max_logic)
-        acc *= logic_scale
-        acc += tl.sum(exp_logic[:, None] * v, axis=0)
+        acc *= logic_scale[:, None]
+        acc += tl.dot(exp_logic.to(kv.dtype), tl.trans(kv))
 
-        sum_exp = sum_exp * logic_scale + tl.sum(exp_logic, axis=0)
+        sum_exp = sum_exp * logic_scale + tl.sum(exp_logic, axis=1)
         max_logic = new_max_logic
 
     need_store = tl.where(block_n_size == 0, 0, 1)
     for _ in range(0, need_store, 1):
-        off_mid_o = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + seq_start_block * stride_mid_os + offs_d
-        off_mid_o_logexpsum = cur_batch * stride_mid_o_eb + cur_head * stride_mid_o_eh + seq_start_block
-        tl.store(Mid_O + off_mid_o, acc / sum_exp)
-        tl.store(Mid_O_LogExpSum + off_mid_o_logexpsum, max_logic + tl.log(sum_exp))
+        off_mid_o = (
+            cur_batch * stride_mid_ob
+            + cur_q_head_range[:, None] * stride_mid_oh
+            + seq_start_block * stride_mid_os
+            + offs_d[None, :]
+        )
+        off_mid_o_logexpsum = cur_batch * stride_mid_o_eb + cur_q_head_range * stride_mid_o_eh + seq_start_block
+        tl.store(
+            Mid_O + off_mid_o,
+            acc / sum_exp[:, None],
+        )
+        tl.store(
+            Mid_O_LogExpSum + off_mid_o_logexpsum,
+            max_logic + tl.log(sum_exp),
+        )
     return
 
 
@@ -124,23 +134,25 @@ def flash_decode_stage1(
     mid_out,
     mid_out_logsumexp,
     block_seq,
-    qk_nope_head_dim,
     softmax_scale,
 ):
     BLOCK_SEQ = block_seq
     BLOCK_N = 16
+    BLOCK_Q_HEAD = 16
     assert BLOCK_SEQ % BLOCK_N == 0
     # shape constraints
     q_nope_dim = q_nope.shape[-1]
     q_rope_dim = q_rope.shape[-1]
+
     assert q_nope_dim == kv_nope.shape[-1]
     assert q_rope_dim == kv_rope.shape[-1]
     assert q_nope_dim in {16, 32, 64, 128, 256, 512}
     assert q_rope_dim in {16, 32, 64, 128, 256}
 
     sm_scale = softmax_scale  # 计算scale系数
-    batch, head_num = B_req_idx.shape[0], q_nope.shape[1]
-    grid = (batch, head_num, triton.cdiv(max_len_in_batch, BLOCK_SEQ))
+    batch, q_head_num = B_req_idx.shape[0], q_nope.shape[1]
+    assert q_head_num % BLOCK_Q_HEAD == 0
+    grid = (triton.cdiv(max_len_in_batch, BLOCK_SEQ), q_head_num // BLOCK_Q_HEAD, batch)
 
     _fwd_kernel_flash_decode_stage1[grid](
         q_nope,
@@ -174,11 +186,12 @@ def flash_decode_stage1(
         mid_out_logsumexp.stride(0),
         mid_out_logsumexp.stride(1),
         mid_out_logsumexp.stride(2),
+        Q_HEAD_NUM=BLOCK_Q_HEAD,
         BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=q_nope_dim,
         BLOCK_ROPE_DMODEL=q_rope_dim,
         BLOCK_N=BLOCK_N,
-        num_warps=1,
+        num_warps=4,
         num_stages=2,
     )
     return
