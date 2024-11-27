@@ -83,8 +83,12 @@ class ModeBackend:
         max_total_token_num = kvargs["max_total_token_num"]
 
         torch.cuda.set_device(self.tp_rank)
-        LIGHTLLM_DISTRIBUTED_ENABLE = os.getenv("LIGHTLLM_DISTRIBUTED_ENABLE", not self.disable_cudagraph)
-        if LIGHTLLM_DISTRIBUTED_ENABLE:
+        LIGHTLLM_PYNCCL_ENABLE = os.getenv("LIGHTLLM_PYNCCL_ENABLE", str(not self.disable_cudagraph)).upper() in [
+            "ON",
+            "TRUE",
+            "1",
+        ]
+        if LIGHTLLM_PYNCCL_ENABLE:
             # Multiple nodes are not currently supported, so local_rank == rank
             init_distributed_environment(
                 backend="nccl",
@@ -112,7 +116,7 @@ class ModeBackend:
         self.infer_state_lock = g_infer_state_lock
         # 防止InferStateLock 中的全局共享信息被重复异常初始化,导致同步异常的问题。
         # 所以做一次barrier等待
-        if LIGHTLLM_DISTRIBUTED_ENABLE:
+        if LIGHTLLM_PYNCCL_ENABLE:
             self.tp_group.barrier()
         else:
             dist.barrier()

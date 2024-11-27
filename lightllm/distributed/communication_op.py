@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional, Union
 import torch
 import torch.distributed
 
-from .parallel_state import get_tp_group
+from .parallel_state import get_tp_group, original_all_reduce
 from torch.distributed import ReduceOp
 from lightllm.utils.log_utils import init_logger
 
@@ -33,7 +33,10 @@ logger = init_logger(__name__)
 
 
 def all_reduce(input_, op=ReduceOp.SUM, group=None, async_op=False):
-    input_.data = tensor_model_parallel_all_reduce(input_)
+    if op != ReduceOp.SUM or group is not None or async_op:
+        original_all_reduce(input_, op, group, async_op)
+    else:
+        input_.data = tensor_model_parallel_all_reduce(input_)
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
