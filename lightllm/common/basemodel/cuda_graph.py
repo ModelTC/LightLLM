@@ -49,7 +49,7 @@ class CudaGraph:
     @torch.no_grad()
     def warmup(self, model):
         logger.info("Begin capture cudagraph, use the --disable_cudagraph to disable it.")
-        LIGHTLLM_PYNCCL_ENABLE = os.getenv("LIGHTLLM_PYNCCL_ENABLE", "True").upper() in ["ON", "TRUE", "1"]
+        LIGHTLLM_PYNCCL_ENABLE = os.getenv("LIGHTLLM_PYNCCL_ENABLE", "False").upper() in ["ON", "TRUE", "1"]
         graph_capture_context_manager = graph_capture() if LIGHTLLM_PYNCCL_ENABLE else nullcontext()
         with graph_capture_context_manager as graph_capture_context:
             self.stream = graph_capture_context.stream if graph_capture_context is not None else None

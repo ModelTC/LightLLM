@@ -83,7 +83,7 @@ class ModeBackend:
         max_total_token_num = kvargs["max_total_token_num"]
 
         torch.cuda.set_device(self.tp_rank)
-        LIGHTLLM_PYNCCL_ENABLE = os.getenv("LIGHTLLM_PYNCCL_ENABLE", str(not self.disable_cudagraph)).upper() in [
+        LIGHTLLM_PYNCCL_ENABLE = os.getenv("LIGHTLLM_PYNCCL_ENABLE", "False").upper() in [
             "ON",
             "TRUE",
             "1",

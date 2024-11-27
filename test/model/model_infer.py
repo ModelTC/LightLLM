@@ -51,9 +51,8 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
     rank_id = model_kvargs["tp_rank"]
     world_size = model_kvargs["world_size"]
 
-    disable_cudagraph = model_kvargs.get("disable_cudagraph", False)
     torch.cuda.set_device(rank_id)
-    LIGHTLLM_PYNCCL_ENABLE = os.getenv("LIGHTLLM_PYNCCL_ENABLE", str(not disable_cudagraph)).upper() in [
+    LIGHTLLM_PYNCCL_ENABLE = os.getenv("LIGHTLLM_PYNCCL_ENABLE", "False").upper() in [
         "ON",
         "TRUE",
         "1",
