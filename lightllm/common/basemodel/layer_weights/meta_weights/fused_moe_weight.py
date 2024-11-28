@@ -33,7 +33,7 @@ class FusedMoeWeight(BaseWeight):
         self.lock = threading.Lock()
 
     def set_quant_method(self, quant_method):
-        if isinstance(self.quant_method, vLLMFP8w8a8QuantizationMethod):
+        if isinstance(quant_method, vLLMFP8w8a8QuantizationMethod):
             self.quant_method = quant_method
             if self.quant_method is not None:
                 self.quant_method.is_moe = True
