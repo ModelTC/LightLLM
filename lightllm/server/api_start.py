@@ -196,7 +196,7 @@ def normal_or_p_d_start(g_objs):
 
         start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
 
-    g_objs.shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load", 1)
+    g_objs.shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load", args.dp)
 
     g_objs.server.install_signal_handlers()
     uvicorn.run(

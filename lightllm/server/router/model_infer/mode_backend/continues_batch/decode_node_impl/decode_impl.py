@@ -72,10 +72,10 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
                     f"req_id: {req_obj.group_req_id} forced to finished, it not in g_success_kv_move_task_cache"
                 )
 
-        if self.tp_rank == 0:
+        if self.tp_rank < self.dp_size:
             with g_router_lock.obj:
-                self.shared_token_load.add_frozened_token_count(-remove_count)
-                self.shared_token_load.add_estimated_peak_token_count(estimated_peak_token_count)
+                self.shared_token_load.add_frozened_token_count(-remove_count, self.tp_rank)
+                self.shared_token_load.add_estimated_peak_token_count(estimated_peak_token_count, self.tp_rank)
         g_infer_state_lock.release()
 
         self.cache[batch.batch_id] = batch

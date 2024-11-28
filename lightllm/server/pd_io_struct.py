@@ -39,6 +39,7 @@ class PD_Client_Obj:
 class UpKVStatus:
     type: str = "kv_move_status"
     group_request_id: int = None
+    dp_index: int = None
 
     def __post_init__(self):
         if self.type != "kv_move_status":
@@ -71,6 +72,10 @@ class KVMoveTask:
     move_kv_len: int  # 因为 prompt cache 的原因，当prefill节点和decode节点沟通后，传输的kv的数量可能少于 prefill_value 的长度
     prefill_node_id: str
     decode_node: DecodeNodeInfo
+    # 保存prefill 和 decode 节点对应处理的dp_index, 如果是普通tp模式，这个值一定是0,
+    # 如果是deepseekv2的tp dp 混合模式, 才有真正的意义。
+    prefill_dp_index: int
+    decode_dp_index: int
 
     def __post_init__(self):
         if len(self.input_tokens) <= 0:
@@ -80,12 +85,16 @@ class KVMoveTask:
 
     def to_prefill_log_info(self):
         v_len = None if self.prefill_token_indexes is None else len(self.prefill_token_indexes)
-        log = f"id: {self.group_request_id} in_len:{len(self.input_tokens)} v_len: {v_len} move_len: {self.move_kv_len}"
+        d_i = self.prefill_dp_index
+        id = self.group_request_id
+        log = f"id: {id} in_len:{len(self.input_tokens)} v_len: {v_len} move_len: {self.move_kv_len} dp_index:{d_i}"
         return log
 
     def to_decode_log_info(self):
         v_len = None if self.decode_token_indexes is None else len(self.decode_token_indexes)
-        log = f"id: {self.group_request_id} in_len:{len(self.input_tokens)} v_len: {v_len} move_len: {self.move_kv_len}"
+        d_i = self.decode_dp_index
+        id = self.group_request_id
+        log = f"id: {id} in_len:{len(self.input_tokens)} v_len: {v_len} move_len: {self.move_kv_len} dp_index:{d_i}"
         return log
 
     def id(self):

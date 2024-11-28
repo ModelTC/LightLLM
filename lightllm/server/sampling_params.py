@@ -40,6 +40,8 @@ class SamplingParams:
         group_request_id: Optional[int] = None,
         # move kv to deocde node, only used in pd mode
         move_kv_to_decode_node: Optional[dict] = None,
+        # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
+        suggested_dp_index: Optional[int] = None,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -62,6 +64,7 @@ class SamplingParams:
         self.allowed_token_ids = allowed_token_ids
         self.group_request_id = group_request_id
         self.move_kv_to_decode_node = move_kv_to_decode_node
+        self.suggested_dp_index = suggested_dp_index
         if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -146,6 +149,9 @@ class SamplingParams:
         if not (self.move_kv_to_decode_node is None or isinstance(self.move_kv_to_decode_node, dict)):
             raise ValueError(f"move_kv_to_decode_node must be None or dict, but get {self.move_kv_to_decode_node}")
 
+        if not (self.suggested_dp_index is None or isinstance(self.suggested_dp_index, int)):
+            raise ValueError(f"suggested_dp_index must be None or int, but get {self.suggested_dp_index}")
+
         self._verify_stop_sentences()
 
         self._verify_allowed_token_ids()
@@ -223,4 +229,5 @@ class SamplingParams:
     def to_origin_dict(self):
         ret = self.to_dict()
         ret["group_request_id"] = self.group_request_id
+        ret["suggested_dp_index"] = self.suggested_dp_index
         return ret

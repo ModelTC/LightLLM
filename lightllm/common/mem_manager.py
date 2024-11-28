@@ -1,6 +1,7 @@
 import re
 import os
 import torch
+import torch.distributed as dist
 from typing import List
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
@@ -31,7 +32,8 @@ class MemoryManager:
         assert nccl_port is not None
         logger.info(f"mem manger get nccl port: {str(nccl_port)}")
 
-        self.shared_can_use_token_num = SharedInt(f"{str(nccl_port)}_mem_manger_can_use_token_num")
+        rank_id = dist.get_rank()
+        self.shared_can_use_token_num = SharedInt(f"{str(nccl_port)}_mem_manger_can_use_token_num_{rank_id}")
 
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._init_buffers(
@@ -77,7 +79,17 @@ class MemoryManager:
         )
         return
 
-    def send_to_decode_node(self, token_indexes: List[int], mem_managers: List["MemoryManager"]):
+    def send_to_decode_node(
+        self, token_indexes: List[int], mem_managers: List["MemoryManager"], dp_size: int, dp_index: int
+    ):
+        """
+        dp_size 和 dp_index 是为 deepseekv2 类型，可以 dp 和 tp 混合模式运行的模型定制的参数，
+        普通tp模式下, dp_size 一定等于 1, dp_index 一定等于 0, 同时普通模式下, 这两个参数并不会
+        被真正使用
+        """
+        assert dp_size == 1
+        assert dp_index == 0
+
         # 先将数据发送到指定的一张卡上的buffer，再发送。
         import torch.distributed as dist
 
@@ -105,7 +117,17 @@ class MemoryManager:
         move_buffer[:, :, :, :] = self.kv_buffer[layer_index, token_indexes, :, :]
         return move_buffer
 
-    def receive_from_prefill_node(self, token_indexes: List[int], mem_managers: List["MemoryManager"]):
+    def receive_from_prefill_node(
+        self, token_indexes: List[int], mem_managers: List["MemoryManager"], dp_size: int, dp_index: int
+    ):
+        """
+        dp_size 和 dp_index 是为 deepseekv2 类型，可以 dp 和 tp 混合模式运行的模型定制的参数，
+        普通tp模式下, dp_size 一定等于 1, dp_index 一定等于 0, 同时普通模式下, 这两个参数并不会
+        被真正使用
+        """
+        assert dp_size == 1
+        assert dp_index == 0
+
         # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
         import torch.distributed as dist
 
@@ -223,3 +245,17 @@ class MemoryManager:
         self._free_buffers()
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
         return
+
+
+class ReadOnlyStaticsMemoryManager:
+    """
+    读取一些统计信息
+    """
+
+    def __init__(self, nccl_port, tp_size) -> None:
+        self.shared_tp_infos = [
+            SharedInt(f"{str(nccl_port)}_mem_manger_can_use_token_num_{tp_index}") for tp_index in range(tp_size)
+        ]
+
+    def get_unrefed_token_num(self, tp_index: int):
+        return self.shared_tp_infos[tp_index].get_value()

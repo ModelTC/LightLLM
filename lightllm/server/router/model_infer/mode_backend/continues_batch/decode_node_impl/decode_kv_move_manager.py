@@ -6,9 +6,10 @@ import signal
 import time
 import psutil
 import threading
+import random
 from rpyc.utils.classic import obtain
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from rpyc import ThreadedServer
 from lightllm.utils.log_utils import init_logger
 from .decode_infer_rpyc import PDDecodeInferRpcServer
@@ -76,10 +77,11 @@ class TransProcessObj:
 
 
 class DecodeKVMoveManager(rpyc.Service):
-    def __init__(self, args, info_queues: List[mp.Queue], mem_queues: List[mp.Queue]):
+    def __init__(self, args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
         super().__init__()
         self.args = args
-        self.info_queues = info_queues
+        self.dp_size = args.dp
+        self.info_queue = info_queue
         self.mem_queues = mem_queues
         self.infer_rpyc_lock = threading.Lock()
         self.infer_rpyc_objs: List[PDDecodeInferRpcServer] = []
@@ -106,11 +108,74 @@ class DecodeKVMoveManager(rpyc.Service):
         await asyncio.gather(*[asyncio.to_thread(future.wait) for future in futures])
         return
 
+    def _alloc_to_frozen_some_tokens(self, task: KVMoveTask) -> Tuple[int, Optional[List[int]]]:
+        if self.dp_size == 1:
+            with self.infer_rpyc_lock:
+                futures: List[AsyncResult] = []
+                for conn in self.infer_rpyc_objs:
+                    futures.append(rpyc.async_(conn.alloc_to_frozen_some_tokens)(task))
+                asyncio.run(self.wait_all_future_finish(futures))
+                return 0, obtain(futures[0].value)
+        else:
+            dp_indexes = list(range(self.dp_size))
+            random.shuffle(dp_indexes)
+
+            with self.infer_rpyc_lock:
+                for dp_index in dp_indexes:
+                    conn = self.infer_rpyc_objs[dp_index]
+                    futures = [rpyc.async_(conn.alloc_to_frozen_some_tokens)(task)]
+                    asyncio.run(self.wait_all_future_finish(futures))
+                    ans_value = obtain(futures[0].value)
+                    if ans_value is not None:
+                        return dp_index, ans_value
+            return None, None
+
+    def _put_kv_received_to_radix_cache(self, task: KVMoveTask) -> None:
+        if self.dp_size == 1:
+            with self.infer_rpyc_lock:
+                futures: List[AsyncResult] = []
+                for conn in self.infer_rpyc_objs:
+                    futures.append(rpyc.async_(conn.put_kv_received_to_radix_cache)(task.group_request_id))
+                asyncio.run(self.wait_all_future_finish(futures))
+        else:
+            with self.infer_rpyc_lock:
+                futures: List[AsyncResult] = []
+                conn = self.infer_rpyc_objs[task.decode_dp_index]
+                futures.append(rpyc.async_(conn.put_kv_received_to_radix_cache)(task.group_request_id))
+                asyncio.run(self.wait_all_future_finish(futures))
+        return
+
+    def _fail_to_realese_forzen_tokens(self, task: KVMoveTask) -> None:
+        if self.dp_size == 1:
+            with self.infer_rpyc_lock:
+                futures: List[AsyncResult] = []
+                for conn in self.infer_rpyc_objs:
+                    futures.append(rpyc.async_(conn.fail_to_realese_forzen_tokens)(task.group_request_id))
+                asyncio.run(self.wait_all_future_finish(futures))
+        else:
+            with self.infer_rpyc_lock:
+                futures: List[AsyncResult] = []
+                conn = self.infer_rpyc_objs[task.decode_dp_index]
+                futures.append(rpyc.async_(conn.fail_to_realese_forzen_tokens)(task.group_request_id))
+                asyncio.run(self.wait_all_future_finish(futures))
+        return
+
+    def _unfrozen_time_out_reqs_tokens(self) -> None:
+        # 这个接口比较特殊，可以不区分 dp 的具体模式
+        with self.infer_rpyc_lock:
+            futures: List[AsyncResult] = []
+            for conn in self.infer_rpyc_objs:
+                futures.append(rpyc.async_(conn.unfrozen_time_out_reqs_tokens)())
+            asyncio.run(self.wait_all_future_finish(futures))
+        return
+
     def on_connect(self, conn):
+        # 用于处理连接断开的时候，自动删除资源
         thread_local_data.prefill_node_id = None
         pass
 
     def on_disconnect(self, conn):
+        # 用于处理连接断开的时候，自动删除资源
         if thread_local_data.prefill_node_id is not None:
             self.node_id_to_trans_obj.pop(thread_local_data.prefill_node_id, None)
             logger.info(f"prefill node id {thread_local_data.prefill_node_id} disconnect")
@@ -140,20 +205,16 @@ class DecodeKVMoveManager(rpyc.Service):
             trans_obj = self.get_trans_obj(task)
             device_index = trans_obj.device_index
             assert trans_obj is not None
-            value_list = []
-            with self.infer_rpyc_lock:
-                futures: List[AsyncResult] = []
-                for conn in self.infer_rpyc_objs:
-                    futures.append(rpyc.async_(conn.alloc_to_frozen_some_tokens)(task))
-                asyncio.run(self.wait_all_future_finish(futures))
-                value_list = [obtain(future.value) for future in futures]
 
+            dp_index, decode_token_indexes = self._alloc_to_frozen_some_tokens(task)
             # 代表服务很繁忙，申请不到资源，需要拒绝
-            if value_list[0] is None:
+            if decode_token_indexes is None:
                 raise DecodeBusyError("token is full, busy")
 
-            task.decode_token_indexes = value_list[0]
-            task.move_kv_len = len(value_list[0])
+            task.decode_dp_index = dp_index
+            task.decode_token_indexes = decode_token_indexes
+            task.move_kv_len = len(decode_token_indexes)
+
         except DecodeBusyError as e:
             logger.error(str(e))
             return None
@@ -192,24 +253,18 @@ class DecodeKVMoveManager(rpyc.Service):
                     trans_obj.task_in_queue.put(task, timeout=10)
                     assert trans_obj.task_out_queue.get(timeout=30) == "ok"
                     logger.info(f"deocode node transfer kv ok {task.to_decode_log_info()}")
-                    # 成功了将
-                    with self.infer_rpyc_lock:
-                        futures: List[AsyncResult] = []
-                        for conn in self.infer_rpyc_objs:
-                            futures.append(rpyc.async_(conn.put_kv_received_to_radix_cache)(task.group_request_id))
-                        asyncio.run(self.wait_all_future_finish(futures))
+                    # 成功了将 token 放入prompt cache中
+                    self._put_kv_received_to_radix_cache(task)
 
                     logger.info(f"decode node put kv to radix cache ok, req_id: {task.id()}")
-                    self.up_status_in_queue.put(UpKVStatus(group_request_id=task.group_request_id))
+                    self.up_status_in_queue.put(
+                        UpKVStatus(group_request_id=task.group_request_id, dp_index=task.decode_dp_index)
+                    )
                     logger.info("decode node up kv status finished")
                 except BaseException as e:
                     logger.exception(str(e))
                     # 失败了也需要释放锁定的 token
-                    with self.infer_rpyc_lock:
-                        futures: List[AsyncResult] = []
-                        for conn in self.infer_rpyc_objs:
-                            futures.append(rpyc.async_(conn.fail_to_realese_forzen_tokens)(task.group_request_id))
-                        asyncio.run(self.wait_all_future_finish(futures))
+                    self._fail_to_realese_forzen_tokens(task)
                     logger.error(f"decode kv move task {task.to_decode_log_info()} has error, remove the trans_obj")
                     self.node_id_to_trans_obj.pop(task.prefill_node_id, None)
                 finally:
@@ -221,22 +276,18 @@ class DecodeKVMoveManager(rpyc.Service):
 
     def timer_loop(self):
         while True:
-            with self.infer_rpyc_lock:
-                futures: List[AsyncResult] = []
-                for conn in self.infer_rpyc_objs:
-                    futures.append(rpyc.async_(conn.unfrozen_time_out_reqs_tokens)())
-                asyncio.run(self.wait_all_future_finish(futures))
+            self._unfrozen_time_out_reqs_tokens()
             time.sleep(3.5)
 
 
-def _init_env(args, info_queues: List[mp.Queue], mem_queues: List[mp.Queue], event: mp.Event):
+def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.Event):
     # 注册graceful 退出的处理
     from lightllm.utils.graceful_utils import graceful_registry
     import inspect
 
     graceful_registry(inspect.currentframe().f_code.co_name)
 
-    manager = DecodeKVMoveManager(args, info_queues, mem_queues)
+    manager = DecodeKVMoveManager(args, info_queue, mem_queues)
     t = ThreadedServer(manager, port=args.pd_decode_rpyc_port, protocol_config={"allow_pickle": True})
     threading.Thread(target=lambda: t.start(), daemon=True).start()
 
@@ -248,9 +299,9 @@ def _init_env(args, info_queues: List[mp.Queue], mem_queues: List[mp.Queue], eve
     return
 
 
-def start_decode_kv_move_manager_process(args, info_queues: List[mp.Queue], mem_queues: List[mp.Queue]):
+def start_decode_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
     event = mp.Event()
-    proc = mp.Process(target=_init_env, args=(args, info_queues, mem_queues, event))
+    proc = mp.Process(target=_init_env, args=(args, info_queue, mem_queues, event))
     proc.start()
     event.wait()
     assert proc.is_alive()

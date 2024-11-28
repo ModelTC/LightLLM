@@ -63,12 +63,13 @@ class InferStateLock:
 @dataclass
 class G_Infer_Lock:
     obj: InferStateLock = None
+    dp_size: int = None
 
     def acquire(self):
         if self.obj is not None:
             # 当遇到有同步请求的时候，同时自己的mark已经是最大的mark的时候，就在这里休眠，
-            # 不去竞争锁, 因为 wait_mark == 1 的时候， 说明wait_get_locks被调用，有人
-            # 在申请同步点操作
+            # 不去竞争锁, 因为 wait_mark == 1 的时候， 说明acquire_lock_until_ready被调用，
+            # 有推理进程在申请同步点操作
             while self.obj.get_group_wait_mark() == 1 and self.obj.judge_cur_mark_equal_max_mark_in_group():
                 time.sleep(0)
 
@@ -85,6 +86,12 @@ g_infer_state_lock = G_Infer_Lock()
 
 # 下面两个函数需要配对使用
 def acquire_lock_until_ready(nccl_group):
+    # 在 deepseekv2 的tp dp 混合运行模式下, 不需要多个推理进程间做协调同步
+    # 所以直接加锁，解锁即可
+    if g_infer_state_lock.dp_size != 1:
+        g_infer_state_lock.obj.infer_lock.acquire()
+        return
+
     g_infer_state_lock.obj.set_group_wait_mark()
     while True:
         g_infer_state_lock.obj.infer_lock.acquire()

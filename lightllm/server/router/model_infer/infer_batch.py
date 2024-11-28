@@ -416,7 +416,7 @@ class InferBatch:
         )
 
     @torch.no_grad()
-    def pause_reqs(self, pause_reqs: List[str]):
+    def pause_reqs(self, pause_reqs: List):
         free_token_index = []
         for request_id, pause_way in pause_reqs:
             req: InferReq = requests_mapping[request_id]

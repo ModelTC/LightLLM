@@ -88,6 +88,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--tp", type=int, default=1, help="model tp parral size, the default is 1")
     parser.add_argument(
+        "--dp",
+        type=int,
+        default=1,
+        help="""This is just a useful parameter for deepseekv2. When
+                        using the deepseekv2 model, set dp to be equal to the tp parameter. In other cases, please
+                        do not set it and keep the default value as 1.""",
+    )
+    parser.add_argument(
         "--max_req_total_len", type=int, default=2048 + 1024, help="the max value for req_input_len + req_output_len"
     )
     parser.add_argument(

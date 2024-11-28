@@ -10,13 +10,15 @@ from lightllm.common.basemodel.infer_lock import g_router_lock
 
 
 class ContinuesBatchQueue(BaseQueue):
-    def __init__(self, args, router) -> None:
-        super().__init__(args, router)
+    def __init__(self, args, router, dp_index, dp_size) -> None:
+        super().__init__(args, router, dp_index, dp_size)
 
     def _init_cache_list(self, current_batch: Batch, is_busy):
         if current_batch is not None:
             self.cache_len_list = [
-                req.get_tuple_tokens(is_busy, self.router_max_new_token_len) for req in current_batch.reqs
+                req.get_tuple_tokens(is_busy, self.router_max_new_token_len)
+                for req in current_batch.reqs
+                if req.sample_params.suggested_dp_index == self.dp_index
             ]
         else:
             self.cache_len_list = []
@@ -37,7 +39,8 @@ class ContinuesBatchQueue(BaseQueue):
 
         with g_router_lock.obj:
             ok_token_num = (
-                need_max_token_num + self.router.shared_token_load.get_frozened_token_count() < self.max_total_tokens
+                need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)
+                < self.max_total_tokens
             )
 
             if req.req_status != ReqRunStatus.PAUSED_AND_OFFLOAD:
@@ -51,10 +54,11 @@ class ContinuesBatchQueue(BaseQueue):
             ok_prefill = new_batch_first_router_need_tokens <= self.batch_max_tokens
 
             if ok_token_num and ok_req_num and ok_prefill:
-                self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num)
+                self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
                 self.router.shared_token_load.set_dynamic_max_load(
-                    (need_max_token_num + self.router.shared_token_load.get_frozened_token_count())
-                    / self.max_total_tokens
+                    (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
+                    / self.max_total_tokens,
+                    self.dp_index,
                 )
                 return True, new_batch_first_router_need_tokens
             else:
@@ -63,7 +67,7 @@ class ContinuesBatchQueue(BaseQueue):
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch):
         # 如果当前已经被调度的请求数量超过了上限，直接不调度新的请求了。
-        exist_req_num = (0 if current_batch is None else len(current_batch.reqs)) + len(self.pause_req_dict)
+        exist_req_num = self.get_batch_dp_req_size(current_batch) + len(self.pause_req_dict)
         req_is_full = exist_req_num >= self.running_max_req_size
         if req_is_full:
             return None
@@ -91,7 +95,7 @@ class ContinuesBatchQueue(BaseQueue):
             else:
                 break
         if len(can_run_list) != 0:
-            new_batch = Batch(uuid.uuid4().hex, can_run_list)
+            new_batch = Batch(uuid.uuid4().hex, can_run_list, dp_size=self.dp_size)
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
             return new_batch
         else:
@@ -108,5 +112,6 @@ class ContinuesBatchQueue(BaseQueue):
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
         return (
             need_max_token_num,
-            (need_max_token_num + self.router.shared_token_load.get_frozened_token_count()) / self.max_total_tokens,
+            (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
+            / self.max_total_tokens,
         )

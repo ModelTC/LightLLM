@@ -17,7 +17,12 @@ class Deepseek2MemoryManager(MemoryManager):
         )
         return
 
-    def send_to_decode_node(self, token_indexes: List[int], mem_managers: List["Deepseek2MemoryManager"]):
+    def send_to_decode_node(
+        self, token_indexes: List[int], mem_managers: List["Deepseek2MemoryManager"], dp_size: int, dp_index: int
+    ):
+        assert dp_size == 1
+        assert dp_index == 0
+
         # 先将数据发送到指定的一张卡上的buffer，再发送。
         import torch.distributed as dist
 
@@ -36,7 +41,12 @@ class Deepseek2MemoryManager(MemoryManager):
         move_buffer[:, :, :, :] = self.kv_buffer[layer_index, token_indexes, :, :]
         return move_buffer
 
-    def receive_from_prefill_node(self, token_indexes: List[int], mem_managers: List["MemoryManager"]):
+    def receive_from_prefill_node(
+        self, token_indexes: List[int], mem_managers: List["MemoryManager"], dp_size: int, dp_index: int
+    ):
+        assert dp_size == 1
+        assert dp_index == 0
+
         # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
         import torch.distributed as dist
 

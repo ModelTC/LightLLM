@@ -101,9 +101,10 @@ class ContinuesBatchBackendForPrefillNode(ModeBackend):
                     req.shared_kv_node = None
                 req.cur_kv_len = 0
                 if req.sampling_param.move_kv_to_decode_node is not None:
-                    if self.tp_rank == 0:
+                    # 注意兼容纯tp 和 tp dp 混合模式的逻辑
+                    if self.tp_rank < self.dp_size:
                         g_router_lock.acquire()
-                        self.shared_token_load.add_frozened_token_count(len(key))
+                        self.shared_token_load.add_frozened_token_count(len(key), self.tp_rank)
                         g_router_lock.release()
 
                     share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=True)
@@ -118,10 +119,13 @@ class ContinuesBatchBackendForPrefillNode(ModeBackend):
                         prefill_node_id=self.args.pd_node_id,
                         decode_node=decode_node_info,
                         move_kv_len=None,
+                        prefill_dp_index=0 if self.dp_size == 1 else self.tp_rank,
+                        decode_dp_index=None,
                     )
                     g_kv_move_task_cache[task.group_request_id] = (task, share_node)
-                    # 只有 0 进程发送真正的数据到队列中。
-                    if self.tp_rank == 0:
+
+                    # 注意兼容纯 tp 和 tp dp 混合模式的逻辑
+                    if self.tp_rank < self.dp_size:
                         self.info_queue.put(task)
         except BaseException as e:
             logger.exception(str(e))

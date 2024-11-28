@@ -8,13 +8,15 @@ from lightllm.server.router.req_queue.base_queue import BaseQueue
 
 
 class SplitFuseQueue(BaseQueue):
-    def __init__(self, args, router) -> None:
-        super().__init__(args, router)
+    def __init__(self, args, router, dp_index, dp_size) -> None:
+        super().__init__(args, router, dp_index, dp_size)
 
     def _init_cache_list(self, current_batch: Batch, is_busy):
         if current_batch is not None:
             self.cache_len_list = [
-                req.get_tuple_tokens(is_busy, self.router_max_new_token_len) for req in current_batch.reqs
+                req.get_tuple_tokens(is_busy, self.router_max_new_token_len)
+                for req in current_batch.reqs
+                if req.sample_params.suggested_dp_index == self.dp_index
             ]
         else:
             self.cache_len_list = []
@@ -33,7 +35,8 @@ class SplitFuseQueue(BaseQueue):
 
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
         ok_token_num = (
-            need_max_token_num + self.router.shared_token_load.get_frozened_token_count() < self.max_total_tokens
+            need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)
+            < self.max_total_tokens
         )
 
         if req.req_status != ReqRunStatus.PAUSED_AND_OFFLOAD:
@@ -46,9 +49,11 @@ class SplitFuseQueue(BaseQueue):
         ok_splitfuse_decode = new_batch_first_router_need_tokens <= self.batch_max_tokens
 
         if ok_token_num and ok_req_num and ok_splitfuse_decode:
-            self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num)
+            self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
             self.router.shared_token_load.set_dynamic_max_load(
-                (need_max_token_num + self.router.shared_token_load.get_frozened_token_count()) / self.max_total_tokens
+                (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
+                / self.max_total_tokens,
+                self.dp_index,
             )
             return True, new_batch_first_router_need_tokens
         else:
@@ -58,7 +63,7 @@ class SplitFuseQueue(BaseQueue):
     def generate_new_batch(self, current_batch: Batch):
 
         # 如果当前已经被调度的请求数量超过了上限，直接不调度新的请求了。
-        exist_req_num = (0 if current_batch is None else len(current_batch.reqs)) + len(self.pause_req_dict)
+        exist_req_num = self.get_batch_dp_req_size(current_batch) + len(self.pause_req_dict)
         req_is_full = exist_req_num >= self.running_max_req_size
         if req_is_full:
             return None
@@ -67,7 +72,9 @@ class SplitFuseQueue(BaseQueue):
 
         # 得到当前batch 往前 decode 一次，需要的token量，在 splitfuse 模式下才有用，因为splitfuse
         # 模式下 类似prefill 和 deocde 是在一起进行的，所以需要合并考虑历史当前Batch
-        new_batch_first_router_need_tokens = 0 if current_batch is None else current_batch.batch_decode_need_tokens
+        new_batch_first_router_need_tokens = (
+            0 if current_batch is None else current_batch.batch_decode_need_tokens[self.dp_index]
+        )
 
         self._init_cache_list(current_batch, is_busy)
         can_run_list = []
@@ -89,7 +96,7 @@ class SplitFuseQueue(BaseQueue):
                 break
 
         if len(can_run_list) != 0:
-            new_batch = Batch(uuid.uuid4().hex, can_run_list)
+            new_batch = Batch(uuid.uuid4().hex, can_run_list, dp_size=self.dp_size)
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
             return new_batch
         else:
@@ -106,5 +113,6 @@ class SplitFuseQueue(BaseQueue):
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
         return (
             need_max_token_num,
-            (need_max_token_num + self.router.shared_token_load.get_frozened_token_count()) / self.max_total_tokens,
+            (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
+            / self.max_total_tokens,
         )

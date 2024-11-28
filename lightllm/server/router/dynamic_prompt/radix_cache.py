@@ -360,7 +360,7 @@ class RadixCache:
         return
 
 
-class RadixCacheReadOnlyClient:
+class _RadixCacheReadOnlyClient:
     """
     router 端只读用的客户端，用于从共享内存中读取树结构中的信息，用于进行prompt cache 的调度估计。
     """
@@ -389,6 +389,26 @@ class RadixCacheReadOnlyClient:
             node = self.shared_idx_manager.get_shared_node(node.get_parent_idx())
             ans_list.append(node)
         return ans_list
+
+
+class RadixCacheReadOnlyClient:
+    def __init__(self, unique_name, total_token_num, tp_size):
+        self.tp_clients = [_RadixCacheReadOnlyClient(unique_name, total_token_num, tp_id) for tp_id in range(tp_size)]
+
+    def get_refed_tokens_num(self, index):
+        return self.tp_clients[index].get_refed_tokens_num()
+
+    def get_tree_total_tokens_num(self, index):
+        return self.tp_clients[index].get_tree_total_tokens_num()
+
+    def get_unrefed_tokens_num(self, index):
+        return self.tp_clients[index].get_unrefed_tokens_num()
+
+    def get_shared_node(self, tp_index, idx):
+        return self.tp_clients[tp_index].get_shared_node(idx)
+
+    def get_all_parent_shared_nodes(self, tp_index, idx):
+        return self.tp_clients[tp_index].get_all_parent_shared_nodes(idx)
 
 
 # ///////////////////////////////////////////////////////////////////////////////

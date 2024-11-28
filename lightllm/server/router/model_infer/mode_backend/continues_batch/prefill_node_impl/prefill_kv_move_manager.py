@@ -91,9 +91,10 @@ class TransProcessObj:
 
 
 class PrefillKVMoveManager:
-    def __init__(self, args, info_queues: List[mp.Queue], mem_queues: List[mp.Queue]):
+    def __init__(self, args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
         self.args = args
-        self.info_queues = info_queues
+        self.dp_size = self.args.dp
+        self.info_queue = info_queue
         self.mem_queues = mem_queues
         self.infer_rpyc_objs: List[PDPrefillInferRpcServer] = []
         self.node_id_to_trans_obj: Dict[str, TransProcessObj] = {}
@@ -140,7 +141,7 @@ class PrefillKVMoveManager:
     def handle_loop(self):
         try:
             while True:
-                move_task = self.info_queues[0].get()
+                move_task = self.info_queue.get()
                 if not isinstance(move_task, KVMoveTask):
                     logger.error("receive type is not KVMoveTask")
                     sys.exit(-1)
@@ -177,39 +178,46 @@ class PrefillKVMoveManager:
                     # 去引用否则进程无法杀掉
                     trans_obj = None
                     # 解除对prefill token的占用状态。
-                    futures: List[AsyncResult] = []
-                    for infer_rpyc in self.infer_rpyc_objs:
-                        futures.append(
-                            rpyc.async_(infer_rpyc.remove_req_refs_from_prompt_cache)(move_task.group_request_id)
-                        )
-                    asyncio.run(self.wait_all_future_finish(futures))
+                    self._remove_req_refs_from_prompt_cache(move_task)
 
         except (BaseException, RuntimeError) as e:
             logger.exception(str(e))
             raise e
+
+    def _remove_req_refs_from_prompt_cache(self, move_task: KVMoveTask):
+        futures: List[AsyncResult] = []
+        if self.dp_size == 1:
+            infer_rpycs = self.infer_rpyc_objs
+        else:
+            infer_rpycs = [self.infer_rpyc_objs[move_task.prefill_dp_index]]
+
+        for infer_rpyc in infer_rpycs:
+            futures.append(rpyc.async_(infer_rpyc.remove_req_refs_from_prompt_cache)(move_task.group_request_id))
+        asyncio.run(self.wait_all_future_finish(futures))
+        return
 
     async def wait_all_future_finish(self, futures: List[AsyncResult]):
         await asyncio.gather(*[asyncio.to_thread(future.wait) for future in futures])
         return
 
 
-def _init_env(args, info_queues: List[mp.Queue], mem_queues: List[mp.Queue], event: mp.Event):
+def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.Event):
     # 注册graceful 退出的处理
     from lightllm.utils.graceful_utils import graceful_registry
     import inspect
 
     graceful_registry(inspect.currentframe().f_code.co_name)
 
-    manager = PrefillKVMoveManager(args, info_queues, mem_queues)
+    manager = PrefillKVMoveManager(args, info_queue, mem_queues)
     event.set()
     # 进入主循环
     manager.handle_loop()
     return
 
 
-def start_prefill_kv_move_manager_process(args, info_queues: List[mp.Queue], mem_queues: List[mp.Queue]):
+def start_prefill_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
     event = mp.Event()
-    proc = mp.Process(target=_init_env, args=(args, info_queues, mem_queues, event))
+    proc = mp.Process(target=_init_env, args=(args, info_queue, mem_queues, event))
     proc.start()
     event.wait()
     assert proc.is_alive()

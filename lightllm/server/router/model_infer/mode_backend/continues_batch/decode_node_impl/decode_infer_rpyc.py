@@ -25,16 +25,32 @@ class PDDecodeInferRpcServer(rpyc.Service):
         return
 
     def judge_token_is_ok(self, key_len, max_new_token):
-        if self.rank_id == 0:
+        # 多 dp 模式下, 每个 dp 各自处理自己的, 不需要同步
+        if self.backend.dp_size != 1:
             with g_router_lock.obj:
                 shared_token_load = self.backend.shared_token_load
-                peak_num = shared_token_load.get_estimated_peak_token_count()
-                peak_num += shared_token_load.get_frozened_token_count()
+                peak_num = shared_token_load.get_estimated_peak_token_count(self.rank_id)
+                peak_num += shared_token_load.get_frozened_token_count(self.rank_id)
                 peak_num += key_len + max_new_token
 
                 if peak_num < self.backend.get_max_total_token_num():
                     object_list = [True]
-                    shared_token_load.add_frozened_token_count(key_len + max_new_token)
+                    shared_token_load.add_frozened_token_count(key_len + max_new_token, self.rank_id)
+                else:
+                    object_list = [False]
+            return object_list[0]
+
+        # 普通单dp模式下, 只有 0 rank 处理信息，并将数据同步到其他rank上
+        if self.rank_id == 0:
+            with g_router_lock.obj:
+                shared_token_load = self.backend.shared_token_load
+                peak_num = shared_token_load.get_estimated_peak_token_count(self.rank_id)
+                peak_num += shared_token_load.get_frozened_token_count(self.rank_id)
+                peak_num += key_len + max_new_token
+
+                if peak_num < self.backend.get_max_total_token_num():
+                    object_list = [True]
+                    shared_token_load.add_frozened_token_count(key_len + max_new_token, self.rank_id)
                 else:
                     object_list = [False]
             dist.broadcast_object_list(object_list, src=0, group=self.backend.lock_nccl_group)
@@ -44,10 +60,17 @@ class PDDecodeInferRpcServer(rpyc.Service):
         return object_list[0]
 
     def recover_frozen_token(self, key_len, max_new_token):
+        # 多 dp 模式下，每个 dp 都自己独立操作
+        if self.backend.dp_size != 1:
+            with g_router_lock.obj:
+                shared_token_load = self.backend.shared_token_load
+                shared_token_load.add_frozened_token_count(-(key_len + max_new_token), self.rank_id)
+            return
+
         if self.rank_id == 0:
             with g_router_lock.obj:
                 shared_token_load = self.backend.shared_token_load
-                shared_token_load.add_frozened_token_count(-(key_len + max_new_token))
+                shared_token_load.add_frozened_token_count(-(key_len + max_new_token), self.rank_id)
         return
 
     # 返回 None 代表服务繁忙已经无法调度新的请求进入了
@@ -85,7 +108,7 @@ class PDDecodeInferRpcServer(rpyc.Service):
             return move_task.decode_token_indexes
         except BaseException as e:
             logger.exception(str(e))
-            return -1
+            return None
         finally:
             release_acquired_lock()
             logger.info("exposed_alloc_to_frozen_some_tokens end")
@@ -127,28 +150,42 @@ class PDDecodeInferRpcServer(rpyc.Service):
 
     def exposed_unfrozen_time_out_reqs_tokens(self):
         acquire_lock_until_ready(self.backend.lock_nccl_group)
-        if self.rank_id == 0:
-            need_release_reqs = []
-            for req_id, (task, tree_node, time_mark) in g_success_kv_move_task_cache.items():
-                # 4s 这个请求都没有被调度使用，就会主动被删除掉锁定，释放其锁定的token
-                if time.time() - time_mark > 4:
-                    need_release_reqs.append(req_id)
+        if self.backend.dp_size != 1:
+            need_release_reqs = self._get_time_out_reqs()
             logger.info(f"kv time out reqs: {need_release_reqs}")
-            dist.broadcast_object_list([need_release_reqs], src=0, group=self.backend.lock_nccl_group)
+            remove_tokens = self._remove_time_out_reqs(need_release_reqs)
+            if remove_tokens != 0:
+                with g_router_lock.obj:
+                    self.backend.shared_token_load.add_frozened_token_count(-remove_tokens, self.rank_id)
         else:
-            receive_objs = [None]
-            dist.broadcast_object_list(receive_objs, src=0, group=self.backend.lock_nccl_group)
-            need_release_reqs = receive_objs[0]
+            if self.rank_id == 0:
+                need_release_reqs = self._get_time_out_reqs()
+                logger.info(f"kv time out reqs: {need_release_reqs}")
+                dist.broadcast_object_list([need_release_reqs], src=0, group=self.backend.lock_nccl_group)
+            else:
+                receive_objs = [None]
+                dist.broadcast_object_list(receive_objs, src=0, group=self.backend.lock_nccl_group)
+                need_release_reqs = receive_objs[0]
+            remove_tokens = self._remove_time_out_reqs(need_release_reqs)
+            if self.rank_id == 0 and remove_tokens != 0:
+                with g_router_lock.obj:
+                    self.backend.shared_token_load.add_frozened_token_count(-remove_tokens, self.rank_id)
 
+        release_acquired_lock()
+        return
+
+    def _get_time_out_reqs(self):
+        need_release_reqs = []
+        for req_id, (_, _, time_mark) in g_success_kv_move_task_cache.items():
+            # 4s 这个请求都没有被调度使用，就会主动被删除掉锁定，释放其锁定的token
+            if time.time() - time_mark > 4:
+                need_release_reqs.append(req_id)
+        return need_release_reqs
+
+    def _remove_time_out_reqs(self, need_release_reqs: List[int]) -> int:
         remove_tokens = 0
         for req_id in need_release_reqs:
             task, tree_node, _ = g_success_kv_move_task_cache.pop(req_id)
             self.backend.radix_cache.dec_node_ref_counter(tree_node)
             remove_tokens += len(task.input_tokens) + task.decode_node.max_new_tokens
-
-        if self.rank_id == 0 and remove_tokens != 0:
-            with g_router_lock.obj:
-                self.backend.shared_token_load.add_frozened_token_count(-remove_tokens)
-
-        release_acquired_lock()
-        return
+        return remove_tokens

@@ -64,6 +64,7 @@ class ModeBackend:
         self.is_multimodal = False
         self.tp_rank = kvargs["rank_id"]
         self.world_size = kvargs["world_size"]
+        self.dp_size = kvargs.get("dp_size", 1)
         self.load_way = kvargs["load_way"]
         self.mode = kvargs["mode"]
         self.is_splitfuse_mode = kvargs.get("is_splitfuse_mode", False)
@@ -78,7 +79,7 @@ class ModeBackend:
 
         self.weight_dir = kvargs["weight_dir"]
         nccl_port_str = str(kvargs["nccl_port"])
-        self.shared_token_load = TokenLoad(f"{nccl_port_str}_shared_token_load", 1)
+        self.shared_token_load = TokenLoad(f"{nccl_port_str}_shared_token_load", self.dp_size)
         # p d 分离模式，decode节点才会使用的参数
         self.pd_rpyc_port = kvargs.get("pd_rpyc_port", None)
         max_total_token_num = kvargs["max_total_token_num"]
@@ -114,6 +115,7 @@ class ModeBackend:
         # 为 p d 分离模式添加的全局锁管理，用于做一些同步操作。 一定需要在
         # init_process_group 之后调用
         g_infer_state_lock.obj = InferStateLock(name=nccl_port_str)
+        g_infer_state_lock.dp_size = self.dp_size
         self.infer_state_lock = g_infer_state_lock
         # 防止InferStateLock 中的全局共享信息被重复异常初始化,导致同步异常的问题。
         # 所以做一次barrier等待
@@ -244,6 +246,13 @@ class ModeBackend:
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def add_batch(self, batch_id, reqs):
+        # 当 dp_size 不等于 1 的时候，需要提前从发来的请求参数中
+        # 剔除掉不需要处理的请求参数, deepseekv2 这种特殊的模型
+        # 在 dp 模式下 tp_rank == dp_rank
+        if self.dp_size != 1:
+            cur_dp_index = self.tp_rank
+            reqs = [req for req in reqs if req["dp_index"] == cur_dp_index]
+
         g_infer_state_lock.acquire()
         batch_data = InferBatch.init_batch(
             batch_id,
@@ -274,6 +283,10 @@ class ModeBackend:
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def filter_batch(self, batch_id, req_id_list, finished_req_id_list):
+        if self.dp_size != 1:
+            req_id_list = [req_id for req_id in req_id_list if req_id in requests_mapping]
+            finished_req_id_list = [req_id for req_id in finished_req_id_list if req_id in requests_mapping]
+
         g_infer_state_lock.acquire()
         batch = self.cache.pop(batch_id)
         filter_batch = batch.filter(req_id_list, finished_req_id_list)
@@ -283,6 +296,9 @@ class ModeBackend:
         return
 
     def pause_reqs(self, batch_id, req_list):
+        if self.dp_size != 1:
+            req_list = [req for req in req_list if req[0] in requests_mapping]
+
         g_infer_state_lock.acquire()
         batch1 = self.cache.pop(batch_id)
         batch2 = batch1.pause_reqs(req_list)

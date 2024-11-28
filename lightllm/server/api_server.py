@@ -121,17 +121,25 @@ async def healthcheck(request: Request):
 
 @app.get("/token_load", summary="Get the current server's load of tokens")
 async def token_load(request: Request):
-    return JSONResponse(
-        {
-            # 当前使用token量，估计的负载
-            "current_load": float(g_objs.shared_token_load.get_current_load()),
-            # 朴素估计的负载，简单将当前请求的输入和输出长度想加得到,目前已未使用，其值与dynamic_max_load一样。
-            "logical_max_load": float(g_objs.shared_token_load.get_logical_max_load()),
-            # 动态估计的最大负载，考虑请求中途退出的情况的负载
-            "dynamic_max_load": float(g_objs.shared_token_load.get_dynamic_max_load()),
-        },
-        status_code=200,
-    )
+    ans_dict = {
+        # 当前使用 token 量，估计的负载
+        "current_load": [
+            float(g_objs.shared_token_load.get_current_load(dp_index)) for dp_index in range(g_objs.args.dp)
+        ],
+        # 朴素估计的负载，简单将当前请求的输入和输出长度想加得到,目前已未使用，其值与 dynamic_max_load 一样。
+        "logical_max_load": [
+            float(g_objs.shared_token_load.get_logical_max_load(dp_index)) for dp_index in range(g_objs.args.dp)
+        ],
+        # 动态估计的最大负载，考虑请求中途退出的情况的负载
+        "dynamic_max_load": [
+            float(g_objs.shared_token_load.get_dynamic_max_load(dp_index)) for dp_index in range(g_objs.args.dp)
+        ],
+    }
+
+    if g_objs.args.dp == 1:
+        ans_dict = {k: v[0] for k, v in ans_dict.items()}
+
+    return JSONResponse(ans_dict, status_code=200)
 
 
 @app.post("/generate")

@@ -27,56 +27,56 @@ class TokenLoad:
         self.last_dynamic_max_load_update_time = time.time()
 
     # 记录系统调度器估计的峰值token使用量
-    def set_estimated_peak_token_count(self, obj: int, index: int = 0):
+    def set_estimated_peak_token_count(self, obj: int, index: int):
         self.shared_token_infos.arr[index, 0] = obj
         self.last_dynamic_max_load_update_time = time.time()
         return
 
-    def add_estimated_peak_token_count(self, value: int, index: int = 0):
+    def add_estimated_peak_token_count(self, value: int, index: int):
         self.shared_token_infos.arr[index, 0] += value
         self.last_dynamic_max_load_update_time = time.time()
         return
 
-    def get_estimated_peak_token_count(self, index: int = 0) -> int:
+    def get_estimated_peak_token_count(self, index: int) -> int:
         return self.shared_token_infos.arr[index, 0]
 
     # 记录系统被临时固定的不能被使用的token数，主要在于 pd 分离的模式下
     # 推理系统需要在 kv 传输时临时固定一些 token， 防止调度系统估计失误，导致调度问题
-    def set_frozened_token_count(self, obj: int, index: int = 0):
+    def set_frozened_token_count(self, obj: int, index: int):
         self.shared_token_infos.arr[index, 1] = obj
         return
 
-    def get_frozened_token_count(self, index: int = 0) -> int:
+    def get_frozened_token_count(self, index: int) -> int:
         return self.shared_token_infos.arr[index, 1]
 
-    def add_frozened_token_count(self, value: int, index: int = 0):
+    def add_frozened_token_count(self, value: int, index: int):
         self.shared_token_infos.arr[index, 1] += value
         return
 
     # current_load 当前使用token量，估计的负载
-    def set_current_load(self, value, index: int = 0):
+    def set_current_load(self, value, index: int):
         self.shared_token_load.arr[index, 0] = value
         return
 
-    def get_current_load(self, index: int = 0):
+    def get_current_load(self, index: int):
         return self.shared_token_load.arr[index, 0]
 
     # logical_max_load 朴素估计的负载，简单将当前请求的输入和输出长度想加得到, 目前已未使用，其值与dynamic_max_load一样
-    def set_logical_max_load(self, value, index: int = 0):
+    def set_logical_max_load(self, value, index: int):
         self.shared_token_load.arr[index, 1] = value
         return
 
-    def get_logical_max_load(self, index: int = 0):
+    def get_logical_max_load(self, index: int):
         return self.shared_token_load.arr[index, 1]
 
     # dynamic_max_load 动态估计的最大负载，考虑请求中途退出的情况，估计的最大token使用量
-    def set_dynamic_max_load(self, value, index: int = 0):
+    def set_dynamic_max_load(self, value, index: int):
         self.shared_token_load.arr[index, 2] = value
         self.set_logical_max_load(value, index=index)
         self.last_dynamic_max_load_update_time = time.time()
         return
 
-    def get_dynamic_max_load(self, index: int = 0):
+    def get_dynamic_max_load(self, index: int):
         return self.shared_token_load.arr[index, 2]
 
     def need_update_dynamic_max_load(self, index: int = 0):

@@ -73,6 +73,7 @@ class HttpServerManagerForPDMaster:
     async def update_req_status(self, upkv_status: UpKVStatus):
         try:
             event = self.id_to_event[upkv_status.group_request_id]
+            event.upkv_status = upkv_status
             event.set()
             del self.id_to_event[upkv_status.group_request_id]
         except:
@@ -175,6 +176,7 @@ class HttpServerManagerForPDMaster:
             old_max_new_tokens = sampling_params.max_new_tokens
             sampling_params.max_new_tokens = 1
             sampling_params.move_kv_to_decode_node = decode_node_dict if old_max_new_tokens != 1 else None
+            sampling_params.suggested_dp_index = None
 
             req = await self._to_req_info(prompt, sampling_params, multimodal_params)
             create_start_time = time.time()
@@ -212,6 +214,8 @@ class HttpServerManagerForPDMaster:
 
             sampling_params.move_kv_to_decode_node = None
             sampling_params.max_new_tokens = old_max_new_tokens - 1
+            sampling_params.suggested_dp_index = event.upkv_status.dp_index
+
             req = await self._to_req_info(prompt_ids, sampling_params, multimodal_params)
             async with self.session.post(d_node.to_llm_url(), json=req) as response:
                 if response.status == 200:
