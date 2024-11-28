@@ -23,7 +23,7 @@ class RewardModelBackend(ContinuesBatchBackend):
         kwargs, run_reqs = prepare_prefill_inputs(batch, self.radix_cache, self.is_multimodal)
 
         scores: torch.Tensor = self.model.forward(**kwargs)
-        scores = scores.unsqueeze(1).detach().cpu().numpy()
+        scores = scores.unsqueeze(1).detach().cpu().float().numpy()
 
         next_token_id = 1
         next_token_logprob = 1.0
