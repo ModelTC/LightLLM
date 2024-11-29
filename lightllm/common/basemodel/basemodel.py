@@ -71,8 +71,15 @@ class TpPartBaseModel:
         self._verify_must()
         self._verify_params()
         self._init_quant()
-        self._init_weights()
-        self._init_mem_manager()
+
+        # 更连续的显存分配可以有更好的性能
+        if self.max_total_token_num is None:
+            self._init_weights()
+            self._init_mem_manager()
+        else:
+            self._init_mem_manager()
+            self._init_weights()
+
         self._init_kv_move_buffer()
         self._check_mem_size()
         self._init_req_manager()

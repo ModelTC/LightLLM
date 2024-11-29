@@ -85,7 +85,7 @@ class ModeBackend:
             rank=self.tp_rank,
             world_size=self.world_size,
         )
-        
+
         from lightllm.distributed import set_custom_reduce
 
         set_custom_reduce()
