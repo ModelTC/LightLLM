@@ -19,42 +19,59 @@
 
 from typing import Any, Dict, Optional, Union
 
+import os
 import torch
-import torch.distributed
-
-from .parallel_state import get_tp_group, original_all_reduce
+import torch.distributed as dist
 from torch.distributed import ReduceOp
 from lightllm.utils.log_utils import init_logger
 
+original_all_reduce = torch.distributed.all_reduce
+from contextlib import nullcontext, contextmanager
 
+try:
+    HAS_VLLM = True
+    from .custom_all_reduce import CustomAllreduce
+except:
+    HAS_VLLM = False
+
+vllm_reduce = None
 logger = init_logger(__name__)
-# if op != ReduceOp.SUM or group != None or async_op != False:
-#     logger.warning("This function op, group, async_op will only run with default values")
 
 
-def all_reduce(input_, op=ReduceOp.SUM, group=None, async_op=False):
-    if op != ReduceOp.SUM or group is not None or async_op:
+@contextmanager
+def lightllm_capture_graph():
+    if vllm_reduce is not None:
+        with vllm_reduce.capture():
+            yield
+    else:
+        yield
+    pass
+
+
+def _all_reduce(input_, op=ReduceOp.SUM, group=None, async_op=False):
+    if op != ReduceOp.SUM or group is not None or async_op or vllm_reduce is None:
         original_all_reduce(input_, op, group, async_op)
     else:
-        input_.data = tensor_model_parallel_all_reduce(input_)
+        if vllm_reduce is not None:
+            can_use = vllm_reduce.should_custom_ar(input_)
+            if can_use:
+                input_.data = vllm_reduce.custom_all_reduce(input_)
+                return
+        original_all_reduce(input_, op, group, async_op)
 
 
-def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    """All-reduce the input tensor across model parallel group."""
-    return get_tp_group().all_reduce(input_)
+def set_custom_reduce():
+    global vllm_reduce
 
-
-def tensor_model_parallel_all_gather(input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """All-gather the input tensor across model parallel group."""
-    return get_tp_group().all_gather(input_, dim)
-
-
-def tensor_model_parallel_gather(input_: torch.Tensor, dst: int = 0, dim: int = -1) -> Optional[torch.Tensor]:
-    """Gather the input tensor across model parallel group."""
-    return get_tp_group().gather(input_, dst, dim)
-
-
-def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None, src: int = 0):
-    if not torch.distributed.is_initialized():
-        return tensor_dict
-    return get_tp_group().broadcast_tensor_dict(tensor_dict, src)
+    ENABLE_VLLM_REDUCE = os.getenv("ENABLE_VLLM_REDUCE", "False").upper() in [
+        "ON",
+        "TRUE",
+        "1",
+    ]
+    if ENABLE_VLLM_REDUCE and HAS_VLLM:
+        world_size = dist.get_world_size()
+        ranks = list(range(world_size))
+        cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+        vllm_reduce = CustomAllreduce(cpu_group, torch.cuda.current_device())
+        logger.info("Enable VLLM ALLReduce.")
+        dist.all_reduce = _all_reduce

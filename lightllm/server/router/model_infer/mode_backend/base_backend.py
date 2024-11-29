@@ -39,14 +39,7 @@ from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferBatch, InferReq, InferSamplingParams, requests_mapping
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
-from lightllm.distributed import (
-    get_tp_group,
-    init_distributed_environment,
-    initialize_model_parallel,
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_rank,
-    all_reduce,
-)
+
 import torch.distributed as dist
 
 
@@ -85,32 +78,17 @@ class ModeBackend:
         max_total_token_num = kvargs["max_total_token_num"]
 
         torch.cuda.set_device(self.tp_rank)
-        LIGHTLLM_PYNCCL_ENABLE = os.getenv("LIGHTLLM_PYNCCL_ENABLE", "False").upper() in [
-            "ON",
-            "TRUE",
-            "1",
-        ]
-        if LIGHTLLM_PYNCCL_ENABLE:
-            # Multiple nodes are not currently supported, so local_rank == rank
-            init_distributed_environment(
-                backend="nccl",
-                world_size=self.world_size,
-                rank=self.tp_rank,
-                distributed_init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}',
-            )
-            initialize_model_parallel(tensor_model_parallel_size=self.world_size)
-            self.tp_group = get_tp_group()
 
-            dist.all_reduce = all_reduce
-            dist.get_rank = get_tensor_model_parallel_rank
-            dist.get_world_size = get_tensor_model_parallel_world_size
-        else:
-            dist.init_process_group(
-                "nccl",
-                init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}',
-                rank=self.tp_rank,
-                world_size=self.world_size,
-            )
+        dist.init_process_group(
+            "nccl",
+            init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}',
+            rank=self.tp_rank,
+            world_size=self.world_size,
+        )
+        
+        from lightllm.distributed import set_custom_reduce
+
+        set_custom_reduce()
 
         # 为 p d 分离模式添加的全局锁管理，用于做一些同步操作。 一定需要在
         # init_process_group 之后调用
@@ -119,10 +97,7 @@ class ModeBackend:
         self.infer_state_lock = g_infer_state_lock
         # 防止InferStateLock 中的全局共享信息被重复异常初始化,导致同步异常的问题。
         # 所以做一次barrier等待
-        if LIGHTLLM_PYNCCL_ENABLE:
-            self.tp_group.barrier()
-        else:
-            dist.barrier()
+        dist.barrier()
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
