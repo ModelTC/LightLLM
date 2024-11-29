@@ -319,7 +319,7 @@ async def register_and_keep_alive(websocket: WebSocket):
         while True:
             try:
                 # 等待接收消息，设置超时为10秒
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
                 json_data = json.loads(data)
                 if json_data.get("type") != "heartbeat":
                     logger.warning(f"recive error messesage {json_data}")
