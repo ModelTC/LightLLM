@@ -2,7 +2,7 @@ from functools import partial
 
 # from lightllm.common.layers.mm import MM
 from .base_layer_weight import BaseLayerWeight
-from .meta_weights import BaseWeight, MultiMMWeight, MMWeight, FusedMoeWeight
+from .meta_weights import BaseWeight, MultiMMWeight, MMWeightTpl, FusedMoeWeight
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -51,7 +51,7 @@ class TransformerLayerWeight(BaseLayerWeight):
         mix_quant_list = self.quant_cfg.get_mixed_list(self.layer_num_)
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
-            if isinstance(attr, MMWeight) or isinstance(attr, FusedMoeWeight):
+            if isinstance(attr, MMWeightTpl) or isinstance(attr, FusedMoeWeight):
                 if attr_name in mix_quant_list:
                     attr.set_quant_method(self.quant_cfg.get_quant_method(self.layer_num_, attr_name))
                     attr_quant_type = self.quant_cfg.get_quant_type(self.layer_num_, attr_name)
