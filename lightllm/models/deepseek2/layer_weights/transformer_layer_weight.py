@@ -75,6 +75,11 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self.disable_qk_absorb = disable_qk_absorb
         self.disable_vo_absorb = disable_vo_absorb
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode, quant_cfg)
+        # mla_type = "ACCM", "MIX"
+        # MIX是prefilled CC，decoding ACC
+        self.mla_type = "MIX"
+        if not disable_vo_absorb or not disable_qk_absorb:
+            self.mla_type = "ACCM"
         return
 
     def _parse_config(self):
