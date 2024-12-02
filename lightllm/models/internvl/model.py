@@ -3,6 +3,7 @@ import json
 from lightllm.models.internlm2.model import Internlm2TpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.phi3.model import Phi3TpPartModel
+from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.common.build_utils import repair_config
@@ -125,6 +126,29 @@ class InternVLInternlm2TpPartModel(Internlm2TpPartModel):
 
 
 class InternVLLlamaTpPartModel(LlamaTpPartModel):
+    # weight class
+    pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
+
+    # infer class
+    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
+
+    def __init__(self, kvargs):
+        super().__init__(kvargs)
+        return
+
+    def _init_config(self):
+        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
+            self.config = json.load(json_file)["llm_config"]
+        # rename keys
+        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
+        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
+        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        if self.finetune_config:
+            self.config["vocab_size"] = self.finetune_config.vocab_size
+        return
+
+
+class InternVLQwen2TpPartModel(Qwen2TpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
 

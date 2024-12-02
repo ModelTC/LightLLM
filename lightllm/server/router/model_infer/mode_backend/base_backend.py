@@ -28,7 +28,7 @@ from lightllm.models.qwen_vl.model import QWenVLTpPartModel
 from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
 from lightllm.models.phi3.model import Phi3TpPartModel
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
-from lightllm.models.internvl.model import InternVLLlamaTpPartModel, InternVLPhi3TpPartModel
+from lightllm.models.internvl.model import InternVLLlamaTpPartModel, InternVLPhi3TpPartModel, InternVLQwen2TpPartModel
 from lightllm.models.internvl.model import InternVLInternlm2TpPartModel
 from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel
 from lightllm.models.qwen2_reward.model import Qwen2RewardTpPartModel
@@ -184,6 +184,8 @@ class ModeBackend:
                     self.model = InternVLInternlm2TpPartModel(model_kvargs)
                 elif llm_model_type == "llama":
                     self.model = InternVLLlamaTpPartModel(model_kvargs)
+                elif llm_model_type == "qwen2":
+                    self.model = InternVLQwen2TpPartModel(model_kvargs)
                 self.is_multimodal = True
             else:
                 raise Exception(f"can not support {self.model_type} now")
