@@ -64,38 +64,16 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
         return
 
     import torch
-    from lightllm.distributed import (
-        get_tp_group,
-        init_distributed_environment,
-        initialize_model_parallel,
-        get_tensor_model_parallel_world_size,
-        get_tensor_model_parallel_rank,
-        all_reduce,
-    )
+    from lightllm.distributed import set_custom_reduce
     import torch.distributed as dist
 
     rank_id = model_kvargs["tp_rank"]
     world_size = model_kvargs["world_size"]
 
     torch.cuda.set_device(rank_id)
-    LIGHTLLM_PYNCCL_ENABLE = os.getenv("LIGHTLLM_PYNCCL_ENABLE", "False").upper() in [
-        "ON",
-        "TRUE",
-        "1",
-    ]
-    if LIGHTLLM_PYNCCL_ENABLE:
-        init_distributed_environment(
-            backend="nccl", world_size=world_size, rank=rank_id, distributed_init_method="tcp://127.0.0.1:28765"
-        )
-        initialize_model_parallel(tensor_model_parallel_size=world_size)
-        tp_group = get_tp_group()
-        dist.all_reduce = all_reduce
-        dist.get_rank = get_tensor_model_parallel_rank
-        dist.get_world_size = get_tensor_model_parallel_world_size
-        tp_group.barrier()
-    else:
-        dist.init_process_group("nccl", init_method="tcp://127.0.0.1:28765", rank=rank_id, world_size=world_size)
-        dist.barrier()
+    dist.init_process_group("nccl", init_method="tcp://127.0.0.1:28765", rank=rank_id, world_size=world_size)
+    set_custom_reduce()
+    dist.barrier()
 
     torch.cuda.empty_cache()
 
@@ -154,7 +132,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
         b_start_loc = None
         b_seq_len = None
 
-        tp_group.barrier()
+        dist.barrier()
         if rank_id == 0:
             new_log_path = log_path.replace("batch_size", str(batch_size))
             fp_file = open(new_log_path, "w+")
