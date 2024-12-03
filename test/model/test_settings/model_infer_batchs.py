@@ -9,13 +9,18 @@ def test_model_inference(world_size, model_dir, model_class, batch_sizes, input_
     workers = []
     for rank_id in range(world_size):
         model_kvargs = {
+            "run_mode": "normal",
             "tp_rank": rank_id,
             "world_size": world_size,
             "weight_dir": model_dir,
-            "max_total_token_num": 0 * (input_len + output_len),
+            "max_total_token_num": None,
+            "mem_faction": 0.8,
             "load_way": "HF",
+            "batch_max_tokens": (input_len + output_len),
             "mode": mode,
             "max_req_num": max(batch_sizes),
+            "graph_max_batch_size": max(batch_sizes),
+            "graph_max_len_in_batch": (input_len + output_len),
             "max_seq_length": (input_len + output_len),
         }
 
@@ -96,8 +101,17 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
             b_seq_len[i] = input_len
 
         total_token_num = input_len * batch_size
+        mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0])
         logics = model_part.forward(
-            batch_size, total_token_num, input_len, test_data, b_req_idx, b_start_loc, b_seq_len, is_prefill=True
+            batch_size,
+            total_token_num,
+            input_len,
+            test_data,
+            mem_indexes,
+            b_req_idx,
+            b_start_loc,
+            b_seq_len,
+            is_prefill=True,
         )
         prob_out = torch.softmax(logics, dim=-1)
         predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
@@ -107,11 +121,13 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
             b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
             total_token_num += batch_size
             b_seq_len += 1
+            mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0])
             logics = model_part.forward(
                 batch_size,
                 total_token_num,
                 input_len + i + 1,
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
+                mem_indexes,
                 b_req_idx,
                 b_start_loc,
                 b_seq_len,
@@ -152,8 +168,17 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
             b_seq_len[i] = input_len
 
         total_token_num = batch_size * input_len
+        mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0])
         logics = model_part.forward(
-            batch_size, total_token_num, input_len, test_data, b_req_idx, b_start_loc, b_seq_len, is_prefill=True
+            batch_size,
+            total_token_num,
+            input_len,
+            test_data,
+            mem_indexes,
+            b_req_idx,
+            b_start_loc,
+            b_seq_len,
+            is_prefill=True,
         )
         prob_out = torch.softmax(logics, dim=-1)
         predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
@@ -169,12 +194,13 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
             b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
             total_token_num += batch_size
             b_seq_len += 1
-
+            mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0])
             logics = model_part.forward(
                 batch_size,
                 total_token_num,
                 input_len + i + 1,
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
+                mem_indexes,
                 b_req_idx,
                 b_start_loc,
                 b_seq_len,
