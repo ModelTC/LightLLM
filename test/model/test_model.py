@@ -1,5 +1,8 @@
 import os
 import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import unittest
 from model_infer import test_model_inference
 from lightllm.models.bloom.model import BloomTpPartModel
@@ -21,9 +24,6 @@ from lightllm.models.mixtral.model import MixtralTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.utils.config_utils import get_dtype
 from lightllm.utils.config_utils import get_config_json
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 
 def get_model(weight_dir):
     model_cfg = get_config_json(weight_dir)
