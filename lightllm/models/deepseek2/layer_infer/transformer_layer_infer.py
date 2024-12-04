@@ -185,7 +185,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             num_local_heads //= self.world_size_
             num_local_kv_heads //= self.world_size_
         # ACC
-        q_nope = layer_weight.k_b_proj_.weight.bmm(
+        q_nope = layer_weight.k_b_proj_.bmm(
             q_nope.transpose(0, 1),
         ).transpose(0, 1)
         if self.enable_opt_decoding_mha:
