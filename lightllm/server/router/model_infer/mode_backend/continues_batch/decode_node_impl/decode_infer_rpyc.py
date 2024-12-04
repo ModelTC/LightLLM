@@ -75,7 +75,6 @@ class PDDecodeInferRpcServer(rpyc.Service):
 
     # 返回 None 代表服务繁忙已经无法调度新的请求进入了
     def exposed_alloc_to_frozen_some_tokens(self, move_task: KVMoveTask) -> Optional[List[int]]:
-        logger.info("exposed_alloc_to_frozen_some_tokens start")
         move_task = obtain(move_task)
         acquire_lock_until_ready(self.backend.lock_nccl_group)
         try:
@@ -111,7 +110,6 @@ class PDDecodeInferRpcServer(rpyc.Service):
             return None
         finally:
             release_acquired_lock()
-            logger.info("exposed_alloc_to_frozen_some_tokens end")
 
     def exposed_put_kv_received_to_radix_cache(self, group_req_id: int):
         group_req_id = obtain(group_req_id)
