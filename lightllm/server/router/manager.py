@@ -5,6 +5,7 @@ import uvloop
 import asyncio
 import torch
 import rpyc
+import pickle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -204,7 +205,8 @@ class RouterManager:
                 sampling_params.add_spaces_between_special_tokens,
                 sampling_params.print_eos_token,
                 sampling_params.best_of,
-            )
+            ),
+            protocol=pickle.HIGHEST_PROTOCOL,
         )
         return
 
@@ -469,7 +471,7 @@ class RouterManager:
                 else:
                     batch_out.reqs_infs.append((req_id, new_token_id, new_gen_metadata, FinishStatus.NO_FINISH))
 
-        self.send_to_detokenization.send_pyobj(batch_out)
+        self.send_to_detokenization.send_pyobj(batch_out, protocol=pickle.HIGHEST_PROTOCOL)
         return
 
     def get_used_tokens(self, dp_index):
@@ -492,7 +494,7 @@ class RouterManager:
                 abort_req = recv_req
                 group_req_id = abort_req.group_req_id
                 await self.abort(group_req_id)
-                self.send_to_detokenization.send_pyobj(abort_req)
+                self.send_to_detokenization.send_pyobj(abort_req, protocol=pickle.HIGHEST_PROTOCOL)
             else:
                 assert False, f"Error Req Inf {recv_req}"
 

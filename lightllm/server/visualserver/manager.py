@@ -3,6 +3,7 @@ import zmq.asyncio
 import asyncio
 import uvloop
 import rpyc
+import pickle
 from typing import List
 from transformers import AutoConfig
 from ..io_struct import AbortReq
@@ -76,7 +77,7 @@ class VisualManager:
 
     async def abort(self, group_req_id):
         abort_req = AbortReq(group_req_id=group_req_id)
-        self.send_to_router.send_pyobj(abort_req)
+        self.send_to_router.send_pyobj(abort_req, protocol=pickle.HIGHEST_PROTOCOL)
         # 过滤掉被 aborted的请求。
         self.waiting_reqs = [req for req in self.waiting_reqs if req[3] != group_req_id]
         return
@@ -115,11 +116,11 @@ class VisualManager:
                     if len(uuids_need_infer) > 0:
                         reqs_need_infer.append(req)
                     else:
-                        self.send_to_router.send_pyobj(req)
+                        self.send_to_router.send_pyobj(req, protocol=pickle.HIGHEST_PROTOCOL)
 
                 await self.infer_imgs(uuids_need_infer)
                 for req in reqs_need_infer:
-                    self.send_to_router.send_pyobj(req)
+                    self.send_to_router.send_pyobj(req, protocol=pickle.HIGHEST_PROTOCOL)
 
     async def loop_for_netio_req(self):
         while True:

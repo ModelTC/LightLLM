@@ -11,8 +11,8 @@ from typing import Union
 from .decode import decode_token
 from .decode_mode_fix import decode_mode_fix
 from ..tokenizer import get_tokenizer
-import traceback
-
+import pickle
+import time
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.log_utils import init_logger
 
@@ -55,6 +55,7 @@ class DeTokenizationManager:
                 recv_obj: Union[
                     BatchTokenIdOut, ReqDetokenizationState, AbortReq
                 ] = await self.recv_from_router.recv_pyobj()
+                start_time = time.time()
                 assert isinstance(
                     recv_obj, (BatchTokenIdOut, ReqDetokenizationState, AbortReq)
                 ), f"type is not right {type(recv_obj)}"
@@ -120,11 +121,12 @@ class DeTokenizationManager:
                                 del self.req_id_to_out[req_id]
                             except:
                                 pass
-                    self.send_to_httpserver.send_pyobj(new_batch_str_out)
+                    self.send_to_httpserver.send_pyobj(new_batch_str_out, protocol=pickle.HIGHEST_PROTOCOL)
+                    cost_time = (time.time() - start_time) * 1000
+                    if cost_time > 50:
+                        logger.info(f"detokenize batch cost time {cost_time} ms")
             except Exception as e:
-                logger.error(f"detoken process has exception {str(e)}")
-                traceback.print_exc()
-                pass
+                logger.exception(f"detoken process has exception {str(e)}")
 
 
 def start_detokenization_process(args, detokenization_port, httpserver_port, pipe_writer):

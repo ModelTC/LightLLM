@@ -8,6 +8,7 @@ import time
 import hashlib
 import datetime
 import websockets
+import pickle
 import ujson as json
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -245,29 +246,34 @@ class HttpServerManager:
         if self.pd_mode == NodeRole.P:
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
-                    (prompt_ids, sampling_params, multimodal_params, group_request_id, start_time)
+                    (prompt_ids, sampling_params, multimodal_params, group_request_id, start_time),
+                    protocol=pickle.HIGHEST_PROTOCOL,
                 )
             else:
                 self.send_to_router.send_pyobj(
-                    (prompt_ids, sampling_params, multimodal_params, group_request_id, start_time)
+                    (prompt_ids, sampling_params, multimodal_params, group_request_id, start_time),
+                    protocol=pickle.HIGHEST_PROTOCOL,
                 )
             return
 
         if self.pd_mode == NodeRole.D:
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了, 传输一个空的即可
             self.send_to_router.send_pyobj(
-                (prompt_ids, sampling_params, MultimodalParams(), group_request_id, start_time)
+                (prompt_ids, sampling_params, MultimodalParams(), group_request_id, start_time),
+                protocol=pickle.HIGHEST_PROTOCOL,
             )
             return
 
         if self.pd_mode == NodeRole.NORMAL:
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
-                    (prompt_ids, sampling_params, multimodal_params, group_request_id, start_time)
+                    (prompt_ids, sampling_params, multimodal_params, group_request_id, start_time),
+                    protocol=pickle.HIGHEST_PROTOCOL,
                 )
             else:
                 self.send_to_router.send_pyobj(
-                    (prompt_ids, sampling_params, multimodal_params, group_request_id, start_time)
+                    (prompt_ids, sampling_params, multimodal_params, group_request_id, start_time),
+                    protocol=pickle.HIGHEST_PROTOCOL,
                 )
             return
 
@@ -367,9 +373,9 @@ class HttpServerManager:
 
     async def abort(self, group_request_id):
         abort_req = AbortReq(group_req_id=group_request_id)
-        self.send_to_router.send_pyobj(abort_req)
+        self.send_to_router.send_pyobj(abort_req, protocol=pickle.HIGHEST_PROTOCOL)
         if self.enable_multimodal:
-            self.send_to_visual.send_pyobj(abort_req)
+            self.send_to_visual.send_pyobj(abort_req, protocol=pickle.HIGHEST_PROTOCOL)
         try:
             req = self.req_id_to_out_inf[group_request_id]
             await self._release_multimodal_resources(req.multimodal_params)
