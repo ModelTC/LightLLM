@@ -159,46 +159,35 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             compressed_kv, [layer_weight.kv_lora_rank, layer_weight.qk_rope_head_dim], dim=-1
         )
         compressed_kv = compressed_kv.view(-1, layer_weight.kv_lora_rank)
-        k = self.alloc_tensor(
-            [k_pe.shape[0], num_local_kv_heads, layer_weight.qk_nope_head_dim + layer_weight.qk_rope_head_dim],
+        k_nope = self.alloc_tensor(
+            [compressed_kv.shape[0], num_local_kv_heads, layer_weight.qk_nope_head_dim],
             dtype=q[0].dtype,
         )
-        k[..., layer_weight.qk_nope_head_dim :] = k_pe
         wk = layer_weight.k_b_proj_.weight.view(-1, layer_weight.k_b_proj_.weight.shape[-1])
-        o_tensor = self.alloc_tensor([compressed_kv.shape[0], wk.shape[0]], dtype=q[0].dtype)
-        torch.mm(compressed_kv, wk.transpose(0, 1), out=o_tensor)
-        k[..., : layer_weight.qk_nope_head_dim] = o_tensor.view(-1, num_local_kv_heads, layer_weight.qk_nope_head_dim)
+        torch.mm(compressed_kv, wk.transpose(0, 1), out=k_nope.reshape(k_pe.shape[0], -1))
+
         trans_weight = layer_weight.v_b_proj_.weight.transpose(1, 2)
         wv = trans_weight.view(-1, trans_weight.shape[-1])
-        o_tensor = self.alloc_tensor([compressed_kv.shape[0], wv.shape[0]], dtype=q[0].dtype)
-        torch.mm(compressed_kv, wv.transpose(0, 1), out=o_tensor)
-        v = o_tensor.view(-1, num_local_kv_heads, layer_weight.qk_nope_head_dim)
-        return self._context_attention_kernel_with_v(q, k, v, infer_state, layer_weight)
+        v = self.alloc_tensor(
+            [compressed_kv.shape[0], num_local_kv_heads, layer_weight.qk_nope_head_dim],
+            dtype=q[0].dtype,
+        )
+        torch.mm(compressed_kv, wv.transpose(0, 1), out=v.reshape(compressed_kv.shape[0], -1))
+        return self._context_attention_kernel_with_v(q, [k_nope, k_pe], v, infer_state, layer_weight)
 
     def _ACC_method(
         self, q, compressed_kv, infer_state: LlamaInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ):
-        q_ne, q_pe = q
+        q_nope, q_rope = q
         num_local_heads = self.num_heads
         num_local_kv_heads = self.num_kv_heads
         if self.world_size_ > 1:
             num_local_heads //= self.world_size_
             num_local_kv_heads //= self.world_size_
         # ACC
-        q = self.alloc_tensor(
-            [q_ne.shape[0], num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim], dtype=q_ne.dtype
-        )
-        q[..., self.kv_lora_rank :] = q_pe
-        torch.bmm(  # TODO: 转换成einsum 或者 cublas
-            q_ne.transpose(0, 1),  # (h, b*s, qk_n)
-            layer_weight.k_b_proj_.weight,  # (h, qk_n, kv_lora)
-            out=q[..., : self.kv_lora_rank].view(q_ne.shape[1], q_ne.shape[0], self.kv_lora_rank),
-        ).transpose(
-            0, 1
-        )  # (b*s, h, kv_lora)
-        q_nope, q_rope = torch.split(  # (b*s, h, qk_n + qk_r) -> (b*s, h, qk_n), (b*s, h, qk_r)
-            q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-        )
+        q_nope = layer_weight.k_b_proj_.weight.bmm(
+            q_nope.transpose(0, 1),
+        ).transpose(0, 1)
         if self.enable_opt_decoding_mha:
             import lightllm_ppl_mla
 
@@ -221,17 +210,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             output_parallel = self._token_gqa_decode_attention_flashdecoding_origin(
                 (q_nope, q_rope), infer_state, layer_weight
             )
-        o_tensor = self.alloc_tensor(
-            [output_parallel.shape[1], output_parallel.shape[0], self.qk_nope_head_dim], dtype=q_ne.dtype
-        )
-        torch.bmm(  # TODO: 转换成einsum 或者 cublas
-            output_parallel.transpose(0, 1),  # (h, b*s, kv_lora)
-            layer_weight.v_b_proj_.weight,  # (h, kv_lora, vo_d)
-            out=o_tensor,
-        ).transpose(
-            0, 1
-        )  # (b*s, h, vo_d)
-        return o_tensor
+        vo = layer_weight.v_b_proj_.bmm(output_parallel.transpose(0, 1)).transpose(0, 1)
+        return vo
 
     def _context_attention_kernel(
         self, q, kv, infer_state: LlamaInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
@@ -247,17 +227,18 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         return self._CC_method(q, kv, infer_state, layer_weight)
 
     def _context_attention_kernel_with_v(
-        self, q: Tuple[torch.Tensor, torch.Tensor], kv, v, infer_state: LlamaInferStateInfo, layer_weight, out=None
+        self, q: Tuple[torch.Tensor, torch.Tensor], k, v, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
         q_nope, q_rope = q
+        k_nope, k_rope = k
         nope_head_dim = q_nope.shape[-1]
         o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
         if infer_state.use_dynamic_prompt_cache:
             context_attention_fwd_with_v(
                 q_nope,
                 q_rope,
-                kv[:, :, :nope_head_dim],
-                kv[:, :, nope_head_dim:],
+                k_nope,
+                k_rope,
                 v,
                 o_tensor.view(-1, self.tp_q_head_num_, nope_head_dim),
                 infer_state.b_req_idx,
@@ -272,8 +253,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             context_attention_fwd_no_prompt_cache_with_v(
                 q_nope,
                 q_rope,
-                kv[:, :, :nope_head_dim],
-                kv[:, :, nope_head_dim:],
+                k_nope,
+                k_rope,
                 v,
                 o_tensor.view(-1, self.tp_q_head_num_, nope_head_dim),
                 infer_state.b_start_loc,
@@ -332,8 +313,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _token_gqa_decode_attention_flashdecoding_with_ACC(
         self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ):
-        compressed_kv = infer_state.mem_manager.kv_buffer[self.layer_num_][: infer_state.mem_end, :, :]
-        return self._ACC_method(q, compressed_kv, infer_state, layer_weight)
+        # compressed_kv = infer_state.mem_manager.kv_buffer[self.layer_num_][: infer_state.mem_end, :, :]
+        return self._ACC_method(q, None, infer_state, layer_weight)
 
     def _token_gqa_decode_attention_flashdecoding_origin(
         self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None

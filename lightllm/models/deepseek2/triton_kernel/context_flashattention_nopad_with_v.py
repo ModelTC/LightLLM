@@ -97,9 +97,7 @@ def _fwd_kernel_with_v(
             other=0,
         )
         off_k = k_loc[None, :] * stride_k_bs + cur_k_head * stride_k_h + offs_d[:, None] * stride_k_d
-        off_k_rope = (
-            k_loc[None, :] * stride_k_rope_bs + cur_k_head * stride_k_rope_h + offs_rope_d[:, None] * stride_k_rope_d
-        )
+        off_k_rope = k_loc[None, :] * stride_k_rope_bs + offs_rope_d[:, None] * stride_k_rope_d
         k = tl.load(K_nope + off_k, mask=(start_n + offs_n[None, :]) < block_end_loc, other=0.0)
         k_rope = tl.load(K_rope + off_k_rope, mask=(start_n + offs_n[None, :]) < block_end_loc, other=0.0)
 
@@ -290,9 +288,7 @@ def _fwd_kernel_no_prompt_cache_with_v(
         + offs_rope_d[None, :] * stride_q_rope_d
     )
     off_k = offs_n[None, :] * stride_k_bs + cur_k_head * stride_k_h + offs_d[:, None] * stride_k_d
-    off_rope_k = (
-        offs_n[None, :] * stride_k_rope_bs + cur_k_head * stride_k_rope_h + offs_rope_d[:, None] * stride_k_rope_d
-    )
+    off_rope_k = offs_n[None, :] * stride_k_rope_bs + offs_rope_d[:, None] * stride_k_rope_d
     off_v = offs_n[:, None] * stride_vbs + cur_k_head * stride_vh + offs_d[None, :] * stride_vd
 
     q = tl.load(Q_nope + off_q, mask=offs_m[:, None] < cur_batch_seq_len, other=0.0)
