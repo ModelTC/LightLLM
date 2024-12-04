@@ -244,6 +244,8 @@ class ModelRpcClient:
 
 
 def _init_env(args, port, info_queue, mem_queue, router_lock):
+    import lightllm.utils.rpyc_fix_utils as _
+
     # 注册graceful 退出的处理
     from lightllm.utils.graceful_utils import graceful_registry
     import inspect
@@ -263,6 +265,8 @@ def _init_env(args, port, info_queue, mem_queue, router_lock):
 
 
 async def start_model_process(args, port, world_size, info_queue: mp.Queue, mem_queue: mp.Queue, router_lock: mp.Queue):
+    import lightllm.utils.rpyc_fix_utils as _
+
     # 单卡时不使用 rpc
     if world_size == 1:
         return ModelRpcClient(ModelRpcServer(args, info_queue, mem_queue), world_size)
