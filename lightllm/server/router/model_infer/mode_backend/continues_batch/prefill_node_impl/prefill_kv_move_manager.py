@@ -202,6 +202,8 @@ class PrefillKVMoveManager:
 
 
 def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.Event):
+    import lightllm.utils.rpyc_fix_utils as _
+
     # 注册graceful 退出的处理
     from lightllm.utils.graceful_utils import graceful_registry
     import inspect
