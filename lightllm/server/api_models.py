@@ -1,6 +1,6 @@
 import time
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional, Union, Literal
 import uuid
 
@@ -9,7 +9,7 @@ class ChatCompletionRequest(BaseModel):
     # The openai api native parameters
     model: str
     messages: List[Dict[str, str]]
-    function_call: Optional[str] = 'none'
+    function_call: Optional[str] = "none"
     temperature: Optional[float] = 1
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -52,6 +52,10 @@ class ChatCompletionResponse(BaseModel):
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
 
+    @field_validator("id", mode="before")
+    def ensure_id_is_str(cls, v):
+        return str(v)
+
 
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
@@ -70,3 +74,7 @@ class ChatCompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionStreamResponseChoice]
+
+    @field_validator("id", mode="before")
+    def ensure_id_is_str(cls, v):
+        return str(v)
