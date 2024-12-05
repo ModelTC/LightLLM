@@ -41,7 +41,9 @@ class HttpServerManagerForPDMaster:
         self.id_to_event: Dict[int, asyncio.Event] = {}
         self.session = None
         self.first_time_costs = MovingAverage()
-        self.create_session_costs = MovingAverage()
+        self.prefill_create_session_costs = MovingAverage()
+        self.decode_create_session_costs = MovingAverage()
+        self.per_token_costs = MovingAverage()
         return
 
     async def register_pd(self, pd_info_json):
@@ -181,7 +183,7 @@ class HttpServerManagerForPDMaster:
             req = await self._to_req_info(prompt, sampling_params, multimodal_params)
             create_start_time = time.time()
             async with self.session.post(p_node.to_llm_url(), json=req) as response:
-                self.create_session_costs.add((time.time() - create_start_time) * 1000)
+                self.prefill_create_session_costs.add((time.time() - create_start_time) * 1000)
                 if response.status == 200:
                     async for line in response.content:
                         line = line.decode("utf-8").strip()
@@ -217,7 +219,9 @@ class HttpServerManagerForPDMaster:
             sampling_params.suggested_dp_index = event.upkv_status.dp_index
 
             req = await self._to_req_info(prompt_ids, sampling_params, multimodal_params)
+            create_start_time = time.time()
             async with self.session.post(d_node.to_llm_url(), json=req) as response:
+                self.decode_create_session_costs.add((time.time() - create_start_time) * 1000)
                 if response.status == 200:
                     async for line in response.content:
                         line = line.decode("utf-8").strip()
@@ -269,6 +273,7 @@ class HttpServerManagerForPDMaster:
 
         total_cost_time_ms = (time.time() - start_time) * 1000
         mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
+        self.per_token_costs.add(mean_per_token_cost_time_ms)
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
         prompt_cache_len = metadata.pop("prompt_cache_len", 0)
@@ -312,5 +317,7 @@ class HttpServerManagerForPDMaster:
             # 可以做一个定时任务
             await asyncio.sleep(20)
             logger.info(f"mean first cost: {self.first_time_costs.average()} ms")
-            logger.info(f"create_session_costs: {self.create_session_costs.average()} ms")
+            logger.info(f"prefill mean create_session_costs: {self.prefill_create_session_costs.average()} ms")
+            logger.info(f"decode mean create_session_costs: {self.decode_create_session_costs.average()} ms")
+            logger.info(f"mean per token cost: {self.per_token_costs.average()} ms")
         return

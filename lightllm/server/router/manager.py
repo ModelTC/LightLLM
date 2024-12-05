@@ -426,6 +426,9 @@ class RouterManager:
 
     def _update_out_status_to_batch(self, batch: Batch, req_to_out_status):
         new_batch_decode_need_tokens = [0 for _ in range(self.dp_size)]  # 只有在 splitfuse 模式下有意义
+
+        start_time = 0
+        # extral_info 字段如果推理后端输入时间标记, 则用来评估序列化所占用的时间, 主要用于调试时使用
         for req_id, (
             req_status,
             cur_kv_len,
@@ -434,6 +437,8 @@ class RouterManager:
             finish_status_value,
             extral_info,
         ) in req_to_out_status.items():
+            if extral_info is not None:
+                start_time = max(start_time, extral_info)
             req: Req = batch.id_to_reqs[req_id]
             req.req_status = req_status
             req.cur_kv_len = cur_kv_len
@@ -446,6 +451,9 @@ class RouterManager:
             new_batch_decode_need_tokens[req_dp_index] += req.get_decode_need_tokens()
 
         batch.batch_decode_need_tokens = new_batch_decode_need_tokens
+        rpyc_cost_time = (time.time() - start_time) * 1000
+        if 8 <= rpyc_cost_time <= 1000:
+            logger.warning(f"rpyc use too much time {rpyc_cost_time} ms, batch_size {len(req_to_out_status)}")
         return
 
     def _can_decode(self, batch: Batch):

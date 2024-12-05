@@ -166,7 +166,14 @@ class TpPartBaseModel:
         return
 
     def _init_req_manager(self):
-        self.req_manager = ReqManager(self.max_req_num, self.max_seq_length, self.mem_manager)
+        create_max_seq_len = 0
+
+        if self.batch_max_tokens is not None:
+            create_max_seq_len = max(create_max_seq_len, self.batch_max_tokens)
+        if self.max_seq_length is not None:
+            create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
+
+        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, self.mem_manager)
         return
 
     def _init_infer_layer(self):

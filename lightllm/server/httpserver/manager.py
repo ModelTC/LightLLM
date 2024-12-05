@@ -67,6 +67,7 @@ class HttpServerManager:
         assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL]
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
+        self.per_token_costs = MovingAverage()
         # 有的模型的vocab size 读取tokenizer和config.json中不一致
         self.vocab_size = max(get_vocab_size(args.model_dir), self.tokenizer.vocab_size)
 
@@ -340,6 +341,7 @@ class HttpServerManager:
                             pass
                         total_cost_time_ms = (time.time() - start_time) * 1000
                         mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
+                        self.per_token_costs.add(mean_per_token_cost_time_ms)
                         x_request_id = request.headers.get("X-Request-Id", "")
                         x_session_id = request.headers.get("X-Session-Id", "")
                         prompt_cache_len = metadata.pop("prompt_cache_len", 0)
@@ -441,6 +443,7 @@ class HttpServerManager:
                         await asyncio.sleep(3)
                         if log_count % 5 == 0:
                             logger.info(f"mean first cost: {self.first_time_costs.average()} ms")
+                            logger.info(f"mean per token cost: {self.per_token_costs.average()} ms")
 
             except Exception as e:
                 logger.error("connetion to pd_master has error")
