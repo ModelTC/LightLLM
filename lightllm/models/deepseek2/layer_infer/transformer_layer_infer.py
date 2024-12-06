@@ -3,6 +3,7 @@ import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
+from lightllm.common.basemodel.splitfuse_infer_struct import SplitFuseInferStateInfo
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.models.deepseek2.triton_kernel.context_flashattention_nopad import (
@@ -372,3 +373,62 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             hidden_states.add_(shared_output)
 
         return hidden_states.view(num_tokens, hidden_dim)
+
+    def _splitfuse_attention_kernel(
+        self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None
+    ) -> torch.Tensor:
+        if self.mla_type == "MIX":
+            return self._splitfuse_attention_kernel_with_CC(q, infer_state, layer_weight, out)
+        else:
+            return self._splitfuse_attention_kernel_origin(q, infer_state, layer_weight, out)
+
+    def _splitfuse_attention_kernel_origin(
+        self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None
+    ) -> torch.Tensor:
+        q_nope, q_rope = q
+        o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
+        infer_state.start_event.record(torch.cuda.default_stream())
+        if infer_state.decode_req_num > 0:
+            o_tensor[0 : infer_state.decode_req_num, :] = self._token_gqa_decode_attention_flashdecoding_origin(
+                (q_nope[0 : infer_state.decode_req_num, :], q_rope[0 : infer_state.decode_req_num, :]),
+                infer_state.inner_decode_infer_status,
+                layer_weight,
+            )
+        if infer_state.prefill_req_num > 0:
+            infer_state.parrall_stream.wait_event(infer_state.start_event)
+            with torch.cuda.stream(infer_state.parrall_stream):
+                self._context_attention_kernel_origin(
+                    (q_nope[infer_state.decode_req_num :, :], q_rope[infer_state.decode_req_num :, :]),
+                    infer_state.mem_manager.kv_buffer[self.layer_num_],
+                    infer_state.inner_prefill_infer_status,
+                    layer_weight,
+                    out=o_tensor[infer_state.decode_req_num :, :],
+                )
+            infer_state.end_event.record(infer_state.parrall_stream)
+            torch.cuda.default_stream().wait_event(infer_state.end_event)
+        return o_tensor
+
+    def _splitfuse_attention_kernel_with_CC(
+        self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None
+    ) -> torch.Tensor:
+        q_nope, q_rope = q
+        o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
+        infer_state.start_event.record(torch.cuda.default_stream())
+        if infer_state.decode_req_num > 0:
+            o_tensor[0 : infer_state.decode_req_num, :] = self._token_gqa_decode_attention_flashdecoding_with_ACC(
+                (q_nope[0 : infer_state.decode_req_num, :], q_rope[0 : infer_state.decode_req_num, :]),
+                infer_state.inner_decode_infer_status,
+                layer_weight,
+            )
+        if infer_state.prefill_req_num > 0:
+            infer_state.parrall_stream.wait_event(infer_state.start_event)
+            with torch.cuda.stream(infer_state.parrall_stream):
+                o_tensor[infer_state.decode_req_num :, :] = self._context_attention_kernel_with_CC(
+                    (q_nope[infer_state.decode_req_num :, :], q_rope[infer_state.decode_req_num :, :]),
+                    infer_state.mem_manager.kv_buffer[self.layer_num_],
+                    infer_state.inner_prefill_infer_status,
+                    layer_weight,
+                )
+            infer_state.end_event.record(infer_state.parrall_stream)
+            torch.cuda.default_stream().wait_event(infer_state.end_event)
+        return o_tensor

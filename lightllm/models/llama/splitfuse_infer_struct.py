@@ -7,7 +7,7 @@ from .infer_struct import LlamaInferStateInfo
 
 class LlamaSplitFuseInferStateInfo(SplitFuseInferStateInfo):
 
-    inner_decode_infer_state_class = LlamaInferStateInfo
+    inner_infer_state_class = LlamaInferStateInfo
 
     def __init__(self):
         super().__init__()

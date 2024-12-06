@@ -9,7 +9,7 @@ class SplitFuseInferStateInfo:
     推理时用的信息结构体
     """
 
-    inner_decode_infer_state_class = InferStateInfo
+    inner_infer_state_class = InferStateInfo
 
     def __init__(self):
         self.use_dynamic_prompt_cache = False
@@ -45,10 +45,11 @@ class SplitFuseInferStateInfo:
 
         self.is_splitfuse = True
         self.inner_decode_infer_status = None
+        self.inner_prefill_infer_status = None
         return
 
     def create_inner_decode_infer_status(self):
-        infer_status = self.inner_decode_infer_state_class()
+        infer_status = self.inner_infer_state_class()
         infer_status.batch_size = self.decode_req_num
         infer_status.total_token_num = self.decode_total_token_num
         infer_status.b_req_idx = self.decode_b_req_idx
@@ -61,6 +62,24 @@ class SplitFuseInferStateInfo:
         infer_status.is_prefill = False
 
         self.inner_decode_infer_status = infer_status
+        return infer_status
+
+    def create_inner_prefill_infer_status(self):
+        infer_status = self.inner_infer_state_class()
+        infer_status.batch_size = self.prefill_req_num
+        infer_status.use_dynamic_prompt_cache = True
+        infer_status.b_req_idx = self.prefill_b_req_idx
+        infer_status.b_start_loc = self.prefill_b_split_start_loc
+        infer_status.b_seq_len = self.prefill_b_seq_len
+        infer_status.b_ready_cache_len = self.prefill_b_split_ready_cache_len
+        infer_status.max_len_in_batch = self.prefill_max_split_seq_len_in_batch
+        if infer_status.batch_size > 0:
+            infer_status.max_seq_len = self.prefill_b_seq_len.cpu().numpy().max()
+        infer_status.mem_manager = self.mem_manager
+        infer_status.req_manager = self.req_manager
+        infer_status.is_prefill = True
+
+        self.inner_prefill_infer_status = infer_status
         return infer_status
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):

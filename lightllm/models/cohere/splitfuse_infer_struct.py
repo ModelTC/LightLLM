@@ -3,7 +3,7 @@ from lightllm.models.llama.splitfuse_infer_struct import LlamaSplitFuseInferStat
 
 
 class CohereSplitFuseInferStateInfo(LlamaSplitFuseInferStateInfo):
-    inner_decode_infer_state_class = CohereInferStateInfo
+    inner_infer_state_class = CohereInferStateInfo
 
     def __init__(self):
         super().__init__()

@@ -437,6 +437,7 @@ class TpPartBaseModel:
 
         infer_state.init_some_extra_state(self, input_ids)
         infer_state.create_inner_decode_infer_status()
+        infer_state.create_inner_prefill_infer_status()
         predict_logics = self._splitfuse_forward(input_ids, infer_state)
         return predict_logics
 
