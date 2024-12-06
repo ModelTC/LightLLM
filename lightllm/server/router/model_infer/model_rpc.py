@@ -1,6 +1,6 @@
 import asyncio
 import rpyc
-import torch
+import tempfile
 import torch.multiprocessing as mp
 from datetime import timedelta
 from typing import Dict, List, Tuple
@@ -243,7 +243,7 @@ class ModelRpcClient:
             return ans
 
 
-def _init_env(args, port, info_queue, mem_queue, router_lock):
+def _init_env(args, socket_path, info_queue, mem_queue, router_lock, success_event: mp.Event):
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
@@ -259,7 +259,10 @@ def _init_env(args, port, info_queue, mem_queue, router_lock):
 
     from rpyc.utils.server import ThreadedServer
 
-    t = ThreadedServer(ModelRpcServer(args, info_queue, mem_queue), port=port, protocol_config={"allow_pickle": True})
+    t = ThreadedServer(
+        ModelRpcServer(args, info_queue, mem_queue), socket_path=socket_path, protocol_config={"allow_pickle": True}
+    )
+    success_event.set()
     t.start()
     return
 
@@ -271,13 +274,18 @@ async def start_model_process(args, port, world_size, info_queue: mp.Queue, mem_
     if world_size == 1:
         return ModelRpcClient(ModelRpcServer(args, info_queue, mem_queue), world_size)
 
-    proc = mp.Process(target=_init_env, args=(args, port, info_queue, mem_queue, router_lock))
+    socket_path = tempfile.mktemp()
+    success_event = mp.Event()
+    proc = mp.Process(target=_init_env, args=(args, socket_path, info_queue, mem_queue, router_lock, success_event))
     proc.start()
-    await asyncio.sleep(2)
+    success_event.wait(timeout=40)
+
     repeat_count = 0
     while repeat_count < 20:
         try:
-            con = rpyc.connect("localhost", port, config={"allow_pickle": True})
+            from rpyc.utils.factory import unix_connect
+
+            con = unix_connect(socket_path, config={"allow_pickle": True})
             break
         except BaseException:
             await asyncio.sleep(1)

@@ -33,10 +33,10 @@ class DeTokenizationManager:
         self.args = args
         context = zmq.asyncio.Context(2)
         self.recv_from_router = context.socket(zmq.PULL)
-        self.recv_from_router.bind(f"tcp://127.0.0.1:{detokenization_port}")
+        self.recv_from_router.bind(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
 
         self.send_to_httpserver = context.socket(zmq.PUSH)
-        self.send_to_httpserver.connect(f"tcp://127.0.0.1:{httpserver_port}")
+        self.send_to_httpserver.connect(f"{args.zmq_mode}127.0.0.1:{httpserver_port}")
 
         self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code)
         self.all_special_ids = set(self.tokenizer.all_special_ids)

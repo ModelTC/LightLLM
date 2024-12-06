@@ -13,6 +13,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--zmq_mode",
+        type=str,
+        default="ipc:///tmp/",
+        help="use socket mode or ipc mode, only can be set in ['tcp://', 'ipc:///tmp/']",
+    )
 
     parser.add_argument(
         "--pd_master_ip",

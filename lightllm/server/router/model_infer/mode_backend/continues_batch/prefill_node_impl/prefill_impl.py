@@ -1,3 +1,4 @@
+import os
 import threading
 import torch
 import torch.multiprocessing as mp
@@ -29,8 +30,12 @@ class ContinuesBatchBackendForPrefillNode(ModeBackend):
         self.lock_nccl_group = dist.new_group(backend="gloo")
         from .prefill_infer_rpyc import PDPrefillInferRpcServer
 
+        socket_path = f"/tmp/prefill_node_infer_rpyc_{self.pd_rpyc_port}"
+        if os.path.exists(socket_path):
+            os.remove(socket_path)
+
         t = ThreadedServer(
-            PDPrefillInferRpcServer(self), port=self.pd_rpyc_port, protocol_config={"allow_pickle": True}
+            PDPrefillInferRpcServer(self), socket_path=socket_path, protocol_config={"allow_pickle": True}
         )
         threading.Thread(target=lambda: t.start(), daemon=True).start()
         return

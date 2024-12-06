@@ -66,10 +66,10 @@ class RouterManager:
 
         context = zmq.asyncio.Context(2)
         self.recv_from_httpserver = context.socket(zmq.PULL)
-        self.recv_from_httpserver.bind(f"tcp://127.0.0.1:{router_port}")
+        self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{router_port}")
 
         self.send_to_detokenization = context.socket(zmq.PUSH)
-        self.send_to_detokenization.connect(f"tcp://127.0.0.1:{detokenization_port}")
+        self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
         self.model_rpc_ports = model_rpc_ports
 
         self.is_splitfuse_mode = args.splitfuse_mode
@@ -283,7 +283,7 @@ class RouterManager:
                 self.running_batch = new_batch
                 await self._prefill_batch(self.running_batch)
                 self._filter_runing_batch()
-                self.has_wait_tokens = 0
+                self.has_wait_tokens = self.max_wait_tokens
             return
 
         # 有运行请求，但是已经到了可以调度新的请求合并推理的时机
@@ -291,6 +291,7 @@ class RouterManager:
             new_mini_batch = self.req_queue.generate_new_batch(self.running_batch)
             self.has_wait_tokens = 0
             if new_mini_batch is not None:
+                self.has_wait_tokens = self.max_wait_tokens
                 self.stats_tool.count_prompt_tokens(new_mini_batch)
                 await self._prefill_batch(new_mini_batch)
                 if not new_mini_batch.is_clear():

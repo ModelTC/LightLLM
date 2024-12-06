@@ -4,6 +4,9 @@ import socket
 from rpyc.lib.compat import get_exc_errno
 from rpyc.core.stream import SocketStream
 from rpyc.utils.server import Server
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 def fix_connect(cls, host, port, **kwargs):
@@ -21,7 +24,9 @@ def fix_accept(self):
     while self.active:
         try:
             sock, addrinfo = self.listener.accept()
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if str(sock.family) != "AddressFamily.AF_UNIX":
+                logger.info("set nodelay mode")
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except socket.timeout:
             pass
         except socket.error:

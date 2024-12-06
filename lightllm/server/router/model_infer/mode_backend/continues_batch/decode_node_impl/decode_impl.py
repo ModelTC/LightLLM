@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -30,7 +31,13 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
         self.lock_nccl_group = dist.new_group(backend="gloo")
         from .decode_infer_rpyc import PDDecodeInferRpcServer
 
-        t = ThreadedServer(PDDecodeInferRpcServer(self), port=self.pd_rpyc_port, protocol_config={"allow_pickle": True})
+        socket_path = f"/tmp/decode_node_infer_rpyc_{self.pd_rpyc_port}"
+        if os.path.exists(socket_path):
+            os.remove(socket_path)
+
+        t = ThreadedServer(
+            PDDecodeInferRpcServer(self), socket_path=socket_path, protocol_config={"allow_pickle": True}
+        )
         threading.Thread(target=lambda: t.start(), daemon=True).start()
         return
 

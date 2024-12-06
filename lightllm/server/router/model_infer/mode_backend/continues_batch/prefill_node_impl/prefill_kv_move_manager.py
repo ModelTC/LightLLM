@@ -99,7 +99,10 @@ class PrefillKVMoveManager:
         self.infer_rpyc_objs: List[PDPrefillInferRpcServer] = []
         self.node_id_to_trans_obj: Dict[str, TransProcessObj] = {}
         for port in self.args.pd_tp_infer_rpyc_ports:
-            con = retry(max_attempts=20, wait_time=2)(rpyc.connect)("localhost", port, config={"allow_pickle": True})
+            socket_path = f"/tmp/prefill_node_infer_rpyc_{port}"
+            from rpyc.utils.factory import unix_connect
+
+            con = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
             self.infer_rpyc_objs.append(con.root)
             logger.info(f"rpyc connect to infer rpyc port: {port} ok")
         self.host_ip = get_hostname_ip()

@@ -29,10 +29,10 @@ class VisualManager:
     ):
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"tcp://127.0.0.1:{router_port}")
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
 
         self.recv_from_httpserver = context.socket(zmq.PULL)
-        self.recv_from_httpserver.bind(f"tcp://127.0.0.1:{visual_port}")
+        self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
         self.cache_client = rpyc.connect("localhost", cache_port)
         self.cache_port = cache_port
         self.waiting_reqs = []

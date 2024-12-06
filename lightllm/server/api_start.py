@@ -4,7 +4,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.server import TokenLoad
 from .api_lightllm import lightllm_generate, lightllm_generate_stream
 from .api_tgi import tgi_generate_impl, tgi_generate_stream_impl
-from lightllm.utils.net_utils import alloc_can_use_network_port
+from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
 from lightllm.utils.start_utils import start_submodule_processes
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
@@ -26,6 +26,15 @@ def normal_or_p_d_start(g_objs):
 
     if args.run_mode not in ["normal", "prefill", "decode"]:
         return
+
+    assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
+
+    # 确保单机上多实列不冲突
+    if args.zmq_mode == "ipc:///tmp/":
+        zmq_mode = f"{args.zmq_mode}_{str(args.nccl_port)}_"
+        args.zmq_mode = None  # args 的参数不能直接设置，只能先设置None，再设置才能成功
+        args.zmq_mode = zmq_mode
+        logger.info(f"zmq mode head: {args.zmq_mode}")
 
     if args.use_tgi_api:
         g_objs.g_generate_func = tgi_generate_impl
@@ -117,9 +126,18 @@ def normal_or_p_d_start(g_objs):
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
+    if args.run_mode == "decode":
+        already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port, args.pd_decode_rpyc_port]
+
+    # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
+    # 捕获到端口设置冲突的问题
+    ports_locker = PortLocker(already_uesd_ports)
+    ports_locker.lock_port()
+
     can_use_ports = alloc_can_use_network_port(
         num=6 + args.tp + args.tp + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
+    logger.info(f"alloced ports: {can_use_ports}")
     router_port, detokenization_port, httpserver_port, visual_port, cache_port, metric_port = can_use_ports[0:6]
     model_rpc_ports = can_use_ports[6 : 6 + args.tp]
     can_use_ports = can_use_ports[6 + args.tp :]
@@ -143,6 +161,8 @@ def normal_or_p_d_start(g_objs):
         args.router_max_wait_tokens = 0
 
     logger.info(f"all start args:{args}")
+
+    ports_locker.release_port()
 
     if args.enable_multimodal:
         start_submodule_processes(

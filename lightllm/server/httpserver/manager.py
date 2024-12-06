@@ -45,16 +45,16 @@ class HttpServerManager:
         self.args = args
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"tcp://127.0.0.1:{router_port}")
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
 
         self.enable_multimodal = enable_multimodal
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", cache_port)
             self.send_to_visual = context.socket(zmq.PUSH)
-            self.send_to_visual.connect(f"tcp://127.0.0.1:{visual_port}")
+            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
 
         self.recv_from_detokenization = context.socket(zmq.PULL)
-        self.recv_from_detokenization.bind(f"tcp://127.0.0.1:{httpserver_port}")
+        self.recv_from_detokenization.bind(f"{args.zmq_mode}127.0.0.1:{httpserver_port}")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
