@@ -30,7 +30,7 @@ from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from lightllm.utils.log_utils import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cuda_device_count_stateless
-
+from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 ops.meta_size()
 custom_ar = True
 
@@ -49,7 +49,7 @@ class CustomAllreduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
     # max_size: max supported allreduce size
-    def __init__(self, group: ProcessGroup, device: Union[int, str, torch.device], max_size=8192 * 1024) -> None:
+    def __init__(self, group: ProcessGroup, device_group: ProcessGroup, device: Union[int, str, torch.device], max_size=8192 * 1024) -> None:
         """
         Args:
             group: the process group to work on. If None, it will use the
@@ -69,7 +69,7 @@ class CustomAllreduce:
             return
 
         self.group = group
-
+        self.device_group = device_group
         assert dist.get_backend(group) != dist.Backend.NCCL, "CustomAllreduce should be attached to a non-NCCL group."
 
         rank = dist.get_rank(group=self.group)
@@ -226,7 +226,7 @@ class CustomAllreduce:
         buffer.
         """
         if out is None:
-            out = torch.empty_like(inp)
+            out = g_cache_manager.alloc_tensor(inp.shape, inp.dtype, device=inp.device, is_graph_out=False)
         if registered:
             ops.all_reduce(self._ptr, inp, out, 0, 0)
         else:
@@ -244,7 +244,8 @@ class CustomAllreduce:
             else:
                 # If warm up, mimic the allocation pattern since custom
                 # allreduce is out-of-place.
-                return torch.empty_like(input)
+                out = g_cache_manager.alloc_tensor(input.shape, input.dtype, device=input.device, is_graph_out=False)
+                return out
         else:
             # Note: outside of cuda graph context, custom allreduce incurs a
             # cost of cudaMemcpy, which should be small (<=1% of overall

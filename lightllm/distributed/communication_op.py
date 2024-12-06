@@ -37,7 +37,6 @@ except:
 vllm_reduce = None
 logger = init_logger(__name__)
 
-
 @contextmanager
 def lightllm_capture_graph():
     if vllm_reduce is not None:
@@ -47,9 +46,8 @@ def lightllm_capture_graph():
         yield
     pass
 
-
 def _all_reduce(input_, op=ReduceOp.SUM, group=None, async_op=False):
-    if op != ReduceOp.SUM or group is not None or async_op or vllm_reduce is None:
+    if op != ReduceOp.SUM or group is not None or async_op:
         original_all_reduce(input_, op, group, async_op)
     else:
         if vllm_reduce is not None:
@@ -57,12 +55,13 @@ def _all_reduce(input_, op=ReduceOp.SUM, group=None, async_op=False):
             if can_use:
                 input_.data = vllm_reduce.custom_all_reduce(input_)
                 return
-        original_all_reduce(input_, op, group, async_op)
+            original_all_reduce(input_, op, vllm_reduce.device_group, async_op)
+        else:
+            original_all_reduce(input_, op, group, async_op)
 
 
 def set_custom_reduce():
     global vllm_reduce
-
     ENABLE_VLLM_REDUCE = os.getenv("ENABLE_VLLM_REDUCE", "False").upper() in [
         "ON",
         "TRUE",
@@ -71,7 +70,8 @@ def set_custom_reduce():
     if ENABLE_VLLM_REDUCE and HAS_VLLM:
         world_size = dist.get_world_size()
         ranks = list(range(world_size))
+        device_group = torch.distributed.new_group(ranks, backend="nccl")
         cpu_group = torch.distributed.new_group(ranks, backend="gloo")
-        vllm_reduce = CustomAllreduce(cpu_group, torch.cuda.current_device())
+        vllm_reduce = CustomAllreduce(cpu_group, device_group, torch.cuda.current_device())
         logger.info("Enable VLLM ALLReduce.")
         dist.all_reduce = _all_reduce
