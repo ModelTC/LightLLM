@@ -4,12 +4,8 @@ from lightllm.utils.dist_utils import get_world_size, get_rank
 import threading
 from lightllm.common.quantization import vLLMFP8w8a8QuantizationMethod
 
-try:
-    HAS_VLLM = True
-    from vllm.model_executor.layers.fused_moe import FusedMoE
-    from vllm.model_executor.layers.fused_moe import fused_experts
-except:
-    HAS_VLLM = False
+from lightllm.common.vllm_kernel import _custom_ops as ops
+from lightllm.common.fused_moe import fused_experts
 
 
 class FusedMoeWeight(BaseWeight):
@@ -17,7 +13,6 @@ class FusedMoeWeight(BaseWeight):
         self, gate_proj_name, down_proj_name, up_proj_name, weight_prefix, n_routed_experts, split_inter_size, data_type
     ):
         super().__init__()
-        assert HAS_VLLM, "vllm is not installed, you can't use FusedMoeWeight"
         self.w1_weight_name = gate_proj_name
         self.w2_weight_name = down_proj_name
         self.w3_weight_name = up_proj_name
@@ -39,7 +34,7 @@ class FusedMoeWeight(BaseWeight):
                 self.quant_method.is_moe = True
 
     def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids = ops.select_experts(
             hidden_states=input_tensor,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,

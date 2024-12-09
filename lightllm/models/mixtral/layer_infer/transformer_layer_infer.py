@@ -6,7 +6,7 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.mistral.layer_infer.transformer_layer_infer import MistralTransformerLayerInfer
 from lightllm.models.mixtral.layer_infer._custom_ops import fused_topk
 from lightllm.models.mixtral.layer_weights.transformer_layer_weight import MixtralTransformerLayerWeight
-from lightllm.models.deepseek2.layer_infer.fused_moe import fused_experts
+from lightllm.common.fused_moe import fused_experts
 
 
 class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):

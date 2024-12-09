@@ -29,14 +29,18 @@ from functools import partial
 original_all_reduce = torch.distributed.all_reduce
 from contextlib import nullcontext, contextmanager
 
+logger = init_logger(__name__)
+
 try:
     HAS_VLLM = True
     from .custom_all_reduce import CustomAllreduce
+
+    logger.info("using custom allreduce")
 except:
     HAS_VLLM = False
+    logger.info("vllm or lightllm_kernel is not installed, you can't use custom allreduce")
 
 vllm_reduce = None
-logger = init_logger(__name__)
 
 
 @contextmanager

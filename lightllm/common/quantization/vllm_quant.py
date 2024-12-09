@@ -6,9 +6,7 @@ import torch.nn.functional as F
 
 try:
     HAS_VLLM = True
-    import vllm
-    from vllm import _custom_ops as ops
-    from vllm.model_executor.layers.quantization.utils.w8a8_utils import apply_int8_linear
+    from lightllm.common.vllm_kernel import _custom_ops as ops
 except:
     HAS_VLLM = False
 
