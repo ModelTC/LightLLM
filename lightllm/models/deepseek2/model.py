@@ -3,6 +3,7 @@ import json
 import torch
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
+from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -19,6 +20,9 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
     # infer class
     transformer_layer_infer_class = Deepseek2TransformerLayerInfer
+
+    # infer state class
+    infer_state_class = Deepseek2InferStateInfo
 
     def __init__(self, kvargs):
         self.disable_qk_absorb = os.getenv("DISABLE_QK_ABSORB", "False").upper() in ["ON", "TRUE", "1"]
