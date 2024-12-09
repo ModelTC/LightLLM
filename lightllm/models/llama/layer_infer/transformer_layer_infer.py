@@ -23,10 +23,6 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.splitfuse_infer_struct import SplitFuseInferStateInfo
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv, destindex_copy_quantize_kv
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.models.llama.triton_kernel.splitfuse_context_flashattention_nopad import (
-    splitfuse_context_attention_fwd,
-    splitfuse_context_attention_fwd_int8kv,
-)
 from lightllm.models.llama.triton_kernel.ppl_quant_copy_kv import destindex_copy_dequantize_kv
 
 
@@ -236,20 +232,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             # infer_state.start_event.wait(infer_state.parrall_stream)
             with torch.cuda.stream(infer_state.parrall_stream):
                 # assert torch.cuda.current_stream().cuda_stream == infer_state.parrall_stream.cuda_stream
-                splitfuse_context_attention_fwd(
+                self._context_attention_kernel(
                     q[infer_state.decode_req_num :, :].view(calcu_shape1),
-                    infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-                    infer_state.mem_manager.kv_buffer[self.layer_num_][
-                        :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                    ],
-                    o_tensor[infer_state.decode_req_num :, :].view(calcu_shape1),
-                    infer_state.prefill_req_num,
-                    infer_state.req_manager.req_to_token_indexs,
-                    infer_state.prefill_b_req_idx,
-                    infer_state.prefill_b_split_start_loc,
-                    infer_state.prefill_b_split_ready_cache_len,
-                    infer_state.prefill_b_seq_len,
-                    infer_state.prefill_max_split_seq_len_in_batch,
+                    infer_state.mem_manager.kv_buffer[self.layer_num_],
+                    infer_state.inner_prefill_infer_status,
+                    layer_weight,
+                    out=o_tensor[infer_state.decode_req_num :, :].view(calcu_shape1),
                 )
             infer_state.end_event.record(infer_state.parrall_stream)
             torch.cuda.default_stream().wait_event(infer_state.end_event)
@@ -274,24 +262,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         if infer_state.prefill_req_num > 0:
             infer_state.parrall_stream.wait_event(infer_state.start_event)
             with torch.cuda.stream(infer_state.parrall_stream):
-                splitfuse_context_attention_fwd_int8kv(
+                self._context_attention_kernel_ppl_int8kv(
                     q[infer_state.decode_req_num :, :].view(calcu_shape1),
-                    infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-                    infer_state.mem_manager.scale_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-                    infer_state.mem_manager.kv_buffer[self.layer_num_][
-                        :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                    ],
-                    infer_state.mem_manager.scale_buffer[self.layer_num_][
-                        :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                    ],
-                    o_tensor[infer_state.decode_req_num :, :].view(calcu_shape1),
-                    infer_state.prefill_req_num,
-                    infer_state.req_manager.req_to_token_indexs,
-                    infer_state.prefill_b_req_idx,
-                    infer_state.prefill_b_split_start_loc,
-                    infer_state.prefill_b_split_ready_cache_len,
-                    infer_state.prefill_b_seq_len,
-                    infer_state.prefill_max_split_seq_len_in_batch,
+                    infer_state.mem_manager.kv_buffer[self.layer_num_],
+                    infer_state.inner_prefill_infer_status,
+                    layer_weight,
+                    out=o_tensor[infer_state.decode_req_num :, :].view(calcu_shape1),
                 )
             infer_state.end_event.record(infer_state.parrall_stream)
             torch.cuda.default_stream().wait_event(infer_state.end_event)
