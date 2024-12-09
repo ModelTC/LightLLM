@@ -84,8 +84,11 @@ class ModeBackend:
             init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}',
             rank=self.tp_rank,
             world_size=self.world_size,
-            device_id=torch.device(f"cuda:{self.tp_rank}"),
         )
+        # warmup nccl communicator
+        _a = torch.zeros([1]).to(f"cuda:{self.tp_rank}")
+        dist.all_reduce(_a)
+        del _a
 
         from lightllm.distributed import set_custom_reduce
 
