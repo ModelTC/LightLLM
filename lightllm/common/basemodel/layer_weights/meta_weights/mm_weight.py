@@ -1,6 +1,16 @@
+import os
 import torch
 from .base_weight import BaseWeightTpl
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+
+
+def generate_scale_name(name):
+    weight_scale_name = ".".join(name.split(".")[:-1] + ["weight_scale"])
+    input_scale_name = ".".join(name.split(".")[:-1] + ["input_scale"])
+    return weight_scale_name, input_scale_name
+
+
+STATIC_QUANT = os.getenv("STATIC_QUANT", "0").upper() in ["1", "TRUE", "ON"]
 
 
 class MMWeightTpl(BaseWeightTpl):
@@ -10,6 +20,8 @@ class MMWeightTpl(BaseWeightTpl):
         self.quant_method = None
         self.weight = None
         self.bias = None
+        self.weight_scale = None
+        self.input_scale = None
 
     def set_quant_method(self, quant_method):
         self.quant_method = quant_method
@@ -31,7 +43,11 @@ class MMWeightTpl(BaseWeightTpl):
 
     def _post_load_weights(self):
         if self.quant_method is not None:
-            self.weight = self.quant_method.quantize(self.weight.cuda(self.tp_rank_))
+            if STATIC_QUANT:
+                if all(w is not None for w in [self.weight, self.weight_scale, self.input_scale]):
+                    self.weight = self.quant_method.quantize((self.weight, self.weight_scale, self.input_scale))
+            else:
+                self.weight = self.quant_method.quantize(self.weight.to(self.data_type_).cuda(self.tp_rank_))
             return
         self.weight = self.weight.transpose(0, 1).cuda(self.tp_rank_)
 
@@ -43,6 +59,7 @@ class MMWeight(MMWeightTpl):
         self.end = split_n_embed * (self.tp_rank_ + 1)
         self.weight_name = weight_name
         self.bias_name = bias_name
+        self.weight_scale_name, self.input_scale_name = generate_scale_name(weight_name)
 
     def verify_load(self):
         load_ok = True
@@ -60,13 +77,24 @@ class ROWMMWeight(MMWeight):
 
     def load_hf_weights(self, weights):
         weight = None
+        weight_scale = None
+        input_scale = None
         if self.weight_name in weights:
-            weight = weights[self.weight_name].to(self.data_type_)
+            weight = weights[self.weight_name]
             self.weight = weight[self.start : self.end]
         if self.bias_name in weights:
             bias = weights[self.bias_name].to(self.data_type_)[self.start : self.end]
             self.bias = bias.cuda(self.tp_rank_)
-        if weight is None:
+
+        if STATIC_QUANT and self.weight_scale_name in weights:
+            weight_scale = weights[self.weight_scale_name].to(torch.float)[self.start : self.end]
+            self.weight_scale = weight_scale.cuda()
+
+        if STATIC_QUANT and self.input_scale_name in weights:
+            input_scale = weights[self.input_scale_name].to(torch.float)
+            self.input_scale = input_scale.cuda()
+
+        if weight is None and weight_scale is None and input_scale is None:
             return
         self._post_load_weights()
         return
@@ -85,13 +113,24 @@ class COLMMWeight(MMWeight):
 
     def load_hf_weights(self, weights):
         weight = None
+        weight_scale = None
+        input_scale = None
         if self.weight_name in weights:
-            weight = weights[self.weight_name].to(self.data_type_)
+            weight = weights[self.weight_name]
             self.weight = weight[:, self.start : self.end]
         if self.bias_name in weights:
             bias = weights[self.bias_name]
             self.bias = (bias / self.world_size_).to(self.data_type_).cuda(self.tp_rank_)
-        if weight is None:
+
+        if STATIC_QUANT and self.weight_scale_name in weights:
+            weight_scale = weights[self.weight_scale_name].to(torch.float)
+            self.weight_scale = weight_scale.cuda()
+
+        if STATIC_QUANT and self.input_scale_name in weights:
+            input_scale = weights[self.input_scale_name].to(torch.float)
+            self.input_scale = input_scale.cuda()
+
+        if weight is None and weight_scale is None and input_scale is None:
             return
         self._post_load_weights()
         return
@@ -109,8 +148,17 @@ class MultiMMWeight(MMWeightTpl):
         self.ends = [i * (self.tp_rank_ + 1) for i in self.split_n_embeds]
         self.weight_names = weight_names
         self.bias_names = bias_names
+        self.weight_scale_names = []
+        self.input_scale_names = []
+        for weight_name in weight_names:
+            weight_scale_name, input_scale_name = generate_scale_name(weight_name)
+            self.weight_scale_names.append(weight_scale_name)
+            self.input_scale_names.append(input_scale_name)
+
         self.weights = [None] * len(self.weight_names)
         self.biases = [None] * len(self.bias_names)
+        self.input_scales = [None] * len(self.weight_names)
+        self.weight_scales = [None] * len(self.weight_names)
         self.has_bias = all(b is not None for b in self.bias_names) and len(bias_names) > 0
 
     def verify_load(self):
@@ -131,6 +179,16 @@ class MultiROWMMWeight(MultiMMWeight):
         if self.weight is None and all(w is not None for w in self.weights):
             self.weight = torch.cat(self.weights, dim=0)
             self._post_load_weights()
+
+        if self.weight_scale is None and all(w is not None for w in self.weight_scales):
+            self.weight_scale = torch.cat(self.weight_scales, dim=0).cuda()
+            self._post_load_weights()
+
+        if self.input_scale is None and all(w is not None for w in self.input_scales):
+            input_scales = torch.stack(self.input_scales, dim=0)
+            self.input_scale = torch.max(input_scales).cuda()
+            self._post_load_weights()
+
         if self.has_bias:
             if self.bias is None and all(b is not None for b in self.biases):
                 self.bias = torch.cat(self.biases, dim=0).cuda(self.tp_rank_)
@@ -140,11 +198,18 @@ class MultiROWMMWeight(MultiMMWeight):
         weight = None
         for i in range(len(self.weight_names)):
             if self.weight_names[i] in weights:
-                weight = weights[self.weight_names[i]].to(self.data_type_)
+                weight = weights[self.weight_names[i]]
                 self.weights[i] = weight[self.starts[i] : self.ends[i]]
             if self.has_bias and self.bias_names[i] in weights:
                 bias = weights[self.bias_names[i]].to(self.data_type_)
                 self.biases[i] = bias[self.starts[i] : self.ends[i]]
+            if STATIC_QUANT and self.weight_scale_names[i] in weights:
+                weight_scale = weights[self.weight_scale_names[i]][self.starts[i] : self.ends[i]]
+                self.weight_scales[i] = weight_scale.to(torch.float)
+            if STATIC_QUANT and self.input_scale_names[i] in weights:
+                input_scale = weights[self.input_scale_names[i]].to(torch.float)
+                self.input_scales[i] = input_scale
+
         self._fuse()
         return
 
@@ -164,11 +229,17 @@ class MultiCOLMMWeight(MultiROWMMWeight):
         weight = None
         for i in range(len(self.weight_names)):
             if self.weight_names[i] in weights:
-                weight = weights[self.weight_names[i]].to(self.data_type_)
+                weight = weights[self.weight_names[i]]
                 self.weights[i] = weight[:, self.starts[i] : self.ends[i]]
             if self.has_bias and self.bias_names[i] in weights:
                 bias = weights[self.bias_names[i]].to(self.data_type_)
                 self.biases[i] = bias[:, self.starts[i] : self.ends[i]]
+            if STATIC_QUANT and self.weight_scale_names[i] in weights:
+                weight_scale = weights[self.weight_scale_names[i]]
+                self.weight_scales[i] = weight_scale.to(torch.float)
+            if STATIC_QUANT and self.input_scale_names[i] in weights:
+                input_scale = weights[self.input_scale_names[i]].to(torch.float)
+                self.input_scales[i] = input_scale
         self._fuse()
         return
 

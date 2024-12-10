@@ -244,4 +244,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Path of quantization config. It can be used for mixed quantization.
             Examples can be found in lightllm/common/quantization/configs.""",
     )
+    parser.add_argument(
+        "--static_quant",
+        action="store_true",
+        help="whether to load static quantized weights. Currently, only vllm-w8a8 is supported.",
+    )
     return parser

@@ -17,6 +17,9 @@ from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 
 logger = init_logger(__name__)
 
+def set_env(args):
+    if args.static_quant:
+        os.environ["STATIC_QUANT"] = "1"
 
 def normal_or_p_d_start(g_objs):
     from .api_server import G_Objs
@@ -45,10 +48,15 @@ def normal_or_p_d_start(g_objs):
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
 
+    set_env(args)
+
     assert not (args.beam_mode and args.use_dynamic_prompt_cache), "Beam mode incompatible with dynamic prompt cache"
     assert (
         args.mem_fraction > 0 and args.mem_fraction < 1
     ), f"Invalid mem_fraction {args.mem_fraction}, The expected value is between 0 and 1."
+
+    if args.static_quant:
+        assert args.quant_type == "vllm-w8a8", "Only static parameter loading for vllm-w8a8 is supported."
 
     # splitfuse_mode 和 cuda_graph 不能同时开启
     if args.splitfuse_mode:

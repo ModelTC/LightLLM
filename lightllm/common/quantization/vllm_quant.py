@@ -31,8 +31,8 @@ class vLLMw8a8QuantizationMethod(vLLMBaseQuantizationMethod):
         super().__init__()
 
     def quantize(self, weight: torch.Tensor):
-        if hasattr(weight, "scale"):
-            return weight.data.transpose(0, 1).cuda(), weight.scale.cuda()
+        if isinstance(weight, tuple):
+            return (weight[0].transpose(0, 1).cuda(),) + weight[1:]
         weight = weight.float()
         scale = weight.abs().max(dim=-1)[0] / 127
         weight = weight.transpose(0, 1) / scale.reshape(1, -1)
@@ -40,14 +40,22 @@ class vLLMw8a8QuantizationMethod(vLLMBaseQuantizationMethod):
         return weight.cuda(), scale.cuda()
 
     def apply(self, input_tensor, weights, bias=None, out=None, workspace=None):
-        x_q, x_scale, x_zp = ops.scaled_int8_quant(input_tensor, scale=None, azp=None, symmetric=True)
+        input_scale = None
+        if len(weights) == 3:
+            qweight, weight_scale, input_scale = weights
+        elif len(weights) == 2:
+            qweight, weight_scale = weights
+        else:
+            raise ValueError("vllm-quant Weights must be a tuple of length 2 or 3.")
+
+        x_q, x_scale, x_zp = ops.scaled_int8_quant(input_tensor, scale=input_scale, azp=None, symmetric=True)
         m = input_tensor.shape[0]
-        n = weights[0].shape[1]
+        n = qweight.shape[1]
         if out is None:
             out = g_cache_manager.alloc_tensor(
                 (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
             )
-        torch.ops._C.cutlass_scaled_mm(out, x_q, weights[0], x_scale, weights[1], bias)
+        torch.ops._C.cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
         return out
 
 
