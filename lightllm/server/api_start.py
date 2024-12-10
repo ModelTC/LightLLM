@@ -18,6 +18,7 @@ from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 logger = init_logger(__name__)
 
 def set_env(args):
+    import os
     if args.static_quant:
         os.environ["STATIC_QUANT"] = "1"
 
