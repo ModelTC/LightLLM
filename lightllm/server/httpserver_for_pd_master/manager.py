@@ -9,18 +9,20 @@ import hashlib
 import datetime
 import aiohttp
 import ujson as json
+import pickle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict
 from ..io_struct import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, UpKVStatus
+from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType
 from ..sampling_params import SamplingParams
 from ..multimodal_params import MultimodalParams
-from ..req_id_generator import ReqIDGenerator
+from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
 from fastapi import Request
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
+from lightllm.server.httpserver.manager import AsyncQueue
 
 logger = init_logger(__name__)
 
@@ -38,16 +40,16 @@ class HttpServerManagerForPDMaster:
         self.decode_nodes: List[PD_Client_Obj] = []
         self.url_to_pd_nodes: Dict[str, PD_Client_Obj] = {}
 
-        self.id_to_event: Dict[int, asyncio.Event] = {}
-        self.session = None
+        self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
+        self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
+
         self.first_time_costs = MovingAverage()
-        self.prefill_create_session_costs = MovingAverage()
-        self.decode_create_session_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
         return
 
-    async def register_pd(self, pd_info_json):
+    async def register_pd(self, pd_info_json, websocket):
         pd_client = PD_Client_Obj(**pd_info_json)
+        pd_client.websocket = websocket
         self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
         if pd_client.mode == "prefill":
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
@@ -74,10 +76,10 @@ class HttpServerManagerForPDMaster:
 
     async def update_req_status(self, upkv_status: UpKVStatus):
         try:
-            event = self.id_to_event[upkv_status.group_request_id]
-            event.upkv_status = upkv_status
-            event.set()
-            del self.id_to_event[upkv_status.group_request_id]
+            group_request_id = convert_sub_id_to_group_id(upkv_status.group_request_id)
+            up_status_event = self.req_id_to_out_inf[group_request_id].up_status_event
+            up_status_event.upkv_status = upkv_status
+            up_status_event.set()
         except:
             pass
         return
@@ -101,7 +103,7 @@ class HttpServerManagerForPDMaster:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
-    ) -> Tuple[int, str, dict, FinishStatus]:
+    ):
         start_time = time.time()
         group_request_id = self.id_gen.generate_id()
         try:
@@ -125,6 +127,12 @@ class HttpServerManagerForPDMaster:
             )
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
                 yield sub_req_id, request_output, metadata, finish_status
+
+        except BaseException as e:
+            logger.error(f"has exception {str(e)}")
+            await self.abort(group_request_id)
+            raise e
+
         finally:
             await self.remove_req(group_request_id)
         return
@@ -157,14 +165,14 @@ class HttpServerManagerForPDMaster:
         prompt: Union[str, List[int]],
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
+        request: Request,
     ):
         group_request_id = sampling_params.group_request_id
-        event = asyncio.Event()
-        self.id_to_event[group_request_id] = event
-        # 初始化连接池
-        if self.session is None:
-            self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=2000, verify_ssl=False))
-            await self.session.__aenter__()
+
+        req_status = ReqStatus(group_request_id, p_node, d_node)
+        self.req_id_to_out_inf[group_request_id] = req_status
+
+        up_status_event = req_status.up_status_event
 
         d_start_args = d_node.start_args
         decode_node_dict = {
@@ -174,66 +182,57 @@ class HttpServerManagerForPDMaster:
             "max_new_tokens": sampling_params.max_new_tokens - 1,
         }
 
+        old_max_new_tokens = sampling_params.max_new_tokens
+        sampling_params.max_new_tokens = 1
+        sampling_params.move_kv_to_decode_node = decode_node_dict if old_max_new_tokens != 1 else None
+        sampling_params.suggested_dp_index = None
+
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+
+        while True:
+            await req_status.wait_to_ready()
+            if await request.is_disconnected():
+                raise Exception(f"req_id {group_request_id} disconnected")
+
+            if await req_status.can_read(self.req_id_to_out_inf):
+                token_list = await req_status.pop_all_tokens()
+                for sub_req_id, request_output, metadata, finish_status in token_list:
+                    if old_max_new_tokens != 1:
+                        finish_status = FinishStatus.NO_FINISH
+                    else:
+                        finish_status = FinishStatus(finish_status)
+                    # 得到 p 节点返回的 prompt_ids 信息
+                    if metadata.get("prompt_ids", None) is not None:
+                        prompt_ids = metadata.get("prompt_ids")
+                        prompt_ids.append(metadata.get("id"))
+                    yield sub_req_id, request_output, metadata, finish_status
+                break
+
+        # 如果只需要一个输出 token，prefill 完就直接结束掉吧
+        if old_max_new_tokens == 1:
+            return
+
         try:
-            old_max_new_tokens = sampling_params.max_new_tokens
-            sampling_params.max_new_tokens = 1
-            sampling_params.move_kv_to_decode_node = decode_node_dict if old_max_new_tokens != 1 else None
-            sampling_params.suggested_dp_index = None
+            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning(f"group_request_id: {group_request_id} kv move time out err")
+            assert False, f"req_id {group_request_id} kv move time out, server is busy"
 
-            req = await self._to_req_info(prompt, sampling_params, multimodal_params)
-            create_start_time = time.time()
-            async with self.session.post(p_node.to_llm_url(), json=req) as response:
-                self.prefill_create_session_costs.add((time.time() - create_start_time) * 1000)
-                if response.status == 200:
-                    async for line in response.content:
-                        line = line.decode("utf-8").strip()
-                        if line.startswith("data:"):
-                            data = line[len("data:") :].strip()
-                            sub_req_id, request_output, metadata, finish_status = json.loads(data)
-                            if old_max_new_tokens != 1:
-                                finish_status = FinishStatus.NO_FINISH
-                            else:
-                                finish_status = FinishStatus(finish_status)
-                            # 得到 p 节点返回的 prompt_ids 信息
-                            if metadata.get("prompt_ids", None) is not None:
-                                prompt_ids = metadata.get("prompt_ids")
-                                prompt_ids.append(metadata.get("id"))
-                            yield sub_req_id, request_output, metadata, finish_status
-                else:
-                    logger.error(f"fetch_stream error: {response.status}")
-                    raise Exception(f"group_req_id {group_request_id} connection error: {response}")
+        sampling_params.move_kv_to_decode_node = None
+        sampling_params.max_new_tokens = old_max_new_tokens - 1
+        sampling_params.suggested_dp_index = up_status_event.upkv_status.dp_index
 
-            # 如果只需要一个输出 token，prefill 完就直接结束掉吧
-            if old_max_new_tokens == 1:
-                return
+        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, multimodal_params))))
 
-            try:
-                await asyncio.wait_for(event.wait(), timeout=60)
-            except asyncio.TimeoutError:
-                logger.warning(f"group_request_id: {group_request_id} time out err")
-                raise Exception("server is busy")
-                # raise Exception(f"group_request_id: {group_request_id} time out err, maybe kv move get questions")
+        while True:
+            await req_status.wait_to_ready()
+            if await request.is_disconnected():
+                raise Exception(f"req_id {group_request_id} disconnected")
+            if await req_status.can_read(self.req_id_to_out_inf):
+                token_list = await req_status.pop_all_tokens()
+                for sub_req_id, request_output, metadata, finish_status in token_list:
+                    yield sub_req_id, request_output, metadata, finish_status
 
-            sampling_params.move_kv_to_decode_node = None
-            sampling_params.max_new_tokens = old_max_new_tokens - 1
-            sampling_params.suggested_dp_index = event.upkv_status.dp_index
-
-            req = await self._to_req_info(prompt_ids, sampling_params, multimodal_params)
-            create_start_time = time.time()
-            async with self.session.post(d_node.to_llm_url(), json=req) as response:
-                self.decode_create_session_costs.add((time.time() - create_start_time) * 1000)
-                if response.status == 200:
-                    async for line in response.content:
-                        line = line.decode("utf-8").strip()
-                        if line.startswith("data:"):
-                            data = line[len("data:") :].strip()
-                            sub_req_id, request_output, metadata, finish_status = json.loads(data)
-                            yield sub_req_id, request_output, metadata, FinishStatus(finish_status)
-                else:
-                    logger.error(f"fetch_stream error: {response.status}")
-                    raise Exception(f"group_req_id {group_request_id} connection error: {response}")
-        finally:
-            await self.remove_req(group_request_id)
         return
 
     async def _wait_to_token_package(
@@ -253,11 +252,11 @@ class HttpServerManagerForPDMaster:
         is_first_token = True
 
         async for sub_req_id, out_str, metadata, finish_status in self.fetch_stream(
-            p_node, d_node, prompt, sampling_params, multimodal_params
+            p_node, d_node, prompt, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
-                await self.abort(group_request_id)
                 raise Exception(f"req_id {group_request_id} disconnected")
+
             prompt_tokens = metadata["prompt_tokens"]
             out_token_counter += 1
             if is_first_token:
@@ -300,24 +299,99 @@ class HttpServerManagerForPDMaster:
 
     async def abort(self, group_request_id):
         logger.warning(f"aborted group_request_id {group_request_id}")
+
         try:
-            del self.id_to_event[group_request_id]
+            req_status = self.req_id_to_out_inf[group_request_id]
+            del self.req_id_to_out_inf[group_request_id]
         except:
             pass
+
+        try:
+            await req_status.p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+        except:
+            pass
+
+        try:
+            await req_status.d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+        except:
+            pass
+
         return
 
     async def remove_req(self, group_request_id):
         try:
-            del self.id_to_event[group_request_id]
+            del self.req_id_to_out_inf[group_request_id]
         except:
             pass
 
-    async def handle_loop(self):
+    async def timer_log(self):
         while True:
-            # 可以做一个定时任务
-            await asyncio.sleep(20)
-            logger.info(f"mean first cost: {self.first_time_costs.average()} ms")
-            logger.info(f"prefill mean create_session_costs: {self.prefill_create_session_costs.average()} ms")
-            logger.info(f"decode mean create_session_costs: {self.decode_create_session_costs.average()} ms")
-            logger.info(f"mean per token cost: {self.per_token_costs.average()} ms")
+            await asyncio.sleep(30)
+            self.first_time_costs.print_log("mean first cost")
+            self.per_token_costs.print_log("mean per token cost")
+
+    async def put_to_handle_queue(self, obj):
+        await self.infos_queues.put(obj)
+
+    async def handle_loop(self):
+        self.infos_queues = AsyncQueue()
+        asyncio.create_task(self.timer_log())
+
+        while True:
+            objs = await self.infos_queues.wait_to_get_all_data()
+
+            try:
+                for obj in objs:
+                    if obj[0] == ObjType.TOKEN_PACKS:
+                        for sub_req_id, text, metadata, finish_status in obj[1]:
+                            finish_status = FinishStatus(finish_status)
+                            group_req_id = convert_sub_id_to_group_id(sub_req_id)
+                            try:
+                                if not finish_status.is_aborted():
+                                    req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
+                                    async with req_status.lock:
+                                        req_status.out_token_info_list.append(
+                                            (sub_req_id, text, metadata, finish_status)
+                                        )
+                                        req_status.event.set()
+                                else:
+                                    del self.req_id_to_out_inf[group_req_id]
+                            except:
+                                pass
+                    else:
+                        logger.error(f"recevie error obj {obj}")
+            except BaseException as e:
+                logger.exception(str(e))
         return
+
+
+class ReqStatus:
+    def __init__(self, req_id, p_node, d_node) -> None:
+        self.req_id = req_id
+        self.lock = asyncio.Lock()
+        self.event = asyncio.Event()
+        self.up_status_event = asyncio.Event()
+        self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
+        self.p_node: PD_Client_Obj = p_node
+        self.d_node: PD_Client_Obj = d_node
+
+    async def wait_to_ready(self):
+        try:
+            await asyncio.wait_for(self.event.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+
+    async def can_read(self, req_id_to_out_inf):
+        async with self.lock:
+            self.event.clear()
+            assert self.req_id in req_id_to_out_inf, f"error state req_id {self.req_id}"
+            if len(self.out_token_info_list) == 0:
+                return False
+            else:
+                return True
+
+    async def pop_all_tokens(self):
+        async with self.lock:
+            ans = self.out_token_info_list.copy()
+            self.out_token_info_list.clear()
+        return ans

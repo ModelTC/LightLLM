@@ -15,7 +15,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict
 from ..tokenizer import get_tokenizer
 from ..io_struct import BatchStrOut, AbortReq, FinishStatus
-from ..pd_io_struct import NodeRole
+from ..pd_io_struct import NodeRole, ObjType
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..req_id_generator import convert_sub_id_to_group_id
 from ..sampling_params import SamplingParams
@@ -59,6 +59,7 @@ class HttpServerManager:
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
+        self.forwarding_queue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
 
         self.max_req_total_len = args.max_req_total_len
         self.metric_client = MetricClient(metric_port)
@@ -171,7 +172,11 @@ class HttpServerManager:
                 start_time, prompt_ids, group_request_id, sampling_params, req_status, request
             )
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
-                yield sub_req_id, request_output, metadata, finish_status
+                # p d 模式下，将 token 数据放入到转发队列中
+                if self.pd_mode.is_P_or_D():
+                    await self.forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
+                else:
+                    yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
@@ -180,8 +185,10 @@ class HttpServerManager:
         return
 
     async def _log_req_header(self, request: Request, group_request_id: int):
-        x_request_id = request.headers.get("X-Request-Id", "")
-        x_session_id = request.headers.get("X-Session-Id", "")
+
+        x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
+        x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
+
         format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             f"recieved req X-Request-Id:{x_request_id} "
@@ -304,7 +311,7 @@ class HttpServerManager:
             except asyncio.TimeoutError:
                 pass
 
-            if await request.is_disconnected():
+            if request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
                 raise Exception(f"req_id {group_request_id} disconnected")
 
@@ -342,8 +349,8 @@ class HttpServerManager:
                         total_cost_time_ms = (time.time() - start_time) * 1000
                         mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
                         self.per_token_costs.add(mean_per_token_cost_time_ms)
-                        x_request_id = request.headers.get("X-Request-Id", "")
-                        x_session_id = request.headers.get("X-Session-Id", "")
+                        x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
+                        x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
                         prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
@@ -388,7 +395,10 @@ class HttpServerManager:
         return
 
     async def handle_loop(self):
-        asyncio.create_task(self.timer_to_pd_master())
+        
+        if self.pd_mode.is_P_or_D():
+            self.forwarding_queue = AsyncQueue()
+            asyncio.create_task(self.pd_handle_loop())
 
         while True:
             recv_ans: BatchStrOut = await self.recv_from_detokenization.recv_pyobj()
@@ -408,7 +418,8 @@ class HttpServerManager:
                     pass
         return
 
-    async def timer_to_pd_master(self):
+    async def pd_handle_loop(self):
+        asyncio.create_task(self.timer_log())
         if self.pd_mode not in [NodeRole.P, NodeRole.D]:
             return
 
@@ -417,9 +428,15 @@ class HttpServerManager:
             self.host_ip = self.args.host
 
         while True:
+            forwarding_tokens_task = None
             try:
-                uri = f"ws://{self.args.pd_master_ip}:{self.args.pd_master_port}/register_and_keep_alive"
-                async with websockets.connect(uri) as websocket:
+                uri = f"ws://{self.args.pd_master_ip}:{self.args.pd_master_port}/pd_register"
+                async with websockets.connect(uri, max_queue=(2048 * 1024, 2048 * 1023)) as websocket:
+                    import socket
+
+                    sock = websocket.transport.get_extra_info("socket")
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
                     args_dict = vars(self.args)
                     args_dict["host"] = self.host_ip
                     # 发送注册信息
@@ -433,23 +450,47 @@ class HttpServerManager:
                     await websocket.send(json.dumps(regist_json))
                     logger.info(f"Sent registration JSON: {regist_json}")
 
-                    log_count = 0
+                    forwarding_tokens_task = asyncio.create_task(self.up_tokens_to_pd_master(websocket))
+
                     while True:
-                        heartbeat_message = {"type": "heartbeat"}
-                        await websocket.send(json.dumps(heartbeat_message))
-                        if log_count % 10 == 0:
-                            logger.info(f"Sent heartbeat: {heartbeat_message}")
-                        log_count += 1
-                        await asyncio.sleep(3)
-                        if log_count % 5 == 0:
-                            logger.info(f"mean first cost: {self.first_time_costs.average()} ms")
-                            logger.info(f"mean per token cost: {self.per_token_costs.average()} ms")
+                        recv_bytes = await websocket.recv()
+                        obj = pickle.loads(recv_bytes)
+                        if obj[0] == ObjType.REQ:
+                            prompt, sampling_params, multimodal_params = obj[1]
+                            asyncio.create_task(self._pd_process_generate(prompt, sampling_params, multimodal_params))
+                        elif obj[0] == ObjType.ABORT:
+                            group_req_id = obj[1]
+                            await self.abort(group_req_id)
+                        else:
+                            logger.error(f"recevie error obj {str(obj)}")
 
             except Exception as e:
                 logger.error("connetion to pd_master has error")
                 logger.exception(str(e))
+                if forwarding_tokens_task is not None:
+                    forwarding_tokens_task.cancel()
                 await asyncio.sleep(10)
+                await self.forwarding_queue.get_all_data()
                 logger.info("reconnection to pd_master")
+
+    async def up_tokens_to_pd_master(self, websocket):
+        while True:
+            handle_list = await self.forwarding_queue.wait_to_get_all_data()
+            if len(handle_list) != 0:
+                await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list)))
+
+    async def timer_log(self):
+        while True:
+            await asyncio.sleep(30)
+            self.first_time_costs.print_log("mean first cost")
+            self.per_token_costs.print_log("mean per token cost")
+
+    async def _pd_process_generate(self, prompt, sampling_params, multimodal_params):
+        try:
+            async for _, _, _, _ in self.generate(prompt, sampling_params, multimodal_params, None):
+                pass
+        except BaseException as e:
+            logger.error(str(e))
 
 
 class ReqStatus:
@@ -459,3 +500,34 @@ class ReqStatus:
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
+
+
+class AsyncQueue:
+    def __init__(self):
+        self.datas = []
+        self.event = asyncio.Event()
+        self.lock = asyncio.Lock()
+
+    async def wait_to_ready(self):
+        try:
+            await asyncio.wait_for(self.event.wait(), timeout=3)
+        except asyncio.TimeoutError:
+            pass
+
+    async def get_all_data(self):
+        async with self.lock:
+            self.event.clear()
+            ans = self.datas
+            self.datas = []
+            return ans
+
+    async def put(self, obj):
+        async with self.lock:
+            self.datas.append(obj)
+            self.event.set()
+        return
+
+    async def wait_to_get_all_data(self):
+        await self.wait_to_ready()
+        handle_list = await self.get_all_data()
+        return handle_list

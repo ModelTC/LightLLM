@@ -175,8 +175,8 @@ class PDDecodeInferRpcServer(rpyc.Service):
     def _get_time_out_reqs(self):
         need_release_reqs = []
         for req_id, (_, _, time_mark) in g_success_kv_move_task_cache.items():
-            # 4s 这个请求都没有被调度使用，就会主动被删除掉锁定，释放其锁定的token
-            if time.time() - time_mark > 4:
+            # 6s 这个请求都没有被调度使用，就会主动被删除掉锁定，释放其锁定的token
+            if time.time() - time_mark > 6:
                 need_release_reqs.append(req_id)
         return need_release_reqs
 

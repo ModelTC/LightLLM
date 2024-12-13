@@ -24,6 +24,7 @@ import uvloop
 import sys
 import os
 import rpyc
+import pickle
 from .build_prompt import build_prompt
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -306,28 +307,21 @@ async def metrics() -> Response:
     return response
 
 
-@app.websocket("/register_and_keep_alive")
+@app.websocket("/pd_register")
 async def register_and_keep_alive(websocket: WebSocket):
     await websocket.accept()
     client_ip, client_port = websocket.client
     logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
     regist_json = json.loads(await websocket.receive_text())
     logger.info(f"recieved regist_json {regist_json}")
-    await g_objs.httpserver_manager.register_pd(regist_json)
+    await g_objs.httpserver_manager.register_pd(regist_json, websocket)
 
     try:
         while True:
-            try:
-                # 等待接收消息，设置超时为10秒
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
-                json_data = json.loads(data)
-                if json_data.get("type") != "heartbeat":
-                    logger.warning(f"recive error messesage {json_data}")
-                    break
-
-            except asyncio.TimeoutError:
-                logger.error(f"client {regist_json} heartbeat timeout")
-                break
+            # 等待接收消息，设置超时为10秒
+            data = await websocket.receive_bytes()
+            obj = pickle.loads(data)
+            await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
     except (WebSocketDisconnect, Exception, RuntimeError) as e:
         logger.error(f"client {regist_json} has error {str(e)}")

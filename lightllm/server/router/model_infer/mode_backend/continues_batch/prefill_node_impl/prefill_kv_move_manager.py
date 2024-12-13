@@ -1,4 +1,5 @@
 import asyncio
+import time
 import rpyc
 import sys
 import os
@@ -7,6 +8,8 @@ import signal
 import copy
 import numpy as np
 import psutil
+import threading
+import random
 from dataclasses import dataclass
 from typing import List, Dict
 from lightllm.utils.log_utils import init_logger
@@ -20,12 +23,9 @@ from rpyc.utils.classic import obtain
 from rpyc import AsyncResult
 from lightllm.utils.net_utils import get_hostname_ip
 
+KV_MOVE_MAX_NUM = 16
+
 logger = init_logger(__name__)
-
-
-class DecodeBusyError(Exception):
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
 
 
 @dataclass
@@ -38,6 +38,9 @@ class TransProcessObj:
     nccl_ip: str = None
     nccl_port: str = None
     device_index: str = None  # 使用的gpu序号
+    move_task_queue: List[KVMoveTask] = None
+    manager: "PrefillKVMoveManager" = None
+    has_error: bool = False
 
     def create(
         self, decode_node_id: str, decode_node_ip: str, decode_node_rpyc_port: int, manager: "PrefillKVMoveManager"
@@ -59,8 +62,7 @@ class TransProcessObj:
             manager.args, device_index, nccl_ip, nccl_port, task_in_queue, task_out_queue, manager.mem_queues
         )
         assert task_out_queue.get(timeout=30) == "proc_start"
-        for obj in manager.infer_rpyc_objs:
-            obj.put_mem_manager_to_mem_queue()
+        manager._put_mem_manager_to_mem_queue()
         assert task_out_queue.get(timeout=60) == "get_mem_managers_ok"
         prefill_node_id = manager.args.pd_node_id
         con.root.build_trans_process(prefill_node_id, nccl_ip, nccl_port)  # 异步调用, 让decode节点建立与prefill节点进行nccl通信的进程
@@ -74,15 +76,122 @@ class TransProcessObj:
         self.nccl_port = nccl_port
         self.nccl_ip = nccl_ip
         self.device_index = device_index
+        self.manager = manager
+        self.move_task_queue_lock = threading.Lock()
+        self.move_task_queue = []
+
+        # 启动处理任务的线程
+        self.thread = threading.Thread(target=self.handle_loop, daemon=True)
+        self.thread.start()
         return
 
     def check_trans_process(self):
         process = psutil.Process(self.process.pid)
         if not (process.is_running() and process.status() != psutil.STATUS_ZOMBIE):
+            self.has_error = True
             raise Exception(f"trans process: {self.process.pid} is dead")
         return
 
+    def put(self, move_task):
+        if self.has_error:
+            raise Exception(f"trans obj {self.decode_node_id} has error, can not put")
+        with self.move_task_queue_lock:
+            self.move_task_queue.append(move_task)
+
+    def get_tasks(self):
+        with self.move_task_queue_lock:
+            move_tasks: List[KVMoveTask] = self.move_task_queue[0:KV_MOVE_MAX_NUM]
+            self.move_task_queue = self.move_task_queue[KV_MOVE_MAX_NUM:]
+        return move_tasks
+
+    def clear_tasks(self):
+        with self.move_task_queue_lock:
+            for move_task in self.move_task_queue:
+                self.manager._remove_req_refs_from_prompt_cache(move_task)
+            self.move_task_queue = []
+
+    def handle_loop(self):
+        while not self.has_error:
+            if len(self.move_task_queue) == 0:
+                time.sleep(0.01)
+                continue
+
+            move_tasks: List[KVMoveTask] = self.get_tasks()
+            if len(move_tasks) == 0:
+                continue
+
+            handle_list: List[KVMoveTask] = []
+            not_handle_list: List[KVMoveTask] = []
+
+            try:
+                # random to check stats
+                if random.randint(0, 20) == 10:
+                    self.check_trans_process()
+                    self.rpyc_conn.root.check_alive()
+
+                for move_task in move_tasks:
+                    logger.info(
+                        f"prefill node get task {move_task.to_prefill_log_info()} "
+                        f"queue time {move_task.get_cost_time()} s "
+                        f"queue leff size {len(self.move_task_queue)} "
+                    )
+
+                trans_move_tasks = [copy.copy(move_task) for move_task in move_tasks]
+                for trans_move_task in trans_move_tasks:
+                    trans_move_task.prefill_token_indexes = None
+
+                mark_start = time.time()
+                move_kv_lens = self.rpyc_conn.root.request_data_transfer(trans_move_tasks)
+                request_data_transfer_cost_time = time.time() - mark_start
+
+                logger.info(
+                    f"prefill node request_data_transfer ok, {move_tasks[0].to_prefill_log_info()}"
+                    f" cost time: {request_data_transfer_cost_time} s"
+                )
+
+                for i, move_task in enumerate(move_tasks):
+                    if move_kv_lens[i] is not None:
+                        move_task.move_kv_len = move_kv_lens[i]
+                        handle_list.append(move_task)
+                    else:
+                        not_handle_list.append(move_task)
+
+                with self.manager.device_locks[self.device_index]:
+
+                    for move_task in handle_list:
+                        self.task_in_queue.put(move_task, timeout=10)
+
+                    for move_task in handle_list:
+                        assert self.task_out_queue.get(timeout=60) == "ok"
+                        self.manager._remove_req_refs_from_prompt_cache(move_task)
+                        move_tasks.remove(move_task)
+                        logger.info(
+                            f"prefill node transfer data ok, req_id: {move_task.id()}"
+                            f" cost total time: {move_task.get_cost_time()} s"
+                        )
+
+                for move_task in not_handle_list:
+                    logger.info(f"prefill node kv move task req_id: {move_task.id()} not send, decode is busy")
+
+            except BaseException as e:
+                logger.exception(str(e))
+                logger.error(f"tran obj id {self.decode_node_id} has error, remove the trans_obj")
+                self.has_error = True
+                self.manager.remove_trans_obj(self.decode_node_id)
+                # 将队列中没处理的数据全部清空
+                self.clear_tasks()
+
+            finally:
+                for move_task in move_tasks:
+                    self.manager._remove_req_refs_from_prompt_cache(move_task)
+
+        logger.error(f"trans thread, decode id {self.decode_node_id} device_index {self.device_index} thread quit")
+        return
+
     def __del__(self):
+        self.has_error = True
+        self.clear_tasks()
+
         # 强制关闭连接和杀掉传输进程
         if self.process is not None:
             logger.warning(f"prefill trans process {self.process.pid} is killed")
@@ -108,6 +217,10 @@ class PrefillKVMoveManager:
         self.host_ip = get_hostname_ip()
         if self.host_ip is None:
             self.host_ip = args.host
+
+        self.infer_rpyc_lock = threading.Lock()
+        # 需要每个卡有一个锁来规划每次只能有一个tran obj 操作对应显卡上的传输任务。
+        self.device_locks = [threading.Lock() for _ in range(self.args.tp)]
         return
 
     def get_next_device_index(self):
@@ -118,70 +231,47 @@ class PrefillKVMoveManager:
         return device_index
 
     def get_trans_obj(self, task: KVMoveTask):
+        self.remove_dead_trans_obj()
         if task.decode_node.node_id not in self.node_id_to_trans_obj:
-            # 先遍历删除老的不能用的连接
-            self.remove_dead_trans_obj()
             trans_obj = TransProcessObj()
             trans_obj.create(task.decode_node.node_id, task.decode_node.ip, task.decode_node.rpyc_port, self)
             self.node_id_to_trans_obj[task.decode_node.node_id] = trans_obj
         return self.node_id_to_trans_obj[task.decode_node.node_id]
 
+    def remove_trans_obj(self, decode_node_id):
+        if decode_node_id in self.node_id_to_trans_obj:
+            trans_obj = self.node_id_to_trans_obj.pop(decode_node_id, None)
+            if trans_obj is not None:
+                trans_obj.has_error = True
+        return
+
     def remove_dead_trans_obj(self):
         del_node_ids = []
         for node_id, t_obj in self.node_id_to_trans_obj.items():
-            try:
-                t_obj.rpyc_conn.root.check_alive()
-            except BaseException as e:
-                logger.error(f"check error {str(e)}")
+            if t_obj.has_error or (not t_obj.thread.is_alive()):
+                t_obj.has_error = True
                 del_node_ids.append(node_id)
+
         for node_id in del_node_ids:
-            self.node_id_to_trans_obj.pop(node_id)
+            self.node_id_to_trans_obj.pop(node_id, None)
 
         if len(del_node_ids) != 0:
             gc.collect()
         return
 
-    def handle_loop(self):
+    def task_dispatcher_loop(self):
         try:
+            # 获取任务，并分发给相关卡的处理队列
             while True:
-                move_task = self.info_queue.get()
-                if not isinstance(move_task, KVMoveTask):
-                    logger.error("receive type is not KVMoveTask")
-                    sys.exit(-1)
-
-                logger.info(f"prefill node get task {move_task.to_prefill_log_info()}")
+                move_task: KVMoveTask = self.info_queue.get()
                 try:
                     trans_obj = self.get_trans_obj(move_task)
-                    # 申请传输
-                    trans_move_task = copy.copy(move_task)
-                    # 不需要发送prefill节点的token index信息给decode节点
-                    trans_move_task.prefill_token_indexes = None
-                    # 申请发送，并收到发送长度 move_kv_len.
-                    move_kv_len = obtain(trans_obj.rpyc_conn.root.request_data_transfer(trans_move_task))
-                    # 代表对方已经很繁忙了，放弃这次发送，改为用
-                    if move_kv_len is None:
-                        raise DecodeBusyError(f"decode_node_id {trans_obj.decode_node_id} is busy")
-
-                    move_task.move_kv_len = move_kv_len
-                    logger.info(f"prefill node request_data_transfer ok, {move_task.to_prefill_log_info()}")
-                    # 开始传输直到完成
-                    trans_obj.task_in_queue.put(move_task, timeout=10)
-                    assert trans_obj.task_out_queue.get(timeout=30) == "ok"
-                    logger.info(f"prefill node transfer data ok, req_id: {move_task.id()}")
-
-                except DecodeBusyError as e:
-                    logger.error(str(e))
-
+                    trans_obj.put(move_task)
                 except BaseException as e:
                     logger.exception(str(e))
-                    logger.error(f"kv move task {move_task.to_prefill_log_info()} has error, remove the trans_obj")
-                    self.node_id_to_trans_obj.pop(move_task.decode_node.node_id, None)
-
-                finally:
-                    # 去引用否则进程无法杀掉
-                    trans_obj = None
-                    # 解除对prefill token的占用状态。
                     self._remove_req_refs_from_prompt_cache(move_task)
+                finally:
+                    trans_obj = None
 
         except (BaseException, RuntimeError) as e:
             logger.exception(str(e))
@@ -193,10 +283,16 @@ class PrefillKVMoveManager:
             infer_rpycs = self.infer_rpyc_objs
         else:
             infer_rpycs = [self.infer_rpyc_objs[move_task.prefill_dp_index]]
+        with self.infer_rpyc_lock:
+            for infer_rpyc in infer_rpycs:
+                futures.append(rpyc.async_(infer_rpyc.remove_req_refs_from_prompt_cache)(move_task.group_request_id))
+            asyncio.run(self.wait_all_future_finish(futures))
+        return
 
-        for infer_rpyc in infer_rpycs:
-            futures.append(rpyc.async_(infer_rpyc.remove_req_refs_from_prompt_cache)(move_task.group_request_id))
-        asyncio.run(self.wait_all_future_finish(futures))
+    def _put_mem_manager_to_mem_queue(self):
+        with self.infer_rpyc_lock:
+            for obj in self.infer_rpyc_objs:
+                obj.put_mem_manager_to_mem_queue()
         return
 
     async def wait_all_future_finish(self, futures: List[AsyncResult]):
@@ -216,7 +312,7 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
     manager = PrefillKVMoveManager(args, info_queue, mem_queues)
     event.set()
     # 进入主循环
-    manager.handle_loop()
+    manager.task_dispatcher_loop()
     return
 
 

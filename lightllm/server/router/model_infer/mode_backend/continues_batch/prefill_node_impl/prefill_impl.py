@@ -1,4 +1,5 @@
 import os
+import time
 import threading
 import torch
 import torch.multiprocessing as mp
@@ -126,6 +127,7 @@ class ContinuesBatchBackendForPrefillNode(ModeBackend):
                         move_kv_len=None,
                         prefill_dp_index=0 if self.dp_size == 1 else self.tp_rank,
                         decode_dp_index=None,
+                        mark_start_time=time.time(),
                     )
                     g_kv_move_task_cache[task.group_request_id] = (task, share_node)
 

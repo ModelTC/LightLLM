@@ -28,6 +28,11 @@ class UpStatusManager:
             try:
                 uri = f"ws://{self.args.pd_master_ip}:{self.args.pd_master_port}/kv_move_status"
                 async with websockets.connect(uri) as websocket:
+                    import socket
+
+                    sock = websocket.transport.get_extra_info("socket")
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
                     while True:
                         try:
                             loop = asyncio.get_event_loop()
