@@ -4,6 +4,7 @@ import asyncio
 import sys
 import os
 import signal
+import collections
 import time
 import psutil
 import threading
@@ -67,9 +68,15 @@ class TransProcessObj:
         self.move_task_queue_lock = threading.Lock()
         self.move_task_queue = []
 
+        self.ready_task_queue_lock = threading.Lock()
+        self.ready_task_queue = []
+
         # 启动处理任务的线程
         self.thread = threading.Thread(target=self.handle_loop, daemon=True)
         self.thread.start()
+
+        self.put_to_radix_thread = threading.Thread(target=self.ready_handle_loop, daemon=True)
+        self.put_to_radix_thread.start()
         return
 
     def check_trans_process(self):
@@ -99,19 +106,35 @@ class TransProcessObj:
 
     def clear_tasks(self):
         with self.move_task_queue_lock:
-            for move_task in self.move_task_queue:
-                self.manager._fail_to_realese_forzen_tokens(move_task)
-                logger.error(f"decode kv move task {move_task.to_decode_log_info()} has error, unforzen tokens")
+            if len(self.move_task_queue) != 0:
+                for task in self.move_task_queue:
+                    self.manager.put_to_fail_release_task_queue(task)
             self.move_task_queue = []
+
+    def put_ready(self, move_task):
+        if self.has_error:
+            raise Exception(f"trans obj {self.prefill_node_id} has error, can not put")
+        with self.ready_task_queue_lock:
+            self.ready_task_queue.append(move_task)
+
+    def get_ready_tasks(self):
+        with self.ready_task_queue_lock:
+            move_tasks: List[KVMoveTask] = self.ready_task_queue[0:KV_MOVE_MAX_NUM]
+            self.ready_task_queue = self.ready_task_queue[KV_MOVE_MAX_NUM:]
+        return move_tasks
+
+    def clear_ready_tasks(self):
+        with self.ready_task_queue_lock:
+            if len(self.ready_task_queue) != 0:
+                for task in self.ready_task_queue:
+                    self.manager.put_to_fail_release_task_queue(task)
+            self.ready_task_queue = []
 
     def handle_loop(self):
         while not self.has_error:
-            if len(self.move_task_queue) == 0:
-                time.sleep(0.01)
-                continue
-
             move_tasks: List[KVMoveTask] = self.get_tasks()
             if len(move_tasks) == 0:
+                time.sleep(0.01)
                 continue
 
             for task in move_tasks:
@@ -128,14 +151,8 @@ class TransProcessObj:
                     for task in iter_move_tasks:
                         assert self.task_out_queue.get(timeout=60) == "ok"
                         logger.info(f"deocode node transfer kv ok {task.to_decode_log_info()}")
-                        # 成功了将 token 放入 prompt cache 中
-                        self.manager._put_kv_received_to_radix_cache(task)
+                        self.put_ready(task)
                         move_tasks.remove(task)
-                        logger.info(f"decode node put kv to radix cache ok, req_id: {task.id()}")
-                        self.manager.up_status_in_queue.put(
-                            UpKVStatus(group_request_id=task.group_request_id, dp_index=task.decode_dp_index)
-                        )
-                        logger.info("decode node up kv status finished")
 
             except BaseException as e:
                 logger.exception(str(e))
@@ -145,14 +162,58 @@ class TransProcessObj:
 
             finally:
                 for move_task in move_tasks:
-                    self.manager._fail_to_realese_forzen_tokens(move_task)
+                    self.manager.put_to_fail_release_task_queue(move_task)
 
         logger.error(f"trans thread, prefill id {self.prefill_node_id} device_index {self.device_index} thread quit")
+        return
+
+    def ready_handle_loop(self):
+        while not self.has_error:
+            move_tasks: List[KVMoveTask] = self.get_ready_tasks()
+            if len(move_tasks) == 0:
+                time.sleep(0.01)
+                continue
+
+            for task in move_tasks:
+                logger.info(f"deocode node get put radix task {task.to_decode_log_info()}")
+
+            try:
+                # random to check stats
+                if random.randint(0, 20) == 10:
+                    self.check_trans_process()
+
+                self.manager._put_kv_received_to_radix_cache(move_tasks)
+                iter_move_tasks = move_tasks.copy()
+                move_tasks.clear()
+
+                for task in iter_move_tasks:
+                    logger.info(f"decode node put kv to radix cache ok, req_id: {task.id()}")
+                    self.manager.up_status_in_queue.put(
+                        UpKVStatus(group_request_id=task.group_request_id, dp_index=task.decode_dp_index)
+                    )
+                    logger.info(f"decode node up kv status req_id: {task.id()} finished")
+
+            except BaseException as e:
+                logger.exception(str(e))
+                self.has_error = True
+                self.clear_ready_tasks()
+                self.manager.remove_trans_obj(self.prefill_node_id)
+
+            finally:
+                for move_task in move_tasks:
+                    self.manager.put_to_fail_release_task_queue(move_task)
+
+        logger.error(
+            f"put to radix thread, prefill id {self.prefill_node_id} device_index {self.device_index} thread quit"
+        )
         return
 
     def __del__(self):
         self.has_error = True
         self.clear_tasks()
+        self.clear_ready_tasks()
+
+        logger.error(f"trans obj deled, prefill node id {self.prefill_node_id} device_index {self.device_index}")
 
         # 强制关闭连接和杀掉传输进程
         if self.process is not None:
@@ -185,63 +246,102 @@ class DecodeKVMoveManager(rpyc.Service):
         self.up_status_out_queue = mp.Queue()
         start_up_kv_status_process(self.args, self.up_status_in_queue, self.up_status_out_queue)
 
+        # fail release queue
+        self.fail_to_release_queue_lock = threading.Lock()
+        self.fail_to_release_queue = []
+        self.fail_to_release_thread = threading.Thread(target=self.handle_fail_release_task_loop, daemon=True)
+        self.fail_to_release_thread.start()
+
         # 需要每个卡有一个锁来规划每次只能有一个tran obj 操作对应显卡上的传输任务。
         self.device_locks = [threading.Lock() for _ in range(self.args.tp)]
+        return
+
+    def put_to_fail_release_task_queue(self, task: KVMoveTask):
+        with self.fail_to_release_queue_lock:
+            self.fail_to_release_queue.append(task)
+
+    def get_fail_release_tasks_from_queue(self):
+        with self.fail_to_release_queue_lock:
+            ans = self.fail_to_release_queue[0:KV_MOVE_MAX_NUM]
+            self.fail_to_release_queue = self.fail_to_release_queue[KV_MOVE_MAX_NUM:]
+        return ans
+
+    def handle_fail_release_task_loop(self):
+        while True:
+            handle_list: List[KVMoveTask] = self.get_fail_release_tasks_from_queue()
+            if len(handle_list) == 0:
+                time.sleep(0.01)
+            else:
+                self._fail_to_realese_forzen_tokens(handle_list)
         return
 
     async def wait_all_future_finish(self, futures: List[AsyncResult]):
         await asyncio.gather(*[asyncio.to_thread(future.wait) for future in futures])
         return
 
-    def _alloc_to_frozen_some_tokens(self, task: KVMoveTask) -> Tuple[int, Optional[List[int]]]:
+    def _tp_alloc_to_frozen_some_tokens(self, tasks: List[KVMoveTask]) -> List[Optional[List[int]]]:
+        assert self.dp_size == 1
+        with self.infer_rpyc_lock:
+            futures: List[AsyncResult] = []
+            for conn in self.infer_rpyc_objs:
+                futures.append(rpyc.async_(conn.alloc_to_frozen_some_tokens)(tasks))
+            asyncio.run(self.wait_all_future_finish(futures))
+            return obtain(futures[0].value)
+
+    def _dp_alloc_to_frozen_some_tokens(self, dp_tasks: List[List[KVMoveTask]]) -> List[List[Optional[List[int]]]]:
+        assert self.dp_size != 1
+        with self.infer_rpyc_lock:
+            futures = []
+            for dp_index in range(self.dp_size):
+                conn = self.infer_rpyc_objs[dp_index]
+                futures.append(rpyc.async_(conn.alloc_to_frozen_some_tokens)(dp_tasks[dp_index]))
+            asyncio.run(self.wait_all_future_finish(futures))
+            ans_values = [obtain(futures[dp_index].value) for dp_index in range(self.dp_size)]
+            return ans_values
+
+    def _put_kv_received_to_radix_cache(self, tasks: List[KVMoveTask]) -> None:
         if self.dp_size == 1:
             with self.infer_rpyc_lock:
                 futures: List[AsyncResult] = []
                 for conn in self.infer_rpyc_objs:
-                    futures.append(rpyc.async_(conn.alloc_to_frozen_some_tokens)(task))
-                asyncio.run(self.wait_all_future_finish(futures))
-                return 0, obtain(futures[0].value)
-        else:
-            dp_indexes = list(range(self.dp_size))
-            random.shuffle(dp_indexes)
-
-            with self.infer_rpyc_lock:
-                for dp_index in dp_indexes:
-                    conn = self.infer_rpyc_objs[dp_index]
-                    futures = [rpyc.async_(conn.alloc_to_frozen_some_tokens)(task)]
-                    asyncio.run(self.wait_all_future_finish(futures))
-                    ans_value = obtain(futures[0].value)
-                    if ans_value is not None:
-                        return dp_index, ans_value
-            return None, None
-
-    def _put_kv_received_to_radix_cache(self, task: KVMoveTask) -> None:
-        if self.dp_size == 1:
-            with self.infer_rpyc_lock:
-                futures: List[AsyncResult] = []
-                for conn in self.infer_rpyc_objs:
-                    futures.append(rpyc.async_(conn.put_kv_received_to_radix_cache)(task.group_request_id))
+                    futures.append(
+                        rpyc.async_(conn.put_kv_received_to_radix_cache)([task.group_request_id for task in tasks])
+                    )
                 asyncio.run(self.wait_all_future_finish(futures))
         else:
             with self.infer_rpyc_lock:
+                dp_to_tasks = collections.defaultdict(list)
+                for task in tasks:
+                    dp_to_tasks[task.decode_dp_index].append(task)
                 futures: List[AsyncResult] = []
-                conn = self.infer_rpyc_objs[task.decode_dp_index]
-                futures.append(rpyc.async_(conn.put_kv_received_to_radix_cache)(task.group_request_id))
+                for decode_dp_index, _tasks in dp_to_tasks.items():
+                    conn = self.infer_rpyc_objs[decode_dp_index]
+                    futures.append(
+                        rpyc.async_(conn.put_kv_received_to_radix_cache)([task.group_request_id for task in _tasks])
+                    )
                 asyncio.run(self.wait_all_future_finish(futures))
         return
 
-    def _fail_to_realese_forzen_tokens(self, task: KVMoveTask) -> None:
+    def _fail_to_realese_forzen_tokens(self, tasks: List[KVMoveTask]) -> None:
         if self.dp_size == 1:
             with self.infer_rpyc_lock:
                 futures: List[AsyncResult] = []
                 for conn in self.infer_rpyc_objs:
-                    futures.append(rpyc.async_(conn.fail_to_realese_forzen_tokens)(task.group_request_id))
+                    futures.append(
+                        rpyc.async_(conn.fail_to_realese_forzen_tokens)([task.group_request_id for task in tasks])
+                    )
                 asyncio.run(self.wait_all_future_finish(futures))
         else:
             with self.infer_rpyc_lock:
+                dp_to_tasks = collections.defaultdict(list)
+                for task in tasks:
+                    dp_to_tasks[task.decode_dp_index].append(task)
                 futures: List[AsyncResult] = []
-                conn = self.infer_rpyc_objs[task.decode_dp_index]
-                futures.append(rpyc.async_(conn.fail_to_realese_forzen_tokens)(task.group_request_id))
+                for decode_dp_index, _tasks in dp_to_tasks.items():
+                    conn = self.infer_rpyc_objs[decode_dp_index]
+                    futures.append(
+                        rpyc.async_(conn.fail_to_realese_forzen_tokens)([task.group_request_id for task in _tasks])
+                    )
                 asyncio.run(self.wait_all_future_finish(futures))
         return
 
@@ -290,7 +390,7 @@ class DecodeKVMoveManager(rpyc.Service):
 
     # 返回 None 代表繁忙， 放弃该任务的 kv 传送
     def exposed_request_data_transfer(self, tasks: List[KVMoveTask]) -> List[Optional[int]]:
-        tasks = obtain(tasks)
+        tasks: List[KVMoveTask] = obtain(tasks)
         alloc_tokened_tasks = []
         ans_list = []
         try:
@@ -300,22 +400,51 @@ class DecodeKVMoveManager(rpyc.Service):
             trans_obj = self.get_trans_obj(tasks[0])
             assert trans_obj is not None
 
-            for task in tasks:
-                dp_index, decode_token_indexes = self._alloc_to_frozen_some_tokens(task)
-                # 代表服务很繁忙，申请不到资源，需要拒绝
-                if decode_token_indexes is None:
-                    logger.info(f"req id {task.id()} request_data_transfer fail, server is busy")
-                    ans_list.append(None)
-                else:
-                    task.decode_dp_index = dp_index
-                    task.decode_token_indexes = decode_token_indexes
-                    task.move_kv_len = len(decode_token_indexes)
-                    ans_list.append(task.move_kv_len)
-                    alloc_tokened_tasks.append(task)
+            if self.dp_size == 1:
+                list_decode_token_indexes = self._tp_alloc_to_frozen_some_tokens(tasks)
+                for i, task in enumerate(tasks):
+                    decode_token_indexes = list_decode_token_indexes[i]
+                    if decode_token_indexes is None:
+                        logger.info(f"req id {task.id()} request_data_transfer fail, server is busy")
+                        ans_list.append(None)
+                    else:
+                        task.decode_dp_index = 0
+                        task.decode_token_indexes = decode_token_indexes
+                        task.move_kv_len = len(decode_token_indexes)
+                        ans_list.append(task.move_kv_len)
+                        alloc_tokened_tasks.append(task)
+            else:
+                id_to_test_range = {task.group_request_id: random.shuffle(list(range(self.dp_size))) for task in tasks}
+                id_has_result = {}
+                for test_index in range(self.dp_size):
+                    dp_tasks = [[] for _ in range(self.dp_size)]
+                    for task in tasks:
+                        if task.group_request_id not in id_has_result:
+                            test_dp_index = id_to_test_range[task.group_request_id][test_index]
+                            dp_tasks[test_dp_index].append(task)
+                    if not all(len(t) == 0 for t in dp_tasks):
+                        dp_tasks_ans = self._dp_alloc_to_frozen_some_tokens(dp_tasks)
+                        for dp_index in range(self.dp_size):
+                            for task, decode_token_indexes in zip(dp_tasks[dp_index], dp_tasks_ans[dp_index]):
+                                if decode_token_indexes is not None:
+                                    id_has_result[task.group_request_id] = (dp_index, decode_token_indexes)
+                for task in tasks:
+                    if task.group_request_id in id_has_result:
+                        task.decode_dp_index = id_has_result[task.group_request_id][0]
+                        task.decode_token_indexes = id_has_result[task.group_request_id][1]
+                        task.move_kv_len = len(task.decode_token_indexes)
+                        ans_list.append(task.move_kv_len)
+                        alloc_tokened_tasks.append(task)
+                    else:
+                        logger.info(f"req id {task.id()} request_data_transfer fail, server is busy")
+                        ans_list.append(None)
 
         except BaseException as e:
-            for task in alloc_tokened_tasks:
-                self._fail_to_realese_forzen_tokens(task)
+            if len(alloc_tokened_tasks) != 0:
+                for task in alloc_tokened_tasks:
+                    self.put_to_fail_release_task_queue(task)
+                alloc_tokened_tasks = []
+
             self.remove_trans_obj(tasks[0].prefill_node_id)
             logger.exception(str(e))
             raise e
@@ -324,8 +453,10 @@ class DecodeKVMoveManager(rpyc.Service):
             trans_obj.put_list(alloc_tokened_tasks)
         except BaseException as e:
             logger.exception(str(e))
-            for task in alloc_tokened_tasks:
-                self._fail_to_realese_forzen_tokens(task)
+            if len(alloc_tokened_tasks) != 0:
+                for task in alloc_tokened_tasks:
+                    self.put_to_fail_release_task_queue(task)
+                alloc_tokened_tasks = []
             raise e
 
         return ans_list

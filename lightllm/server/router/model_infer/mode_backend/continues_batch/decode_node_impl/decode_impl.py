@@ -75,9 +75,10 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
                     req_obj.finish_status.value,  # 转化为整数，避免传送大对象,
                     None,
                 )
-                logger.error(
-                    f"req_id: {req_obj.group_req_id} forced to finished, it not in g_success_kv_move_task_cache"
-                )
+                if self.tp_rank < self.dp_size:
+                    logger.error(
+                        f"req_id: {req_obj.group_req_id} forced to finished, it not in g_success_kv_move_task_cache"
+                    )
 
         if self.tp_rank < self.dp_size:
             with g_router_lock.obj:

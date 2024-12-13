@@ -73,47 +73,51 @@ class PDDecodeInferRpcServer(rpyc.Service):
                 shared_token_load.add_frozened_token_count(-(key_len + max_new_token), self.rank_id)
         return
 
+    def _alloc_to_frozen_some_tokens(self, move_task: KVMoveTask):
+        is_ok = self.judge_token_is_ok(len(move_task.input_tokens), move_task.decode_node.max_new_tokens)
+        if not is_ok:
+            return None
+
+        key = torch.tensor(move_task.input_tokens, dtype=torch.int64, device="cpu")
+        tree_node, kv_len, fused_token_indexes = self.backend.radix_cache.match_prefix(key, update_refs=True)
+        # 如果没匹配到，说明长度是0， 将fused_token_indexes做一下转换
+        fused_token_indexes = [] if fused_token_indexes is None else fused_token_indexes.tolist()
+        need_len = len(move_task.input_tokens) - kv_len
+        if need_len == 0:
+            alloc_token_indexes = []
+        else:
+            self.backend.radix_cache.free_radix_cache_to_get_enough_token(need_len)
+            alloc_token_indexes = self.backend.model.mem_manager.alloc(need_len)
+            if alloc_token_indexes is not None:
+                alloc_token_indexes = alloc_token_indexes.detach().cpu().tolist()
+
+        if alloc_token_indexes is None:
+            self.backend.radix_cache.dec_node_ref_counter(tree_node)
+            self.recover_frozen_token(len(move_task.input_tokens), move_task.decode_node.max_new_tokens)
+            return None
+
+        move_task.decode_token_indexes = alloc_token_indexes
+        move_task.move_kv_len = need_len
+
+        g_kv_move_task_cache[move_task.group_request_id] = (move_task, tree_node, fused_token_indexes)
+        return move_task.decode_token_indexes
+
     # 返回 None 代表服务繁忙已经无法调度新的请求进入了
-    def exposed_alloc_to_frozen_some_tokens(self, move_task: KVMoveTask) -> Optional[List[int]]:
-        move_task = obtain(move_task)
+    def exposed_alloc_to_frozen_some_tokens(self, move_tasks: List[KVMoveTask]) -> List[Optional[List[int]]]:
+        move_tasks = obtain(move_tasks)
         acquire_lock_until_ready(self.backend.lock_nccl_group)
         try:
-            is_ok = self.judge_token_is_ok(len(move_task.input_tokens), move_task.decode_node.max_new_tokens)
-            if not is_ok:
-                return None
-
-            key = torch.tensor(move_task.input_tokens, dtype=torch.int64, device="cpu")
-            tree_node, kv_len, fused_token_indexes = self.backend.radix_cache.match_prefix(key, update_refs=True)
-            # 如果没匹配到，说明长度是0， 将fused_token_indexes做一下转换
-            fused_token_indexes = [] if fused_token_indexes is None else fused_token_indexes.tolist()
-            need_len = len(move_task.input_tokens) - kv_len
-            if need_len == 0:
-                alloc_token_indexes = []
-            else:
-                self.backend.radix_cache.free_radix_cache_to_get_enough_token(need_len)
-                alloc_token_indexes = self.backend.model.mem_manager.alloc(need_len)
-                if alloc_token_indexes is not None:
-                    alloc_token_indexes = alloc_token_indexes.detach().cpu().tolist()
-
-            if alloc_token_indexes is None:
-                self.backend.radix_cache.dec_node_ref_counter(tree_node)
-                self.recover_frozen_token(len(move_task.input_tokens), move_task.decode_node.max_new_tokens)
-                return None
-
-            move_task.decode_token_indexes = alloc_token_indexes
-            move_task.move_kv_len = need_len
-
-            g_kv_move_task_cache[move_task.group_request_id] = (move_task, tree_node, fused_token_indexes)
-            return move_task.decode_token_indexes
+            ans_list = []
+            for move_task in move_tasks:
+                ans_list.append(self._alloc_to_frozen_some_tokens(move_task))
+            return ans_list
         except BaseException as e:
             logger.exception(str(e))
             return None
         finally:
             release_acquired_lock()
 
-    def exposed_put_kv_received_to_radix_cache(self, group_req_id: int):
-        group_req_id = obtain(group_req_id)
-        acquire_lock_until_ready(self.backend.lock_nccl_group)
+    def _put_kv_received_to_radix_cache(self, group_req_id: int):
         move_task, tree_node, fused_token_indexes = g_kv_move_task_cache.pop(group_req_id)
         radix_cache = self.backend.radix_cache
         key = torch.tensor(move_task.input_tokens, dtype=torch.int64, device="cpu")
@@ -127,17 +131,29 @@ class PDDecodeInferRpcServer(rpyc.Service):
         tree_node, kv_len, _ = self.backend.radix_cache.match_prefix(key, update_refs=True)
         assert len(key) == kv_len
         g_success_kv_move_task_cache[group_req_id] = (move_task, tree_node, time.time())
+        return
+
+    def exposed_put_kv_received_to_radix_cache(self, group_req_ids: List[int]):
+        group_req_ids = obtain(group_req_ids)
+        acquire_lock_until_ready(self.backend.lock_nccl_group)
+        for group_req_id in group_req_ids:
+            self._put_kv_received_to_radix_cache(group_req_id)
         release_acquired_lock()
         return
 
-    def exposed_fail_to_realese_forzen_tokens(self, group_req_id: int):
-        group_req_id = obtain(group_req_id)
-        acquire_lock_until_ready(self.backend.lock_nccl_group)
+    def _fail_to_realese_forzen_tokens(self, group_req_id: int):
         move_task, tree_node, fused_token_indexes = g_kv_move_task_cache.pop(group_req_id)
         value = torch.tensor(move_task.decode_token_indexes, dtype=torch.int64, device="cpu")
         self.backend.model.mem_manager.free(value.cuda())
         self.backend.radix_cache.dec_node_ref_counter(tree_node)
         self.recover_frozen_token(len(move_task.input_tokens), move_task.decode_node.max_new_tokens)
+        return
+
+    def exposed_fail_to_realese_forzen_tokens(self, group_req_ids: List[int]):
+        group_req_ids = obtain(group_req_ids)
+        acquire_lock_until_ready(self.backend.lock_nccl_group)
+        for group_req_id in group_req_ids:
+            self._fail_to_realese_forzen_tokens(group_req_id)
         release_acquired_lock()
         return
 

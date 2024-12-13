@@ -94,7 +94,8 @@ class ContinuesBatchBackendForPrefillNode(ModeBackend):
 
     def prefill_req_handle_and_frozen_tokens(self, run_reqs: List[InferReq]):
         # 提前在radix cache中回收相关的信息，并添加引用信息
-        logger.info("prefill_req_handle_and_frozen_tokens")
+        if self.tp_rank < self.dp_size:
+            logger.info("prefill_req_handle_and_frozen_tokens")
         g_infer_state_lock.acquire()
         try:
             for req in run_reqs:
@@ -137,5 +138,6 @@ class ContinuesBatchBackendForPrefillNode(ModeBackend):
         except BaseException as e:
             logger.exception(str(e))
         g_infer_state_lock.release()
-        logger.info("prefill_req_handle_and_frozen_tokens end")
+        if self.tp_rank < self.dp_size:
+            logger.info("prefill_req_handle_and_frozen_tokens end")
         return
