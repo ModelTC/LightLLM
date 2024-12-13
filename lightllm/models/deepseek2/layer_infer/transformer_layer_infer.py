@@ -35,6 +35,9 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.q_lora_rank = network_config["q_lora_rank"]
         self.kv_lora_rank = network_config["kv_lora_rank"]
+
+        self.n_routed_experts = network_config["n_routed_experts"]
+
         self.is_moe = (
             network_config["n_routed_experts"] is not None
             and layer_num >= network_config["first_k_dense_replace"]
@@ -75,7 +78,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         if self.is_moe:
-            self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn, self)
+            if os.environ.get("ETP_MODE_ENABLED") == "true":
+                self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn_etp, self)
+            else:
+                self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn, self)
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
 
@@ -350,6 +356,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
+
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
@@ -432,3 +439,59 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.end_event.record(infer_state.parrall_stream)
             torch.cuda.default_stream().wait_event(infer_state.end_event)
         return o_tensor
+
+    def _moe_ffn_etp(
+        self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
+    ) -> torch.Tensor:
+        world_size_ = self.world_size_
+        # num_local_experts = self.n_shared_experts // world_size_
+        # local_expert_offset = self.tp_rank_ * num_local_experts
+        num_experts_per_token = self.num_experts_per_tok
+        num_experts = self.n_routed_experts
+        # num_expert_groups = self.n_group
+        # num_groups_per_token = self.topk_group
+        gating_scaling_factor = self.routed_scaling_factor
+        # gating_normalize_prob = self.norm_topk_prob
+        rank_self = self.tp_rank_
+
+        hidden_states = input.view(-1, self.embed_dim_)
+        num_tokens, hidden_dim = hidden_states.shape
+
+        final_hidden_states = torch.empty(
+            num_tokens, hidden_dim, device=hidden_states.device, dtype=hidden_states.dtype
+        )
+
+        # router_logits_len = hidden_states.shape[0]*layer_weight.moe_gate.shape[1]
+        router_logits = layer_weight.moe_gate.mm(hidden_states)
+
+        # now some parameter is not supported yet
+        # assert gating_normalize_prob is False
+        # assert num_expert_groups<=1
+
+        import lightllm_moe_etp_kernel
+
+        lightllm_moe_etp_kernel.moe_fused_all(
+            router_logits.contiguous(),
+            hidden_states.contiguous(),
+            layer_weight.gate_up_proj.weight.contiguous(),  # transpose
+            layer_weight.down_proj.weight.contiguous(),  # transpose
+            layer_weight.experts.expert_gate_up_proj_etp.contiguous(),
+            layer_weight.experts.expert_down_proj_etp.contiguous(),
+            infer_state.mem_manager.work_buffer.contiguous(),
+            infer_state.mem_manager.work_buffer.nelement(),
+            final_hidden_states.contiguous(),
+            rank_self,
+            gating_scaling_factor,
+            num_experts,
+            num_experts_per_token,
+            num_tokens,
+            world_size_,
+            hidden_dim,
+            layer_weight.gate_up_proj.weight.size(1) // 2,
+            layer_weight.experts.expert_gate_up_proj_etp.size(1) // 2,
+            self.n_shared_experts is not None,
+        )
+
+        router_logits = None
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
