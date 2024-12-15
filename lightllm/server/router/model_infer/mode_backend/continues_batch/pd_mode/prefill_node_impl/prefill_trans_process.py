@@ -50,17 +50,17 @@ def _init_env(
         )
         task_out_queue.put("nccl_ok")
         while True:
-            move_task: KVMoveTask = task_in_queue.get()
+            move_tasks: List[KVMoveTask] = task_in_queue.get()
+            total_move_kv_len = sum([task.move_kv_len for task in move_tasks])
             try:
                 start = time.time()
-                if move_task.move_kv_len != 0:
-                    logger.info(f"trans start: {move_task.to_prefill_log_info()}")
-                    token_indexes = move_task.prefill_token_indexes[-move_task.move_kv_len :]
+                if total_move_kv_len != 0:
+                    logger.info(f"trans start: {move_tasks[0].to_prefill_log_info()}")
                     cur_mem = mem_managers[device_index]
-                    cur_mem.send_to_decode_node(token_indexes, mem_managers, args.dp, move_task.prefill_dp_index)
-                    logger.info(f"trans finished: {move_task.to_prefill_log_info()}")
+                    cur_mem.send_to_decode_node(move_tasks, mem_managers, args.dp)
+                    logger.info(f"trans finished: {move_tasks[0].to_prefill_log_info()} move len: {total_move_kv_len}")
                 torch.cuda.synchronize()
-                logger.info(f"trans cost time: {(time.time() - start)}, {move_task.to_prefill_log_info()}")
+                logger.info(f"trans cost time: {(time.time() - start)}, {move_tasks[0].to_prefill_log_info()}")
                 task_out_queue.put("ok")
             except BaseException as e:
                 logger.exception(str(e))

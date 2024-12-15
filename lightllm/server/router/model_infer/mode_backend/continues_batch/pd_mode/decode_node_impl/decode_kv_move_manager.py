@@ -10,10 +10,11 @@ import psutil
 import threading
 from rpyc.utils.classic import obtain
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Union
 from rpyc import ThreadedServer
 from lightllm.utils.log_utils import init_logger
 from .decode_infer_rpyc import PDDecodeInferRpcServer
+from ..task_queue import TaskQueue
 from lightllm.common.mem_manager import MemoryManager
 import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import KVMoveTask, UpKVStatus
@@ -38,9 +39,13 @@ class TransProcessObj:
     nccl_ip: str = None
     nccl_port: str = None
     device_index: int = None
-    move_task_queue: List[KVMoveTask] = None
     manager: "DecodeKVMoveManager" = None
     has_error: bool = False
+    ready_to_move_queue: TaskQueue = None
+    kv_move_thread: threading.Thread = None
+    move_finished_queue: TaskQueue = None
+    put_to_radix_thread: threading.Thread = None
+    latest_check_time: float = None
 
     def create(self, prefill_node_id: str, nccl_ip: str, nccl_port: int, manager: "DecodeKVMoveManager"):
         from .decode_trans_process import start_decode_trans_process
@@ -65,153 +70,157 @@ class TransProcessObj:
         self.device_index = device_index
 
         self.manager = manager
-        self.move_task_queue_lock = threading.Lock()
-        self.move_task_queue = []
+        self.latest_check_time = time.time()
 
-        self.ready_task_queue_lock = threading.Lock()
-        self.ready_task_queue = []
+        self.ready_to_move_queue = TaskQueue(
+            get_func=lambda datas: datas[0:1], fail_func=self.manager.put_to_fail_release_task_queue
+        )
+        self.kv_move_thread = threading.Thread(target=self.kv_move_loop, daemon=True)
+        self.kv_move_thread.start()
 
-        # 启动处理任务的线程
-        self.thread = threading.Thread(target=self.handle_loop, daemon=True)
-        self.thread.start()
-
-        self.put_to_radix_thread = threading.Thread(target=self.ready_handle_loop, daemon=True)
+        self.move_finished_queue = TaskQueue(
+            get_func=lambda datas: datas[0:KV_MOVE_MAX_NUM], fail_func=self.manager.put_to_fail_release_task_queue
+        )
+        self.put_to_radix_thread = threading.Thread(target=self.put_to_radix_loop, daemon=True)
         self.put_to_radix_thread.start()
         return
 
-    def check_trans_process(self):
+    def check_trans_process(self, raise_exception=True):
         process = psutil.Process(self.process.pid)
         if not (process.is_running() and process.status() != psutil.STATUS_ZOMBIE):
-            self.has_error = True
-            raise Exception(f"trans process: {self.process.pid} is dead")
+            self.set_has_error()
+            if raise_exception:
+                raise Exception(f"trans process: {self.process.pid} is dead")
         return
 
-    def put(self, move_task):
-        if self.has_error:
-            raise Exception(f"trans obj {self.prefill_node_id} has error, can not put")
-        with self.move_task_queue_lock:
-            self.move_task_queue.append(move_task)
+    def timer_to_check_status(self, raise_exception=True):
+        if time.time() - self.latest_check_time >= 2.0:
+            self.latest_check_time = time.time()
+            self.check_trans_process(raise_exception=raise_exception)
+        return
 
-    def put_list(self, move_tasks):
-        if self.has_error:
-            raise Exception(f"trans obj {self.prefill_node_id} has error, can not put")
-        with self.move_task_queue_lock:
-            self.move_task_queue.extend(move_tasks)
-
-    def get_tasks(self):
-        with self.move_task_queue_lock:
-            move_tasks: List[KVMoveTask] = self.move_task_queue[0:KV_MOVE_MAX_NUM]
-            self.move_task_queue = self.move_task_queue[KV_MOVE_MAX_NUM:]
-        return move_tasks
-
-    def clear_tasks(self):
-        with self.move_task_queue_lock:
-            if len(self.move_task_queue) != 0:
-                for task in self.move_task_queue:
-                    self.manager.put_to_fail_release_task_queue(task)
-            self.move_task_queue = []
-
-    def put_ready(self, move_task):
-        if self.has_error:
-            raise Exception(f"trans obj {self.prefill_node_id} has error, can not put")
-        with self.ready_task_queue_lock:
-            self.ready_task_queue.append(move_task)
-
-    def get_ready_tasks(self):
-        with self.ready_task_queue_lock:
-            move_tasks: List[KVMoveTask] = self.ready_task_queue[0:KV_MOVE_MAX_NUM]
-            self.ready_task_queue = self.ready_task_queue[KV_MOVE_MAX_NUM:]
-        return move_tasks
-
-    def clear_ready_tasks(self):
-        with self.ready_task_queue_lock:
-            if len(self.ready_task_queue) != 0:
-                for task in self.ready_task_queue:
-                    self.manager.put_to_fail_release_task_queue(task)
-            self.ready_task_queue = []
-
-    def handle_loop(self):
+    def kv_move_loop(self):
+        func_name = self.kv_move_loop.__name__
         while not self.has_error:
-            move_tasks: List[KVMoveTask] = self.get_tasks()
+            move_tasks: List[List[KVMoveTask]] = self.ready_to_move_queue.get_tasks(log_tag="ready_to_move_queue")
             if len(move_tasks) == 0:
                 time.sleep(0.01)
                 continue
 
+            if len(move_tasks) != 1:
+                logger.error(f"error get need 1, but get {len(move_tasks)}")
+                assert False
+
+            move_tasks = move_tasks[0]
             for task in move_tasks:
-                logger.info(f"deocode node get task {task.to_decode_log_info()}")
+                logger.info(f"{func_name} get task {task.to_decode_log_info()}")
 
             try:
-                # random to check stats
-                if random.randint(0, 20) == 10:
-                    self.check_trans_process()
-                iter_move_tasks = move_tasks.copy()
-                with self.manager.device_locks[self.device_index]:
-                    for task in iter_move_tasks:
-                        self.task_in_queue.put(task, timeout=10)
-                    for task in iter_move_tasks:
+                self.timer_to_check_status(raise_exception=True)
+                with self.manager.kv_trans_lock:
+                    with self.manager.device_locks[self.device_index]:
+                        self.task_in_queue.put(move_tasks.copy(), timeout=10)
                         assert self.task_out_queue.get(timeout=60) == "ok"
-                        logger.info(f"deocode node transfer kv ok {task.to_decode_log_info()}")
-                        self.put_ready(task)
-                        move_tasks.remove(task)
+                        logger.info(f"{func_name} transfer kv ok {move_tasks[0].to_decode_log_info()}")
+                        self.move_finished_queue.put_list(move_tasks)
+                        move_tasks.clear()
 
             except BaseException as e:
                 logger.exception(str(e))
-                self.has_error = True
-                self.clear_tasks()
+                self.set_has_error()
+                self.ready_to_move_queue.clear_tasks()
                 self.manager.remove_trans_obj(self.prefill_node_id)
 
             finally:
-                for move_task in move_tasks:
-                    self.manager.put_to_fail_release_task_queue(move_task)
+                self.manager.put_to_fail_release_task_queue(move_tasks)
 
-        logger.error(f"trans thread, prefill id {self.prefill_node_id} device_index {self.device_index} thread quit")
+        logger.error(f"{func_name} prefill id {self.prefill_node_id} device_index {self.device_index} thread quit")
         return
 
-    def ready_handle_loop(self):
+    def put_to_radix_loop(self):
+        func_name = self.put_to_radix_loop.__name__
         while not self.has_error:
-            move_tasks: List[KVMoveTask] = self.get_ready_tasks()
+            move_tasks: List[KVMoveTask] = self.move_finished_queue.get_tasks(log_tag="move_finished_queue")
             if len(move_tasks) == 0:
                 time.sleep(0.01)
                 continue
 
             for task in move_tasks:
-                logger.info(f"deocode node get put radix task {task.to_decode_log_info()}")
+                logger.info(f"{func_name} get put radix task {task.to_decode_log_info()}")
 
             try:
                 # random to check stats
-                if random.randint(0, 20) == 10:
-                    self.check_trans_process()
+                self.timer_to_check_status(raise_exception=True)
 
-                self.manager._put_kv_received_to_radix_cache(move_tasks)
-                iter_move_tasks = move_tasks.copy()
-                move_tasks.clear()
-
-                for task in iter_move_tasks:
-                    logger.info(f"decode node put kv to radix cache ok, req_id: {task.id()}")
+                self.manager._put_kv_received_to_radix_cache(move_tasks.copy())
+                for task in move_tasks.copy():
+                    logger.info(f"{func_name} put kv to radix cache ok, req_id: {task.id()}")
                     self.manager.up_status_in_queue.put(
                         UpKVStatus(group_request_id=task.group_request_id, dp_index=task.decode_dp_index)
                     )
-                    logger.info(f"decode node up kv status req_id: {task.id()} finished")
+                    logger.info(f"{func_name} up kv status req_id: {task.id()} finished")
+                move_tasks.clear()
 
             except BaseException as e:
                 logger.exception(str(e))
-                self.has_error = True
-                self.clear_ready_tasks()
+                self.set_has_error()
+                self.move_finished_queue.clear_tasks()
                 self.manager.remove_trans_obj(self.prefill_node_id)
 
             finally:
-                for move_task in move_tasks:
-                    self.manager.put_to_fail_release_task_queue(move_task)
+                self.manager.put_to_fail_release_task_queue(move_tasks)
 
-        logger.error(
-            f"put to radix thread, prefill id {self.prefill_node_id} device_index {self.device_index} thread quit"
-        )
+        logger.error(f"{func_name}, prefill id {self.prefill_node_id} device_index {self.device_index} thread quit")
+        return
+
+    def wait_thread_quit(self):
+        if self.kv_move_thread is not None:
+            if self.kv_move_thread.is_alive():
+                try:
+                    self.kv_move_thread.join()
+                except:
+                    pass
+        if self.put_to_radix_thread is not None:
+            if self.put_to_radix_thread.is_alive():
+                try:
+                    self.put_to_radix_thread.join()
+                except:
+                    pass
+        return
+
+    def has_error_status(self):
+        try:
+            assert self.has_error is False
+            assert self.kv_move_thread.is_alive()
+            assert self.put_to_radix_thread.is_alive()
+        except BaseException as e:
+            logger.exception(str(e))
+            self.set_has_error()
+            return True
+
+        return False
+
+    def set_has_error(self):
+        self.has_error = True
+        try:
+            self.ready_to_move_queue.has_error = True
+            self.move_finished_queue.has_error = True
+        except:
+            pass
         return
 
     def __del__(self):
-        self.has_error = True
-        self.clear_tasks()
-        self.clear_ready_tasks()
+        logger.error(f"trans obj del start, prefill node id {self.prefill_node_id} device_index {self.device_index}")
+
+        try:
+            self.set_has_error()
+            self.wait_thread_quit()
+            if self.ready_to_move_queue is not None:
+                self.ready_to_move_queue.clear_tasks()
+            if self.move_finished_queue is not None:
+                self.move_finished_queue.clear_tasks()
+        except BaseException as e:
+            logger.exception(str(e))
 
         logger.error(f"trans obj deled, prefill node id {self.prefill_node_id} device_index {self.device_index}")
 
@@ -247,28 +256,27 @@ class DecodeKVMoveManager(rpyc.Service):
         start_up_kv_status_process(self.args, self.up_status_in_queue, self.up_status_out_queue)
 
         # fail release queue
-        self.fail_to_release_queue_lock = threading.Lock()
-        self.fail_to_release_queue = []
+        self.fail_to_release_queue = TaskQueue(get_func=lambda datas: datas[0:KV_MOVE_MAX_NUM], fail_func=None)
         self.fail_to_release_thread = threading.Thread(target=self.handle_fail_release_task_loop, daemon=True)
         self.fail_to_release_thread.start()
 
+        self.kv_trans_lock = threading.Lock()
         # 需要每个卡有一个锁来规划每次只能有一个tran obj 操作对应显卡上的传输任务。
         self.device_locks = [threading.Lock() for _ in range(self.args.tp)]
         return
 
-    def put_to_fail_release_task_queue(self, task: KVMoveTask):
-        with self.fail_to_release_queue_lock:
-            self.fail_to_release_queue.append(task)
-
-    def get_fail_release_tasks_from_queue(self):
-        with self.fail_to_release_queue_lock:
-            ans = self.fail_to_release_queue[0:KV_MOVE_MAX_NUM]
-            self.fail_to_release_queue = self.fail_to_release_queue[KV_MOVE_MAX_NUM:]
-        return ans
+    def put_to_fail_release_task_queue(self, task: Union[KVMoveTask, List[KVMoveTask]]):
+        if isinstance(task, KVMoveTask):
+            self.fail_to_release_queue.put(task)
+        elif isinstance(task, list):
+            self.fail_to_release_queue.put_list(task)
+        else:
+            assert False, "error input"
+        return
 
     def handle_fail_release_task_loop(self):
         while True:
-            handle_list: List[KVMoveTask] = self.get_fail_release_tasks_from_queue()
+            handle_list: List[KVMoveTask] = self.fail_to_release_queue.get_tasks(log_tag="fail_to_release_queue")
             if len(handle_list) == 0:
                 time.sleep(0.01)
             else:
@@ -370,14 +378,19 @@ class DecodeKVMoveManager(rpyc.Service):
         if thread_local_data.prefill_node_id is not None:
             self.remove_trans_obj(thread_local_data.prefill_node_id)
             logger.info(f"prefill node id {thread_local_data.prefill_node_id} disconnect")
+            import gc
+
+            gc.collect()
         pass
 
     def exposed_check_alive(self):
         # 用于 prefill node check 通信连接的状态。
         return
 
-    def exposed_build_trans_process(self, prefill_node_id, nccl_ip, nccl_port):
-        prefill_node_id, nccl_ip, nccl_port = list(map(obtain, [prefill_node_id, nccl_ip, nccl_port]))
+    def exposed_build_trans_process(self, prefill_node_id, nccl_ip, nccl_port, prefill_node_max_kv_trans_num):
+        prefill_node_id, nccl_ip, nccl_port, prefill_node_max_kv_trans_num = list(
+            map(obtain, [prefill_node_id, nccl_ip, nccl_port, prefill_node_max_kv_trans_num])
+        )
         thread_local_data.prefill_node_id = prefill_node_id
 
         logger.info(f"build trans infos {prefill_node_id} {nccl_ip} {nccl_port}")
@@ -386,7 +399,7 @@ class DecodeKVMoveManager(rpyc.Service):
         tran_obj = TransProcessObj()
         tran_obj.create(prefill_node_id, nccl_ip, nccl_port, self)
         self.node_id_to_trans_obj[prefill_node_id] = tran_obj
-        return
+        return min(prefill_node_max_kv_trans_num, self.args.max_total_token_num)
 
     # 返回 None 代表繁忙， 放弃该任务的 kv 传送
     def exposed_request_data_transfer(self, tasks: List[KVMoveTask]) -> List[Optional[int]]:
@@ -440,23 +453,18 @@ class DecodeKVMoveManager(rpyc.Service):
                         ans_list.append(None)
 
         except BaseException as e:
-            if len(alloc_tokened_tasks) != 0:
-                for task in alloc_tokened_tasks:
-                    self.put_to_fail_release_task_queue(task)
-                alloc_tokened_tasks = []
-
+            self.put_to_fail_release_task_queue(alloc_tokened_tasks)
+            alloc_tokened_tasks = []
             self.remove_trans_obj(tasks[0].prefill_node_id)
             logger.exception(str(e))
             raise e
 
         try:
-            trans_obj.put_list(alloc_tokened_tasks)
+            trans_obj.ready_to_move_queue.put(alloc_tokened_tasks)
         except BaseException as e:
             logger.exception(str(e))
-            if len(alloc_tokened_tasks) != 0:
-                for task in alloc_tokened_tasks:
-                    self.put_to_fail_release_task_queue(task)
-                alloc_tokened_tasks = []
+            self.put_to_fail_release_task_queue(alloc_tokened_tasks)
+            alloc_tokened_tasks = []
             raise e
 
         return ans_list
@@ -475,8 +483,7 @@ class DecodeKVMoveManager(rpyc.Service):
     def remove_dead_trans_obj(self):
         del_node_ids = []
         for node_id, t_obj in self.node_id_to_trans_obj.items():
-            if t_obj.has_error or (not t_obj.thread.is_alive()):
-                t_obj.has_error = True
+            if t_obj.has_error_status():
                 del_node_ids.append(node_id)
 
         for node_id in del_node_ids:
@@ -492,7 +499,7 @@ class DecodeKVMoveManager(rpyc.Service):
         if prefill_node_id in self.node_id_to_trans_obj:
             trans_obj = self.node_id_to_trans_obj.pop(prefill_node_id, None)
             if trans_obj is not None:
-                trans_obj.has_error = True
+                trans_obj.set_has_error()
         return
 
     def timer_loop(self):

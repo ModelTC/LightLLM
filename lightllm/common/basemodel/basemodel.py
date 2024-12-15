@@ -158,7 +158,7 @@ class TpPartBaseModel:
     def _init_kv_move_buffer(self):
         # p d 分离的推理模式下才需要做这一步初始化
         if self.run_mode in ["prefill", "decode"]:
-            self.mem_manager.alloc_kv_move_buffer(self.max_seq_length)
+            self.mem_manager.alloc_kv_move_buffer(self.mem_manager.size)
 
     def _check_mem_size(self):
         self.max_total_token_num = self.mem_manager.size

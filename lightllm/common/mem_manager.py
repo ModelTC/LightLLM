@@ -3,6 +3,7 @@ import os
 import torch
 import torch.distributed as dist
 from typing import List
+from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
@@ -79,25 +80,27 @@ class MemoryManager:
         )
         return
 
-    def send_to_decode_node(
-        self, token_indexes: List[int], mem_managers: List["MemoryManager"], dp_size: int, dp_index: int
-    ):
+    def send_to_decode_node(self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int):
         """
-        dp_size 和 dp_index 是为 deepseekv2 类型，可以 dp 和 tp 混合模式运行的模型定制的参数，
+        dp_size 是为 deepseekv2 类型，可以 dp 和 tp 混合模式运行的模型定制的参数，
         普通tp模式下, dp_size 一定等于 1, dp_index 一定等于 0, 同时普通模式下, 这两个参数并不会
         被真正使用
         """
         assert dp_size == 1
-        assert dp_index == 0
 
         # 先将数据发送到指定的一张卡上的buffer，再发送。
         import torch.distributed as dist
+
+        move_token_indexes = []
+        for task in move_tasks:
+            if task.move_kv_len != 0:
+                move_token_indexes.extend(task.prefill_token_indexes[-task.move_kv_len :])
 
         cur_device_index = self.kv_buffer.get_device()
         cur_mem = mem_managers[cur_device_index]
         for i, mem in enumerate(mem_managers):
             for layer_index in range(mem.layer_num):
-                move_buffer = mem._get_kv_move_data(token_indexes, layer_index)
+                move_buffer = mem._get_kv_move_data(move_token_indexes, layer_index)
                 if i == cur_device_index:
                     dist.send(move_buffer, dst=1)
                 else:
@@ -118,34 +121,38 @@ class MemoryManager:
         return move_buffer
 
     def receive_from_prefill_node(
-        self, token_indexes: List[int], mem_managers: List["MemoryManager"], dp_size: int, dp_index: int
+        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int
     ):
         """
-        dp_size 和 dp_index 是为 deepseekv2 类型，可以 dp 和 tp 混合模式运行的模型定制的参数，
-        普通tp模式下, dp_size 一定等于 1, dp_index 一定等于 0, 同时普通模式下, 这两个参数并不会
+        dp_size 是为 deepseekv2 类型，可以 dp 和 tp 混合模式运行的模型定制的参数，
+        普通tp模式下, dp_size 一定等于 1, 同时普通模式下, 这两个参数并不会
         被真正使用
         """
         assert dp_size == 1
-        assert dp_index == 0
 
         # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
         import torch.distributed as dist
 
+        move_token_indexes = []
+        for task in move_tasks:
+            if task.move_kv_len != 0:
+                move_token_indexes.extend(task.decode_token_indexes[-task.move_kv_len :])
+
         cur_device_index = self.kv_buffer.get_device()
-        token_num = len(token_indexes)
+        token_num = len(move_token_indexes)
         move_size = self.kv_buffer.numel() // self.layer_num // self.size * token_num
         recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(1, token_num, 2 * self.head_num, self.head_dim)
         for i, mem in enumerate(mem_managers):
             for layer_index in range(mem.layer_num):
                 dist.recv(recive_buffer, src=0)
                 if i == cur_device_index:
-                    mem._write_kv_move_data(token_indexes, recive_buffer, layer_index)
+                    mem._write_kv_move_data(move_token_indexes, recive_buffer, layer_index)
                 else:
                     new_recive_buffer = mem.kv_move_buffer.view(-1)[0:move_size].view(recive_buffer.shape)
                     from torch.cuda import comm
 
                     comm.broadcast(recive_buffer, out=[new_recive_buffer])
-                    mem._write_kv_move_data(token_indexes, new_recive_buffer, layer_index)
+                    mem._write_kv_move_data(move_token_indexes, new_recive_buffer, layer_index)
         return
 
     def _write_kv_move_data(self, token_indexes: torch.Tensor, buffer_tensor: torch.Tensor, layer_index):

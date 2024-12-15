@@ -153,7 +153,7 @@ class RouterManager:
 
         if self.args.run_mode == "prefill":
             # 启动 prefill kv move 管理进程
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.prefill_node_impl import (
+            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.prefill_node_impl import (
                 start_prefill_kv_move_manager_process,
             )
 
@@ -161,7 +161,7 @@ class RouterManager:
 
         if self.args.run_mode == "decode":
             # 启动 decode kv move 管理进程
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.decode_node_impl import (
+            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.decode_node_impl import (
                 start_decode_kv_move_manager_process,
             )
 
