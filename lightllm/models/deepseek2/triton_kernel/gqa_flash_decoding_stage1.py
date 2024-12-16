@@ -1,3 +1,4 @@
+import os
 import torch
 import triton
 import triton.language as tl
@@ -259,9 +260,19 @@ def flash_decode_stage1(
     block_seq,
     softmax_scale,
 ):
-    BLOCK_SEQ = block_seq
-    BLOCK_N = 16
-    BLOCK_Q_HEAD = 16
+    if hasattr(os, "tuning_config"):
+        BLOCK_SEQ = os.tuning_config["BLOCK_SEQ"]
+        BLOCK_N = os.tuning_config["BLOCK_N"]
+        BLOCK_Q_HEAD = os.tuning_config["BLOCK_Q_HEAD"]
+        num_warps = os.tuning_config["stage1_num_warps"]
+        num_stages = os.tuning_config["stage1_num_stages"]
+    else:
+        BLOCK_SEQ = block_seq
+        BLOCK_N = 16
+        BLOCK_Q_HEAD = 16
+        num_warps = 4
+        num_stages = 2
+
     assert BLOCK_SEQ % BLOCK_N == 0
     # shape constraints
     q_nope_dim = q_nope.shape[-1]
@@ -276,7 +287,6 @@ def flash_decode_stage1(
     batch, q_head_num = B_req_idx.shape[0], q_nope.shape[1]
     if q_head_num % BLOCK_Q_HEAD == 0:
         grid = (triton.cdiv(max_len_in_batch, BLOCK_SEQ), q_head_num // BLOCK_Q_HEAD, batch)
-
         _fwd_kernel_flash_decode_stage1[grid](
             q_nope,
             q_rope,
@@ -314,8 +324,8 @@ def flash_decode_stage1(
             BLOCK_DMODEL=q_nope_dim,
             BLOCK_ROPE_DMODEL=q_rope_dim,
             BLOCK_N=BLOCK_N,
-            num_warps=4,
-            num_stages=2,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
     else:
         assert q_head_num < BLOCK_Q_HEAD
@@ -360,7 +370,7 @@ def flash_decode_stage1(
             BLOCK_DMODEL=q_nope_dim,
             BLOCK_ROPE_DMODEL=q_rope_dim,
             BLOCK_N=BLOCK_N,
-            num_warps=4,
-            num_stages=2,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
     return

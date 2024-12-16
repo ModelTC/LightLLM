@@ -1,3 +1,4 @@
+import os
 import torch
 import triton
 import triton.language as tl
@@ -54,6 +55,15 @@ def _fwd_kernel_flash_decode_stage2(
 
 @torch.no_grad()
 def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, Out, block_seq):
+    if hasattr(os, "tuning_config"):
+        BLOCK_SEQ = os.tuning_config["BLOCK_SEQ"]
+        num_warps = os.tuning_config["stage2_num_warps"]
+        num_stages = os.tuning_config["stage2_num_stages"]
+    else:
+        BLOCK_SEQ = block_seq
+        num_warps = 4
+        num_stages = 2
+
     Lk = mid_out.shape[-1]
     assert Lk in {16, 32, 64, 128, 256, 512}
     batch, head_num = mid_out.shape[0], mid_out.shape[1]
@@ -74,9 +84,9 @@ def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, Out, block_seq):
         Out.stride(0),
         Out.stride(1),
         Out.stride(2),
-        BLOCK_SEQ=block_seq,
+        BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=Lk,
-        num_warps=4,
-        num_stages=2,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return
