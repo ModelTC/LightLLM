@@ -148,7 +148,9 @@ class HttpServerManager:
             self.metric_client.counter_inc("lightllm_request_count")
 
             sampling_params.stop_sentences_to_token_ids(self.tokenizer)
-            prompt_ids = await self._encode(prompt, multimodal_params)
+            prompt_ids = await self._encode(
+                prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
+            )
             prompt_tokens = len(prompt_ids)
             # 监控
             self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
@@ -197,14 +199,16 @@ class HttpServerManager:
         )
         return
 
-    async def _encode(self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams):
+    async def _encode(
+        self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, add_special_tokens: bool
+    ):
         if isinstance(prompt, str):
             if self.enable_multimodal:
                 assert len(multimodal_params.images) <= self.args.cache_capacity, "too many images!"
                 await self._alloc_multimodal_resources(multimodal_params)
                 prompt_ids = self.tokenizer.encode(prompt, multimodal_params)
             else:
-                prompt_ids = self.tokenizer.encode(prompt)
+                prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
             return prompt_ids
 
         # 这里的校验对多模态不是很充分, to do
@@ -395,7 +399,7 @@ class HttpServerManager:
         return
 
     async def handle_loop(self):
-        
+
         if self.pd_mode.is_P_or_D():
             self.forwarding_queue = AsyncQueue()
             asyncio.create_task(self.pd_handle_loop())

@@ -121,10 +121,10 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
             scale = rope_scaling.get("factor", 1.0)
             mscale = rope_scaling.get("mscale", 1)
             mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
-        original_max_position_embeddings = self.config.get("original_max_position_embeddings", 2048)
+        original_max_position_embeddings = rope_scaling.get("original_max_position_embeddings", 2048)
         extrapolation_factor = 1.0
-        beta_fast = 32.0
-        beta_slow = 1.0
+        beta_fast = rope_scaling.get("beta_fast", 32.0)
+        beta_slow = rope_scaling.get("beta_slow", 1.0)
 
         pos_freqs = base ** (torch.arange(0, dim, 2).float().cuda() / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs

@@ -25,7 +25,7 @@ import sys
 import os
 import rpyc
 import pickle
-from .build_prompt import build_prompt
+from .build_prompt import build_prompt, init_tokenizer
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import ujson as json
@@ -214,6 +214,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         stop_sequences=request.stop,
         n=request.n,
         best_of=request.n,
+        add_special_tokens=False,
     )
     sampling_params.verify()
     multimodal_params = MultimodalParams(images=[])
@@ -390,4 +391,5 @@ if __name__ == "__main__":
     if args.run_mode == "pd_master":
         pd_master_start(g_objs)
     else:
+        init_tokenizer(args)  # for openai api
         normal_or_p_d_start(g_objs)

@@ -27,6 +27,7 @@ class SamplingParams:
         min_new_tokens: int = 1,
         stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None,  # 停止句子条件
         skip_special_tokens: bool = True,  # whether to skip special tokens when decoding
+        add_special_tokens: bool = True,  # whether to add special tokens when encoding
         add_spaces_between_special_tokens: bool = True,  # whether to add spaces between special tokens when decoding
         print_eos_token: bool = False,  # eos_id will be always ignored except the value is set to True
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
@@ -58,6 +59,7 @@ class SamplingParams:
         self.min_new_tokens = min_new_tokens
         self.stop_sequences = stop_sequences
         self.skip_special_tokens = skip_special_tokens
+        self.add_special_tokens = add_special_tokens
         self.add_spaces_between_special_tokens = add_spaces_between_special_tokens
         self.print_eos_token = print_eos_token
         self.regular_constraint = regular_constraint
