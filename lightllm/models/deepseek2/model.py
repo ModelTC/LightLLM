@@ -145,8 +145,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         t = torch.arange(max_seq_len_cached, device="cuda", dtype=torch.float32)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self._cos_cached = emb.cos().to(self.data_type).cuda() * _mscale
-        self._sin_cached = emb.sin().to(self.data_type).cuda() * _mscale
+        self._cos_cached = (freqs.cos() * _mscale).to(self.data_type).cuda()
+        self._sin_cached = (freqs.sin() * _mscale).to(self.data_type).cuda()
 
         return
