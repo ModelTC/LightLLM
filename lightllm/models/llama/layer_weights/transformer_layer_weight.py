@@ -66,7 +66,7 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_o(self):
-        o_split_n_embed = self.n_embed // self.world_size_
+        o_split_n_embed = self.head_dim * self.n_head // self.world_size_
         self.o_proj = COLMMWeight(self._o_weight_name, self.data_type_, o_split_n_embed, bias_name=self._o_bias_name)
 
     def _init_ffn(self):
