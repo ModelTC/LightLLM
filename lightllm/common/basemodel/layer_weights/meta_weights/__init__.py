@@ -11,6 +11,10 @@ from .mm_weight import (
     MultiCOLMMWeight,
     ROWBMMWeight,
     COLBMMWeight,
+    MultiCOLMMWeightNoTp,
+    ROWBMMWeightNoTp,
+    COLBMMWeightNoTp,
+    COLMMWeightNoTp,
 )
 from .norm_weight import NormWeight, GEMMANormWeight, TpNormWeight
 from .fused_moe_weight import FusedMoeWeight

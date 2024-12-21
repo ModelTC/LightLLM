@@ -2,6 +2,7 @@ import os
 import copy
 import time
 import torch
+import torch.distributed as dist
 import numpy as np
 import collections
 
@@ -349,6 +350,8 @@ class InferBatch:
 
     @torch.no_grad()
     def free_self(self):
+        if len(self.request_ids) == 0:
+            return
         free_req_index = []
         free_token_index = []
         for request_id in self.request_ids:
@@ -385,7 +388,8 @@ class InferBatch:
     @torch.no_grad()
     def filter(self, request_ids: List[str], finished_request_ids: List[str]):
         if len(requests_mapping) == 0:
-            raise ValueError("Batch must have at least one request")
+            logger.warning(f"Batch in rank {dist.get_rank()} has no request!")
+            return self
         if len(request_ids) == len(self):
             return self
         if len(request_ids) == 0:

@@ -18,6 +18,7 @@ from lightllm.models.deepseek2.triton_kernel.context_flashattention_nopad_with_v
 from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
+from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from functools import partial
@@ -62,8 +63,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                 mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+        self.enable_dp = os.getenv("ENABLE_DP", "0").upper() in ["ON", "TRUE", "1"]
+        if self.enable_dp:
+            self.tp_q_head_num_ = int(self.tp_q_head_num_ * self.world_size_)
         self.tp_o_head_num_ = self.tp_q_head_num_
-
         self.num_heads = network_config["num_attention_heads"]
         self.num_kv_heads = network_config["num_key_value_heads"]
         self.enable_opt_decoding_mha = os.getenv("ENABLE_OPT_DECODE_MHA", "False").upper() in ["ON", "TRUE", "1"]
@@ -78,10 +81,14 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         if self.is_moe:
-            if os.environ.get("ETP_MODE_ENABLED") == "true":
-                self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn_etp, self)
+            if self.enable_dp:
+                if os.environ.get("MOE_MODE", "TP") == "TP":
+                    self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn_dtp, self)
             else:
-                self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn, self)
+                if os.environ.get("ETP_MODE_ENABLED") == "true":
+                    self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn_etp, self)
+                else:
+                    self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn, self)
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
 
@@ -111,7 +118,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                 q = layer_weight.q_a_proj_.mm(input)
                 rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_, out=q)
                 q = layer_weight.q_b_proj_.mm(q)
-
             q = q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim)
             q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
             if infer_state.use_dynamic_prompt_cache and infer_state.is_prefill:
@@ -122,7 +128,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                 q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
         layer_weight.kv_a_proj_with_mqa_.mm(input, out=cache_kv.view(-1, self.kv_lora_rank + self.qk_rope_head_dim))
-
         rmsnorm_forward(
             cache_kv[:, :, : self.kv_lora_rank],
             weight=layer_weight.kv_a_layernorm_.weight,
@@ -155,7 +160,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         num_local_heads = self.num_heads
         num_local_kv_heads = self.num_kv_heads
-        if self.world_size_ > 1:
+        if self.world_size_ > 1 and not self.enable_dp:
             num_local_heads //= self.world_size_
             num_local_kv_heads //= self.world_size_
         if infer_state.use_dynamic_prompt_cache:
@@ -187,7 +192,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_nope, q_rope = q
         num_local_heads = self.num_heads
         num_local_kv_heads = self.num_kv_heads
-        if self.world_size_ > 1:
+        if self.world_size_ > 1 and not self.enable_dp:
             num_local_heads //= self.world_size_
             num_local_kv_heads //= self.world_size_
         # ACC
@@ -353,6 +358,34 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         return
 
+    def _ffn_dp(
+        self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
+    ) -> torch.Tensor:
+        tp_hidden_states = input.view(-1, self.embed_dim_)
+        num_tokens, hidden_dim = tp_hidden_states.shape
+        hidden_states = self.alloc_tensor(
+            [infer_state.all_token_num, hidden_dim], dtype=tp_hidden_states.dtype, device=tp_hidden_states.device
+        )
+        dist.all_gather(
+            [
+                hidden_states[infer_state.all_start_idx[i] : infer_state.all_end_idx[i], :]
+                for i in range(self.world_size_)
+            ],
+            tp_hidden_states,
+            group=None,
+            async_op=False,
+        )
+        up_gate_out = layer_weight.gate_up_proj.mm(hidden_states)
+        ffn1_out = self.alloc_tensor((hidden_states.size(0), up_gate_out.size(1) // 2), input.dtype)
+        silu_and_mul_fwd(up_gate_out, ffn1_out)
+        input = None
+        up_gate_out = None
+        ffn2_out = layer_weight.down_proj.mm(ffn1_out)
+        if self.world_size_ > 1:
+            dist.all_reduce(ffn2_out, op=dist.ReduceOp.SUM, async_op=False)
+        ffn1_out = None
+        return ffn2_out[infer_state.start_idx : infer_state.end_idx]
+
     def _moe_ffn(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
@@ -380,6 +413,48 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             hidden_states.add_(shared_output)
 
         return hidden_states.view(num_tokens, hidden_dim)
+
+    def _moe_ffn_dtp(
+        self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
+    ) -> torch.Tensor:
+
+        tp_hidden_states = input.view(-1, self.embed_dim_)
+        num_tokens, hidden_dim = tp_hidden_states.shape
+        hidden_states = self.alloc_tensor(
+            [infer_state.all_token_num, hidden_dim], dtype=tp_hidden_states.dtype, device=tp_hidden_states.device
+        )
+        dist.all_gather(
+            [
+                hidden_states[infer_state.all_start_idx[i] : infer_state.all_end_idx[i], :]
+                for i in range(self.world_size_)
+            ],
+            tp_hidden_states,
+            group=None,
+            async_op=False,
+        )
+        if self.n_shared_experts is not None:
+            shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
+
+        router_logits = layer_weight.moe_gate.mm(hidden_states)
+        layer_weight.experts.experts(
+            hidden_states,
+            router_logits=router_logits,
+            top_k=self.num_experts_per_tok,
+            renormalize=self.norm_topk_prob,
+            use_grouped_topk=self.n_group,
+            topk_group=self.topk_group,
+            num_expert_group=self.n_group,
+        )
+
+        hidden_states.mul_(self.routed_scaling_factor)
+
+        if self.n_shared_experts is not None:
+            hidden_states.add_(shared_output)
+
+        hidden_states = hidden_states.view(infer_state.all_token_num, hidden_dim)
+        if self.world_size_ > 1:
+            dist.all_reduce(hidden_states, op=dist.ReduceOp.SUM, async_op=False)
+        return hidden_states[infer_state.start_idx : infer_state.end_idx]
 
     def _splitfuse_attention_kernel(
         self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None

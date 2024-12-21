@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.functional as F
 import torch.distributed as dist
@@ -21,6 +22,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         self.eps_ = network_config["rms_norm_eps"]
         self.vocab_size_ = network_config["vocab_size"]
         self.embed_dim_ = network_config["n_embed"]
+        self.enable_dp = os.getenv("ENABLE_DP", "0").upper() in ["ON", "TRUE", "1"]
         return
 
     def _norm(self, input, infer_state, layer_weight: LlamaPreAndPostLayerWeight) -> torch.Tensor:
@@ -89,7 +91,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         torch.mm(layer_weight.lm_head_weight_, last_input, out=logic_batch)
 
         last_input = None
-        if self.world_size_ == 1:
+        if self.world_size_ == 1 or self.enable_dp:
             gather_data = logic_batch
         else:
             gather_data = self.alloc_tensor((self.vocab_size_, token_num), dtype=input_embdings_dtype)

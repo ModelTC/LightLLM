@@ -77,6 +77,10 @@ class ModeBackend:
         self.pd_rpyc_port = kvargs.get("pd_rpyc_port", None)
         max_total_token_num = kvargs["max_total_token_num"]
 
+        if self.dp_size > 1:
+            assert self.dp_size == self.world_size, "Currently only self-sustaining dp_size == tp_size"
+            os.environ["ENABLE_DP"] = "1"
+
         torch.cuda.set_device(self.tp_rank)
 
         dist.init_process_group(

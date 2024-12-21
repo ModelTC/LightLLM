@@ -538,6 +538,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
 
         etype, evalue, tb = sys.exc_info()
         err_str = "\n".join(traceback.format_exception(etype, evalue, tb))
+        logger.error(err_str)
         pipe_writer.send(err_str)
         router.clean_up()
         raise

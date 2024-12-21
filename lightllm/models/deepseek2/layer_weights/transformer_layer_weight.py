@@ -1,3 +1,4 @@
+import os
 import torch
 import math
 import numpy as np
@@ -6,12 +7,17 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     ROWMMWeightNoTP,
     MultiROWMMWeight,
+    MultiROWMMWeightNoTP,
     COLMMWeight,
+    COLMMWeightNoTp,
     MultiCOLMMWeight,
+    MultiCOLMMWeightNoTp,
     NormWeight,
     FusedMoeWeight,
     ROWBMMWeight,
+    ROWBMMWeightNoTp,
     COLBMMWeight,
+    COLBMMWeightNoTp,
 )
 from functools import partial
 
@@ -74,6 +80,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
     ):
         self.disable_qk_absorb = disable_qk_absorb
         self.disable_vo_absorb = disable_vo_absorb
+        self.enable_dp = os.getenv("ENABLE_DP", "0").upper() in ["ON", "TRUE", "1"]
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode, quant_cfg)
         # mla_type = "ACCM", "MIX"
         # MIX是prefilled CC，decoding ACC
@@ -89,7 +96,9 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             and self.layer_num_ >= self.network_config_["first_k_dense_replace"]
             and self.layer_num_ % self.network_config_["moe_layer_freq"] == 0
         )
-        self.tp_q_head_num_ = self.network_config_["num_attention_heads"] // self.world_size_
+        self.tp_q_head_num_ = self.network_config_["num_attention_heads"]
+        if not self.enable_dp:
+            self.tp_q_head_num_ = self.tp_q_head_num_ // self.world_size_
         self.n_routed_experts = self.network_config_["n_routed_experts"]
         self.q_lora_rank = self.network_config_["q_lora_rank"]
         self.qk_nope_head_dim = self.network_config_["qk_nope_head_dim"]
@@ -104,7 +113,10 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             self.rope_weight_name = f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight"
 
     def _init_weight(self):
-        self._init_qkvo()
+        if not self.enable_dp:
+            self._init_qkvo()
+        else:
+            self._init_qkvo_dp()
         if self.is_moe:
             self._init_moe()
         else:
@@ -112,12 +124,13 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self._init_norm()
 
     def _load_q_rope(self, q_weight_):
-        q_split_n_embed_with_rope = (
-            (self.qk_nope_head_dim + self.qk_rope_head_dim) * self.num_attention_heads // self.world_size_
-        )
-        q_weight_ = q_weight_[
-            q_split_n_embed_with_rope * self.tp_rank_ : q_split_n_embed_with_rope * (self.tp_rank_ + 1), :
-        ]
+        if not self.enable_dp:
+            q_split_n_embed_with_rope = (
+                (self.qk_nope_head_dim + self.qk_rope_head_dim) * self.num_attention_heads // self.world_size_
+            )
+            q_weight_ = q_weight_[
+                q_split_n_embed_with_rope * self.tp_rank_ : q_split_n_embed_with_rope * (self.tp_rank_ + 1), :
+            ]
         q_weight_ = q_weight_.transpose(0, 1).contiguous()
         q_nope_proj_, q_rope_proj_ = torch.split(
             q_weight_.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
@@ -239,11 +252,100 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 q_split_n_embed,
             )
 
-    def _load_mlp(self, mlp_prefix, split_inter_size):
-        self.gate_up_proj = MultiROWMMWeight(
-            [f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"], self.data_type_, split_inter_size
+    def _init_qkvo_dp(self):
+        q_split_n_embed = self.qk_nope_head_dim * self.tp_q_head_num_
+        q_split_n_embed_with_rope = (self.qk_nope_head_dim + self.qk_rope_head_dim) * self.num_attention_heads
+        if self.q_lora_rank is None:
+            if not self.disable_qk_absorb:  # acc
+                self.fuse_qk_weight_ = MultiROWMMWeightNoTP(
+                    [
+                        f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
+                        f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
+                    ],
+                    self.data_type_,
+                    [q_split_n_embed_with_rope, self.tp_q_head_num_],
+                )
+                self.fuse_qk_weight_._fuse = partial(fuse_q_kb, self.fuse_qk_weight_, self)
+            else:  # cc
+                self.q_weight_ = ROWMMWeightNoTP(
+                    f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
+                    self.data_type_,
+                    q_split_n_embed_with_rope,
+                )
+        else:
+            self.q_a_proj_ = ROWMMWeightNoTP(
+                f"model.layers.{self.layer_num_}.self_attn.q_a_proj.weight",
+                self.data_type_,
+                self.q_lora_rank,
+            )
+            if not self.disable_qk_absorb:
+                self.fuse_qk_weight_ = MultiROWMMWeightNoTP(
+                    [
+                        f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
+                        f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
+                    ],
+                    self.data_type_,
+                    [q_split_n_embed_with_rope, self.tp_q_head_num_],
+                )
+                self.fuse_qk_weight_._fuse = partial(fuse_q_kb, self.fuse_qk_weight_, self)
+            else:
+                self.q_b_proj_ = ROWMMWeightNoTP(
+                    f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
+                    self.data_type_,
+                    q_split_n_embed_with_rope,
+                )
+
+        self.q_rope_proj_ = ROWMMWeightNoTP(
+            f"model.layers.{self.layer_num_}.self_attn.q_rope_proj.weight",
+            self.data_type_,
+            self.qk_rope_head_dim * self.tp_q_head_num_,
         )
-        self.down_proj = COLMMWeight(f"{mlp_prefix}.down_proj.weight", self.data_type_, split_inter_size)
+
+        self.kv_a_proj_with_mqa_ = ROWMMWeightNoTP(
+            f"model.layers.{self.layer_num_}.self_attn.kv_a_proj_with_mqa.weight",
+            self.data_type_,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+        )
+        if self.disable_qk_absorb:
+            self.k_b_proj_ = ROWBMMWeightNoTp(
+                f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
+                self.data_type_,
+                split_n_embed=self.tp_q_head_num_,
+            )
+        if not self.disable_vo_absorb:
+            self.fuse_vo_weight_ = MultiCOLMMWeightNoTp(
+                [
+                    f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
+                    f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
+                ],
+                self.data_type_,
+                [self.tp_q_head_num_, q_split_n_embed],
+            )
+            self.fuse_vo_weight_._fuse = partial(fuse_vb_o, self.fuse_vo_weight_, self)
+        else:
+            self.v_b_proj_ = COLBMMWeightNoTp(
+                f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
+                self.data_type_,
+                split_n_embed=self.tp_q_head_num_,
+            )
+        if self.disable_vo_absorb:
+            self.o_weight_ = COLMMWeightNoTp(
+                f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
+                self.data_type_,
+                q_split_n_embed,
+            )
+
+    def _load_mlp(self, mlp_prefix, split_inter_size, no_tp=False):
+        if no_tp:
+            self.gate_up_proj = MultiROWMMWeightNoTP(
+                [f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"], self.data_type_, split_inter_size
+            )
+            self.down_proj = COLMMWeightNoTp(f"{mlp_prefix}.down_proj.weight", self.data_type_, split_inter_size)
+        else:
+            self.gate_up_proj = MultiROWMMWeight(
+                [f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"], self.data_type_, split_inter_size
+            )
+            self.down_proj = COLMMWeight(f"{mlp_prefix}.down_proj.weight", self.data_type_, split_inter_size)
 
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
@@ -266,8 +368,8 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
 
     def _init_ffn(self):
         inter_size = self.network_config_["intermediate_size"]
-        split_inter_size = inter_size // self.world_size_
-        self._load_mlp(f"model.layers.{self.layer_num_}.mlp", split_inter_size)
+        num_shards = self.world_size_ if not self.enable_dp else 1
+        self._load_mlp(f"model.layers.{self.layer_num_}.mlp", inter_size // num_shards, no_tp=self.enable_dp)
 
     def _init_norm(self):
         self.att_norm_weight_ = NormWeight(f"model.layers.{self.layer_num_}.input_layernorm.weight", self.data_type_)

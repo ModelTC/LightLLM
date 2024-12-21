@@ -4,9 +4,20 @@ import os
 from lightllm.server.pd_io_struct import KVMoveTask
 from .mem_manager import MemoryManager
 from typing import List
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class Deepseek2MemoryManager(MemoryManager):
+    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
+        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
+        self.enable_dp = os.getenv("ENABLE_DP", "0").upper() in ["ON", "TRUE", "1"]
+        self.holding_size = 1 if self.enable_dp else 0
+        self.mem_state[0 : self.holding_size] = 1
+        self.can_use_mem_size -= self.holding_size
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+
     def get_cell_size(self):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
@@ -84,4 +95,26 @@ class Deepseek2MemoryManager(MemoryManager):
 
     def _write_kv_move_data(self, token_indexes: torch.Tensor, buffer_tensor: torch.Tensor, layer_index):
         self.kv_buffer[layer_index : layer_index + 1, token_indexes, :, :] = buffer_tensor
+        return
+
+    @torch.no_grad()
+    def free_all(self):
+        self.can_use_mem_size = len(self.mem_state) - self.holding_size
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        self.mem_state[:] = 0
+        self.mem_state[0 : self.holding_size] = 1
+
+    @torch.no_grad()
+    def free(self, free_index):
+        """_summary_
+
+        Args:
+            free_index (torch.Tensor): _description_
+        """
+        free_index = free_index.long()
+        self.decrease_refs(free_index)
+        if self.can_use_mem_size + self.holding_size == len(self.mem_state):
+            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
+            if self.holding_size > 0:
+                logger.debug(f"holding gpu mem size {self.holding_size} for dp")
         return

@@ -14,6 +14,8 @@ def alloc_can_use_network_port(num=3, used_nccl_ports=None, from_port_num=10000)
             result = s.connect_ex(("localhost", port))
             if result != 0 and port not in used_nccl_ports:
                 port_list.append(port)
+            if len(port_list) > num * 30:
+                break
 
     if len(port_list) < num:
         return None
