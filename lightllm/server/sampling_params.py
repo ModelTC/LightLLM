@@ -1,7 +1,7 @@
 """Sampling parameters for text generation."""
 import os
 from typing import List, Optional, Union, Tuple
-
+from transformers import GenerationConfig
 from .req_id_generator import MAX_BEST_OF
 
 _SAMPLING_EPS = 1e-5
@@ -10,18 +10,27 @@ DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in ["ON", "T
 
 
 class SamplingParams:
+
+    _do_sample: bool = False
+    _presence_penalty: float = 0.0
+    _frequency_penalty: float = 0.0
+    _repetition_penalty: float = 1.0
+    _temperature: float = 1.0
+    _top_p: float = 1.0
+    _top_k: int = -1  # -1 is for all
+
     def __init__(
         self,
         best_of: int = 1,
         n: int = None,  # number of results
-        do_sample: bool = False,
-        presence_penalty: float = 0.0,
-        frequency_penalty: float = 0.0,
-        repetition_penalty: float = 1.0,
+        do_sample: bool = None,
+        presence_penalty: float = None,
+        frequency_penalty: float = None,
+        repetition_penalty: float = None,
         exponential_decay_length_penalty: Tuple[int, float] = (1, 1.0),
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        top_k: int = -1,  # -1 is for all
+        temperature: float = None,
+        top_p: float = None,
+        top_k: int = None,  # -1 is for all
         ignore_eos: bool = False,
         max_new_tokens: int = 16,
         min_new_tokens: int = 1,
@@ -46,14 +55,18 @@ class SamplingParams:
     ) -> None:
         self.best_of = best_of
         self.n = n
-        self.do_sample = do_sample
-        self.presence_penalty = presence_penalty
-        self.frequency_penalty = frequency_penalty
-        self.repetition_penalty = repetition_penalty
+        self.do_sample = do_sample if do_sample is not None else SamplingParams._do_sample
+        self.presence_penalty = presence_penalty if presence_penalty is not None else SamplingParams._presence_penalty
+        self.frequency_penalty = (
+            frequency_penalty if frequency_penalty is not None else SamplingParams._frequency_penalty
+        )
+        self.repetition_penalty = (
+            repetition_penalty if repetition_penalty is not None else SamplingParams._repetition_penalty
+        )
         self.exponential_decay_length_penalty = exponential_decay_length_penalty
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
+        self.temperature = temperature if temperature is not None else SamplingParams._temperature
+        self.top_p = top_p if top_p is not None else SamplingParams._top_p
+        self.top_k = top_k if top_k is not None else SamplingParams._top_k
         self.ignore_eos = ignore_eos
         self.max_new_tokens = max_new_tokens
         self.min_new_tokens = min_new_tokens
@@ -80,6 +93,20 @@ class SamplingParams:
         if self.n is None:
             self.n = self.best_of
         return
+
+    @classmethod
+    def load_generation_cfg(cls, weight_dir):
+        try:
+            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            cls._do_sample = generation_cfg.get("do_sample", False)
+            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
+            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
+            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
+            cls._temperature = generation_cfg.get("temperature", 1.0)
+            cls._top_p = generation_cfg.get("top_p", 1.0)
+            cls._top_k = generation_cfg.get("top_k", -1)
+        except:
+            pass
 
     def verify(self):
         if self.best_of <= 0 or self.best_of > MAX_BEST_OF:

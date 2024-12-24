@@ -392,4 +392,5 @@ if __name__ == "__main__":
         pd_master_start(g_objs)
     else:
         init_tokenizer(args)  # for openai api
+        SamplingParams.load_generation_cfg(args.model_dir)
         normal_or_p_d_start(g_objs)
