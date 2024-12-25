@@ -67,6 +67,12 @@ def get_tokenizer(
         kwargs["use_fast"] = False
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs)
 
+    if not isinstance(tokenizer, PreTrainedTokenizerFast):
+        logger.info(
+            "Using a slow tokenizer. This might cause a significant "
+            "slowdown. Consider using a fast tokenizer instead."
+        )
+
     model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
     model_type = model_cfg.get("model_type", "")
     if model_type == "llava" or model_type == "internlmxcomposer2":
@@ -79,11 +85,6 @@ def get_tokenizer(
         image_processor = AutoProcessor.from_pretrained(tokenizer_name)
         tokenizer = QWen2VLTokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
     elif model_type == "internvl_chat":
-        tokenizer = InternvlTokenizer(tokenizer, model_cfg)
+        tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
 
-    if not isinstance(tokenizer, PreTrainedTokenizerFast):
-        logger.info(
-            "Using a slow tokenizer. This might cause a significant "
-            "slowdown. Consider using a fast tokenizer instead."
-        )
     return tokenizer

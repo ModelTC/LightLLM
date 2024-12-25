@@ -1,3 +1,4 @@
+import os
 import torch
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
@@ -36,11 +37,11 @@ class AOBaseQuantizationMethod(QuantizationMethod):
     def quantize(self, weight: torch.Tensor):
         """ """
         dummy_linear = torch.nn.Linear(weight.shape[1], weight.shape[0], bias=False)
-        dummy_linear.weight = torch.nn.Parameter(weight.cuda())
+        dummy_linear.weight = torch.nn.Parameter(weight.cuda(self.device_id_))
         quantize_(dummy_linear, self.quant_func)
         return dummy_linear.weight
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None):
+    def apply(self, input_tensor, weights, bias=None, out=None, use_custom_tensor_mananger=True):
         return F.linear(input_tensor, weights, bias)
 
 

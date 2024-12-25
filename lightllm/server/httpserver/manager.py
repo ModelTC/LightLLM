@@ -206,7 +206,7 @@ class HttpServerManager:
             if self.enable_multimodal:
                 assert len(multimodal_params.images) <= self.args.cache_capacity, "too many images!"
                 await self._alloc_multimodal_resources(multimodal_params)
-                prompt_ids = self.tokenizer.encode(prompt, multimodal_params)
+                prompt_ids = self.tokenizer.encode(prompt, multimodal_params, add_special_tokens=add_special_tokens)
             else:
                 prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
             return prompt_ids

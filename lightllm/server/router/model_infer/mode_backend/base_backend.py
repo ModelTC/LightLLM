@@ -39,6 +39,7 @@ from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferBatch, InferReq, InferSamplingParams, requests_mapping
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
+from lightllm.utils.device_utils import set_current_device_id
 
 import torch.distributed as dist
 
@@ -82,6 +83,7 @@ class ModeBackend:
             os.environ["ENABLE_DP"] = "1"
 
         torch.cuda.set_device(self.tp_rank)
+        set_current_device_id(self.tp_rank)
 
         dist.init_process_group(
             "nccl",

@@ -197,7 +197,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--push_interval", type=int, default=10, help="interval of pushing monitoring metrics")
     parser.add_argument(
-        "--visual_infer_batch_size", type=int, default=4, help="number of images to process in each inference batch"
+        "--visual_infer_batch_size", type=int, default=1, help="number of images to process in each inference batch"
     )
     parser.add_argument(
         "--visual_gpu_ids", nargs="+", type=int, default=[0], help="List of GPU IDs to use, e.g., 0 1 2"
@@ -239,6 +239,21 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--quant_cfg",
+        type=str,
+        default=None,
+        help="""Path of quantization config. It can be used for mixed quantization.
+            Examples can be found in lightllm/common/quantization/configs.""",
+    )
+    parser.add_argument(
+        "--vit_quant_type",
+        type=str,
+        default=None,
+        help="""Quantization method: ppl-w4a16-128 | flashllm-w6a16
+                        | ao-int4wo-[32,64,128,256] | ao-int8wo | ao-fp8w8a16 | ao-fp6w6a16
+                        | vllm-w8a8 | vllm-fp8w8a8""",
+    )
+    parser.add_argument(
+        "--vit_quant_cfg",
         type=str,
         default=None,
         help="""Path of quantization config. It can be used for mixed quantization.

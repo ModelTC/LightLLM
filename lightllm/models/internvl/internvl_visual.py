@@ -11,6 +11,7 @@ from transformers import AutoModel, AutoTokenizer
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from io import BytesIO
 from lightllm.models.internvl.img_process import load_image
+from lightllm.models.vit import get_load_image_func
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -24,13 +25,20 @@ class InternVLVisionModel:
         assert torch.cuda.is_available()
         self.dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
         self.config = json.load(open(os.path.join(weight_dir, "config.json")))
-        self.model = AutoModel.from_pretrained(
-            weight_dir,
-            torch_dtype=self.dtype,
-            trust_remote_code=True,
-            language_model="fake_language_model",
+        # self.model = AutoModel.from_pretrained(
+        #     weight_dir,
+        #     torch_dtype=self.dtype,
+        #     trust_remote_code=True,
+        #     language_model="fake_language_model",
+        # )
+        from internvl_chat import InternVLChatModel, InternVLChatConfig
+
+        cfg = InternVLChatConfig.from_pretrained(weight_dir)
+        self.model = InternVLChatModel.from_pretrained(
+            weight_dir, config=cfg, torch_dtype=self.dtype, language_model="fake_language_model"
         )
         self.model.eval().cuda()
+        self.load_image_func = get_load_image_func(weight_dir)
 
     def cuda(self):
         return self
@@ -46,7 +54,7 @@ class InternVLVisionModel:
                 uuids.append(url)
                 image_data = read_shm(get_shm_name_data(url))
                 image_data = Image.open(BytesIO(image_data))
-                t = load_image(image_data)
+                t = self.load_image_func(image_data)
                 img_tensors.append(t)
             else:
                 raise Exception("Unsupport input types: {} for {}".format(type(url), url))

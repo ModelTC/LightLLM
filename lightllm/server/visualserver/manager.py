@@ -70,6 +70,8 @@ class VisualManager:
                     "data_type": self.args.data_type,
                     "visual_nccl_port": self.args.visual_nccl_ports[dp_rank_id],
                     "visual_gpu_ids": self.args.visual_gpu_ids,
+                    "quant_type": self.args.vit_quant_type,
+                    "quant_cfg": self.args.vit_quant_cfg,
                 }
                 init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)

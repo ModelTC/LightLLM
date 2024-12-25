@@ -1,3 +1,4 @@
+import torch
 from .base_weight import BaseWeightTpl
 
 
@@ -12,9 +13,9 @@ class NormWeight(BaseWeightTpl):
 
     def load_hf_weights(self, weights):
         if self.weight_name in weights:
-            self.weight = weights[self.weight_name].to(self.data_type_).cuda(self.tp_rank_)
+            self.weight = weights[self.weight_name].to(self.data_type_).cuda(self.device_id_)
         if self.bias_name in weights:
-            self.bias = weights[self.bias_name].to(self.data_type_).cuda(self.tp_rank_)
+            self.bias = weights[self.bias_name].to(self.data_type_).cuda(self.device_id_)
 
     def verify_load(self):
         load_ok = True
@@ -32,7 +33,7 @@ class GEMMANormWeight(NormWeight):
 
     def load_hf_weights(self, weights):
         if self.weight_name in weights:
-            self.weight = (weights[self.weight_name] + 1).to(self.data_type_).cuda(self.tp_rank_)
+            self.weight = (weights[self.weight_name] + 1).to(self.data_type_).cuda(self.device_id_)
 
 
 class TpNormWeight(NormWeight):
@@ -41,10 +42,10 @@ class TpNormWeight(NormWeight):
         self.split_n_embed = split_n_embed
 
     def load_hf_weights(self, weights):
-        start = self.offset + self.split_n_embed * self.tp_rank_
-        end = self.offset + self.split_n_embed * (self.tp_rank_ + 1)
+        start = self.split_n_embed * self.tp_rank_
+        end = self.split_n_embed * (self.tp_rank_ + 1)
 
         if self.weight_name in weights:
-            self.weight = weights[self.weight_name][start:end].to(self.data_type_).cuda(self.tp_rank_)
+            self.weight = weights[self.weight_name][start:end].to(self.data_type_).cuda(self.device_id_)
         if self.bias_name in weights:
-            self.bias = weights[self.bias_name][start:end].to(self.data_type_).cuda(self.tp_rank_)
+            self.bias = weights[self.bias_name][start:end].to(self.data_type_).cuda(self.device_id_)

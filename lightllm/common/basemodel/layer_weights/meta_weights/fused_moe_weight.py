@@ -1,12 +1,13 @@
+import os
 import torch
 from .base_weight import BaseWeight
 from lightllm.utils.dist_utils import get_world_size, get_rank
 import threading
 from lightllm.common.quantization import vLLMFP8w8a8QuantizationMethod
-import os
 
 from lightllm.common.vllm_kernel import _custom_ops as ops
 from lightllm.common.fused_moe import fused_experts
+from lightllm.utils.device_utils import get_current_device_id
 
 
 class FusedMoeWeight(BaseWeight):
@@ -178,10 +179,8 @@ class FusedMoeWeight(BaseWeight):
             self._fuse()
 
     def _cuda(self, cpu_tensor):
-        if self.tp_rank_ is None:
-            return cpu_tensor.contiguous().to(self.data_type_).cuda()
-        else:
-            return cpu_tensor.contiguous().to(self.data_type_).cuda(self.tp_rank_)
+        device_id = get_current_device_id()
+        return cpu_tensor.contiguous().to(self.data_type_).cuda(device_id)
 
     def verify_load(self):
         if os.environ.get("ETP_MODE_ENABLED") == "true":

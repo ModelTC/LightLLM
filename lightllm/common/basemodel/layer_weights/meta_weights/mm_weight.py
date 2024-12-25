@@ -28,7 +28,9 @@ class MMWeightTpl(BaseWeightTpl):
 
     def mm(self, input_tensor, out=None, use_custom_tensor_mananger=True):
         if self.quant_method is not None:
-            return self.quant_method.apply(input_tensor, self.weight, self.bias, out)
+            return self.quant_method.apply(
+                input_tensor, self.weight, self.bias, out, use_custom_tensor_mananger=use_custom_tensor_mananger
+            )
         if out is None:
             shape = (input_tensor.shape[0], self.weight.shape[1])
             dtype = input_tensor.dtype
@@ -47,9 +49,9 @@ class MMWeightTpl(BaseWeightTpl):
                 if all(w is not None for w in [self.weight, self.weight_scale, self.input_scale]):
                     self.weight = self.quant_method.quantize((self.weight, self.weight_scale, self.input_scale))
             else:
-                self.weight = self.quant_method.quantize(self.weight.to(self.data_type_).cuda(self.tp_rank_))
+                self.weight = self.quant_method.quantize(self.weight.to(self.data_type_).cuda(self.device_id_))
             return
-        self.weight = self.weight.to(self.data_type_).transpose(0, 1).cuda(self.tp_rank_)
+        self.weight = self.weight.to(self.data_type_).transpose(0, 1).cuda(self.device_id_)
 
 
 class MMWeight(MMWeightTpl):
@@ -84,7 +86,7 @@ class ROWMMWeight(MMWeight):
             self.weight = weight[self.start : self.end]
         if self.bias_name in weights:
             bias = weights[self.bias_name].to(self.data_type_)[self.start : self.end]
-            self.bias = bias.cuda(self.tp_rank_)
+            self.bias = bias.cuda(self.device_id_)
 
         if STATIC_QUANT and self.weight_scale_name in weights:
             weight_scale = weights[self.weight_scale_name].to(torch.float)[self.start : self.end]
@@ -120,7 +122,7 @@ class COLMMWeight(MMWeight):
             self.weight = weight[:, self.start : self.end]
         if self.bias_name in weights:
             bias = weights[self.bias_name]
-            self.bias = (bias / self.world_size_).to(self.data_type_).cuda(self.tp_rank_)
+            self.bias = (bias / self.world_size_).to(self.data_type_).cuda(self.device_id_)
 
         if STATIC_QUANT and self.weight_scale_name in weights:
             weight_scale = weights[self.weight_scale_name].to(torch.float)
@@ -211,7 +213,7 @@ class MultiROWMMWeight(MultiMMWeight):
 
         if self.has_bias:
             if self.bias is None and all(b is not None for b in self.biases):
-                self.bias = torch.cat(self.biases, dim=0).cuda(self.tp_rank_)
+                self.bias = torch.cat(self.biases, dim=0).cuda(self.device_id_)
         return self
 
     def load_hf_weights(self, weights):
@@ -308,7 +310,7 @@ class BMMWeightTpl(BaseWeightTpl):
         return torch.addbmm(self.bias, input_tensor, self.weight, out=out)
 
     def _post_load_weights(self):
-        self.weight = self.weight.cuda(self.tp_rank_)
+        self.weight = self.weight.cuda(self.device_id_)
 
 
 class BMMWeight(BMMWeightTpl):
@@ -370,7 +372,7 @@ class COLBMMWeight(BMMWeight):
         super().__init__(weight_name, data_type, split_n_embed, bias_name)
 
     def _post_load_weights(self):
-        self.weight = self.weight.transpose(0, 1).cuda(self.tp_rank_)
+        self.weight = self.weight.transpose(0, 1).cuda(self.device_id_)
 
 
 class COLBMMWeightNoTp(BMMWeight):

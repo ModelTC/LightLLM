@@ -1,3 +1,4 @@
+import os
 import torch
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
@@ -32,14 +33,14 @@ class vLLMw8a8QuantizationMethod(vLLMBaseQuantizationMethod):
 
     def quantize(self, weight: torch.Tensor):
         if isinstance(weight, tuple):
-            return (weight[0].transpose(0, 1).cuda(),) + weight[1:]
+            return (weight[0].transpose(0, 1).cuda(self.device_id_),) + weight[1:]
         weight = weight.float()
         scale = weight.abs().max(dim=-1)[0] / 127
         weight = weight.transpose(0, 1) / scale.reshape(1, -1)
         weight = torch.round(weight.clamp(min=-128, max=127)).to(dtype=torch.int8)
-        return weight.cuda(), scale.cuda()
+        return weight.cuda(self.device_id_), scale.cuda(self.device_id_)
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None):
+    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
         input_scale = None
         if len(weights) == 3:
             qweight, weight_scale, input_scale = weights
@@ -52,9 +53,12 @@ class vLLMw8a8QuantizationMethod(vLLMBaseQuantizationMethod):
         m = input_tensor.shape[0]
         n = qweight.shape[1]
         if out is None:
-            out = g_cache_manager.alloc_tensor(
-                (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
-            )
+            if use_custom_tensor_mananger:
+                out = g_cache_manager.alloc_tensor(
+                    (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
+                )
+            else:
+                out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         torch.ops._C.cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
         return out
 
@@ -69,7 +73,7 @@ class vLLMFP8w8a8QuantizationMethod(vLLMBaseQuantizationMethod):
         if self.is_moe:
             return self.quantize_moe(weight)
         qweight, weight_scale = ops.scaled_fp8_quant(
-            weight.contiguous().cuda(), scale=None, use_per_token_if_dynamic=True
+            weight.contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
         )
         return qweight.transpose(0, 1), weight_scale
 
@@ -77,23 +81,26 @@ class vLLMFP8w8a8QuantizationMethod(vLLMBaseQuantizationMethod):
         num_experts = weight.shape[0]
         qweights = []
         weight_scales = []
-        qweights = torch.empty_like(weight, dtype=torch.float8_e4m3fn).cuda()
+        qweights = torch.empty_like(weight, dtype=torch.float8_e4m3fn).cuda(self.device_id_)
         for i in range(num_experts):
             qweight, weight_scale = ops.scaled_fp8_quant(
-                weight[i].contiguous().cuda(), scale=None, use_per_token_if_dynamic=False
+                weight[i].contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=False
             )
             qweights[i] = qweight
             weight_scales.append(weight_scale)
         weight_scale = torch.cat(weight_scales, dim=0).reshape(-1)
         return qweights, weight_scale
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None):
+    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
         x_q, x_scale = ops.scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
         m = input_tensor.shape[0]
         n = weights[0].shape[1]
         if out is None:
-            out = g_cache_manager.alloc_tensor(
-                (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
-            )
+            if use_custom_tensor_mananger:
+                out = g_cache_manager.alloc_tensor(
+                    (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
+                )
+            else:
+                out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         torch.ops._C.cutlass_scaled_mm(out, x_q, weights[0], x_scale, weights[1], bias)
         return out

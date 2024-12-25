@@ -13,7 +13,9 @@ from lightllm.models.internvl.layer_weights.pre_and_post_layer_weight import (
 )
 from lightllm.models.internvl.layer_weights.pre_and_post_layer_weight import InternVLInternlm2PreAndPostLayerWeight
 from lightllm.models.llava.llava_visual import LlavaVisionModel
-from lightllm.models.internvl.img_process import get_image_patch
+
+# from lightllm.models.internvl.img_process import get_image_patch
+from lightllm.models.vit import get_image_patch_func
 from typing import Dict
 import lightllm.models.internvl.internvl_visual
 import torch
@@ -36,9 +38,10 @@ class InternvlTokenizer:
 
         self.image_end_tag = IMG_END_TOKEN
         self.image_end_id = tokenizer.convert_tokens_to_ids(self.image_end_tag)
+        self.get_image_patch_func = get_image_patch_func(kwargs["weight_dir"])
 
     def get_image_token_length(self, img: ImageItem):
-        return get_image_patch(img.image_w, img.image_h, use_thumbnail=True) * self.image_length
+        return self.get_image_patch_func(img.image_w, img.image_h, use_thumbnail=True) * self.image_length
 
     # only change the impl of the encode func:
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
@@ -47,7 +50,7 @@ class InternvlTokenizer:
         image_count = len(multimodal_params.images)
         prompt = prompt.replace(IMG_TOKEN, image_tokens, image_count)
 
-        origin_ids = self.tokenizer.encode(prompt)
+        origin_ids = self.tokenizer.encode(prompt, add_special_tokens=kwargs["add_special_tokens"])
         # <img></img> --> <img>id,id+1...id+num</img>
         input_ids = []
         image_id = 0
