@@ -363,17 +363,22 @@ if __name__ == "__main__":
     from lightllm.utils.tuning_utils import mp_tuning
     from lightllm.common.fused_moe.moe_kernel_configs import MoeGroupedGemmKernelConfig
 
-    # tuning to get deepseekv2 large configs and store in H800
+    # tuning to get deepseekv2 large configs and store in H800, tp 8
+    expert_num = 160
+    n = 192  # up is n * 2
+    hidden_dim = 5120
+    topk_num = 6
+
     up_dict = {}
     for m in [1, 8, 64, 128, 256, 512, 1024, 4096, 8192]:
         ans = mp_tuning(
             tuning_configs,
             {
-                "expert_num": 160,
+                "expert_num": expert_num,
                 "m": m,
-                "n": 192,
-                "k": 5120,
-                "topk": 6,
+                "n": n,
+                "k": hidden_dim,
+                "topk": topk_num,
                 "dtype": torch.bfloat16,
                 "test_count": 20,
                 "use_fp8_w8a8": True,
@@ -382,10 +387,10 @@ if __name__ == "__main__":
         )
         up_dict[m] = ans
         MoeGroupedGemmKernelConfig.save_config(
-            N=192 * 2,
-            K=5120,
-            topk_num=6,
-            expert_num=160,
+            N=n * 2,
+            K=hidden_dim,
+            topk_num=topk_num,
+            expert_num=expert_num,
             mul_routed_weight=False,
             use_fp8_w8a8=True,
             out_dtype=str(torch.bfloat16),
@@ -397,11 +402,11 @@ if __name__ == "__main__":
         ans = mp_tuning(
             tuning_configs,
             {
-                "expert_num": 160,
+                "expert_num": expert_num,
                 "m": m,
-                "n": 192,
-                "k": 5120,
-                "topk": 6,
+                "n": n,
+                "k": hidden_dim,
+                "topk": topk_num,
                 "dtype": torch.bfloat16,
                 "test_count": 20,
                 "use_fp8_w8a8": True,
@@ -411,10 +416,10 @@ if __name__ == "__main__":
         down_dict[m] = ans
 
         MoeGroupedGemmKernelConfig.save_config(
-            N=5120,
-            K=192,
+            N=hidden_dim,
+            K=n,
             topk_num=1,
-            expert_num=160,
+            expert_num=expert_num,
             mul_routed_weight=True,
             use_fp8_w8a8=True,
             out_dtype=str(torch.bfloat16),
