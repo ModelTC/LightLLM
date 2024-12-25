@@ -1,7 +1,7 @@
-FROM nvidia/cuda:11.8.0-runtime-ubuntu20.04 as base
-ARG PYTORCH_VERSION=2.4.0
+FROM nvidia/cuda:12.4.0-runtime-ubuntu20.04 as base
+ARG PYTORCH_VERSION=2.5.1
 ARG PYTHON_VERSION=3.9
-ARG CUDA_VERSION=11.8
+ARG CUDA_VERSION=12.4
 ARG MAMBA_VERSION=23.1.0-1
 ARG TARGETPLATFORM
 
@@ -36,8 +36,7 @@ RUN case ${TARGETPLATFORM} in \
 WORKDIR /root
 
 COPY ./requirements.txt /lightllm/requirements.txt
-RUN pip install -r /lightllm/requirements.txt --no-cache-dir --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu118
-RUN pip install nvidia-nccl-cu12==2.20.5
+RUN pip install -r /lightllm/requirements.txt --no-cache-dir --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu124
 
 COPY . /lightllm
 RUN pip install -e /lightllm --no-cache-dir

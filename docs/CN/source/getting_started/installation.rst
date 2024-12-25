@@ -67,14 +67,13 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $ git clone https://github.com/ModelTC/lightllm.git
     $ cd lightllm
     $
-    $ # 安装lightllm的依赖 (cuda 11.8)
-    $ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
-    $
-    $ # 这个版本的 nccl 可以支持 torch cuda graph
-    $ pip install nvidia-nccl-cu12==2.20.5
+    $ # 安装lightllm的依赖 (cuda 12.4)
+    $ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
     $
     $ # 安装lightllm
     $ python setup.py install
+
+NOTE: 如果您出于一些原因使用了cuda 11.x的torch, 请运行 `pip install nvidia-nccl-cu12==2.20.5` 以支持 torch cuda graph.
 
 .. note::
 

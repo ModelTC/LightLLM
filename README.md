@@ -76,14 +76,14 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 
 ### Requirements
 
-The code has been tested with Pytorch>=1.3, CUDA 11.8, and Python 3.9. To install the necessary dependencies, please refer to the provided **requirements.txt** and follow the instructions as
+The code has been tested with Pytorch>=1.3, CUDA 12.4, and Python 3.9. To install the necessary dependencies, please refer to the provided **requirements.txt** and follow the instructions as
 
 ~~~shell
-# for cuda 11.8
-pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
-# this version nccl can support torch cuda graph 
-pip install nvidia-nccl-cu12==2.20.5
+# for cuda 12.4
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
 ~~~
+
+NOTE: If you are using torch with cuda 11.x instead, run `pip install nvidia-nccl-cu12==2.20.5` to support torch cuda graph.
 
 ### Container
 

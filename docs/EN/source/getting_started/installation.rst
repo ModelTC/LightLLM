@@ -71,12 +71,12 @@ You can also install Lightllm from source:
     $ cd lightllm
     $
     $ # Install Lightllm's dependencies
-    $ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
-    $
-    $ pip install nvidia-nccl-cu12==2.20.5
+    $ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
     $
     $ # Install Lightllm
     $ python setup.py install
+
+NOTE: If you are using torch with cuda 11.x instead, run `pip install nvidia-nccl-cu12==2.20.5` to support torch cuda graph.
 
 .. note::
 
