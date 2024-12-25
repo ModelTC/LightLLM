@@ -31,9 +31,9 @@ class MlaDecodeAttentionKernelConfig(KernelConfigs):
         if finded_config:
             # two search dim, first is avg_seq_len_in_batch, second is batch_size
             batch_size_config: dict = finded_config[
-                min(finded_config.keys(), key=lambda x: abs(x - avg_seq_len_in_batch))
+                min(finded_config.keys(), key=lambda x: abs(int(x) - avg_seq_len_in_batch))
             ]
-            config = batch_size_config[min(batch_size_config.keys(), key=lambda x: abs(x - batch_size))]
+            config = batch_size_config[min(batch_size_config.keys(), key=lambda x: abs(int(x) - batch_size))]
 
             return config
         else:
