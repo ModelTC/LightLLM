@@ -259,13 +259,14 @@ def flash_decode_stage1(
     mid_out_logsumexp,
     block_seq,
     softmax_scale,
+    **run_config,
 ):
-    if hasattr(os, "tuning_config"):
-        BLOCK_SEQ = os.tuning_config["BLOCK_SEQ"]
-        BLOCK_N = os.tuning_config["BLOCK_N"]
-        BLOCK_Q_HEAD = os.tuning_config["BLOCK_Q_HEAD"]
-        num_warps = os.tuning_config["stage1_num_warps"]
-        num_stages = os.tuning_config["stage1_num_stages"]
+    if run_config:
+        BLOCK_SEQ = run_config["BLOCK_SEQ"]
+        BLOCK_N = run_config["BLOCK_N"]
+        BLOCK_Q_HEAD = run_config["BLOCK_Q_HEAD"]
+        num_warps = run_config["stage1_num_warps"]
+        num_stages = run_config["stage1_num_stages"]
     else:
         BLOCK_SEQ = block_seq
         BLOCK_N = 16

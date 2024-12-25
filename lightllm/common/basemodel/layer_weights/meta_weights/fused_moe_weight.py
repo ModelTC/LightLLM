@@ -50,7 +50,10 @@ class FusedMoeWeight(BaseWeight):
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2
         use_fp8_w8a8 = self.quant_method is not None
-        fused_experts(
+
+        from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
+
+        fused_experts_impl(
             hidden_states=input_tensor,
             w1=w1,
             w2=w2,
@@ -61,6 +64,7 @@ class FusedMoeWeight(BaseWeight):
             w1_scale=w1_scale,
             w2_scale=w2_scale,
         )
+        return
 
     def _fuse(self):
         with self.lock:

@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-package_data = {"lightllm": ["models/deepseek2/layer_infer/vllm_configs/*.json"]}
+package_data = {"lightllm": ["common/all_kernel_configs/*/*.json"]}
 setup(
     name="lightllm",
     version="3.0.0",
