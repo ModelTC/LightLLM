@@ -198,7 +198,7 @@ if __name__ == "__main__":
     # tuning to get silu and mul
     for n in [128, 192, 256, 512, 1024, 1408, 2048, 4096, 8192]:
         json_dict = {}
-        for m in [1, 8, 64, 128, 256, 512, 1024, 2048, 4096, 8192]:
+        for m in [1, 8, 64, 128, 200, 256, 512, 1024, 2048, 4096, 8192]:
             ans = mp_tuning(
                 tuning_configs,
                 {

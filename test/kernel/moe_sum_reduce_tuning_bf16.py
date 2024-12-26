@@ -107,7 +107,7 @@ def get_test_configs(split_id, split_count):
         [1, 2, 4, 8, 16, 32],
         [64, 128, 256, 512, 1024],
         [1, 2, 4, 8, 16],
-        [1, 2, 3, 4, 5],
+        [1, 2, 3, 4, 5, 6, 7, 8],
     )
     for BLOCK_M, BLOCK_DIM, num_warps, NUM_STAGE in result:
 
@@ -211,7 +211,7 @@ if __name__ == "__main__":
     for hidden_dim in [1024, 2048, 4096, 5120, 8192]:
         for topk_num in [1, 6]:
             json_dict = {}
-            for m in [1, 8, 64, 128, 256, 512, 1024, 2048, 4096, 8192]:
+            for m in [1, 8, 64, 128, 200, 256, 512, 1024, 2048, 4096, 8192]:
                 ans = mp_tuning(
                     tuning_configs,
                     {
