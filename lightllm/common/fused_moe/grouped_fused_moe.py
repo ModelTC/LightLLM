@@ -31,6 +31,8 @@ from lightllm.utils.device_utils import (
     get_device_warp_size,
 )
 from .moe_kernel_configs import MoeGroupedGemmKernelConfig
+from .moe_silu_and_mul import silu_and_mul_fwd
+from .moe_sum_reduce import moe_sum_reduce
 
 FFN_MOE_CHUNK_SIZE = 8 * 1024
 
@@ -569,7 +571,7 @@ def fused_experts_impl(
             **run_config,
         )
 
-        ops.silu_and_mul(intermediate_cache2.view(-1, N // 2), intermediate_cache1.view(-1, N))
+        silu_and_mul_fwd(intermediate_cache1.view(-1, N), intermediate_cache2.view(-1, N // 2))
 
         grouped_matmul(
             intermediate_cache2.view(-1, N // 2),
@@ -587,7 +589,7 @@ def fused_experts_impl(
             **run_config,
         )
 
-        ops.moe_sum(
+        moe_sum_reduce(
             intermediate_cache3.view(*intermediate_cache3.shape), out_hidden_states[begin_chunk_idx:end_chunk_idx]
         )
     return out_hidden_states

@@ -22,7 +22,7 @@ except ImportError:
             num_expert_group: Optional[int] = None,
             custom_routing_function: Optional[Callable] = None,
         ):
-            from lightllm.common.fused_moe import fused_topk, grouped_topk
+            from lightllm.common.fused_moe.topk_select import fused_topk, grouped_topk
 
             # DeekSeekv2 uses grouped_top_k
             if use_grouped_topk:

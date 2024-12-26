@@ -362,7 +362,7 @@ if __name__ == "__main__":
 
     # tuning to get deepseekv2 lite configs and store tp 1
     expert_num = 64
-    n = 1408 // 2  # up is n * 2
+    n = 1408  # up is n * 2
     hidden_dim = 2048
     topk_num = 6
 

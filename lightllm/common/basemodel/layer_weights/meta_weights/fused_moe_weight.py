@@ -6,7 +6,6 @@ import threading
 from lightllm.common.quantization import vLLMFP8w8a8QuantizationMethod
 
 from lightllm.common.vllm_kernel import _custom_ops as ops
-from lightllm.common.fused_moe import fused_experts
 from lightllm.utils.device_utils import get_current_device_id
 
 

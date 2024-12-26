@@ -6,7 +6,6 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.mistral.layer_infer.transformer_layer_infer import MistralTransformerLayerInfer
 from lightllm.models.mixtral.layer_infer._custom_ops import fused_topk
 from lightllm.models.mixtral.layer_weights.transformer_layer_weight import MixtralTransformerLayerWeight
-from lightllm.common.fused_moe import fused_experts
 
 
 class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
@@ -29,14 +28,17 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
             renormalize=self.renormalize,
             alloc_tensor_func=self.alloc_tensor,
         )
-        # print(topk_weights, topk_ids)
+        from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
 
-        return fused_experts(
+        return fused_experts_impl(
             hidden_states=hidden_states,
             w1=layer_weight.experts.w1,
             w2=layer_weight.experts.w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
+            use_fp8_w8a8=False,
+            w1_scale=None,
+            w2_scale=None,
             alloc_tensor_func=self.alloc_tensor,
         )
