@@ -1,5 +1,6 @@
-import base64
+import asyncio
 import numpy as np
+from dataclasses import dataclass
 from lightllm.server.sampling_params import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.httpserver.manager import HttpServerManager
@@ -14,13 +15,41 @@ _g_health_req_id_gen = ReqIDGenerator()
 _g_health_req_id_gen.generate_id()
 
 
-async def health_check(args, httpserver_manager: HttpServerManager, request: Request):
-    try:
+@dataclass
+class HealthObj:
+    _is_health: bool = True
+    _is_health_checking: bool = False
 
+    def begin_check(self):
+        self._is_health_checking = True
+
+    def end_check(self):
+        self._is_health_checking = False
+
+    def set_unhealth(self):
+        self._is_health = False
+
+    def set_health(self):
+        self._is_health = True
+
+    def is_health(self):
+        return self._is_health
+
+    def is_checking(self):
+        return self._is_health_checking
+
+
+health_obj = HealthObj()
+
+
+async def health_check(args, httpserver_manager: HttpServerManager, request: Request):
+    if health_obj.is_checking():
+        return health_obj.is_health()
+    health_obj.begin_check()
+    try:
         request_dict = {"inputs": "你好！", "parameters": {"do_sample": True, "temperature": 0.8, "max_new_tokens": 2}}
         if args.run_mode == "prefill":
             request_dict["parameters"]["max_new_tokens"] = 1
-
         prompt = request_dict.pop("inputs")
         sample_params_dict = request_dict["parameters"]
         sampling_params = SamplingParams(**sample_params_dict)
@@ -29,11 +58,21 @@ async def health_check(args, httpserver_manager: HttpServerManager, request: Req
             sampling_params.group_request_id = -_g_health_req_id_gen.generate_id()  # health monitor 的 id 是负的
         multimodal_params_dict = request_dict.get("multimodal_params", {})
         multimodal_params = MultimodalParams(**multimodal_params_dict)
-
         results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request)
-        async for _, _, _, _ in results_generator:
-            pass
-        return True
+
+        async def check_timeout(results_generator):
+            async for _, _, _, _ in results_generator:
+                pass
+
+        try:
+            await asyncio.wait_for(check_timeout(results_generator), timeout=88)
+            health_obj.set_health()
+        except asyncio.TimeoutError:
+            health_obj.set_unhealth()
+        return health_obj.is_health()
     except Exception as e:
         logger.exception(str(e))
-        return False
+        health_obj.set_unhealth()
+        return health_obj.is_health()
+    finally:
+        health_obj.end_check()
