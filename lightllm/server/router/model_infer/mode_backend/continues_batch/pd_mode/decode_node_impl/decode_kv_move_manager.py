@@ -22,6 +22,7 @@ from lightllm.utils.retry_utils import retry
 import numpy as np
 import queue
 from rpyc import AsyncResult
+from lightllm.utils.device_utils import kv_trans_use_p2p
 
 logger = init_logger(__name__)
 
@@ -99,6 +100,14 @@ class TransProcessObj:
             self.check_trans_process(raise_exception=raise_exception)
         return
 
+    def _transfer_kv(self, move_tasks: List[KVMoveTask]):
+        with self.manager.device_locks[self.device_index]:
+            self.task_in_queue.put(move_tasks.copy(), timeout=10)
+            assert self.task_out_queue.get(timeout=60) == "ok"
+            logger.info(f"_transfer_kv ok {move_tasks[0].to_decode_log_info()}")
+            self.move_finished_queue.put_list(move_tasks)
+            move_tasks.clear()
+
     def kv_move_loop(self):
         func_name = self.kv_move_loop.__name__
         while not self.has_error:
@@ -117,13 +126,12 @@ class TransProcessObj:
 
             try:
                 self.timer_to_check_status(raise_exception=True)
-                with self.manager.kv_trans_lock:
-                    with self.manager.device_locks[self.device_index]:
-                        self.task_in_queue.put(move_tasks.copy(), timeout=10)
-                        assert self.task_out_queue.get(timeout=60) == "ok"
-                        logger.info(f"{func_name} transfer kv ok {move_tasks[0].to_decode_log_info()}")
-                        self.move_finished_queue.put_list(move_tasks)
-                        move_tasks.clear()
+
+                if not kv_trans_use_p2p():
+                    with self.manager.kv_trans_lock:
+                        self._transfer_kv(move_tasks)
+                else:
+                    self._transfer_kv(move_tasks)
 
             except BaseException as e:
                 logger.exception(str(e))

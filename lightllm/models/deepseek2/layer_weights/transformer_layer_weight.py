@@ -66,27 +66,9 @@ def fuse_vb_o(self, layer_weight):
 
 
 class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
-    def __init__(
-        self,
-        layer_num,
-        tp_rank,
-        world_size,
-        data_type,
-        network_config,
-        mode=[],
-        quant_cfg=None,
-        disable_qk_absorb=False,
-        disable_vo_absorb=False,
-    ):
-        self.disable_qk_absorb = disable_qk_absorb
-        self.disable_vo_absorb = disable_vo_absorb
+    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[], quant_cfg=None):
         self.enable_dp = os.getenv("ENABLE_DP", "0").upper() in ["ON", "TRUE", "1"]
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode, quant_cfg)
-        # mla_type = "ACCM", "MIX"
-        # MIX是prefilled CC，decoding ACC
-        self.mla_type = "MIX"
-        if not disable_vo_absorb or not disable_qk_absorb:
-            self.mla_type = "ACCM"
         return
 
     def _parse_config(self):
@@ -173,44 +155,22 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             (self.qk_nope_head_dim + self.qk_rope_head_dim) * self.num_attention_heads // self.world_size_
         )
         if self.q_lora_rank is None:
-            if not self.disable_qk_absorb:
-                self.fuse_qk_weight_ = MultiROWMMWeight(
-                    [
-                        f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
-                        f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
-                    ],
-                    self.data_type_,
-                    [q_split_n_embed_with_rope, self.tp_q_head_num_],
-                )
-                self.fuse_qk_weight_._fuse = partial(fuse_q_kb, self.fuse_qk_weight_, self)
-            else:
-                self.q_weight_ = ROWMMWeight(
-                    f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
-                    self.data_type_,
-                    q_split_n_embed_with_rope,
-                )
+            self.q_weight_ = ROWMMWeight(
+                f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
+                self.data_type_,
+                q_split_n_embed_with_rope,
+            )
         else:
             self.q_a_proj_ = ROWMMWeightNoTP(
                 f"model.layers.{self.layer_num_}.self_attn.q_a_proj.weight",
                 self.data_type_,
                 self.q_lora_rank,
             )
-            if not self.disable_qk_absorb:
-                self.fuse_qk_weight_ = MultiROWMMWeight(
-                    [
-                        f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
-                        f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
-                    ],
-                    self.data_type_,
-                    [q_split_n_embed_with_rope, self.tp_q_head_num_],
-                )
-                self.fuse_qk_weight_._fuse = partial(fuse_q_kb, self.fuse_qk_weight_, self)
-            else:
-                self.q_b_proj_ = ROWMMWeight(
-                    f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
-                    self.data_type_,
-                    q_split_n_embed_with_rope,
-                )
+            self.q_b_proj_ = ROWMMWeight(
+                f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
+                self.data_type_,
+                q_split_n_embed_with_rope,
+            )
 
         self.q_rope_proj_ = ROWMMWeightNoTP(
             f"model.layers.{self.layer_num_}.self_attn.q_rope_proj.weight",
@@ -223,77 +183,43 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             self.data_type_,
             self.kv_lora_rank + self.qk_rope_head_dim,
         )
-        if self.disable_qk_absorb:
-            self.k_b_proj_ = ROWBMMWeight(
-                f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
-                self.data_type_,
-                split_n_embed=self.tp_q_head_num_,
-            )
-        if not self.disable_vo_absorb:
-            self.fuse_vo_weight_ = MultiCOLMMWeight(
-                [
-                    f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
-                    f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
-                ],
-                self.data_type_,
-                [self.tp_q_head_num_, q_split_n_embed],
-            )
-            self.fuse_vo_weight_._fuse = partial(fuse_vb_o, self.fuse_vo_weight_, self)
-        else:
-            self.v_b_proj_ = COLBMMWeight(
-                f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
-                self.data_type_,
-                split_n_embed=self.tp_q_head_num_,
-            )
-        if self.disable_vo_absorb:
-            self.o_weight_ = COLMMWeight(
-                f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
-                self.data_type_,
-                q_split_n_embed,
-            )
+        self.k_b_proj_ = ROWBMMWeight(
+            f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
+            self.data_type_,
+            split_n_embed=self.tp_q_head_num_,
+        )
+        self.v_b_proj_ = COLBMMWeight(
+            f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
+            self.data_type_,
+            split_n_embed=self.tp_q_head_num_,
+        )
+
+        self.o_weight_ = COLMMWeight(
+            f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
+            self.data_type_,
+            q_split_n_embed,
+        )
 
     def _init_qkvo_dp(self):
         q_split_n_embed = self.qk_nope_head_dim * self.tp_q_head_num_
         q_split_n_embed_with_rope = (self.qk_nope_head_dim + self.qk_rope_head_dim) * self.num_attention_heads
         if self.q_lora_rank is None:
-            if not self.disable_qk_absorb:  # acc
-                self.fuse_qk_weight_ = MultiROWMMWeightNoTP(
-                    [
-                        f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
-                        f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
-                    ],
-                    self.data_type_,
-                    [q_split_n_embed_with_rope, self.tp_q_head_num_],
-                )
-                self.fuse_qk_weight_._fuse = partial(fuse_q_kb, self.fuse_qk_weight_, self)
-            else:  # cc
-                self.q_weight_ = ROWMMWeightNoTP(
-                    f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
-                    self.data_type_,
-                    q_split_n_embed_with_rope,
-                )
+            self.q_weight_ = ROWMMWeightNoTP(
+                f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
+                self.data_type_,
+                q_split_n_embed_with_rope,
+            )
         else:
             self.q_a_proj_ = ROWMMWeightNoTP(
                 f"model.layers.{self.layer_num_}.self_attn.q_a_proj.weight",
                 self.data_type_,
                 self.q_lora_rank,
             )
-            if not self.disable_qk_absorb:
-                self.fuse_qk_weight_ = MultiROWMMWeightNoTP(
-                    [
-                        f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
-                        f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
-                    ],
-                    self.data_type_,
-                    [q_split_n_embed_with_rope, self.tp_q_head_num_],
-                )
-                self.fuse_qk_weight_._fuse = partial(fuse_q_kb, self.fuse_qk_weight_, self)
-            else:
-                self.q_b_proj_ = ROWMMWeightNoTP(
-                    f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
-                    self.data_type_,
-                    q_split_n_embed_with_rope,
-                )
+            self.q_b_proj_ = ROWMMWeightNoTP(
+                f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
+                self.data_type_,
+                q_split_n_embed_with_rope,
+            )
 
         self.q_rope_proj_ = ROWMMWeightNoTP(
             f"model.layers.{self.layer_num_}.self_attn.q_rope_proj.weight",
@@ -306,34 +232,24 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             self.data_type_,
             self.kv_lora_rank + self.qk_rope_head_dim,
         )
-        if self.disable_qk_absorb:
-            self.k_b_proj_ = ROWBMMWeightNoTp(
-                f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
-                self.data_type_,
-                split_n_embed=self.tp_q_head_num_,
-            )
-        if not self.disable_vo_absorb:
-            self.fuse_vo_weight_ = MultiCOLMMWeightNoTp(
-                [
-                    f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
-                    f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
-                ],
-                self.data_type_,
-                [self.tp_q_head_num_, q_split_n_embed],
-            )
-            self.fuse_vo_weight_._fuse = partial(fuse_vb_o, self.fuse_vo_weight_, self)
-        else:
-            self.v_b_proj_ = COLBMMWeightNoTp(
-                f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
-                self.data_type_,
-                split_n_embed=self.tp_q_head_num_,
-            )
-        if self.disable_vo_absorb:
-            self.o_weight_ = COLMMWeightNoTp(
-                f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
-                self.data_type_,
-                q_split_n_embed,
-            )
+
+        self.k_b_proj_ = ROWBMMWeightNoTp(
+            f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
+            self.data_type_,
+            split_n_embed=self.tp_q_head_num_,
+        )
+
+        self.v_b_proj_ = COLBMMWeightNoTp(
+            f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
+            self.data_type_,
+            split_n_embed=self.tp_q_head_num_,
+        )
+
+        self.o_weight_ = COLMMWeightNoTp(
+            f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
+            self.data_type_,
+            q_split_n_embed,
+        )
 
     def _load_mlp(self, mlp_prefix, split_inter_size, no_tp=False):
         if no_tp:

@@ -65,3 +65,25 @@ def get_current_device_name():
         return gpu_name
     else:
         return None
+
+
+@lru_cache(maxsize=None)
+def init_p2p(device_index):
+    """
+    torch 调用跨卡的to操作后，triton编译的算子便能自动操作跨卡tensor。
+    """
+    import torch
+
+    num_gpus = torch.cuda.device_count()
+    tensor = torch.zeros((1,))
+    tensor = tensor.to(f"cuda:{device_index}")
+    for j in range(num_gpus):
+        tensor.to(f"cuda:{j}")
+
+    torch.cuda.empty_cache()
+    return
+
+
+@lru_cache(maxsize=None)
+def kv_trans_use_p2p():
+    return os.getenv("KV_TRANS_USE_P2P", "False").upper() in ["1", "TRUE", "ON"]

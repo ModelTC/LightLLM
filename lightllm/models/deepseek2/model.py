@@ -25,8 +25,6 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     infer_state_class = Deepseek2InferStateInfo
 
     def __init__(self, kvargs):
-        self.disable_qk_absorb = os.getenv("DISABLE_QK_ABSORB", "False").upper() in ["ON", "TRUE", "1"]
-        self.disable_vo_absorb = os.getenv("DISABLE_VO_ABSORB", "False").upper() in ["ON", "TRUE", "1"]
         super().__init__(kvargs)
         return
 
@@ -71,8 +69,6 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
                 network_config=self.config,
                 mode=self.mode,
                 quant_cfg=self.quant_cfg,
-                disable_qk_absorb=self.disable_qk_absorb,
-                disable_vo_absorb=self.disable_vo_absorb,
             )
             for i in range(self.config["n_layer"])
         ]
@@ -101,8 +97,6 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
                 world_size=self.world_size_,
                 network_config=self.config,
                 mode=self.mode,
-                disable_qk_absorb=self.disable_qk_absorb,
-                disable_vo_absorb=self.disable_vo_absorb,
             )
             for i in range(self.config["n_layer"])
         ]

@@ -24,6 +24,7 @@ from rpyc.utils.classic import obtain
 from rpyc import AsyncResult
 from lightllm.utils.net_utils import get_hostname_ip
 from ..task_queue import TaskQueue
+from lightllm.utils.device_utils import kv_trans_use_p2p
 
 KV_MOVE_MAX_NUM = 16
 
@@ -195,6 +196,18 @@ class TransProcessObj:
         logger.error(f"{func_name}, decode id {self.decode_node_id} device_index {self.device_index} thread quit")
         return
 
+    def _transfer_kv(self, move_tasks: List[KVMoveTask]):
+        with self.manager.device_locks[self.device_index]:
+            self.task_in_queue.put(move_tasks.copy(), timeout=10)
+            assert self.task_out_queue.get(timeout=60) == "ok"
+            self.manager.put_to_release_task_queue(move_tasks)
+
+            logger.info(
+                f"_transfer_kv data ok, req_id: {move_tasks[0].id()}"
+                f" cost total time: {move_tasks[0].get_cost_time()} s"
+            )
+            move_tasks.clear()
+
     def kv_trans_handle_loop(self):
         func_name = self.kv_trans_handle_loop.__name__
         while not self.has_error:
@@ -220,17 +233,11 @@ class TransProcessObj:
                         f"queue time {move_task.get_cost_time()} s "
                     )
 
-                with self.manager.kv_trans_lock:
-                    with self.manager.device_locks[self.device_index]:
-                        self.task_in_queue.put(move_tasks.copy(), timeout=10)
-                        assert self.task_out_queue.get(timeout=60) == "ok"
-                        self.manager.put_to_release_task_queue(move_tasks)
-                        logger.info(
-                            f"{func_name} transfer data ok, req_id: {move_tasks[0].id()}"
-                            f" cost total time: {move_tasks[0].get_cost_time()} s"
-                        )
-                        move_tasks.clear()
-
+                if not kv_trans_use_p2p():
+                    with self.manager.kv_trans_lock:
+                        self._transfer_kv(move_tasks)
+                else:
+                    self._transfer_kv(move_tasks)
             except BaseException as e:
                 logger.exception(str(e))
                 self.set_has_error()

@@ -17,6 +17,7 @@ from .up_status import UpStatusManager
 from rpyc.utils.server import ThreadedServer
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, g_router_lock
 from .decode_task_cache import g_success_kv_move_task_cache
+from lightllm.utils.device_utils import kv_trans_use_p2p
 
 logger = init_logger(__name__)
 
@@ -39,6 +40,12 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
             PDDecodeInferRpcServer(self), socket_path=socket_path, protocol_config={"allow_pickle": True}
         )
         threading.Thread(target=lambda: t.start(), daemon=True).start()
+
+        if kv_trans_use_p2p():
+            from ..p2p_fix import reduce_tensor
+
+            mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
+
         return
 
     @calculate_time(show=False, min_cost_ms=300)

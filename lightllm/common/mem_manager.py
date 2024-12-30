@@ -7,6 +7,7 @@ from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
+from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 
 logger = init_logger(__name__)
 
@@ -78,6 +79,7 @@ class MemoryManager:
         self.kv_move_buffer = torch.empty(
             (1, max_req_total_len + 8, 2 * self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
         )
+        self.kv_move_buf_indexes = torch.arange(0, max_req_total_len + 8, dtype=torch.int64, device="cuda")
         return
 
     def send_to_decode_node(self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int):
@@ -157,6 +159,65 @@ class MemoryManager:
 
     def _write_kv_move_data(self, token_indexes: torch.Tensor, buffer_tensor: torch.Tensor, layer_index):
         self.kv_buffer[layer_index : layer_index + 1, token_indexes, :, :] = buffer_tensor
+        return
+
+    def send_to_decode_node_p2p(self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int):
+        """
+        使用 p2p triton kernel 进行数据复制和传输的实现方式。
+        """
+        assert dp_size == 1
+
+        # 先将数据发送到指定的一张卡上的buffer，再发送。
+        import torch.distributed as dist
+
+        move_token_indexes = []
+        for task in move_tasks:
+            if task.move_kv_len != 0:
+                move_token_indexes.extend(task.prefill_token_indexes[-task.move_kv_len :])
+
+        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
+        for i, mem in enumerate(mem_managers):
+            for layer_index in range(mem.layer_num):
+                move_buffer = mem._get_kv_move_data_p2p(move_token_indexes, layer_index, self.kv_move_buffer)
+                dist.send(move_buffer, dst=1)
+        return
+
+    def _get_kv_move_data_p2p(self, token_indexes: torch.Tensor, layer_index: int, kv_move_buffer: torch.Tensor):
+        move_token_num = len(token_indexes)
+        move_size = self.kv_buffer.numel() // self.layer_num // self.size * move_token_num
+        move_buffer = kv_move_buffer.view(-1)[0:move_size].view(move_token_num, 2 * self.head_num, self.head_dim)
+        kv_trans(
+            self.kv_buffer[layer_index, :, :, :], token_indexes, move_buffer, self.kv_move_buf_indexes[0:move_token_num]
+        )
+        return move_buffer
+
+    def receive_from_prefill_node_p2p(
+        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int
+    ):
+        assert dp_size == 1
+
+        # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
+        import torch.distributed as dist
+
+        move_token_indexes = []
+        for task in move_tasks:
+            if task.move_kv_len != 0:
+                move_token_indexes.extend(task.decode_token_indexes[-task.move_kv_len :])
+
+        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
+
+        token_num = len(move_token_indexes)
+        move_size = self.kv_buffer.numel() // self.layer_num // self.size * token_num
+        recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(token_num, 2 * self.head_num, self.head_dim)
+        for i, mem in enumerate(mem_managers):
+            for layer_index in range(mem.layer_num):
+                dist.recv(recive_buffer, src=0)
+                mem._write_kv_move_data_p2p(move_token_indexes, recive_buffer, layer_index)
+        return
+
+    def _write_kv_move_data_p2p(self, token_indexes: torch.Tensor, buffer_tensor: torch.Tensor, layer_index):
+        move_token_num = len(token_indexes)
+        kv_trans(buffer_tensor, self.kv_move_buf_indexes[0:move_token_num], self.kv_buffer[layer_index], token_indexes)
         return
 
     def _free_buffers(self):

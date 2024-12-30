@@ -1,11 +1,12 @@
 import torch
 import time
 import sys
+import torch.multiprocessing as mp
 from typing import List, Dict
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
-import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import KVMoveTask
+from lightllm.utils.device_utils import kv_trans_use_p2p, init_p2p
 
 logger = init_logger(__name__)
 
@@ -33,6 +34,8 @@ def _init_env(
         import inspect
 
         graceful_registry(inspect.currentframe().f_code.co_name)
+        torch.cuda.set_device(device_index)
+
         task_out_queue.put("proc_start")
         mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
         assert len(mem_managers) == args.tp
@@ -52,7 +55,10 @@ def _init_env(
                 if total_move_kv_len != 0:
                     cur_mem = mem_managers[device_index]
                     logger.info(f"trans start: {move_tasks[0].to_decode_log_info()}")
-                    cur_mem.receive_from_prefill_node(move_tasks, mem_managers, args.dp)
+                    if kv_trans_use_p2p():
+                        cur_mem.receive_from_prefill_node_p2p(move_tasks, mem_managers, args.dp)
+                    else:
+                        cur_mem.receive_from_prefill_node(move_tasks, mem_managers, args.dp)
                     logger.info(f"trans finished: {move_tasks[0].to_decode_log_info()} move len: {total_move_kv_len}")
                 torch.cuda.synchronize()
                 logger.info(f"trans cost time: {(time.time() - start)}, {move_tasks[0].to_decode_log_info()}")
