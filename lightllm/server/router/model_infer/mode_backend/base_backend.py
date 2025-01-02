@@ -96,9 +96,10 @@ class ModeBackend:
         dist.all_reduce(_a)
         del _a
 
-        from lightllm.distributed import set_custom_reduce
+        from lightllm.distributed import custom_comm_ops
 
-        set_custom_reduce()
+        custom_comm_ops.set_custom_reduce()
+        custom_comm_ops.set_custom_gather()
 
         # 为 p d 分离模式添加的全局锁管理，用于做一些同步操作。 一定需要在
         # init_process_group 之后调用

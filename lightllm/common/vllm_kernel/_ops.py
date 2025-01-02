@@ -1069,6 +1069,33 @@ def register_graph_buffers(fa: int, handles: List[List[int]], offsets: List[List
     torch.ops.vllm_total_custom_ar.register_graph_buffers(fa, handles, offsets)
 
 
+# custom ar
+def init_custom_gather_ar(
+    ipc_tensors: List[torch.Tensor], rank_data: torch.Tensor, rank: int, full_nvlink: bool
+) -> int:
+    return torch.ops.vllm_total_custom_ar.init_custom_gather_ar(ipc_tensors, rank_data, rank, full_nvlink)
+
+
+def all_gather(fa: int, inp: torch.Tensor, out: torch.Tensor, reg_buffer: int, reg_buffer_sz_bytes: int) -> None:
+    torch.ops.vllm_total_custom_ar.all_gather(fa, inp, out, reg_buffer, reg_buffer_sz_bytes)
+
+
+def allgather_dispose(fa: int) -> None:
+    torch.ops.vllm_total_custom_ar.allgather_dispose(fa)
+
+
+def allgather_register_buffer(fa: int, ipc_tensors: List[int]) -> None:
+    return torch.ops.vllm_total_custom_ar.allgather_register_buffer(fa, ipc_tensors)
+
+
+def allgather_get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[int], List[int]]:
+    return torch.ops.vllm_total_custom_ar.allgather_get_graph_buffer_ipc_meta(fa)
+
+
+def allgather_register_graph_buffers(fa: int, handles: List[List[int]], offsets: List[List[int]]) -> None:
+    torch.ops.vllm_total_custom_ar.allgather_register_graph_buffers(fa, handles, offsets)
+
+
 # temporary fix for https://github.com/vllm-project/vllm/issues/5456
 # TODO: remove this in v0.6.0
 names_and_values = globals()

@@ -257,11 +257,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = self.alloc_tensor(
             [infer_state.all_token_num, hidden_dim], dtype=tp_hidden_states.dtype, device=tp_hidden_states.device
         )
-        dist.all_gather(
-            [
-                hidden_states[infer_state.all_start_idx[i] : infer_state.all_end_idx[i], :]
-                for i in range(self.world_size_)
-            ],
+        dist.all_gather_into_tensor(
+            hidden_states,
             tp_hidden_states,
             group=None,
             async_op=False,
@@ -314,15 +311,23 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = self.alloc_tensor(
             [infer_state.all_token_num, hidden_dim], dtype=tp_hidden_states.dtype, device=tp_hidden_states.device
         )
-        dist.all_gather(
-            [
-                hidden_states[infer_state.all_start_idx[i] : infer_state.all_end_idx[i], :]
-                for i in range(self.world_size_)
-            ],
-            tp_hidden_states,
-            group=None,
-            async_op=False,
-        )
+        if infer_state.is_prefill:
+            dist.all_gather(
+                [
+                    hidden_states[infer_state.all_start_idx[i] : infer_state.all_end_idx[i], :]
+                    for i in range(self.world_size_)
+                ],
+                tp_hidden_states,
+                group=None,
+                async_op=False,
+            )
+        else:
+            dist.all_gather_into_tensor(
+                hidden_states,
+                tp_hidden_states,
+                group=None,
+                async_op=False,
+            )
         if self.n_shared_experts is not None:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 

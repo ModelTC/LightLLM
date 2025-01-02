@@ -39,7 +39,9 @@ def tppart_model_infer(model_kvargs):
     torch.cuda.set_device(rank_id)
     os.environ["CURRENT_DEVICE_ID"] = str(rank_id)
     dist.init_process_group("nccl", init_method="tcp://127.0.0.1:28765", rank=rank_id, world_size=world_size)
-    set_custom_reduce()
+    from lightllm.distributed import custom_comm_ops
+
+    custom_comm_ops.set_custom_reduce()
     dist.barrier()
     torch.cuda.empty_cache()
     model_part = VisionTransformer(model_kvargs)

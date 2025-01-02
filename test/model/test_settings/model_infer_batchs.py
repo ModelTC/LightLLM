@@ -69,7 +69,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
         return
 
     import torch
-    from lightllm.distributed import set_custom_reduce
     import torch.distributed as dist
 
     rank_id = model_kvargs["tp_rank"]
@@ -77,7 +76,9 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
 
     torch.cuda.set_device(rank_id)
     dist.init_process_group("nccl", init_method="tcp://127.0.0.1:28765", rank=rank_id, world_size=world_size)
-    set_custom_reduce()
+    from lightllm.distributed import custom_comm_ops
+
+    custom_comm_ops.set_custom_reduce()
     dist.barrier()
 
     torch.cuda.empty_cache()
