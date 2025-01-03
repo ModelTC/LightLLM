@@ -104,12 +104,15 @@ class ContinuesBatchQueue(BaseQueue):
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):
         is_busy = self.is_busy()
         self._init_cache_list(current_batch, is_busy)
-        self.cache_len_list.sort(key=lambda x: -x[1])
-        left_out_len_array = np.array([e[1] for e in self.cache_len_list])
-        has_run_len_array = np.array([e[0] for e in self.cache_len_list])
-        cum_run_len_array = np.cumsum(has_run_len_array)
-        size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
-        need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
+        if len(self.cache_len_list) != 0:
+            self.cache_len_list.sort(key=lambda x: -x[1])
+            left_out_len_array = np.array([e[1] for e in self.cache_len_list])
+            has_run_len_array = np.array([e[0] for e in self.cache_len_list])
+            cum_run_len_array = np.cumsum(has_run_len_array)
+            size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
+            need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
+        else:
+            need_max_token_num = 0
         return (
             need_max_token_num,
             (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
