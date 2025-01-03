@@ -1,7 +1,6 @@
 import torch
 import triton
 import triton.language as tl
-import torch.nn.functional as F
 
 
 @triton.jit
@@ -94,7 +93,6 @@ def token_softmax_reducev_fwd(
     b_seq_len,
     b_att_start_loc,
     b_att_seq_len,
-    other_kv_index,
     sliding_window,
 ):
     BLOCK = 64
@@ -123,7 +121,7 @@ def token_softmax_reducev_fwd(
         o.stride(2),
         req_to_tokens.stride(0),
         req_to_tokens.stride(1),
-        other_kv_index,
+        0,
         kv_group_num,
         sliding_window,
         BLOCK_DMODEL=v.shape[-1],

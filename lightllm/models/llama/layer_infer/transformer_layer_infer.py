@@ -362,7 +362,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.b_req_idx,
             infer_state.b_start_loc,
             infer_state.b_seq_len,
-            infer_state.other_kv_index,
         )
         return o_tensor
 

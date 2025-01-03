@@ -1,21 +1,10 @@
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
-from typing import Tuple
-import triton
 
-from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.mistral.infer_struct import MistralInferStateInfo
 
 from lightllm.models.mistral.triton_kernel.context_flashattention_nopad import context_attention_fwd
 from lightllm.models.mistral.triton_kernel.token_attention_nopad_att1 import token_att_fwd
-from lightllm.models.mistral.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2
-from lightllm.models.llama.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-
-from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 
 
 class MistralTransformerLayerInfer(LlamaTransformerLayerInfer):
@@ -87,7 +76,6 @@ class MistralTransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.b_seq_len,
             infer_state.b_att_start_loc,
             infer_state.b_att_seq_len,
-            infer_state.other_kv_index,
             infer_state.sliding_window,
         )
         return o_tensor

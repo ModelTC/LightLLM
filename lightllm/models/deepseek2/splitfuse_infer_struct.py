@@ -1,12 +1,12 @@
 import torch
 import numpy as np
 from lightllm.common.basemodel import SplitFuseInferStateInfo
-from .infer_struct import LlamaInferStateInfo
+from .infer_struct import Deepseek2InferStateInfo
 
 
-class LlamaSplitFuseInferStateInfo(SplitFuseInferStateInfo):
+class DeepSeekv2SplitFuseInferStateInfo(SplitFuseInferStateInfo):
 
-    inner_infer_state_class = LlamaInferStateInfo
+    inner_infer_state_class = Deepseek2InferStateInfo
 
     def __init__(self):
         super().__init__()
@@ -27,4 +27,9 @@ class LlamaSplitFuseInferStateInfo(SplitFuseInferStateInfo):
         position_ids = torch.from_numpy(np.concatenate(position_ids, axis=0)).cuda().view(-1)
         self.position_cos = torch.index_select(model._cos_cached, 0, position_ids).view(position_ids.shape[0], -1)
         self.position_sin = torch.index_select(model._sin_cached, 0, position_ids).view(position_ids.shape[0], -1)
+        return
+
+    def create_inner_decode_infer_status(self):
+        infer_state = super().create_inner_decode_infer_status()
+        infer_state.total_token_num_tensor = torch.sum(infer_state.b_seq_len)
         return

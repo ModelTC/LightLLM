@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.common.req_manager import ReqManager
 from lightllm.models.mistral.triton_kernel.init_att_sliding_window_info import init_att_window_info_fwd
 
 
@@ -32,8 +31,6 @@ class MistralInferStateInfo(LlamaInferStateInfo):
             position_ids = self.b_seq_len - 1
             self.position_cos = torch.index_select(model._cos_cached, 0, position_ids).view(self.b_seq_len.shape[0], -1)
             self.position_sin = torch.index_select(model._sin_cached, 0, position_ids).view(self.b_seq_len.shape[0], -1)
-            self.other_kv_index = self.req_manager.req_to_token_indexs[self.b_req_idx[0], 0].item()
-            # b_loc[0, max_len_in_batch - 1].item()
 
             # [SYM] still reserve all kv cache
             self.b_att_seq_len = torch.zeros_like(self.b_seq_len)

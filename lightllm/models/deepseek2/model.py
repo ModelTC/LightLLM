@@ -1,9 +1,8 @@
-import os
-import json
 import torch
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
+from lightllm.models.deepseek2.splitfuse_infer_struct import DeepSeekv2SplitFuseInferStateInfo
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -23,6 +22,9 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
     # infer state class
     infer_state_class = Deepseek2InferStateInfo
+
+    # split fuse state class
+    splitfuse_infer_state_class = DeepSeekv2SplitFuseInferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)

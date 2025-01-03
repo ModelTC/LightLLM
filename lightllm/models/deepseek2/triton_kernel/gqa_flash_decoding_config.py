@@ -38,7 +38,6 @@ class MlaDecodeAttentionKernelConfig(KernelConfigs):
             return config
         else:
             config = {
-                "BLOCK_SEQ": 64,
                 "BLOCK_N": 16,
                 "BLOCK_Q_HEAD": 16,
                 "stage1_num_warps": 4,

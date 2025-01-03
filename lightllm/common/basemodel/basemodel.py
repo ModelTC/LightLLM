@@ -18,7 +18,6 @@ from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_m
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 
 logger = init_logger(__name__)
 

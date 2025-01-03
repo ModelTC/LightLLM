@@ -20,5 +20,4 @@ class StarcoderInferStateInfo(InferStateInfo):
             ).cuda()
         else:
             self.position_ids = self.b_seq_len - 1
-            self.other_kv_index = self.req_manager.req_to_token_indexs[self.b_req_idx[0], 0].item()
         return

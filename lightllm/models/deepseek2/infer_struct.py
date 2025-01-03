@@ -16,6 +16,7 @@ class Deepseek2InferStateInfo(LlamaInferStateInfo):
         # 只有 decode 阶段使用 ppl 的优化算子才会有这个管理变量
         if not self.is_prefill:
             self.kv_starts = torch.cat([self.b_start_loc, self.b_start_loc[-1:] + self.b_seq_len[-1:]], dim=0)
+            self.total_token_num_tensor = torch.sum(self.b_seq_len)
 
         if self.enable_dp:
             rank = dist.get_rank()
