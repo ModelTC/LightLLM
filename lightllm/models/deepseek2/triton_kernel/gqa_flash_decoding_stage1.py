@@ -35,9 +35,7 @@ def _fwd_kernel_flash_decode_stage1_padding(
     stride_mid_od,
     stride_mid_o_eh,
     stride_mid_o_es,
-    total_token_ptr,
     block_size_ptr,
-    batch_start_index_ptr,
     num_sm,
     head_group_num,
     head_num,
@@ -51,15 +49,9 @@ def _fwd_kernel_flash_decode_stage1_padding(
 ):
     # cur_kv_head = 0
     sm_id = tl.program_id(0).to(tl.int64)
-    grid_id = sm_id
     out_batch_start_index = tl.cast(0, tl.int64)
-    total_token_num = tl.load(total_token_ptr, eviction_policy="evict_last")
+    block_seq = tl.load(block_size_ptr, eviction_policy="evict_last")
 
-    block_seq = tl.cast(total_token_num / num_sm / 4, dtype=tl.int32) + 1
-    block_seq = tl.cdiv(block_seq, BLOCK_N) * BLOCK_N
-
-    if grid_id == 0:
-        tl.store(block_size_ptr, block_seq)
     cur_q_head_offs = tl.arange(0, Q_HEAD_NUM)
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_rope_d = tl.arange(0, BLOCK_ROPE_DMODEL)
@@ -163,9 +155,6 @@ def _fwd_kernel_flash_decode_stage1_padding(
                 )
             sm_id += num_sm
 
-        if grid_id == 0:
-            tl.store(batch_start_index_ptr + cur_batch, out_batch_start_index)
-
         out_batch_start_index += cur_block_num // head_group_num
         sm_id -= cur_block_num
     return
@@ -173,9 +162,7 @@ def _fwd_kernel_flash_decode_stage1_padding(
 
 @torch.no_grad()
 def flash_decode_stage1(
-    total_token_num_tensor: torch.Tensor,
-    out_block_seq: torch.Tensor,
-    batch_start_index: torch.Tensor,
+    in_block_seq: torch.Tensor,
     q_nope,
     q_rope,
     kv_nope,
@@ -227,9 +214,7 @@ def flash_decode_stage1(
         *kv_rope.stride(),
         *mid_out.stride(),
         *mid_out_logsumexp.stride(),
-        total_token_num_tensor,
-        out_block_seq,
-        batch_start_index,
+        in_block_seq,
         num_sm=1,
         head_group_num=head_group_num,
         head_num=q_head_num,
@@ -271,9 +256,7 @@ def flash_decode_stage1(
         *kv_rope.stride(),
         *mid_out.stride(),
         *mid_out_logsumexp.stride(),
-        total_token_num_tensor,
-        out_block_seq,
-        batch_start_index,
+        in_block_seq,
         num_sm=num_sm,
         head_group_num=head_group_num,
         head_num=q_head_num,

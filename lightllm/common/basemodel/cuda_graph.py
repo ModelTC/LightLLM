@@ -1,5 +1,6 @@
 import os
 import torch
+import copy
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed import custom_comm_ops
 
@@ -27,10 +28,18 @@ class CudaGraph:
         infer_state.max_len_in_batch = self.graph_max_len_in_batch
         infer_state.total_token_num = self.graph_max_len_in_batch * batch_size
         # warmup
+        # 因为有些推理过程的代码，会通过判断infer_state中是否存在某些属性来在一层上
+        # 做一些初始化的操作，后续层可以复用这些计算的结果，如
+        # lightllm/models/deepseek2/triton_kernel/gqa_flash_decoding.py
+        # 中做的一些操作，所以在 warmup 的时候，需要调用infer_state的copy函数做一个
+        # 浅拷贝，不然后续传入到cuda graph捕获过程中后，infer_state因为提前拥有了这些属性，
+        # 导致不会重新初始化，这样捕获过程中会不能捕获这些临时添加到 infer_state 管理对象
+        # 中的 tensor。
         for _ in range(1):
             torch.cuda.synchronize()
-            decode_func(input_ids, infer_state)
+            decode_func(input_ids, copy.copy(infer_state))  # infer_state must copy()
             torch.cuda.synchronize()
+
         with custom_comm_ops.lightllm_capture_graph():
             with torch.cuda.graph(graph_obj, pool=self.mempool):
                 predict_logics = decode_func(input_ids, infer_state)
