@@ -1,3 +1,4 @@
+import os
 import asyncio
 import numpy as np
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ _g_health_req_id_gen.generate_id()
 class HealthObj:
     _is_health: bool = True
     _is_health_checking: bool = False
+    timeout: int = int(os.getenv("HEALTH_TIMEOUT", 100))
 
     def begin_check(self):
         self._is_health_checking = True
@@ -65,7 +67,7 @@ async def health_check(args, httpserver_manager: HttpServerManager, request: Req
                 pass
 
         try:
-            await asyncio.wait_for(check_timeout(results_generator), timeout=88)
+            await asyncio.wait_for(check_timeout(results_generator), timeout=health_obj.timeout)
             health_obj.set_health()
         except asyncio.TimeoutError:
             health_obj.set_unhealth()

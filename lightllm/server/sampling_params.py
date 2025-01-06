@@ -260,3 +260,9 @@ class SamplingParams:
         ret["group_request_id"] = self.group_request_id
         ret["suggested_dp_index"] = self.suggested_dp_index
         return ret
+
+    def to_string(self):
+        output_str = ""
+        for name, value in vars(self).items():
+            output_str += f"{name}: {value} "
+        return output_str

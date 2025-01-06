@@ -358,27 +358,29 @@ class HttpServerManager:
                         prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                        logger.info(
-                            f"X-Request-Id:{x_request_id} "
-                            f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
-                            f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
-                            f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
-                            f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
-                            f"prompt_token_num:{prompt_tokens} "
-                            f"prompt_cache_len:{prompt_cache_len} "
-                            f"prompt_cache_ratio:{prompt_cache_ratio} "
-                        )
-                        self.metric_client.histogram_observe(
-                            "lightllm_request_inference_duration", total_cost_time_ms / 1000.0
-                        )
-                        self.metric_client.histogram_observe(
-                            "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
-                        )
-                        self.metric_client.histogram_observe(
-                            "lightllm_request_first_token_duration", first_token_cost_ms / 1000.0
-                        )
-                        self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
-                        self.metric_client.counter_inc("lightllm_request_success")
+                        if request is not None:
+                            logger.info(
+                                f"X-Request-Id:{x_request_id} "
+                                f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
+                                f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
+                                f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
+                                f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
+                                f"prompt_token_num:{prompt_tokens} "
+                                f"prompt_cache_len:{prompt_cache_len} "
+                                f"prompt_cache_ratio:{prompt_cache_ratio} "
+                                f"sampling_params: {{{sampling_params.to_string()}}}"
+                            )
+                            self.metric_client.histogram_observe(
+                                "lightllm_request_inference_duration", total_cost_time_ms / 1000.0
+                            )
+                            self.metric_client.histogram_observe(
+                                "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
+                            )
+                            self.metric_client.histogram_observe(
+                                "lightllm_request_first_token_duration", first_token_cost_ms / 1000.0
+                            )
+                            self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
+                            self.metric_client.counter_inc("lightllm_request_success")
 
                         return
                 req_status.out_token_info_list.clear()
