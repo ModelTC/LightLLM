@@ -1,27 +1,44 @@
-import re
 import torch
-from typing import List, Tuple
-from lightllm.server.router.model_infer.infer_batch import InferBatch
+from typing import List
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
+from dataclasses import dataclass
+
+
+@dataclass
+class OverlapStream:
+    overlap_stream: torch.cuda.Stream = None
+
+    def get_overlap_stream(self):
+        if self.overlap_stream is None:
+            self.overlap_stream = torch.cuda.Stream()
+        return self.overlap_stream
+
+
+g_single_overlap_stream = OverlapStream()
 
 
 def sample(logits, reqs, eos_id: List[int] = [2]):
+
+    with torch.cuda.stream(g_single_overlap_stream.get_overlap_stream()):
+        (
+            presence_penalties,
+            frequency_penalties,
+            repetition_penalties,
+            exponential_decay_length_penalties,
+            temperatures,
+            top_ps,
+            top_ks,
+            p_token_ids,
+            p_token_counts,
+            p_cumsum_seq_len,
+            p_max_len_in_batch,
+            length_penalty_idx,
+            mask_eos_reqs,
+        ) = _get_post_sample_tensors(reqs)
+
+    torch.cuda.current_stream().wait_stream(g_single_overlap_stream.get_overlap_stream())
+
     logits = logits.contiguous()
-    (
-        presence_penalties,
-        frequency_penalties,
-        repetition_penalties,
-        exponential_decay_length_penalties,
-        temperatures,
-        top_ps,
-        top_ks,
-        p_token_ids,
-        p_token_counts,
-        p_cumsum_seq_len,
-        p_max_len_in_batch,
-        length_penalty_idx,
-        mask_eos_reqs,
-    ) = _get_post_sample_tensors(reqs)
 
     apply_penalty(
         logits,
