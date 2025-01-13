@@ -171,9 +171,9 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         compressed_kv = compressed_kv.view(-1, layer_weight.kv_lora_rank)
         wk = layer_weight.k_b_proj_.weight.view(-1, layer_weight.kv_lora_rank)
-        wv = layer_weight.v_b_proj_.weight.transpose(1, 2).view(-1, layer_weight.kv_lora_rank)
+        wv = layer_weight.v_b_proj_.weight.transpose(0, 1).reshape(layer_weight.kv_lora_rank, -1)
         torch.mm(compressed_kv, wk.transpose(0, 1), out=k_nope.reshape(compressed_kv.shape[0], -1))
-        torch.mm(compressed_kv, wv.transpose(0, 1), out=v.reshape(compressed_kv.shape[0], -1))
+        torch.mm(compressed_kv, wv, out=v.reshape(compressed_kv.shape[0], -1))
 
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out

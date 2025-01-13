@@ -2,7 +2,6 @@ import os
 import torch
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
-from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
 @QUANTMETHODS.register("ppl-w4a16-128")
@@ -10,6 +9,9 @@ class PPLW4A16QuantizationMethod(QuantizationMethod):
     def __init__(self, group_size=128):
         super().__init__()
         self.group_size = group_size
+        from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+
+        self.cache_manager = g_cache_manager
 
     def quantize(self, weight: torch.Tensor):
         """
@@ -31,7 +33,7 @@ class PPLW4A16QuantizationMethod(QuantizationMethod):
         qweight is quant weight:     (N//8, K) int32 (int4*8 packed with pack_order)
         return tensor:               (M, N) float16
         """
-        qweight, scale_weight = weights
+        qweight, scale_weight = weights[:2]
         if workspace is None:
             workspace = torch.empty(size=[33554432 * 2], dtype=torch.int8, device="cuda")  # 32MB workspace
             PPLW4A16QuantizationMethod.apply.__defaults__ = (None, None, workspace)
@@ -40,7 +42,7 @@ class PPLW4A16QuantizationMethod(QuantizationMethod):
             dtype = input_tensor.dtype
             device = input_tensor.device
             if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
+                out = self.cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
             else:
                 out = torch.empty(shape, dtype, device=device)
         from lightllm_ppl_int4_kernel import matmul_i4_fp16
@@ -81,7 +83,7 @@ class FLASHLLMW6A16QuantizationMethod(QuantizationMethod):
         """ """
         from flash_llm_fp6_llm import linear_forward_cuda
 
-        qweight, scale = weights
+        qweight, scale = weights[:2]
         out = linear_forward_cuda(input_tensor, qweight, scale, 1)
         if self.bias:
             out.add_(bias)

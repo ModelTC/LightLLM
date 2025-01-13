@@ -20,14 +20,18 @@ class TransformerLayerWeight(BaseLayerWeight):
         self.quant_cfg = quant_cfg
         self._parse_config()
         self._init_weight_names()
+        self._init_qweight_names()
         self._init_weight()
-        self.set_quantization()
+        self._set_quantization()
         return
 
     def _parse_config(self):
         pass
 
     def _init_weight_names(self):
+        pass
+
+    def _init_qweight_names(self):
         pass
 
     def _init_weight(self):
@@ -45,7 +49,7 @@ class TransformerLayerWeight(BaseLayerWeight):
             elif isinstance(attr, BaseWeight):
                 attr.load_hf_weights(weights)
 
-    def set_quantization(self):
+    def _set_quantization(self):
         if self.quant_cfg.quant_type is None:
             return
         mix_quant_list = self.quant_cfg.get_mixed_list(self.layer_num_)

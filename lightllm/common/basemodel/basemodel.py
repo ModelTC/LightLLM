@@ -99,6 +99,7 @@ class TpPartBaseModel:
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
+
         return
 
     @final
@@ -112,7 +113,7 @@ class TpPartBaseModel:
         return
 
     def _init_quant(self):
-        self.quant_cfg = Quantcfg(self.config["n_layer"], self.quant_type, self.quant_cfg_path)
+        self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path)
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_weights(self):

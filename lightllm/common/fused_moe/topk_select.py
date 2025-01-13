@@ -19,6 +19,7 @@
 
 import torch
 from lightllm.common.vllm_kernel import _custom_ops as ops
+from typing import Callable, List, Optional, Tuple
 
 
 def fused_topk(
@@ -53,15 +54,23 @@ def fused_topk(
 def grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
     topk: int,
     renormalize: bool,
     num_expert_group: int = 0,
     topk_group: int = 0,
+    scoring_func: str = "softmax",
 ):
 
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+    if scoring_func == "sigmoid":
+        scores = torch.sigmoid(gating_output)
+    else:
+        scores = torch.softmax(gating_output, dim=-1)
 
-    scores = torch.softmax(gating_output, dim=-1)
+    if correction_bias is not None:
+        scores.add_(correction_bias)
+
     num_token = scores.shape[0]
     group_scores = scores.view(num_token, num_expert_group, -1).max(dim=-1).values  # [n, n_group]
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]  # [n, top_k_group]
@@ -79,3 +88,43 @@ def grouped_topk(
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+def select_experts(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    correction_bias: torch.Tensor,
+    top_k: int,
+    use_grouped_topk: bool,
+    renormalize: bool,
+    topk_group: Optional[int] = None,
+    num_expert_group: Optional[int] = None,
+    scoring_func: str = "softmax",
+    custom_routing_function: Optional[Callable] = None,
+):
+    from lightllm.common.fused_moe.topk_select import fused_topk, grouped_topk
+
+    # DeekSeekv2 uses grouped_top_k
+    if use_grouped_topk:
+        assert topk_group is not None
+        assert num_expert_group is not None
+        topk_weights, topk_ids = grouped_topk(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            correction_bias=correction_bias,
+            topk=top_k,
+            renormalize=renormalize,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            scoring_func=scoring_func,
+        )
+    elif custom_routing_function is None:
+        topk_weights, topk_ids = fused_topk(
+            hidden_states=hidden_states, gating_output=router_logits, topk=top_k, renormalize=renormalize
+        )
+    else:
+        topk_weights, topk_ids = custom_routing_function(
+            hidden_states=hidden_states, gating_output=router_logits, topk=top_k, renormalize=renormalize
+        )
+
+    return topk_weights, topk_ids

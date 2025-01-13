@@ -2,7 +2,6 @@ import os
 import torch
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
-from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 import torch.nn.functional as F
 
 try:
@@ -45,17 +44,35 @@ class AOBaseQuantizationMethod(QuantizationMethod):
         return F.linear(input_tensor, weights, bias)
 
 
-@QUANTMETHODS.register([f"ao-w4a16-{group_size}" for group_size in [32, 64, 128, 256]])
-class AOW4A16QuantizationMethod(AOBaseQuantizationMethod):
-    def __init__(self, group_size=128):
+@QUANTMETHODS.register(["ao-w4a16-256"])
+class AOW4A16QuantizationMethodGroup256(AOBaseQuantizationMethod):
+    def __init__(self):
         super().__init__()
-        assert group_size in [
-            32,
-            64,
-            128,
-            256,
-        ], f"torchao int4-weightonly requires groupsize in [32,64,128,256], but gets {group_size}"
-        self.group_size = group_size
+        self.group_size = 256
+        self.quant_func = int4_weight_only(group_size=self.group_size)
+
+
+@QUANTMETHODS.register(["ao-w4a16-128"])
+class AOW4A16QuantizationMethodGroup128(AOBaseQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.group_size = 128
+        self.quant_func = int4_weight_only(group_size=self.group_size)
+
+
+@QUANTMETHODS.register(["ao-w4a16-64"])
+class AOW4A16QuantizationMethodGroup64(AOBaseQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.group_size = 64
+        self.quant_func = int4_weight_only(group_size=self.group_size)
+
+
+@QUANTMETHODS.register(["ao-w4a16-32"])
+class AOW4A16QuantizationMethodGroup32(AOBaseQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.group_size = 32
         self.quant_func = int4_weight_only(group_size=self.group_size)
 
 

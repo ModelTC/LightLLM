@@ -10,10 +10,8 @@ from .mm_weight import (
     MultiROWMMWeightNoTP,
     MultiCOLMMWeight,
     ROWBMMWeight,
-    COLBMMWeight,
     MultiCOLMMWeightNoTp,
     ROWBMMWeightNoTp,
-    COLBMMWeightNoTp,
     COLMMWeightNoTp,
 )
 from .norm_weight import NormWeight, GEMMANormWeight, TpNormWeight

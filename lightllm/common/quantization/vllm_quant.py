@@ -2,7 +2,6 @@ import os
 import torch
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
-from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 import torch.nn.functional as F
 
 try:
@@ -16,6 +15,9 @@ class vLLMBaseQuantizationMethod(QuantizationMethod):
     def __init__(self):
         super().__init__()
         assert HAS_VLLM, "vllm is not installed, you can't use quant api of it"
+        from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+
+        self.cache_manager = g_cache_manager
 
     def quantize(self, weight: torch.Tensor):
         """ """
@@ -54,7 +56,7 @@ class vLLMw8a8QuantizationMethod(vLLMBaseQuantizationMethod):
         n = qweight.shape[1]
         if out is None:
             if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(
+                out = self.cache_manager.alloc_tensor(
                     (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
                 )
             else:
@@ -122,7 +124,7 @@ class vLLMFP8w8a8QuantizationMethod(vLLMBaseQuantizationMethod):
         n = weights[0].shape[1]
         if out is None:
             if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(
+                out = self.cache_manager.alloc_tensor(
                     (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
                 )
             else:
@@ -139,7 +141,7 @@ class vLLMFP8w8a8QuantizationMethod(vLLMBaseQuantizationMethod):
         n = weights[0].shape[1]
         if out is None:
             if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(
+                out = self.cache_manager.alloc_tensor(
                     (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
                 )
             else:

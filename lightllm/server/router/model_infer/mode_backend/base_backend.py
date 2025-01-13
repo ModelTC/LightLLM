@@ -185,7 +185,7 @@ class ModeBackend:
                 self.model = CohereTpPartModel(model_kvargs)
             elif self.model_type == "phi3":
                 self.model = Phi3TpPartModel(model_kvargs)
-            elif self.model_type == "deepseek_v2":
+            elif self.model_type in ["deepseek_v2", "deepseek_v3"]:
                 self.model = Deepseek2TpPartModel(model_kvargs)
             elif self.model_type == "internvl_chat":
                 llm_model_type = model_cfg.get("llm_config").get("model_type")

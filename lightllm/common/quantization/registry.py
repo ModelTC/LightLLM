@@ -19,12 +19,7 @@ class QuantMethodFactory:
         quant_method_class = self._quant_methods.get(key)
         if not quant_method_class:
             raise ValueError(f"QuantMethod '{key}' not supported.")
-        tmp_key = key.split("-")
-        if len(tmp_key) == 2:
-            return quant_method_class()
-        else:
-            group_size = int(tmp_key[-1])
-            return quant_method_class(group_size)
+        return quant_method_class()
 
 
 QUANTMETHODS = QuantMethodFactory()
