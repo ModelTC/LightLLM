@@ -7,6 +7,7 @@ from lightllm.models.vit.layer_infer.transformer_layer_infer import ViTTransform
 from lightllm.models.vit.layer_weights.pre_and_post_layer_weight import ViTPreAndPostLayerWeight
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
 from lightllm.models.vit.layer_weights.hf_load_utils import load_hf_weights
+from lightllm.common.build_utils import repair_config
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.vit import get_load_image_func
 import torchvision.transforms as T
@@ -59,6 +60,9 @@ class VisionTransformer:
             self.config["vision_config"]["llm_hidden_size"] = self.config["llm_config"]["hidden_size"]
             self.config["vision_config"]["downsample_ratio"] = self.config["downsample_ratio"]
             self.config = self.config["vision_config"]
+        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
+        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
+        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         self.layers_num = self.config["num_hidden_layers"]
         return
 
