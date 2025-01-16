@@ -16,6 +16,8 @@ except ImportError:
         logger.error("vllm or lightllm_kernel is not installed, you can't use custom ops")
 
 try:
+    import os
+
     ENABLE_CUSTOM_GATHER = os.getenv("ENABLE_CUSTOM_GATHER", "False").upper() in ["ON", "TRUE", "1"]
     if ENABLE_CUSTOM_GATHER:
         from lightllm.common.vllm_kernel._ops import init_custom_gather_ar
