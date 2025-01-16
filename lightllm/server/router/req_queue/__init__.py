@@ -21,8 +21,9 @@ def build_req_queue(args, router, dp_size: int):
         queue_class = ContinuesBatchQueue
     if args.first_token_constraint_mode:
         queue_class = ContinuesBatchQueue
-    queue_class = ContinuesBatchQueue
-
+    if queue_class is None:
+        queue_class = ContinuesBatchQueue
+    
     if dp_size == 1:
         return queue_class(args, router, 0, dp_size)
     else:
