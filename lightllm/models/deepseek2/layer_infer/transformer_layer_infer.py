@@ -133,14 +133,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         o_tensor = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.qk_nope_head_dim))
         return o_tensor
 
-    def _context_attention_kernel_with_CC(
-        self,
-        q: torch.Tensor,
-        kv,
-        infer_state: Deepseek2InferStateInfo,
-        layer_weight: Deepseek2TransformerLayerWeight,
-        out=None,
-    ) -> torch.Tensor:
+    def _decompress_kv(self, kv, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight):
         if infer_state.use_dynamic_prompt_cache:
             kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
             compressed_kv = self.alloc_tensor(
@@ -161,20 +154,30 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             )
 
         # CC
+        compressed_kv = compressed_kv.view(-1, layer_weight.kv_lora_rank)
         k_nope = self.alloc_tensor(
-            [compressed_kv.shape[0], q.shape[1], self.qk_nope_head_dim],
+            [compressed_kv.shape[0], self.tp_q_head_num_, self.qk_nope_head_dim],
             dtype=compressed_kv.dtype,
         )
         v = self.alloc_tensor(
             k_nope.shape,
             dtype=compressed_kv.dtype,
         )
-        compressed_kv = compressed_kv.view(-1, layer_weight.kv_lora_rank)
-        wk = layer_weight.k_b_proj_.weight.view(-1, layer_weight.kv_lora_rank)
+        wk = layer_weight.k_b_proj_.weight.view(-1, layer_weight.kv_lora_rank).T
         wv = layer_weight.v_b_proj_.weight.transpose(0, 1).reshape(layer_weight.kv_lora_rank, -1)
-        torch.mm(compressed_kv, wk.transpose(0, 1), out=k_nope.reshape(compressed_kv.shape[0], -1))
+        torch.mm(compressed_kv, wk, out=k_nope.reshape(compressed_kv.shape[0], -1))
         torch.mm(compressed_kv, wv, out=v.reshape(compressed_kv.shape[0], -1))
+        return k_nope, k_rope, v
 
+    def _context_attention_kernel_with_CC(
+        self,
+        q: torch.Tensor,
+        kv,
+        infer_state: Deepseek2InferStateInfo,
+        layer_weight: Deepseek2TransformerLayerWeight,
+        out=None,
+    ) -> torch.Tensor:
+        k_nope, k_rope, v = self._decompress_kv(kv, infer_state, layer_weight)
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
         context_attention_fwd_with_v(
