@@ -206,6 +206,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         do_sample=request.do_sample,
         presence_penalty=request.presence_penalty,
         frequency_penalty=request.frequency_penalty,
+        repetition_penalty=request.repetition_penalty,
         temperature=request.temperature,
         top_p=request.top_p,
         top_k=request.top_k,
@@ -283,7 +284,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 model=request.model,
                 choices=[stream_choice],
             )
-            yield ("data: " + stream_resp.json(ensure_ascii=False) + "\n\n").encode("utf-8")
+            yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)

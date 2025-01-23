@@ -24,7 +24,10 @@ class ChatCompletionRequest(BaseModel):
     # Additional parameters supported by LightLLM
     do_sample: Optional[bool] = False
     top_k: Optional[int] = -1
+    repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
+    role_settings: Optional[Dict[str, str]] = None
+    character_settings: Optional[List[Dict[str, str]]] = None
 
 
 class UsageInfo(BaseModel):
