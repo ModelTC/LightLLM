@@ -109,6 +109,7 @@ Docs List
 
    dev/token_attention
    dev/router
+   dev/performance
    
 .. Indices and tables
 .. ==================

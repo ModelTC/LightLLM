@@ -1,6 +1,62 @@
 Examples
 ================
 
+LLaMA
+^^^^^^^^^^^^^^^^^^^^^
+
+**Launching Server**
+
+.. code-block:: console
+
+    $ python -m lightllm.server.api_server --model_dir /path/llama-7B     \
+    $                                      --host 0.0.0.0                 \
+    $                                      --port 8080                    \
+    $                                      --tp 1                         \
+    $                                      --max_total_token_num 120000
+
+.. tip::
+
+    The parameter `max_total_token_num` is influenced by the GPU memory of the deployment environment. You can also specify `--mem_faction` to have it calculated automatically.
+
+.. code-block:: console
+
+    $ python -m lightllm.server.api_server --model_dir /path/llama-7B     \
+    $                                      --host 0.0.0.0                 \
+    $                                      --port 8080                    \
+    $                                      --tp 1                         \
+    $                                      --mem_faction 0.9
+
+**Test Server**
+
+.. code-block:: console
+
+    $ curl http://127.0.0.1:8080/generate     \
+    $     -X POST                             \
+    $     -d '{"inputs":"What is AI?","parameters":{"max_new_tokens":17, "frequency_penalty":1}}' \
+    $     -H 'Content-Type: application/json'
+
+.. code-block:: python
+
+    import time
+    import requests
+    import json
+
+    url = 'http://localhost:8080/generate'
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        'inputs': 'What is AI?',
+        "parameters": {
+            'do_sample': False,
+            'ignore_eos': False,
+            'max_new_tokens': 1024,
+        }
+    }
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+    if response.status_code == 200:
+        print(response.json())
+    else:
+        print('Error:', response.status_code, response.text)
+
 Qwen2-0.5B
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -12,7 +68,6 @@ Qwen2-0.5B
     $                                       --trust_remote_code             
 
 **Test Server**
-
 
 .. code-block:: console
 
@@ -96,34 +151,58 @@ Qwen-VL-Chat
     else:
         print(f"Error: {response.status_code}, {response.text}")
 
-
-
-llama2-70b-chat
-^^^^^^^^^^^^^^^^^^^^^^^
+Llava
+^^^^^^^^^^^^^^^^^
 
 **Launching Server**
 
 .. code-block:: console
 
-    $ python -m lightllm.server.api_server --model_dir ~/models/llama2-70b-chat --tp 4                                
-
-.. tip::
-
-    :code:`--tp` is 4, which means using four cards for tensor parallelism.
+    $ python -m lightllm.server.api_server \
+    $     --host 0.0.0.0                 \
+    $     --port 8080                    \
+    $     --tp 1                         \
+    $     --max_total_token_num 12000    \
+    $     --trust_remote_code            \
+    $     --enable_multimodal            \
+    $     --cache_capacity 1000          \
+    $     --model_dir /path/of/llava-v1.5-7b or /path/of/llava-v1.5-13b
 
 **Test Server**
 
-.. code-block:: console
+.. code-block:: python
 
-    $ curl http://localhost:8000/generate \
-    $      -H "Content-Type: application/json" \
-    $      -d '{
-    $            "inputs": "What is LLM?",
-    $            "parameters":{
-    $              "max_new_tokens":170, 
-    $              "frequency_penalty":1
-    $            }
-    $           }'
+    import time
+    import requests
+    import json
+    import base64
+
+    url = 'http://localhost:8080/generate'
+    headers = {'Content-Type': 'application/json'}
+
+    uri = "/local/path/of/image" # or "/http/path/of/image"
+    if uri.startswith("http"):
+        images = [{"type": "url", "data": uri}]
+    else:
+        with open(uri, 'rb') as fin:
+            b64 = base64.b64encode(fin.read()).decode("utf-8")
+        images=[{'type': "base64", "data": b64}]
+
+    data = {
+        "inputs": "A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions. USER: <image>\nPlease explain the picture. ASSISTANT:",
+        "parameters": {
+            "max_new_tokens": 200,
+        },
+        "multimodal_params": {
+            "images": images,
+        }
+    }
+
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+    if response.status_code == 200:
+        print(response.json())
+    else:
+        print('Error:', response.status_code, response.text)
 
 
 internlm2-1_8b
