@@ -18,7 +18,7 @@
 LightLLM is a Python-based LLM (Large Language Model) inference and serving framework, notable for its lightweight design, easy scalability, and high-speed performance. LightLLM harnesses the strengths of numerous well-regarded open-source implementations, including but not limited to FasterTransformer, TGI, vLLM, and FlashAttention.
 
 
-[English Docs](https://lightllm-en.readthedocs.io/en/latest/) | [中文文档](https://lightllm-cn.readthedocs.io/en/latest/)
+[English Docs](https://lightllm-en.readthedocs.io/en/latest/) | [中文文档](https://lightllm-cn.readthedocs.io/en/latest/) | [Blogs](https://modeltc.github.io/lightllm-blog/)
 
 ## Features
 
@@ -432,6 +432,11 @@ If you have a project that should be incorporated, please contact via email or c
     Documents: https://lazyllm.readthedocs.io/
 
     </details>
+
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=ModelTC/lightllm&type=Timeline)](https://star-history.com/#ModelTC/lightllm&Timeline)
 
 ## Community
 
