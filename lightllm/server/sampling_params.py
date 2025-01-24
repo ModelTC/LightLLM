@@ -18,6 +18,7 @@ class SamplingParams:
     _temperature: float = 1.0
     _top_p: float = 1.0
     _top_k: int = -1  # -1 is for all
+    _stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None
 
     def __init__(
         self,
@@ -70,7 +71,7 @@ class SamplingParams:
         self.ignore_eos = ignore_eos
         self.max_new_tokens = max_new_tokens
         self.min_new_tokens = min_new_tokens
-        self.stop_sequences = stop_sequences
+        self.stop_sequences = stop_sequences if stop_sequences is not None else SamplingParams._stop_sequences
         self.skip_special_tokens = skip_special_tokens
         self.add_special_tokens = add_special_tokens
         self.add_spaces_between_special_tokens = add_spaces_between_special_tokens
@@ -105,6 +106,7 @@ class SamplingParams:
             cls._temperature = generation_cfg.get("temperature", 1.0)
             cls._top_p = generation_cfg.get("top_p", 1.0)
             cls._top_k = generation_cfg.get("top_k", -1)
+            cls._stop_sequences = generation_cfg.get("stop", None)
         except:
             pass
 
