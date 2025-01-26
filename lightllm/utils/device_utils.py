@@ -65,7 +65,8 @@ def calcu_kernel_best_vsm_count(kernel, num_warps):
     warp_size = get_device_warp_size()
 
     occupancy = max_regs // (n_regs * warp_size * num_warps)
-    occupancy = min(occupancy, shared_mem_max // size_smem)
+    if size_smem > 0:
+        occupancy = min(occupancy, shared_mem_max // size_smem)
     num_sm = sm_count * occupancy
     return num_sm
 
