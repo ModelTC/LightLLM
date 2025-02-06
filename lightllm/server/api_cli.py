@@ -13,6 +13,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--httpserver_workers", type=int, default=1)
     parser.add_argument(
         "--zmq_mode",
         type=str,
@@ -55,7 +56,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tokenizer_mode",
         type=str,
-        default="slow",
+        default="fast",
         help="""tokenizer load mode, can be slow, fast or auto, slow mode load fast but run slow,
           slow mode is good for debug and test, fast mode get best performance, auto mode will
           try to use fast mode, if failed will use slow mode""",
@@ -146,7 +147,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--splitfuse_block_size", type=int, default=256, help="splitfuse block size")
 
     parser.add_argument("--splitfuse_mode", action="store_true", help="use splitfuse mode")
-    parser.add_argument("--beam_mode", action="store_true", help="use beamsearch mode")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
     parser.add_argument("--simple_constraint_mode", action="store_true", help="output constraint mode")

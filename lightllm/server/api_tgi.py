@@ -3,7 +3,7 @@ from typing import AsyncGenerator
 from fastapi import BackgroundTasks, Request
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from fastapi.encoders import jsonable_encoder
-from .sampling_params import SamplingParams
+from lightllm.server.core.objs.sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 import json
@@ -58,7 +58,8 @@ async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerMana
     prompt = request_dict.pop("inputs")
     sample_params_dict = format_tgi_params(request_dict["parameters"])
     return_details = sample_params_dict.pop("return_details", False)
-    sampling_params = SamplingParams(**sample_params_dict)
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
@@ -122,7 +123,8 @@ async def tgi_generate_stream_impl(request: Request, httpserver_manager: HttpSer
     prompt = request_dict.pop("inputs")
     sample_params_dict = format_tgi_params(request_dict["parameters"])
     return_details = sample_params_dict.pop("return_details", False)
-    sampling_params = SamplingParams(**sample_params_dict)
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
     if sampling_params.best_of != 1:
         raise Exception("stream api only support best_of == 1")

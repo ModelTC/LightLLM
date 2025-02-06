@@ -2,12 +2,12 @@ import asyncio
 import numpy as np
 import rpyc
 import torch
-import os
+import inspect
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
-from lightllm.server.router.model_infer.infer_batch import InferBatch
 from rpyc.utils.classic import obtain
+from rpyc.utils.server import ThreadedServer
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.internvl.internvl_visual import InternVLVisionModel
@@ -17,6 +17,7 @@ from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.device_utils import set_current_device_id
+from lightllm.utils.graceful_utils import graceful_registry
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -45,7 +46,6 @@ class VisualModelRpcServer(rpyc.Service):
             world_size=self.vit_tp,
         )
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
-        
 
         try:
             self.model_type = model_cfg["model_type"]
@@ -147,12 +147,7 @@ class VisualModelRpcClient:
 
 def _init_env(port):
     # 注册graceful 退出的处理
-    from lightllm.utils.graceful_utils import graceful_registry
-    import inspect
-
     graceful_registry(inspect.currentframe().f_code.co_name)
-
-    from rpyc.utils.server import ThreadedServer
 
     t = ThreadedServer(VisualModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
     t.start()

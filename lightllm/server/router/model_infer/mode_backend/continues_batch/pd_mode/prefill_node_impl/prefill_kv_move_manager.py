@@ -9,7 +9,7 @@ import copy
 import numpy as np
 import psutil
 import threading
-import random
+import inspect
 import collections
 from dataclasses import dataclass
 from typing import List, Dict, Union
@@ -25,6 +25,7 @@ from rpyc import AsyncResult
 from lightllm.utils.net_utils import get_hostname_ip
 from ..task_queue import TaskQueue
 from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.utils.graceful_utils import graceful_registry
 
 KV_MOVE_MAX_NUM = 16
 
@@ -449,9 +450,6 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
-    from lightllm.utils.graceful_utils import graceful_registry
-    import inspect
-
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     manager = PrefillKVMoveManager(args, info_queue, mem_queues)

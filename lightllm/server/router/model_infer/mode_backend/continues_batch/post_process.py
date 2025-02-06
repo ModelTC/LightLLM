@@ -2,24 +2,12 @@ import torch
 from typing import List
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 from dataclasses import dataclass
-
-
-@dataclass
-class OverlapStream:
-    overlap_stream: torch.cuda.Stream = None
-
-    def get_overlap_stream(self):
-        if self.overlap_stream is None:
-            self.overlap_stream = torch.cuda.Stream()
-        return self.overlap_stream
-
-
-g_single_overlap_stream = OverlapStream()
+from ...infer_batch import InferReq, g_infer_context
 
 
 def sample(logits, reqs, eos_id: List[int] = [2]):
 
-    with torch.cuda.stream(g_single_overlap_stream.get_overlap_stream()):
+    with torch.cuda.stream(g_infer_context.get_overlap_stream()):
         (
             presence_penalties,
             frequency_penalties,
@@ -36,7 +24,7 @@ def sample(logits, reqs, eos_id: List[int] = [2]):
             mask_eos_reqs,
         ) = _get_post_sample_tensors(reqs)
 
-    torch.cuda.current_stream().wait_stream(g_single_overlap_stream.get_overlap_stream())
+    torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
 
     logits = logits.contiguous()
 
@@ -77,7 +65,7 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     return probs_sort, probs_idx
 
 
-def _get_post_sample_tensors(reqs):
+def _get_post_sample_tensors(reqs: List[InferReq]):
     presence_penalties: List[float] = []
     frequency_penalties: List[float] = []
     repetition_penalties: List[float] = []
@@ -96,17 +84,18 @@ def _get_post_sample_tensors(reqs):
     for i, req_obj in enumerate(reqs):
         id_to_count = req_obj.out_token_id_count
         sample_param = req_obj.sampling_param
-        presence_penalties.append(sample_param.presence_penalty)
-        frequency_penalties.append(sample_param.frequency_penalty)
-        repetition_penalties.append(sample_param.repetition_penalty)
-        exponential_decay_length_penalties.append(sample_param.exponential_decay_length_penalty[1])
-        out_token_len = len(req_obj.input_token_ids) - req_obj.prompt_len
-        length_penalty_idx.append(max(out_token_len - sample_param.exponential_decay_length_penalty[0], 0))
-        mask_eos_reqs.append(out_token_len < sample_param.min_new_tokens - 1)
+        presence_penalties.append(sample_param.shm_param.presence_penalty)
+        frequency_penalties.append(sample_param.shm_param.frequency_penalty)
+        repetition_penalties.append(sample_param.shm_param.repetition_penalty)
+        exponential_decay_length_penalty = sample_param.shm_param.exponential_decay_length_penalty.to_tuple()
+        exponential_decay_length_penalties.append(exponential_decay_length_penalty[1])
+        out_token_len = req_obj.get_cur_total_len() - req_obj.shm_req.input_len
+        length_penalty_idx.append(max(out_token_len - exponential_decay_length_penalty[0], 0))
+        mask_eos_reqs.append(out_token_len < sample_param.shm_param.min_new_tokens - 1)
 
-        temperatures.append(sample_param.temperature)
-        top_ps.append(sample_param.top_p)
-        top_ks.append(sample_param.top_k)
+        temperatures.append(sample_param.shm_param.temperature)
+        top_ps.append(sample_param.shm_param.top_p)
+        top_ks.append(sample_param.shm_param.top_k)
 
         for token_id, count in id_to_count.items():
             p_token_ids.append(token_id)

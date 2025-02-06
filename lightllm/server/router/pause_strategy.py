@@ -1,9 +1,8 @@
 import uuid
 import numpy as np
 from typing import List, Tuple
-from lightllm.server.io_struct import Batch, Req
+from .batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
-from lightllm.server.io_struct import ReqRunStatus
 
 
 class Strategy:
@@ -20,30 +19,9 @@ class Fcfs(Strategy):
         return sorted(reqs, key=lambda req: req.request_id, reverse=True)
 
 
-class Sfj(Strategy):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def ordering_reqs(self, batch: Batch):
-        reqs = [req for req in batch.reqs]
-        return sorted(reqs, key=lambda req: req.max_output_len - len(req.output_ids), reverse=True)
-
-
-class Hrnn(Strategy):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def ordering_reqs(self, batch: Batch):
-        reqs = [req for req in batch.reqs]
-        return sorted(
-            reqs,
-            key=lambda req: (req.input_len + req.max_output_len - len(req.output_ids)) / req.input_len,
-            reverse=True,
-        )
-
-
 def select_paused_reqs(batch: Batch, strategy: Strategy, req_queue: BaseQueue, max_total_token_num):
     reqs: List[Req] = strategy.ordering_reqs(batch)
+
     if len(reqs) == 0:
         return []
 
@@ -58,8 +36,7 @@ def select_paused_reqs(batch: Batch, strategy: Strategy, req_queue: BaseQueue, m
 
     # 更新请求状态
     for req in pause_reqs:
-        req.req_status = ReqRunStatus.PAUSED_AND_OFFLOAD
-        req.cur_kv_len = 0
+        req.is_paused = True
 
     req_queue.back_to_wait_list(pause_reqs)
 

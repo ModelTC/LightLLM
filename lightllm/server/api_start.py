@@ -1,32 +1,74 @@
-import uvicorn
+import os
+import sys
+import time
 import uuid
-from lightllm.server.metrics.manager import MetricClient
-from lightllm.server import TokenLoad
-from .api_lightllm import lightllm_generate, lightllm_generate_stream
-from .api_tgi import tgi_generate_impl, tgi_generate_stream_impl
+import subprocess
+import signal
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
-from lightllm.utils.start_utils import start_submodule_processes
+from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from .visualserver.manager import start_visual_process
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
-from .httpserver.manager import HttpServerManager
-from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
+from lightllm.utils.process_check import is_process_active
 
 logger = init_logger(__name__)
 
+
+def setup_signal_handlers(http_server_process, process_manager):
+    def signal_handler(sig, frame):
+        if sig == signal.SIGINT:
+            logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
+            if http_server_process and http_server_process.poll() is None:
+                http_server_process.kill()
+
+            process_manager.terminate_all_processes()
+            logger.info("All processes have been forcefully terminated.")
+            sys.exit(0)
+        elif sig == signal.SIGTERM:
+            logger.info("Received SIGTERM, shutting down gracefully...")
+            if http_server_process and http_server_process.poll() is None:
+                http_server_process.send_signal(signal.SIGTERM)
+
+                start_time = time.time()
+                while (time.time() - start_time) < 60:
+                    if not is_process_active(http_server_process.pid):
+                        logger.info("httpserver exit")
+                        break
+                    time.sleep(1)
+
+                if time.time() - start_time < 60:
+                    logger.info("HTTP server has exited gracefully")
+                else:
+                    logger.warning("HTTP server did not exit in time, killing it...")
+                    http_server_process.kill()
+
+            process_manager.terminate_all_processes()
+            logger.info("All processes have been terminated gracefully.")
+            sys.exit(0)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    logger.info(f"start process pid {os.getpid()}")
+    logger.info(f"http server pid {http_server_process.pid}")
+    return
+
+
 def set_env(args):
     import os
+
     if args.static_quant:
         os.environ["STATIC_QUANT"] = "1"
+    set_unique_server_name(args)
+    set_env_start_args(args)
+    return
 
-def normal_or_p_d_start(g_objs):
-    from .api_server import G_Objs
 
-    g_objs: G_Objs = g_objs
-    args = g_objs.args
+def normal_or_p_d_start(args):
 
     if args.run_mode not in ["normal", "prefill", "decode"]:
         return
@@ -40,18 +82,8 @@ def normal_or_p_d_start(g_objs):
         args.zmq_mode = zmq_mode
         logger.info(f"zmq mode head: {args.zmq_mode}")
 
-    if args.use_tgi_api:
-        g_objs.g_generate_func = tgi_generate_impl
-        g_objs.g_generate_stream_func = tgi_generate_stream_impl
-    else:
-        g_objs.g_generate_func = lightllm_generate
-        g_objs.g_generate_stream_func = lightllm_generate_stream
-
     logger.info(f"use tgi api: {args.use_tgi_api}")
 
-    set_env(args)
-
-    assert not (args.beam_mode and args.use_dynamic_prompt_cache), "Beam mode incompatible with dynamic prompt cache"
     assert (
         args.mem_fraction > 0 and args.mem_fraction < 1
     ), f"Invalid mem_fraction {args.mem_fraction}, The expected value is between 0 and 1."
@@ -66,7 +98,6 @@ def normal_or_p_d_start(g_objs):
     # 这些模式不能同时设置。
     assert [
         args.splitfuse_mode,
-        args.beam_mode,
         args.diverse_mode,
         args.token_healing_mode,
         args.use_reward_model,
@@ -75,11 +106,10 @@ def normal_or_p_d_start(g_objs):
     ].count(True) <= 1
     # 部分模式目前还无法与dynamic_prompt_cache一起跑，to do。
     if args.use_dynamic_prompt_cache:
-        assert args.beam_mode is False
         assert args.token_healing_mode is False
 
     # 部分模式还不能支持与高级动态调度算法协同，to do.
-    if args.beam_mode or args.diverse_mode:
+    if args.diverse_mode:
         assert args.router_token_ratio == 0.0
 
     # 检查GPU数量是否足够
@@ -147,7 +177,7 @@ def normal_or_p_d_start(g_objs):
         num=6 + args.tp + args.tp + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
-    router_port, detokenization_port, httpserver_port, visual_port, cache_port, metric_port = can_use_ports[0:6]
+    router_port, detokenization_port, detokenization_pub_port, visual_port, cache_port, metric_port = can_use_ports[0:6]
     model_rpc_ports = can_use_ports[6 : 6 + args.tp]
     can_use_ports = can_use_ports[6 + args.tp :]
 
@@ -157,10 +187,18 @@ def normal_or_p_d_start(g_objs):
         can_use_ports = can_use_ports[args.visual_tp :]
         visual_model_tp_ports.append(tp_ports_for_dp)
 
+    # 将申请好的端口放入args参数中
+    args.router_port = router_port
+    args.detokenization_port = detokenization_port
+    args.detokenization_pub_port = detokenization_pub_port
+    args.visual_port = visual_port
+    args.cache_port = cache_port
+    args.metric_port = metric_port
+
     # 申请在 p d 分离模式下，会用的端口
     args.pd_tp_infer_rpyc_ports = can_use_ports[0 : args.tp]
     # p d 分离模式下用于标识节点的id
-    args.pd_node_id = str(uuid.uuid4())
+    args.pd_node_id = uuid.uuid4().int
     # p 节点用来建立torch kv 传输分布组的可用端口范围
     args.pd_p_allowed_port_min = 20000
     args.pd_p_allowed_port_max = 30000
@@ -169,18 +207,19 @@ def normal_or_p_d_start(g_objs):
     if args.run_mode == "decode":
         args.router_max_wait_tokens = 0
 
+    set_env(args)
     logger.info(f"all start args:{args}")
 
     ports_locker.release_port()
 
     if args.enable_multimodal:
-        start_submodule_processes(
+        process_manager.start_submodule_processes(
             start_funcs=[
                 start_cache_manager,
             ],
             start_args=[(cache_port, args)],
         )
-        start_submodule_processes(
+        process_manager.start_submodule_processes(
             start_funcs=[
                 start_visual_process,
             ],
@@ -189,32 +228,42 @@ def normal_or_p_d_start(g_objs):
             ],
         )
 
-    start_submodule_processes(
+    process_manager.start_submodule_processes(
         start_funcs=[
             start_metric_manager,
         ],
         start_args=[(metric_port, args)],
     )
 
-    g_objs.metric_client = MetricClient(metric_port)
-
-    g_objs.httpserver_manager = HttpServerManager(
-        args,
-        router_port=router_port,
-        cache_port=cache_port,
-        visual_port=visual_port,
-        httpserver_port=httpserver_port,
-        enable_multimodal=args.enable_multimodal,
-        metric_port=metric_port,
-    )
-
-    start_submodule_processes(
+    process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[
             (args, router_port, detokenization_port, model_rpc_ports, metric_port),
-            (args, detokenization_port, httpserver_port),
+            (args, detokenization_port, detokenization_pub_port),
         ],
     )
+
+    # 启动 gunicorn
+    command = [
+        "gunicorn",
+        "--workers",
+        f"{args.httpserver_workers}",
+        "--worker-class",
+        "uvicorn.workers.UvicornWorker",
+        "--bind",
+        f"{args.host}:{args.port}",
+        "--log-level",
+        "info",
+        "--access-logfile",
+        "-",
+        "--error-logfile",
+        "-",
+        "lightllm.server.api_http:app",
+    ]
+
+    # 启动子进程
+    http_server_process = subprocess.Popen(command)
+
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_clear
 
@@ -223,36 +272,15 @@ def normal_or_p_d_start(g_objs):
     if args.health_monitor:
         from lightllm.server.health_monitor.manager import start_health_check_process
 
-        start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
-
-    g_objs.shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load", args.dp)
-
-    g_objs.server.install_signal_handlers()
-    uvicorn.run(
-        g_objs.app,
-        host=args.host,
-        port=args.port,
-        log_level="info",
-        timeout_keep_alive=5,
-        loop="uvloop",
-    )
+        process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+    setup_signal_handlers(http_server_process, process_manager)
+    http_server_process.wait()
+    return
 
 
-def pd_master_start(g_objs):
-    from .api_server import G_Objs
-
-    g_objs: G_Objs = g_objs
-    args = g_objs.args
-
+def pd_master_start(args):
     if args.run_mode != "pd_master":
         return
-
-    if args.use_tgi_api:
-        g_objs.g_generate_func = tgi_generate_impl
-        g_objs.g_generate_stream_func = tgi_generate_stream_impl
-    else:
-        g_objs.g_generate_func = lightllm_generate
-        g_objs.g_generate_stream_func = lightllm_generate_stream
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
     logger.info(f"all start args:{args}")
@@ -260,30 +288,41 @@ def pd_master_start(g_objs):
     can_use_ports = alloc_can_use_network_port(num=1, used_nccl_ports=[args.nccl_port, args.port])
     metric_port = can_use_ports[0]
 
-    start_submodule_processes(
+    args.metric_port = metric_port
+
+    set_env(args)
+
+    process_manager.start_submodule_processes(
         start_funcs=[
             start_metric_manager,
         ],
         start_args=[(metric_port, args)],
     )
 
-    g_objs.metric_client = MetricClient(metric_port)
-    g_objs.httpserver_manager = HttpServerManagerForPDMaster(
-        args,
-        metric_port=metric_port,
-    )
+    command = [
+        "gunicorn",
+        "--workers",
+        "1",
+        "--worker-class",
+        "uvicorn.workers.UvicornWorker",
+        "--bind",
+        f"{args.host}:{args.port}",
+        "--log-level",
+        "info",
+        "--access-logfile",
+        "-",
+        "--error-logfile",
+        "-",
+        "--preload",
+        "lightllm.server.api_http:app",
+    ]
+
+    http_server_process = subprocess.Popen(command)
 
     if args.health_monitor:
         from lightllm.server.health_monitor.manager import start_health_check_process
 
-        start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+        process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
 
-    g_objs.server.install_signal_handlers()
-    uvicorn.run(
-        g_objs.app,
-        host=args.host,
-        port=args.port,
-        log_level="info",
-        timeout_keep_alive=5,
-        loop="uvloop",
-    )
+    setup_signal_handlers(http_server_process, process_manager)
+    http_server_process.wait()

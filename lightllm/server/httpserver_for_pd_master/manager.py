@@ -13,10 +13,11 @@ import pickle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict
-from ..io_struct import FinishStatus
+from lightllm.server.core.objs import FinishStatus
 from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType
-from ..sampling_params import SamplingParams
+from lightllm.server.core.objs import SamplingParams
 from ..multimodal_params import MultimodalParams
+from ..tokenizer import get_tokenizer
 from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
 from fastapi import Request
 from lightllm.utils.log_utils import init_logger
@@ -42,6 +43,8 @@ class HttpServerManagerForPDMaster:
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
+
+        self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -184,8 +187,8 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        sampling_params.move_kv_to_decode_node = decode_node_dict if old_max_new_tokens != 1 else None
-        sampling_params.suggested_dp_index = None
+        sampling_params.move_kv_to_decode_node.initialize(decode_node_dict if old_max_new_tokens != 1 else None)
+        sampling_params.suggested_dp_index = -1
 
         await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
@@ -198,7 +201,7 @@ class HttpServerManagerForPDMaster:
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     if old_max_new_tokens != 1:
-                        finish_status = FinishStatus.NO_FINISH
+                        finish_status = FinishStatus(FinishStatus.NO_FINISH)
                     else:
                         finish_status = FinishStatus(finish_status)
                     # 得到 p 节点返回的 prompt_ids 信息
@@ -218,7 +221,7 @@ class HttpServerManagerForPDMaster:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err")
             assert False, f"req_id {group_request_id} kv move time out, server is busy"
 
-        sampling_params.move_kv_to_decode_node = None
+        sampling_params.move_kv_to_decode_node.initialize(None)
         sampling_params.max_new_tokens = old_max_new_tokens - 1
         sampling_params.suggested_dp_index = up_status_event.upkv_status.dp_index
 
@@ -344,18 +347,13 @@ class HttpServerManagerForPDMaster:
                 for obj in objs:
                     if obj[0] == ObjType.TOKEN_PACKS:
                         for sub_req_id, text, metadata, finish_status in obj[1]:
-                            finish_status = FinishStatus(finish_status)
+                            finish_status: FinishStatus = finish_status
                             group_req_id = convert_sub_id_to_group_id(sub_req_id)
                             try:
-                                if not finish_status.is_aborted():
-                                    req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
-                                    async with req_status.lock:
-                                        req_status.out_token_info_list.append(
-                                            (sub_req_id, text, metadata, finish_status)
-                                        )
-                                        req_status.event.set()
-                                else:
-                                    del self.req_id_to_out_inf[group_req_id]
+                                req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
+                                async with req_status.lock:
+                                    req_status.out_token_info_list.append((sub_req_id, text, metadata, finish_status))
+                                    req_status.event.set()
                             except:
                                 pass
                     else:

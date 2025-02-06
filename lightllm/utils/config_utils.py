@@ -13,7 +13,12 @@ def get_config_json(model_path: str):
 
 def get_eos_token_ids(model_path: str):
     config_json = get_config_json(model_path)
-    eos_token_id = config_json["eos_token_id"]
+    try:
+        eos_token_id = config_json["eos_token_id"]
+    except:
+        # for some multimode model.
+        eos_token_id = config_json["llm_config"]["eos_token_id"]
+
     if isinstance(eos_token_id, int):
         return [eos_token_id]
     if isinstance(eos_token_id, list):

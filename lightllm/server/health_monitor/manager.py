@@ -4,9 +4,12 @@ import asyncio
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import os
-from lightllm.utils.log_utils import init_logger
+import inspect
 import requests
 import time
+
+from lightllm.utils.log_utils import init_logger
+from lightllm.utils.graceful_utils import graceful_registry
 
 logger = init_logger(__name__)
 
@@ -84,9 +87,6 @@ def get_all_cared_pids():
 
 def start_health_check_process(args, pipe_writer):
     # 注册graceful 退出的处理
-    from lightllm.utils.graceful_utils import graceful_registry
-    import inspect
-
     graceful_registry(inspect.currentframe().f_code.co_name)
     pipe_writer.send("init ok")
 

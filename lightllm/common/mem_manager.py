@@ -2,7 +2,7 @@ import re
 import os
 import torch
 import torch.distributed as dist
-from typing import List
+from typing import List, Union
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
@@ -22,9 +22,13 @@ class MemoryManager:
         self.dtype = dtype
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
-        # mem_state 修改为使用计数方式，方便后期实现token共享机制，实现beam search 等
-        self.mem_state = torch.zeros((self.size,), dtype=torch.int32, device="cuda")
-        self.indexes = torch.arange(0, self.size, dtype=torch.long, device="cuda")
+
+        self.mem_state = torch.arange(
+            0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
+        )
+        self.mark_start = 0
+        self.mark_end = self.size
+
         self.can_use_mem_size = self.size
 
         # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
@@ -223,79 +227,52 @@ class MemoryManager:
     def _free_buffers(self):
         self.kv_buffer = None
 
-    @torch.no_grad()
-    def alloc(self, need_size):
-        if need_size > self.can_use_mem_size:
-            logger.warning(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
-            return None
-        can_use_index = torch.nonzero(self.mem_state == 0).view(-1)
-        select_index = can_use_index[0:need_size]
-        self.add_refs(select_index)
-        return select_index
+    def alloc(self, need_size) -> torch.Tensor:
+        if need_size > self.mark_end - self.mark_start:
+            logger.error(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
+            assert False, "error alloc state"
 
-    @torch.no_grad()
-    def alloc_contiguous(self, need_size):
-        if self.always_copy:
-            return None
-        if need_size > self.can_use_mem_size:
-            logger.warning(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
-            return None
+        start = self.mark_start
+        end = self.mark_start + need_size
+        ans = self.mem_state[start:end]
+        self.mark_start += need_size
 
-        can_use_index = torch.nonzero(self.mem_state == 0).view(-1)
-        can_use_index_size = len(can_use_index)
-        can_use_index = can_use_index[0 : can_use_index_size - need_size + 1][
-            (can_use_index[need_size - 1 :] - can_use_index[0 : can_use_index_size - need_size + 1]) == need_size - 1
-        ]
-        if can_use_index.shape[0] == 0:
-            # logger.warn(f'warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}')
-            return None
-        start = can_use_index[0].item()
-        end = start + need_size
-        select_index = self.indexes[start:end]
-        self.add_refs(select_index)
-        return select_index, start, end
+        self.can_use_mem_size -= need_size
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        return ans
 
-    @torch.no_grad()
-    def free(self, free_index):
+    def free(self, free_index: Union[torch.Tensor, List[int]]):
         """_summary_
 
         Args:
             free_index (torch.Tensor): _description_
         """
-        free_index = free_index.long()
-        self.decrease_refs(free_index)
+
+        end = self.mark_start
+        start = self.mark_start - len(free_index)
+        assert start >= 0, f"error free state start: {self.mark_start} free len {len(free_index)}"
+
+        if isinstance(free_index, list):
+            self.mem_state.numpy()[start:end] = free_index
+        else:
+            self.mem_state[start:end] = free_index
+
+        self.mark_start -= len(free_index)
+
+        self.can_use_mem_size += len(free_index)
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+
         if self.can_use_mem_size == len(self.mem_state):
             logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
         return
 
-    @torch.no_grad()
-    def add_refs(self, token_index: torch.Tensor):
-        state = self.mem_state[token_index]
-        has_used_tokens = torch.count_nonzero(state).item()
-        all_tokens = len(state)
-        self.can_use_mem_size -= all_tokens - has_used_tokens
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        self.mem_state[token_index] += 1
-        return
-
-    @torch.no_grad()
-    def decrease_refs(self, token_index: torch.Tensor):
-        token_index, counts = token_index.unique(return_counts=True)
-        self.mem_state[token_index] -= counts
-        state = self.mem_state[token_index]
-        used_tokens = torch.count_nonzero(state).item()
-        all_tokens = len(state)
-        self.can_use_mem_size += all_tokens - used_tokens
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        return
-
-    @torch.no_grad()
     def free_all(self):
         self.can_use_mem_size = len(self.mem_state)
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        self.mem_state[:] = 0
+        self.mem_state.numpy()[:] = list(range(0, len(self.mem_state)))
+        self.mark_start = 0
+        self.mark_end = len(self.mem_state)
 
-    @torch.no_grad()
     def resize_mem(self, new_size):
         """
         just for test code
@@ -306,9 +283,13 @@ class MemoryManager:
         head_dim = self.head_dim
         layer_num = self.layer_num
 
-        self.mem_state = torch.zeros((size,), dtype=torch.int32, device="cuda")
-        self.indexes = torch.arange(0, size, dtype=torch.long, device="cuda")
-        self.can_use_mem_size = size
+        self.size = new_size
+        self.mem_state = torch.arange(
+            0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
+        )
+        self.mark_start = 0
+        self.mark_end = self.size
+        self.can_use_mem_size = self.size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._free_buffers()
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)

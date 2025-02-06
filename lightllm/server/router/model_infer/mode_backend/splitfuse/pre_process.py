@@ -1,16 +1,15 @@
 import torch
 import numpy as np
-from lightllm.server.router.model_infer.infer_batch import requests_mapping, InferReq, InferBatch
-from lightllm.server.io_struct import ReqRunStatus
+from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.mem_manager import MemoryManager
 
 # @calculate_time(show=True, min_cost_ms=1)
-def splitfuse_prepare_decode_inputs(batch: InferBatch, splitfuse_block_size, radix_cache: RadixCache):
+def splitfuse_prepare_decode_inputs(batch, splitfuse_block_size, radix_cache: RadixCache):
     decode_reqs, prefill_reqs = [], []
     for request_id in batch.request_ids:
-        req: InferReq = requests_mapping[request_id]
+        req: InferReq = g_infer_context.requests_mapping[request_id]
         if req.cur_kv_len == len(req.input_token_ids) - 1:
             decode_reqs.append(req)
         elif req.cur_kv_len < len(req.input_token_ids) - 1:

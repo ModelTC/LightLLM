@@ -2,7 +2,7 @@ import os
 import asyncio
 import numpy as np
 from dataclasses import dataclass
-from lightllm.server.sampling_params import SamplingParams
+from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.httpserver.manager import HttpServerManager
 from fastapi import Request
@@ -54,7 +54,8 @@ async def health_check(args, httpserver_manager: HttpServerManager, request: Req
             request_dict["parameters"]["max_new_tokens"] = 1
         prompt = request_dict.pop("inputs")
         sample_params_dict = request_dict["parameters"]
-        sampling_params = SamplingParams(**sample_params_dict)
+        sampling_params = SamplingParams()
+        sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
         sampling_params.verify()
         if args.run_mode in ["prefill", "decode"]:
             sampling_params.group_request_id = -_g_health_req_id_gen.generate_id()  # health monitor 的 id 是负的

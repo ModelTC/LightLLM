@@ -2,7 +2,7 @@ import collections
 from typing import AsyncGenerator
 from fastapi import BackgroundTasks, Request
 from fastapi.responses import Response, StreamingResponse
-from .sampling_params import SamplingParams
+from lightllm.server.core.objs.sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 import ujson as json
@@ -12,7 +12,8 @@ async def lightllm_get_score(request: Request, httpserver_manager: HttpServerMan
     request_dict = await request.json()
     prompt = request_dict.pop("chat")
     sample_params_dict = {"max_new_tokens": 1}
-    sampling_params = SamplingParams(**sample_params_dict)
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
@@ -34,7 +35,8 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
     return_details = sample_params_dict.pop("return_details", False)
-    sampling_params = SamplingParams(**sample_params_dict)
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
@@ -102,7 +104,8 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
     _ = sample_params_dict.pop("return_details", False)
-    sampling_params = SamplingParams(**sample_params_dict)
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
     if sampling_params.best_of != 1:
         raise Exception("stream api only support best_of == 1")
@@ -141,7 +144,8 @@ async def lightllm_pd_generate_stream(request: Request, httpserver_manager: Http
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
     _ = sample_params_dict.pop("return_details", False)
-    sampling_params = SamplingParams(**sample_params_dict)
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
     if sampling_params.best_of != 1:
         raise Exception("stream api only support best_of == 1")

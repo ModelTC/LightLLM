@@ -1,7 +1,7 @@
 import torch
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.server.router.model_infer.infer_batch import InferBatch, InferReq, InferSamplingParams
+from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
 from .pre_process import splitfuse_prepare_decode_inputs
 from lightllm.server.router.model_infer.mode_backend.continues_batch.post_process import sample
 
@@ -20,7 +20,7 @@ class SplitFuseBackend(ModeBackend):
     @calculate_time(show=True, min_cost_ms=200)
     def decode_batch(self, batch_id):
         output_dict = {}
-        batch: InferBatch = self.cache.pop(batch_id)
+        batch = self.cache.pop(batch_id)
         kwargs, decode_reqs, prefill_reqs = splitfuse_prepare_decode_inputs(
             batch, self.splitfuse_block_size, self.radix_cache
         )

@@ -1,10 +1,6 @@
-import time
 import uuid
 import numpy as np
-from typing import List
-from lightllm.utils.infer_utils import calculate_time
-from lightllm.server.io_struct import Batch, Req
-from lightllm.server.io_struct import ReqRunStatus
+from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 from lightllm.common.basemodel.infer_lock import g_router_lock
 
@@ -43,7 +39,7 @@ class ContinuesBatchQueue(BaseQueue):
                 < self.max_total_tokens
             )
 
-            if req.req_status != ReqRunStatus.PAUSED_AND_OFFLOAD:
+            if not req.is_paused:
                 ok_req_num = len(self.cache_len_list) + len(self.pause_req_dict) <= self.running_max_req_size
             else:
                 # 因为存在重复的项
@@ -77,25 +73,30 @@ class ContinuesBatchQueue(BaseQueue):
 
         self._init_cache_list(current_batch, is_busy)
         can_run_list = []
+        abort_req_list = []
         new_batch_first_router_need_tokens = 0  # 主要是对 prefill 大块计算时候的token数量限制
         aborted_count = 0
         for req in self.waiting_req_list:
-            if req.finish_status.is_aborted() and req.req_status == ReqRunStatus.WAIT_IN_QUEUE:
+            if req.is_aborted and not req.is_paused:
                 # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.
                 # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token和管理req对象的泄漏
                 aborted_count += 1
+                abort_req_list.append(req)
                 continue
             ok_insert, new_batch_first_router_need_tokens = self._can_add_new_req(
                 req, is_busy, new_batch_first_router_need_tokens
             )
             if ok_insert:
                 can_run_list.append(req)
-                if req.req_status == ReqRunStatus.PAUSED_AND_OFFLOAD:
+                if req.is_paused:
                     self.pause_req_dict.pop(req.request_id)
+                    req.is_paused = False
             else:
                 break
         if len(can_run_list) != 0:
-            new_batch = Batch(uuid.uuid4().hex, can_run_list, dp_size=self.dp_size)
+            new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size=self.dp_size)
+            for req in abort_req_list:
+                self.router.shm_req_manager.put_back_req_obj(req)
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
             return new_batch
         else:

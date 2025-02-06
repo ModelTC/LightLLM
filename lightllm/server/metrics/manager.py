@@ -2,16 +2,14 @@ import asyncio
 import rpyc
 import time
 import threading
-from typing import Union
-from rpyc.utils.classic import obtain
+import inspect
+import functools
+import queue
 from .metrics import Monitor
 from prometheus_client import generate_latest
-import multiprocessing.shared_memory as shm
-from concurrent.futures import ThreadPoolExecutor
-import functools
-from rpyc import async_, SocketStream
-import queue
+from rpyc import SocketStream
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.graceful_utils import graceful_registry
 
 logger = init_logger(__name__)
 
@@ -137,9 +135,6 @@ class MetricClient(threading.Thread):
 
 def start_metric_manager(port: int, args, pipe_writer):
     # 注册graceful 退出的处理
-    from lightllm.utils.graceful_utils import graceful_registry
-    import inspect
-
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     service = MetricServer(args)

@@ -81,7 +81,7 @@ class TokenLoad:
 
     def need_update_dynamic_max_load(self, index: int = 0):
         # 3s 需要进行一次更新
-        if time.time() - self.last_dynamic_max_load_update_time >= 3.0:
+        if time.time() - self.last_dynamic_max_load_update_time >= 6.0:
             return True
         else:
             return False

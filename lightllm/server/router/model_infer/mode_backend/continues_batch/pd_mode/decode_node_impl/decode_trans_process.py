@@ -1,12 +1,14 @@
 import torch
 import time
 import sys
+import inspect
 import torch.multiprocessing as mp
 from typing import List, Dict
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import KVMoveTask
-from lightllm.utils.device_utils import kv_trans_use_p2p, init_p2p
+from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.utils.graceful_utils import graceful_registry
 
 logger = init_logger(__name__)
 
@@ -30,9 +32,6 @@ def _init_env(
 
     try:
         # 注册graceful 退出的处理
-        from lightllm.utils.graceful_utils import graceful_registry
-        import inspect
-
         graceful_registry(inspect.currentframe().f_code.co_name)
         torch.cuda.set_device(device_index)
 

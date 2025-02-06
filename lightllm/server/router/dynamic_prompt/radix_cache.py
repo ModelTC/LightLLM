@@ -1,13 +1,9 @@
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/router/radix_cache.py
 import torch
-import heapq
-import time
 import numpy as np
-from collections import defaultdict
-from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Dict, Set, List
 from sortedcontainers import SortedSet
-from .shared_arr import SharedArray, SharedTreeInfoNode, SharedLinkedListManager
+from .shared_arr import SharedArray
 from lightllm.common.mem_manager import MemoryManager
 
 
@@ -24,21 +20,22 @@ time_gen = UniqueTimeIdGenerator()
 
 
 class TreeNode:
-    def __init__(self, shared_idx_manager):
-        self.shared_idx_manager: SharedLinkedListManager = shared_idx_manager
-        self.children = {}  # 这里的键 为 token_id_key 的第一个元素
+    def __init__(self):
+        self.children: Dict[int, TreeNode] = {}  # 这里的键 为 token_id_key 的第一个元素
         self.parent: TreeNode = None
         self.token_id_key: torch.Tensor = None
         self.token_mem_index_value: torch.Tensor = None  # 用于记录存储的 token_index 为每个元素在 token mem 中的index位置
         self.ref_counter = 0
-        self.shared_idx_node: SharedTreeInfoNode = self.shared_idx_manager.alloc()
         self.time_id = time_gen.generate_time_id()  # 用于标识时间周期
+
+        self.node_value_len = 0
+        self.node_prefix_total_len = 0
 
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 
     def split_node(self, prefix_len):
-        split_parent_node = TreeNode(self.shared_idx_manager)
+        split_parent_node = TreeNode()
         split_parent_node.parent = self.parent
         split_parent_node.parent.children[self.token_id_key[0].item()] = split_parent_node
         split_parent_node.token_id_key = self.token_id_key[0:prefix_len]
@@ -47,25 +44,20 @@ class TreeNode:
         split_parent_node.children[self.token_id_key[prefix_len].item()] = self
         split_parent_node.ref_counter = self.ref_counter
 
-        split_parent_node.shared_idx_node.set_parent_idx(self.shared_idx_node.get_parent_idx())
         new_len = len(split_parent_node.token_mem_index_value)
-        split_parent_node.shared_idx_node.set_node_value_len(new_len)
-        split_parent_node.shared_idx_node.set_node_prefix_total_len(
-            split_parent_node.get_parent_prefix_total_len() + new_len
-        )
+        split_parent_node.node_value_len = new_len
+        split_parent_node.node_prefix_total_len = split_parent_node.parent.node_prefix_total_len + new_len
 
         self.token_id_key = self.token_id_key[prefix_len:]
         self.token_mem_index_value = self.token_mem_index_value[prefix_len:]
         self.parent = split_parent_node
-        self.shared_idx_node.set_parent_idx(split_parent_node.shared_idx_node.get_idx())
         new_len = len(self.token_mem_index_value)
-        self.shared_idx_node.set_node_value_len(new_len)
-        self.shared_idx_node.set_node_prefix_total_len(self.get_parent_prefix_total_len() + new_len)
-
+        self.node_value_len = new_len
+        self.node_prefix_total_len = self.parent.node_prefix_total_len + new_len
         return split_parent_node
 
     def add_and_return_new_child(self, token_id_key, token_mem_index_value):
-        child = TreeNode(self.shared_idx_manager)
+        child = TreeNode()
         child.token_id_key = token_id_key
         child.token_mem_index_value = token_mem_index_value
         first_token_key = child.token_id_key[0].item()
@@ -73,14 +65,12 @@ class TreeNode:
         self.children[first_token_key] = child
         child.parent = self
 
-        # 更新shared 信息
-        child.shared_idx_node.set_parent_idx(self.shared_idx_node.get_idx())
         new_len = len(child.token_mem_index_value)
-        child.shared_idx_node.set_node_value_len(new_len)
-        child.shared_idx_node.set_node_prefix_total_len(child.get_parent_prefix_total_len() + new_len)
+        child.node_value_len = new_len
+        child.node_prefix_total_len = child.parent.node_prefix_total_len + new_len
         return child
 
-    def remove_child(self, child_node):
+    def remove_child(self, child_node: "TreeNode"):
         del self.children[child_node.token_id_key[0].item()]
         child_node.parent = None
         return
@@ -90,9 +80,6 @@ class TreeNode:
 
     def is_leaf(self):
         return len(self.children) == 0
-
-    def get_parent_prefix_total_len(self):
-        return self.parent.shared_idx_node.get_node_prefix_total_len()
 
 
 def match(key, seq):
@@ -114,14 +101,12 @@ class RadixCache:
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
-        self.shared_idx_manager = SharedLinkedListManager(unique_name, total_token_num, tp_id)
-
-        self.root_node = TreeNode(self.shared_idx_manager)
+        self.root_node = TreeNode()
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
         self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
 
-        self.evict_tree_set = SortedSet(key=lambda x: x.get_compare_key())  # 自定义比较器
+        self.evict_tree_set: Set[TreeNode] = SortedSet(key=lambda x: x.get_compare_key())  # 自定义比较器
         self.evict_tree_set.add(self.root_node)
 
         self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{tp_id}", (1,), dtype=np.int64)
@@ -274,8 +259,6 @@ class RadixCache:
             if parent_node.is_leaf():
                 self.evict_tree_set.add(parent_node)
 
-            # 回收 shared 链表资源
-            self.shared_idx_manager.free(node.shared_idx_node.get_idx())
         return
 
     def assert_leafs_is_right(self):
@@ -295,8 +278,6 @@ class RadixCache:
                 parent_node.remove_child(node)
                 if parent_node.is_leaf():
                     self.evict_tree_set.add(parent_node)
-
-                self.shared_idx_manager.free(node.shared_idx_node.get_idx())
             else:
                 break
 
@@ -335,10 +316,9 @@ class RadixCache:
     def _print_helper(self, node: TreeNode, indent):
         print(
             " " * indent,
-            f"shared_idx: {node.shared_idx_node.get_idx()} p_idx: {node.shared_idx_node.get_parent_idx()} \
-            k: {node.token_id_key[0:10]} v: {node.token_mem_index_value[0:10]} refs: {node.ref_counter} \
-            time_id: {node.time_id} prefix_total_len: {node.shared_idx_node.get_node_prefix_total_len()} \
-            node_value_len: {node.shared_idx_node.get_node_value_len()}",
+            f"k: {node.token_id_key[0:10]} v: {node.token_mem_index_value[0:10]} refs: {node.ref_counter} \
+            time_id: {node.time_id} prefix_total_len: {node.node_prefix_total_len} \
+            node_value_len: {node.node_value_len}",
         )
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)
@@ -356,7 +336,7 @@ class RadixCache:
 
             self.evict(need_evict_token_num, release_mem)
             mem_index = torch.concat(release_mems)
-            self.mem_manager.free(mem_index.cuda())
+            self.mem_manager.free(mem_index)
         return
 
 
@@ -366,7 +346,6 @@ class _RadixCacheReadOnlyClient:
     """
 
     def __init__(self, unique_name, total_token_num, tp_id):
-        self.shared_idx_manager = SharedLinkedListManager(unique_name, total_token_num, tp_id, force_init=False)
         self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{tp_id}", (1,), dtype=np.int64)
         self.tree_total_tokens_num = SharedArray(f"{unique_name}_tree_total_tokens_num_{tp_id}", (1,), dtype=np.int64)
 
@@ -379,21 +358,12 @@ class _RadixCacheReadOnlyClient:
     def get_unrefed_tokens_num(self):
         return self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0]
 
-    def get_shared_node(self, idx):
-        return self.shared_idx_manager.get_shared_node(idx)
-
-    def get_all_parent_shared_nodes(self, idx):
-        node = self.shared_idx_manager.get_shared_node(idx)
-        ans_list = [node]
-        while node.get_parent_idx() != -1:
-            node = self.shared_idx_manager.get_shared_node(node.get_parent_idx())
-            ans_list.append(node)
-        return ans_list
-
 
 class RadixCacheReadOnlyClient:
     def __init__(self, unique_name, total_token_num, tp_size):
-        self.tp_clients = [_RadixCacheReadOnlyClient(unique_name, total_token_num, tp_id) for tp_id in range(tp_size)]
+        self.tp_clients: List[_RadixCacheReadOnlyClient] = [
+            _RadixCacheReadOnlyClient(unique_name, total_token_num, tp_id) for tp_id in range(tp_size)
+        ]
 
     def get_refed_tokens_num(self, index):
         return self.tp_clients[index].get_refed_tokens_num()
@@ -403,12 +373,6 @@ class RadixCacheReadOnlyClient:
 
     def get_unrefed_tokens_num(self, index):
         return self.tp_clients[index].get_unrefed_tokens_num()
-
-    def get_shared_node(self, tp_index, idx):
-        return self.tp_clients[tp_index].get_shared_node(idx)
-
-    def get_all_parent_shared_nodes(self, tp_index, idx):
-        return self.tp_clients[tp_index].get_all_parent_shared_nodes(idx)
 
 
 # ///////////////////////////////////////////////////////////////////////////////
@@ -447,19 +411,19 @@ if __name__ == "__main__":
         tree_node, size, values = tree.match_prefix(
             torch.tensor([0, 1, 2, 3, 4], dtype=torch.int64, device="cpu"), update_refs=False
         )
-        assert tree_node.shared_idx_node.get_node_prefix_total_len() == 5 and size == 5 and len(values) == 5
+        assert tree_node.node_prefix_total_len == 5 and size == 5 and len(values) == 5
         tree_node, size, values = tree.match_prefix(
             torch.tensor([0, 1, 2, 3, 4, 9], dtype=torch.int64, device="cpu"), update_refs=False
         )
-        assert tree_node.shared_idx_node.get_node_prefix_total_len() == 5 and size == 5 and len(values) == 5
+        assert tree_node.node_prefix_total_len == 5 and size == 5 and len(values) == 5
         tree_node, size, values = tree.match_prefix(
             torch.tensor([0, 1, 2, 3, 4, 7, 8], dtype=torch.int64, device="cpu"), update_refs=False
         )
-        assert tree_node.shared_idx_node.get_node_prefix_total_len() == 7 and size == 7 and len(values) == 7
+        assert tree_node.node_prefix_total_len == 7 and size == 7 and len(values) == 7
         tree_node, size, values = tree.match_prefix(
             torch.tensor([0, 1, 2, 3, 4, 7, 9], dtype=torch.int64, device="cpu"), update_refs=False
         )
-        assert tree_node.shared_idx_node.get_node_prefix_total_len() == 6 and size == 6 and len(values) == 6
+        assert tree_node.node_prefix_total_len == 6 and size == 6 and len(values) == 6
         print(ans)
         return
 
@@ -475,13 +439,13 @@ if __name__ == "__main__":
         tree_node, size, values = tree.match_prefix(
             torch.tensor([0, 1, 2, 3, 4], dtype=torch.int64, device="cpu"), update_refs=True
         )
-        assert tree_node.shared_idx_node.get_node_prefix_total_len() == 5 and size == 5 and len(values) == 5
+        assert tree_node.node_prefix_total_len == 5 and size == 5 and len(values) == 5
         assert tree.get_refed_tokens_num() == 5 and tree.get_tree_total_tokens_num() == 13
 
         tree_node, size, values = tree.match_prefix(
             torch.tensor([0, 1, 2, 3, 4, 7, 9], dtype=torch.int64, device="cpu"), update_refs=True
         )
-        assert tree_node.shared_idx_node.get_node_prefix_total_len() == 6 and size == 6 and len(values) == 6
+        assert tree_node.node_prefix_total_len == 6 and size == 6 and len(values) == 6
         assert tree.get_refed_tokens_num() == 6 and tree.get_tree_total_tokens_num() == 13
 
         tree.print_self()
@@ -504,7 +468,6 @@ if __name__ == "__main__":
         tree.print_self()
 
         tree.clear_tree_nodes()
-        assert tree.shared_idx_manager.can_alloc_num() == 100
         print(ans)
         return
 

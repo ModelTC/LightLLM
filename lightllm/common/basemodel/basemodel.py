@@ -236,6 +236,8 @@ class TpPartBaseModel:
         multimodal_params=None,
         is_prefill=True,
     ):
+        assert mem_indexes.is_cuda
+
         if is_prefill:
             return self._prefill(
                 batch_size,
@@ -490,8 +492,8 @@ class TpPartBaseModel:
         try:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int32, device="cuda")
-            b_req_idx = self.req_manager.alloc(1).int()
-            mem_indexes = self.mem_manager.alloc(len(dummy_input_ids))
+            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+            mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")

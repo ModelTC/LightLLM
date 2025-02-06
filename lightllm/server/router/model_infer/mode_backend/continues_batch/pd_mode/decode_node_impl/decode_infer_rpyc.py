@@ -89,7 +89,7 @@ class PDDecodeInferRpcServer(rpyc.Service):
             self.backend.radix_cache.free_radix_cache_to_get_enough_token(need_len)
             alloc_token_indexes = self.backend.model.mem_manager.alloc(need_len)
             if alloc_token_indexes is not None:
-                alloc_token_indexes = alloc_token_indexes.detach().cpu().tolist()
+                alloc_token_indexes = alloc_token_indexes.tolist()
 
         if alloc_token_indexes is None:
             self.backend.radix_cache.dec_node_ref_counter(tree_node)
@@ -124,7 +124,7 @@ class PDDecodeInferRpcServer(rpyc.Service):
         value = torch.tensor(fused_token_indexes + move_task.decode_token_indexes, dtype=torch.int64, device="cpu")
         prefix_len = radix_cache.insert(key, value)
         assert len(fused_token_indexes) <= prefix_len
-        self.backend.model.mem_manager.free(value[len(fused_token_indexes) : prefix_len].cuda())
+        self.backend.model.mem_manager.free(value[len(fused_token_indexes) : prefix_len])
         self.backend.radix_cache.dec_node_ref_counter(tree_node)
 
         # 申请一段key，把 radix cache 锁住，防止极端情况下被刷掉, decode 端通过减两次引用计数来修正。
@@ -144,7 +144,7 @@ class PDDecodeInferRpcServer(rpyc.Service):
     def _fail_to_realese_forzen_tokens(self, group_req_id: int):
         move_task, tree_node, fused_token_indexes = g_kv_move_task_cache.pop(group_req_id)
         value = torch.tensor(move_task.decode_token_indexes, dtype=torch.int64, device="cpu")
-        self.backend.model.mem_manager.free(value.cuda())
+        self.backend.model.mem_manager.free(value)
         self.backend.radix_cache.dec_node_ref_counter(tree_node)
         self.recover_frozen_token(len(move_task.input_tokens), move_task.decode_node.max_new_tokens)
         return

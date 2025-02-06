@@ -2,7 +2,7 @@ import json
 import copy
 import dataclasses
 import requests
-from lightllm.server.sampling_params import SamplingParams
+from lightllm.server.core.objs.py_sampling_params import SamplingParams
 from pydantic import BaseModel
 from typing import List
 from outlines.fsm.json_schema import build_regex_from_schema

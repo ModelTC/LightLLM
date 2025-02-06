@@ -1,13 +1,13 @@
 import rpyc
 import random
 import asyncio
-import sys
 import os
 import signal
 import collections
 import time
 import psutil
 import threading
+import inspect
 from rpyc.utils.classic import obtain
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple, Union
@@ -15,14 +15,13 @@ from rpyc import ThreadedServer
 from lightllm.utils.log_utils import init_logger
 from .decode_infer_rpyc import PDDecodeInferRpcServer
 from ..task_queue import TaskQueue
-from lightllm.common.mem_manager import MemoryManager
 import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import KVMoveTask, UpKVStatus
 from lightllm.utils.retry_utils import retry
 import numpy as np
-import queue
 from rpyc import AsyncResult
 from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.utils.graceful_utils import graceful_registry
 
 logger = init_logger(__name__)
 
@@ -105,6 +104,11 @@ class TransProcessObj:
             self.task_in_queue.put(move_tasks.copy(), timeout=10)
             assert self.task_out_queue.get(timeout=60) == "ok"
             logger.info(f"_transfer_kv ok {move_tasks[0].to_decode_log_info()}")
+
+            # 标记 decode 接收到 kv cache 的时间
+            for move_task in move_tasks:
+                move_task.mark_start_time = time.time()
+
             self.move_finished_queue.put_list(move_tasks)
             move_tasks.clear()
 
@@ -162,7 +166,9 @@ class TransProcessObj:
 
                 self.manager._put_kv_received_to_radix_cache(move_tasks.copy())
                 for task in move_tasks.copy():
-                    logger.info(f"{func_name} put kv to radix cache ok, req_id: {task.id()}")
+                    logger.info(
+                        f"{func_name} put kv to radix cache ok, req_id: {task.id()} cost_time {task.get_cost_time()} s"
+                    )
                     self.manager.up_status_in_queue.put(
                         UpKVStatus(group_request_id=task.group_request_id, dp_index=task.decode_dp_index)
                     )
@@ -468,7 +474,8 @@ class DecodeKVMoveManager(rpyc.Service):
             raise e
 
         try:
-            trans_obj.ready_to_move_queue.put(alloc_tokened_tasks)
+            if len(alloc_tokened_tasks) != 0:
+                trans_obj.ready_to_move_queue.put(alloc_tokened_tasks)
         except BaseException as e:
             logger.exception(str(e))
             self.put_to_fail_release_task_queue(alloc_tokened_tasks)
@@ -520,9 +527,6 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
-    from lightllm.utils.graceful_utils import graceful_registry
-    import inspect
-
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     manager = DecodeKVMoveManager(args, info_queue, mem_queues)
@@ -530,7 +534,6 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
     threading.Thread(target=lambda: t.start(), daemon=True).start()
 
     event.set()
-
     manager.timer_loop()
     return
 
@@ -541,5 +544,5 @@ def start_decode_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues:
     proc.start()
     event.wait()
     assert proc.is_alive()
-    logger.info("prefill kv move manager process started")
+    logger.info("decode kv move manager process started")
     return

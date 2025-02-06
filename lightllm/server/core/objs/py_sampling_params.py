@@ -1,8 +1,12 @@
-"""Sampling parameters for text generation."""
+"""Sampling parameters for text generation.
+本文件中定义的 SamplingParams 类是与 sampling_params.py 文件中实现的 基于ctypes 实现的 SamplingParams 具有
+相同的功能，主要用于便于转化的易用性，目前在约束输出部分有使用到。
+"""
 import os
 from typing import List, Optional, Union, Tuple
 from transformers import GenerationConfig
-from .req_id_generator import MAX_BEST_OF
+from lightllm.server.req_id_generator import MAX_BEST_OF
+
 
 _SAMPLING_EPS = 1e-5
 # 用环境变量控制是否进行输入惩罚的默认值

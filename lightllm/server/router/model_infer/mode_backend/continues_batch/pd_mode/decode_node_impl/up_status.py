@@ -3,10 +3,13 @@ import json
 import asyncio
 import threading
 import websockets
+import inspect
+
 from typing import List
 from dataclasses import asdict
 from lightllm.server.pd_io_struct import UpKVStatus
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.graceful_utils import graceful_registry
 import torch.multiprocessing as mp
 
 logger = init_logger(__name__)
@@ -53,9 +56,6 @@ class UpStatusManager:
 
 
 def _init_env(args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
-    from lightllm.utils.graceful_utils import graceful_registry
-    import inspect
-
     graceful_registry(inspect.currentframe().f_code.co_name)
     up_kv_manager = UpStatusManager(args, task_in_queue, task_out_queue)
     logger.info(f"up kv manager {str(up_kv_manager)} start ok")

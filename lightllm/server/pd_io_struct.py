@@ -31,7 +31,7 @@ class ObjType(enum.Enum):
 
 @dataclass
 class PD_Client_Obj:
-    node_id: str
+    node_id: int
     client_ip_port: str
     mode: str  # 只能是 prefill 或者 decode 节点
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
@@ -69,7 +69,7 @@ class UpKVStatus:
 
 @dataclass
 class DecodeNodeInfo:
-    node_id: str
+    node_id: int
     ip: str
     rpyc_port: str
     max_new_tokens: int
@@ -83,7 +83,7 @@ class KVMoveTask:
     # 在decode节点上 mem manager kv buffer中的token index, 其代表的是真实占用的额外token，并不与prefill_token_indexes 一样长
     decode_token_indexes: List[int]
     move_kv_len: int  # 因为 prompt cache 的原因，当prefill节点和decode节点沟通后，传输的kv的数量可能少于 prefill_value 的长度
-    prefill_node_id: str
+    prefill_node_id: int
     decode_node: DecodeNodeInfo
     # 保存prefill 和 decode 节点对应处理的dp_index, 如果是普通tp模式，这个值一定是0,
     # 如果是deepseekv2的tp dp 混合模式, 才有真正的意义。

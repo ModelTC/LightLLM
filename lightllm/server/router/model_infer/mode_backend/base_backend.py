@@ -9,8 +9,6 @@ from transformers.configuration_utils import PretrainedConfig
 from lightllm.models.cohere.model import CohereTpPartModel
 from lightllm.models.mixtral.model import MixtralTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
-from rpyc.utils.classic import obtain
-
 from lightllm.models.bloom.model import BloomTpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.starcoder.model import StarcoderTpPartModel
@@ -36,20 +34,21 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.server.router.model_infer.infer_batch import InferBatch, InferReq, InferSamplingParams, requests_mapping
+from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 from lightllm.utils.device_utils import set_current_device_id
-
+from lightllm.server.core.objs import ShmReqManager
+from lightllm.server.router.model_infer.infer_batch import g_infer_context
 import torch.distributed as dist
 
 
 class ModeBackend:
     def __init__(self) -> None:
+        self.shm_req_manager = ShmReqManager()
         pass
 
     def init_model(self, kvargs):
-        import torch
 
         self.args = kvargs.get("args", None)
         # p d 分离模式下会有特殊的一些初始化, 所以需要传递
@@ -75,7 +74,7 @@ class ModeBackend:
         nccl_port_str = str(kvargs["nccl_port"])
         self.shared_token_load = TokenLoad(f"{nccl_port_str}_shared_token_load", self.dp_size)
         # p d 分离模式，decode节点才会使用的参数
-        self.pd_rpyc_port = kvargs.get("pd_rpyc_port", None)
+        self.pd_rpyc_ports = kvargs.get("pd_rpyc_ports", None)
         max_total_token_num = kvargs["max_total_token_num"]
 
         if self.dp_size > 1:
@@ -216,6 +215,12 @@ class ModeBackend:
         self.logger.info(f"loaded model class {self.model.__class__}")
         self.init_custom()
 
+        g_infer_context.register(
+            req_manager=self.model.req_manager,
+            radix_cache=self.radix_cache,
+            shm_req_manager=self.shm_req_manager,
+            vocab_size=self.model.vocab_size,
+        )
         return
 
     def init_custom(self):
@@ -224,92 +229,30 @@ class ModeBackend:
     def get_max_total_token_num(self):
         return self.model.mem_manager.size
 
-    # @calculate_time(show=False, min_cost_ms=300)
-    def prefill_batch(self, batch_id):
+    def prefill(self, reqs: List[Tuple]):
+        """This method can be overridden in subclasses."""
         raise NotImplementedError()
 
     # @calculate_time(show=True, min_cost_ms=200)
-    def decode_batch(self, batch_id):
+    def decode(self):
+        """This method can be overridden in subclasses."""
         raise NotImplementedError()
 
-    # @calculate_time(show=True, min_cost_ms=0.1)
-    def add_batch(self, batch_id, reqs):
-        # 当 dp_size 不等于 1 的时候，需要提前从发来的请求参数中
-        # 剔除掉不需要处理的请求参数, deepseekv2 这种特殊的模型
-        # 在 dp 模式下 tp_rank == dp_rank
+    def pause_reqs(self, req_ids):
+        if self.dp_size != 1:
+            req_ids = [req_id for req_id in req_ids if req_id in g_infer_context.requests_mapping]
+
+        g_infer_context.pause_reqs(req_ids)
+        return
+
+    # 一些可以复用的单元功能函数
+    def _init_reqs(self, reqs: List[Tuple], init_req_obj=True):
         if self.dp_size != 1:
             cur_dp_index = self.tp_rank
-            reqs = [req for req in reqs if req["dp_index"] == cur_dp_index]
+            reqs = [req for req in reqs if req[3] == cur_dp_index]
 
         g_infer_state_lock.acquire()
-        batch_data = InferBatch.init_batch(
-            batch_id,
-            reqs,
-            self.model.data_type,
-            torch.cuda.current_device(),
-            self.model.req_manager,
-            self.model.vocab_size,
-            self.radix_cache,
-        )
-        self.cache[batch_id] = batch_data
+        g_infer_context.add_reqs(reqs, init_req_obj=init_req_obj)
         g_infer_state_lock.release()
-
-        # 将更新后的状态返回给调用方用于router中请求的状态
-        ans = {}
-        for req_id in batch_data.request_ids:
-            req_obj: InferReq = requests_mapping[req_id]
-            # 请求状态， 当前占用的kv的长度， 当前输出token的数量， 输出的token的id和元信息列表， 是否推理结束的状态， 额外保留参数
-            ans[req_id] = (
-                req_obj.req_status,
-                req_obj.cur_kv_len,
-                req_obj.get_output_len(),
-                [],
-                req_obj.finish_status.value,
-                None,
-            )
-        return ans
-
-    # @calculate_time(show=True, min_cost_ms=0.1)
-    def filter_batch(self, batch_id, req_id_list, finished_req_id_list):
-        if self.dp_size != 1:
-            req_id_list = [req_id for req_id in req_id_list if req_id in requests_mapping]
-            finished_req_id_list = [req_id for req_id in finished_req_id_list if req_id in requests_mapping]
-
-        g_infer_state_lock.acquire()
-        batch = self.cache.pop(batch_id)
-        filter_batch = batch.filter(req_id_list, finished_req_id_list)
-        del batch
-        self.cache[batch_id] = filter_batch
-        g_infer_state_lock.release()
-        return
-
-    def pause_reqs(self, batch_id, req_list):
-        if self.dp_size != 1:
-            req_list = [req for req in req_list if req[0] in requests_mapping]
-
-        g_infer_state_lock.acquire()
-        batch1 = self.cache.pop(batch_id)
-        batch2 = batch1.pause_reqs(req_list)
-        self.cache[batch_id] = batch2
-        del batch1
-        g_infer_state_lock.release()
-        return
-
-    # @calculate_time(show=True, min_cost_ms=0.1)
-    def merge_batch(self, batch_id1, batch_id2):
-        batch1 = self.cache.pop(batch_id1)
-        batch2 = self.cache.pop(batch_id2)
-        m_batch = InferBatch.merge(batch1, batch2)
-        del batch1
-        del batch2
-        self.cache[batch_id1] = m_batch
-        return
-
-    # @calculate_time(show=True, min_cost_ms=10)
-    def remove_batch(self, batch_id):
-        g_infer_state_lock.acquire()
-        batch = self.cache.pop(batch_id)
-        batch.free_self()
-        del batch
-        g_infer_state_lock.release()
-        return
+        req_ids = [e[0] for e in reqs]
+        return req_ids

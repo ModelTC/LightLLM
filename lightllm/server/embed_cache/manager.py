@@ -1,12 +1,8 @@
-import asyncio
-
-# asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-import zmq
-import zmq.asyncio
 import rpyc
 import uuid
+import inspect
 from typing import Union
-
+from lightllm.utils.graceful_utils import graceful_registry
 from .interface import CacheManager
 from rpyc.utils.classic import obtain
 
@@ -55,9 +51,6 @@ class CacheServer(rpyc.Service):
 
 def start_cache_manager(port: int, args, pipe_writer):
     # 注册graceful 退出的处理
-    from lightllm.utils.graceful_utils import graceful_registry
-    import inspect
-
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     from .interface import CacheManagerFactory

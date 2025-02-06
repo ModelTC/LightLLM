@@ -11,8 +11,6 @@ def build_req_queue(args, router, dp_size: int):
         queue_class = ContinuesBatchQueueForPDDecode
     if args.splitfuse_mode:
         queue_class = SplitFuseQueue
-    if args.beam_mode:
-        queue_class = BeamContinuesBatchQueue
     if args.diverse_mode:
         queue_class = BeamContinuesBatchQueue
     if args.token_healing_mode:
@@ -23,7 +21,7 @@ def build_req_queue(args, router, dp_size: int):
         queue_class = ContinuesBatchQueue
     if queue_class is None:
         queue_class = ContinuesBatchQueue
-    
+
     if dp_size == 1:
         return queue_class(args, router, 0, dp_size)
     else:

@@ -1,10 +1,7 @@
-import uuid
-import asyncio
-import numpy as np
 from typing import List, Dict
 from lightllm.utils.infer_utils import calculate_time
-from lightllm.server.io_struct import Batch, Req
-from lightllm.server.io_struct import ReqRunStatus, FinishStatus
+from ..batch import Batch, Req
+from lightllm.server.core.objs import FinishStatus
 from lightllm.common.basemodel.infer_lock import g_router_lock
 
 
@@ -23,7 +20,7 @@ class BaseQueue:
         self.waiting_req_list: List[Req] = []  # 当前等待队列
         self.router_token_ratio = args.router_token_ratio  # 调度繁忙
         self.router_max_new_token_len = args.router_max_new_token_len
-        self.pause_req_dict: Dict[int, Req] = {}  # 用于保存队列中被暂停的请求，暂停原因为 ReqRunStatus.PAUSED_AND_OFFLOAD
+        self.pause_req_dict: Dict[int, Req] = {}  # 用于保存队列中被暂停的请求，暂停原因为 PAUSED_AND_OFFLOAD
 
     def append(self, req: Req):
         req.sample_params.suggested_dp_index = self.dp_index
@@ -44,9 +41,7 @@ class BaseQueue:
 
     def back_to_wait_list(self, req_list: List[Req]):
         for req in req_list:
-            if req.req_status in [
-                ReqRunStatus.PAUSED_AND_OFFLOAD,
-            ]:
+            if req.is_paused:
                 self.pause_req_dict[req.request_id] = req
         self.waiting_req_list = req_list + self.waiting_req_list
         return

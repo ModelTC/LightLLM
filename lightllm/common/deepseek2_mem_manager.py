@@ -3,7 +3,7 @@ import os
 import torch.distributed as dist
 from lightllm.server.pd_io_struct import KVMoveTask
 from .mem_manager import MemoryManager
-from typing import List
+from typing import List, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 
@@ -13,17 +13,19 @@ logger = init_logger(__name__)
 class Deepseek2MemoryManager(MemoryManager):
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
-        self.enable_dp = os.getenv("ENABLE_DP", "0").upper() in ["ON", "TRUE", "1"]
-        self.holding_size = 1 if self.enable_dp else 0
-        self.mem_state[0 : self.holding_size] = 1
-        self.can_use_mem_size -= self.holding_size
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+
+        self.dp_use_token_index = self.size
 
     def get_cell_size(self):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        self.kv_buffer = torch.empty((layer_num, size, head_num, head_dim), dtype=dtype, device="cuda")
+        # deepseek model 的 kv pool 每 layer 会多申请一个， 预留给 dp 运行模式下，用于平衡各个 dp 间的batch size
+        # 保持一致。具体操作就是如果在 dp 2 的情况下， dp_1 decode batch size 是 10， dp_2 decode batch size 是
+        # 5, 会利用预留的一个token位置，构建一个长度为1的fake 请求，让 dp_2 的 decode batch size padding 到 10，
+        # 这样 dp_1 和 dp_2 的 batch size就一样了，这样可以更容易进行 all gather cuda graph 等操作。
+        self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda")
+
         # todo, etp or edp use the same work buffer here
         # also it can be used for any kernels for work buffer witout save info only
         if os.environ.get("ETP_MODE_ENABLED") == "true":
@@ -145,26 +147,4 @@ class Deepseek2MemoryManager(MemoryManager):
     def _write_kv_move_data_p2p(self, token_indexes: torch.Tensor, buffer_tensor: torch.Tensor, layer_index):
         move_token_num = len(token_indexes)
         kv_trans(buffer_tensor, self.kv_move_buf_indexes[0:move_token_num], self.kv_buffer[layer_index], token_indexes)
-        return
-
-    @torch.no_grad()
-    def free_all(self):
-        self.can_use_mem_size = len(self.mem_state) - self.holding_size
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        self.mem_state[:] = 0
-        self.mem_state[0 : self.holding_size] = 1
-
-    @torch.no_grad()
-    def free(self, free_index):
-        """_summary_
-
-        Args:
-            free_index (torch.Tensor): _description_
-        """
-        free_index = free_index.long()
-        self.decrease_refs(free_index)
-        if self.can_use_mem_size + self.holding_size == len(self.mem_state):
-            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
-            if self.holding_size > 0:
-                logger.debug(f"holding gpu mem size {self.holding_size} for dp")
         return
