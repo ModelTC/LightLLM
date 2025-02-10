@@ -114,29 +114,37 @@ def moe_align1_kernel(
     experts_topk_weight,  # [expert_num, token_num * topk_num]
     experts_topk_weight_stride0,
     experts_topk_weight_stride1,
-    TOKEN_BLOCK_N: tl.constexpr,
+    TOKEN_BLOCK_SIZE: tl.constexpr,
+    NUM_STAGE: tl.constexpr,
 ):
 
     expert_id = tl.program_id(axis=0)
-    n_range = tl.arange(0, TOKEN_BLOCK_N)
 
-    topk_weights_data = tl.load(topk_weights + n_range, mask=n_range < experts_info_n, other=0)
-    expert_data = tl.load(
-        experts_info_ptr + expert_id * experts_info_stride0 + n_range, mask=n_range < experts_info_n, other=0
-    )
-    cumsum_expert_data = tl.cumsum(expert_data)
+    off_n = tl.arange(0, TOKEN_BLOCK_SIZE)
 
-    tl.store(expert_token_num_ptr + expert_id, tl.max(cumsum_expert_data))
-    tl.store(
-        experts_info_ptr + expert_id * experts_info_stride0 + cumsum_expert_data - 1,
-        n_range,
-        mask=(expert_data == 1) & (n_range < experts_info_n),
-    )
-    tl.store(
-        experts_topk_weight + expert_id * experts_topk_weight_stride0 + cumsum_expert_data - 1,
-        topk_weights_data,
-        mask=(expert_data == 1) & (n_range < experts_info_n),
-    )
+    pre_sum = 0
+
+    for start_loc in tl.range(0, experts_info_n, TOKEN_BLOCK_SIZE, num_stages=NUM_STAGE):
+        n_range = start_loc + off_n
+        topk_weights_data = tl.load(topk_weights + n_range, mask=n_range < experts_info_n, other=0)
+        expert_data = tl.load(
+            experts_info_ptr + expert_id * experts_info_stride0 + n_range, mask=n_range < experts_info_n, other=0
+        )
+        cumsum_expert_data = tl.cumsum(expert_data) + pre_sum
+        pre_sum = tl.max(cumsum_expert_data)
+        tl.store(
+            experts_info_ptr + expert_id * experts_info_stride0 + cumsum_expert_data - 1,
+            n_range,
+            mask=(expert_data == 1) & (n_range < experts_info_n),
+        )
+        tl.store(
+            experts_topk_weight + expert_id * experts_topk_weight_stride0 + cumsum_expert_data - 1,
+            topk_weights_data,
+            mask=(expert_data == 1) & (n_range < experts_info_n),
+        )
+
+    tl.store(expert_token_num_ptr + expert_id, pre_sum)
+    return
 
 
 def moe_align1(
@@ -184,7 +192,11 @@ def moe_align1(
     assert token_num_mul_topk <= FFN_MOE_CHUNK_SIZE * topk_num, "need split to handle seq len too long"
     assert exports_token_num.shape[0] == expert_num
     assert topk_weights.is_contiguous()
-    TOKEN_BLOCK_N = triton.next_power_of_2(token_num_mul_topk)
+    if token_num_mul_topk <= 512:
+        TOKEN_BLOCK_SIZE = 256
+    else:
+        TOKEN_BLOCK_SIZE = 512 if token_num_mul_topk <= 4 * 1024 else 2048
+
     grid = (expert_num,)
     moe_align1_kernel[grid](
         experts_info,
@@ -197,7 +209,8 @@ def moe_align1(
         experts_weight_info,
         experts_weight_info.stride(0),
         experts_weight_info.stride(1),
-        TOKEN_BLOCK_N=TOKEN_BLOCK_N,
+        TOKEN_BLOCK_SIZE=TOKEN_BLOCK_SIZE,
+        NUM_STAGE=4,
         num_warps=8,
         num_stages=1,
     )

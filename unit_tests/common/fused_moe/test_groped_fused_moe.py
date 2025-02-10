@@ -1,7 +1,10 @@
 import torch
 import time
-from .grouped_fused_moe import moe_align, moe_align1, grouped_matmul
+import pytest
+from lightllm.common.fused_moe.grouped_fused_moe import moe_align, moe_align1, grouped_matmul
 from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 seed = 42
 torch.manual_seed(seed)
@@ -9,8 +12,6 @@ torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
-logger = init_logger(__name__)
 
 
 def test_moe_align():
@@ -137,6 +138,4 @@ def test_grouped_matmul():
 
 
 if __name__ == "__main__":
-    test_moe_align()
-    test_moe_align1()
-    test_grouped_matmul()
+    pytest.main()
