@@ -154,7 +154,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             )
 
         # CC
-        compressed_kv = compressed_kv.view(-1, layer_weight.kv_lora_rank)
+        compressed_kv = compressed_kv.view(-1, layer_weight.kv_lora_rank).contiguous()
         k_nope = self.alloc_tensor(
             [compressed_kv.shape[0], self.tp_q_head_num_, self.qk_nope_head_dim],
             dtype=compressed_kv.dtype,
@@ -163,10 +163,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             k_nope.shape,
             dtype=compressed_kv.dtype,
         )
-        wk = layer_weight.k_b_proj_.weight.view(-1, layer_weight.kv_lora_rank).T
-        wv = layer_weight.v_b_proj_.weight.transpose(0, 1).reshape(layer_weight.kv_lora_rank, -1)
-        torch.mm(compressed_kv, wk, out=k_nope.reshape(compressed_kv.shape[0], -1))
-        torch.mm(compressed_kv, wv, out=v.reshape(compressed_kv.shape[0], -1))
+        layer_weight.cc_k_b_proj_.mm(compressed_kv, out=k_nope.reshape(compressed_kv.shape[0], -1))
+        layer_weight.cc_v_b_proj_.mm(compressed_kv, out=v.reshape(compressed_kv.shape[0], -1))
         return k_nope, k_rope, v
 
     def _context_attention_kernel_with_CC(
