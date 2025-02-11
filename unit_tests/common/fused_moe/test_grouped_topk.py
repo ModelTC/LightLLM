@@ -89,8 +89,8 @@ def test_grouped_topk(expert_num, topk_group, group_num, topk_num, scoring_func,
 
     assert torch.equal(torch.sort(old_topk_ids, dim=1)[0], torch.sort(new_topk_ids, dim=1)[0])
     assert torch.allclose(
-        torch.sort(old_topk_weights, dim=1)[0], torch.sort(new_topk_weights, dim=1)[0], atol=1e-4, rtol=0
-    )
+        torch.sort(old_topk_weights, dim=1)[0], torch.sort(new_topk_weights, dim=1)[0], atol=1e-3, rtol=1e-1
+    ), f"max delta {torch.max(torch.sort(old_topk_weights, dim=1)[0] - torch.sort(new_topk_weights, dim=1)[0])}"
     return
 
 

@@ -113,7 +113,7 @@ def grouped_topk_kernel(
         gating_output_ptr + token_index * gating_output_stride_m + offs_n,
         mask=offs_n < total_expert_num,
         other=-10000000.0,
-    )
+    ).to(tl.float32)
     if IS_SIGMOID:
         scores = tl.sigmoid(hidden_states)
     else:
