@@ -17,9 +17,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import torch
 from lightllm.common.vllm_kernel import _custom_ops as ops
 from typing import Callable, List, Optional, Tuple
+
+use_cuda_grouped_topk = os.getenv("LIGHTLLM_CUDA_GROUPED_TOPK", "False").upper() in ["ON", "TRUE", "1"]
 
 
 def fused_topk(
@@ -90,6 +93,43 @@ def grouped_topk(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+# This is used by the Deepseek-V2 model
+def cuda_grouped_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
+    scoring_func: str = "softmax",
+):
+
+    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+    num_tokens = gating_output.shape[0]
+    topk_weights = torch.empty(num_tokens, topk, device=hidden_states.device, dtype=torch.float32)
+    topk_indices = torch.empty(num_tokens, topk, device=hidden_states.device, dtype=torch.int32)
+    token_expert_indices = torch.empty(num_tokens, topk_group, device=hidden_states.device, dtype=torch.int32)
+    group_scores = torch.empty(num_tokens, num_expert_group, device=hidden_states.device, dtype=torch.float32)
+    if correction_bias is None:
+        correction_bias = torch.zeros_like(gating_output, dtype=torch.float32)
+    ops.grouped_topk(
+        topk_weights,
+        correction_bias,
+        topk_indices,
+        token_expert_indices,
+        gating_output.float(),
+        num_expert_group,
+        topk_group,
+        topk,
+        renormalize,
+        scoring_func,
+        group_scores,
+    )
+
+    return topk_weights, topk_indices
+
+
 def select_experts(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -109,16 +149,28 @@ def select_experts(
     if use_grouped_topk:
         assert topk_group is not None
         assert num_expert_group is not None
-        topk_weights, topk_ids = triton_grouped_topk(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            correction_bias=correction_bias,
-            topk=top_k,
-            renormalize=renormalize,
-            num_expert_group=num_expert_group,
-            topk_group=topk_group,
-            scoring_func=scoring_func,
-        )
+        if use_cuda_grouped_topk:
+            topk_weights, topk_ids = cuda_grouped_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                correction_bias=correction_bias,
+                topk=top_k,
+                renormalize=renormalize,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                scoring_func=scoring_func,
+            )
+        else:
+            topk_weights, topk_ids = triton_grouped_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                correction_bias=correction_bias,
+                topk=top_k,
+                renormalize=renormalize,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                scoring_func=scoring_func,
+            )
     elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(
             hidden_states=hidden_states, gating_output=router_logits, topk=top_k, renormalize=renormalize

@@ -761,6 +761,34 @@ def topk_softmax(
     torch.ops.vllm_moe.topk_softmax(topk_weights, topk_ids, token_expert_indicies, gating_output)
 
 
+def grouped_topk(
+    topk_weights: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk_indices: torch.Tensor,
+    group_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    num_expert_group: int,
+    topk_group: int,
+    topk: int,
+    renormalize: bool,
+    scoring_func: str,
+    group_scores: torch.Tensor = None,
+) -> None:
+    torch.ops.vllm_moe.grouped_topk(
+        topk_weights,
+        correction_bias,
+        topk_indices,
+        group_indices,
+        gating_output,
+        num_expert_group,
+        topk_group,
+        topk,
+        renormalize,
+        scoring_func,
+        group_scores,
+    )
+
+
 def reshape_and_cache(
     key: torch.Tensor,
     value: torch.Tensor,
