@@ -212,6 +212,10 @@ class ModeBackend:
             else None
         )
 
+        if "prompt_cache_kv_buffer" in model_cfg:
+            assert self.use_dynamic_prompt_cache
+            self.preload_prompt_cache_kv_buffer(model_cfg)
+
         self.logger.info(f"loaded model class {self.model.__class__}")
         self.init_custom()
 
@@ -256,3 +260,25 @@ class ModeBackend:
         g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
         return req_ids
+
+    def preload_prompt_cache_kv_buffer(self, model_cfg):
+        self.logger.info("Preload prompt cache kv buffer.")
+        cur_rank = dist.get_rank()
+        prompt_cache_kv_buffer_path = os.path.join(
+            self.weight_dir, model_cfg["prompt_cache_kv_buffer"][f"rank_{cur_rank}"]
+        )
+        prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
+        intact_kv_len = len(model_cfg["prompt_cache_token_ids"])
+        intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
+        if isinstance(self.radix_cache.mem_manager.kv_buffer, list):
+            for i in range(len(self.radix_cache.mem_manager.kv_buffer)):
+                self.radix_cache.mem_manager.kv_buffer[i][intact_kv_index].copy_(prompt_cache_kv_buffer[i])
+        else:
+            self.radix_cache.mem_manager.kv_buffer[:, intact_kv_index].copy_(prompt_cache_kv_buffer)
+        self.radix_cache.insert(
+            torch.tensor(model_cfg["prompt_cache_token_ids"], dtype=torch.int64, device="cpu"),
+            intact_kv_index,
+        )
+        self.radix_cache.match_prefix(
+            torch.tensor(model_cfg["prompt_cache_token_ids"], dtype=torch.int64, device="cpu"), update_refs=True
+        )

@@ -3,6 +3,7 @@ from lightllm.utils.infer_utils import calculate_time
 from ..batch import Batch, Req
 from lightllm.server.core.objs import FinishStatus
 from lightllm.common.basemodel.infer_lock import g_router_lock
+from lightllm.utils.config_utils import get_fixed_kv_len
 
 
 class BaseQueue:
@@ -13,7 +14,11 @@ class BaseQueue:
         from lightllm.server.router.manager import RouterManager
 
         self.router: RouterManager = router
-        self.max_total_tokens = args.max_total_token_num
+        # max_total_token_num - get_fixed_kv_len() 是为了减去被特定
+        # 推理模式预先占用了部分token kv 资源，这会导致整体可用的kv 资源
+        # 在极端情况下减少，在非特定模式下，get_fixed_kv_len() 返回的都是
+        # 0， 不会有任何影响。
+        self.max_total_tokens = args.max_total_token_num - get_fixed_kv_len()
         assert args.batch_max_tokens is not None
         self.batch_max_tokens = args.batch_max_tokens
         self.running_max_req_size = args.running_max_req_size  # 最大并非请求数量

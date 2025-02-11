@@ -106,6 +106,27 @@ class InferenceContext:
                     self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                     req.shared_kv_node = None
 
+    def _save_promptcache_kvbuffer(self):
+        """
+        save prompt cache kv buffer
+        这个接口是用于保存非量化的缓存prompt cache资源，是定制场景使用的接口，当前代码中不会有调用。
+        其保存的 kv 会配合量化推理模式, 加载到量化推理的prompt cache中, 提升量化推理的精度。
+        like paper:
+        https://arxiv.org/abs/2403.01241
+        """
+        prompt_cache_token_id = list(self.radix_cache.root_node.children.values())[0].token_id_key
+        print(f"prompt_cache_token_id : {prompt_cache_token_id}")
+        if isinstance(self.radix_cache.mem_manager.kv_buffer, list):
+            kv_buffer_list = []
+            for i in range(len(self.radix_cache.mem_manager.kv_buffer)):
+                kv_buffer_list.append(self.radix_cache.mem_manager.kv_buffer[i][: len(prompt_cache_token_id)])
+            torch.save(kv_buffer_list, f"prompt_cache_rank_{dist.get_rank()}.pt")
+        else:
+            torch.save(
+                self.radix_cache.mem_manager.kv_buffer[:, : len(prompt_cache_token_id)],
+                f"prompt_cache_rank_{dist.get_rank()}.pt",
+            )
+
     @torch.no_grad()
     def filter(self, finished_request_ids: List[int]):
         if len(finished_request_ids) == 0:
