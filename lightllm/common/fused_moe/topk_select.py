@@ -102,13 +102,14 @@ def select_experts(
     scoring_func: str = "softmax",
     custom_routing_function: Optional[Callable] = None,
 ):
-    from lightllm.common.fused_moe.topk_select import fused_topk, grouped_topk
+    from lightllm.common.fused_moe.topk_select import fused_topk
+    from lightllm.common.fused_moe.grouped_topk import triton_grouped_topk
 
     # DeekSeekv2 uses grouped_top_k
     if use_grouped_topk:
         assert topk_group is not None
         assert num_expert_group is not None
-        topk_weights, topk_ids = grouped_topk(
+        topk_weights, topk_ids = triton_grouped_topk(
             hidden_states=hidden_states,
             gating_output=router_logits,
             correction_bias=correction_bias,
