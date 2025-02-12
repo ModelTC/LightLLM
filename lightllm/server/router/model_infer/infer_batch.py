@@ -116,16 +116,9 @@ class InferenceContext:
         """
         prompt_cache_token_id = list(self.radix_cache.root_node.children.values())[0].token_id_key
         print(f"prompt_cache_token_id : {prompt_cache_token_id}")
-        if isinstance(self.radix_cache.mem_manager.kv_buffer, list):
-            kv_buffer_list = []
-            for i in range(len(self.radix_cache.mem_manager.kv_buffer)):
-                kv_buffer_list.append(self.radix_cache.mem_manager.kv_buffer[i][: len(prompt_cache_token_id)])
-            torch.save(kv_buffer_list, f"prompt_cache_rank_{dist.get_rank()}.pt")
-        else:
-            torch.save(
-                self.radix_cache.mem_manager.kv_buffer[:, : len(prompt_cache_token_id)],
-                f"prompt_cache_rank_{dist.get_rank()}.pt",
-            )
+        index = range(len(prompt_cache_token_id))
+        prompt_cache_kv_buffer = self.radix_cache.mem_manager.get_index_kv_buffer(index)
+        torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
 
     @torch.no_grad()
     def filter(self, finished_request_ids: List[int]):

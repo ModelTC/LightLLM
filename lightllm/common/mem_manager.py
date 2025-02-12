@@ -295,6 +295,12 @@ class MemoryManager:
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
         return
 
+    def get_index_kv_buffer(self, index):
+        return {"kv_buffer": self.kv_buffer[:, index]}
+
+    def load_index_kv_buffer(self, index, load_tensor_dict):
+        self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
+
 
 class ReadOnlyStaticsMemoryManager:
     """

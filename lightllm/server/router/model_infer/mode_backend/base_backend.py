@@ -270,11 +270,7 @@ class ModeBackend:
         prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
         intact_kv_len = len(model_cfg["prompt_cache_token_ids"])
         intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
-        if isinstance(self.radix_cache.mem_manager.kv_buffer, list):
-            for i in range(len(self.radix_cache.mem_manager.kv_buffer)):
-                self.radix_cache.mem_manager.kv_buffer[i][intact_kv_index].copy_(prompt_cache_kv_buffer[i])
-        else:
-            self.radix_cache.mem_manager.kv_buffer[:, intact_kv_index].copy_(prompt_cache_kv_buffer)
+        self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
         self.radix_cache.insert(
             torch.tensor(model_cfg["prompt_cache_token_ids"], dtype=torch.int64, device="cpu"),
             intact_kv_index,
