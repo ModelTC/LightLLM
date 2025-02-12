@@ -9,7 +9,7 @@ from .httpserver.manager import HttpServerManager
 import json
 
 
-def format_tgi_params(params):
+def format_tgi_params(params, num_beam: int):
     """
     tgi params format -> lightllm server params format
     pub(crate) struct GenerateParameters {
@@ -40,7 +40,7 @@ def format_tgi_params(params):
     if "stop_sequences" not in params:
         params["stop_sequences"] = params.pop("stop", None)
     # remove keys lightllm not used
-    # params.pop("best_of", 1)
+    params["best_of"] = num_beam
     params.pop("typical_p", 0.0)
     params.pop("return_full_text", False)
     params.pop("stop", None)
@@ -49,6 +49,8 @@ def format_tgi_params(params):
     params.pop("details", False)
     params.pop("decoder_input_details", False)
     params.pop("seed", 0)
+    params.pop("token_healing_top_k", 0)
+    params.pop("token_healing_unmerge_last_token", 0)
     return params
 
 
@@ -56,7 +58,8 @@ async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerMana
 
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
-    sample_params_dict = format_tgi_params(request_dict["parameters"])
+    num_beam = request_dict.get("num_beam", 1)
+    sample_params_dict = format_tgi_params(request_dict["parameters"], num_beam)
     return_details = sample_params_dict.pop("return_details", False)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
@@ -74,6 +77,8 @@ async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerMana
     prompt_logprobs = None
     prompt_token_ids = None
     is_first_metadata = True
+    best_score = -float("inf")
+    best_sub_id = 0
     async for sub_req_id, request_output, metadata, finish_status in results_generator:
         # when set "--return_all_prompt_logprobs", the first token metadata will contains
         # prompt_logprobs and prompt_token_ids
@@ -93,27 +98,41 @@ async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerMana
             tokens_dict[sub_req_id].append(metadata)
         if finish_status.is_finished():
             finish_status_dict[sub_req_id] = finish_status
+            if metadata["cumlogprob"] > best_score:
+                best_score = metadata["cumlogprob"]
+                best_sub_id = sub_req_id
 
-    rets = []
+    ret = None
+    beam_sequences = []
     for sub_id in list(final_output_dict.keys()):
+        if return_details:
+            beam_ret = {
+                "generated_text": "".join(final_output_dict[sub_id]),
+                "finish_reason": finish_status_dict[sub_id].get_finish_reason(),
+                "generated_tokens": count_output_tokens_dict[sub_id],
+                "logprob": tokens_dict[sub_id][-1]["cumlogprob"],
+            }
+            beam_sequences.append(beam_ret)
+        if sub_id != best_sub_id:
+            continue
         ret = {
             "generated_text": "".join(final_output_dict[sub_id]),
-            "count_output_tokens": count_output_tokens_dict[sub_id],
-            "finish_reason": finish_status_dict[sub_id].get_finish_reason(),
         }
         if return_details:
             ret["details"] = {
-                "tokens": tokens_dict[sub_id],
                 "generated_tokens": count_output_tokens_dict[sub_id],
                 "finish_reason": finish_status_dict[sub_id].get_finish_reason(),
+                "tokens": tokens_dict[sub_id],
             }
         if prompt_token_ids is not None:
             ret["prompt_token_ids"] = prompt_token_ids
         if prompt_logprobs is not None:
             ret["prompt_logprobs"] = prompt_logprobs
-        rets.append(ret)
+    assert ret is not None
+    if return_details:
+        ret["beam_sequences"] = beam_sequences
     # wrap generation inside a Vec to match api-inference
-    json_compatible_item_data = jsonable_encoder(rets)
+    json_compatible_item_data = jsonable_encoder([ret])
     return JSONResponse(content=json_compatible_item_data)
 
 

@@ -91,6 +91,8 @@ class Req(ctypes.Structure):
         ("can_released_mark", ctypes.c_bool),
         # reward_model 使用的变量
         ("reward_score", ctypes.c_float),
+        # 请求回复累计概率和
+        ("cumlogprob", ctypes.c_float),
     ]
 
     def init(
@@ -119,6 +121,7 @@ class Req(ctypes.Structure):
         self.finish_token_index = -1
         self.can_released_mark = False
         self.reward_score = math.nan
+        self.cumlogprob = 0.0
         if isinstance(sample_param, SamplingParams):
             self.sample_params = sample_param
         else:

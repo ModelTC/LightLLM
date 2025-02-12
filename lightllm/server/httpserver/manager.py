@@ -356,7 +356,6 @@ class HttpServerManager:
                         metadata["prompt_ids"] = prompt_ids
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
-
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
                         is_first_token = False
@@ -474,9 +473,11 @@ class HttpServerManager:
                     if not req.out_tokens_queue.is_empty():
 
                         text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
+                        req.cumlogprob += float(req.shm_logprobs.arr[src_index])
                         metadata = {
                             "id": int(req.shm_prompt_ids.arr[src_index]),
                             "logprob": float(req.shm_logprobs.arr[src_index]),
+                            "cumlogprob": float(req.cumlogprob) / count_output_tokens,
                             "special": special,
                             "count_output_tokens": count_output_tokens,
                             "prompt_cache_len": req.prompt_cache_len,
