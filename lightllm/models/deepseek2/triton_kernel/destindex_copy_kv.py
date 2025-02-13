@@ -12,9 +12,11 @@ def _is_power_of_two(n):
 def _fwd_kernel_destindex_copy_kv(
     KV_nope,
     KV_rope,
+    KV_scale,
     Dest_loc,
     O_nope,
     O_rope,
+    O_scale,
     stride_kv_nope_bs,
     stride_kv_nope_h,
     stride_kv_nope_d,
@@ -29,6 +31,7 @@ def _fwd_kernel_destindex_copy_kv(
     stride_o_rope_d,
     kv_nope_head_num,
     kv_rope_head_num,
+    HAS_SCALE: tl.constexpr,
     BLOCK_DMODEL_NOPE: tl.constexpr,
     BLOCK_DMODEL_ROPE: tl.constexpr,
 ):
@@ -47,13 +50,20 @@ def _fwd_kernel_destindex_copy_kv(
     kv_nope = tl.load(kv_nope_ptrs)
     kv_rope = tl.load(kv_rope_ptrs)
 
+    if HAS_SCALE:
+        offs_d_scale = tl.arange(0, 2)
+        o_scale_ptrs = O_scale + dest_index * stride_o_rope_bs + stride_o_rope_d * offs_d_scale[None, :]
+        kv_scale_ptrs = KV_scale + cur_index * 2 + offs_d_scale[None, :]
+        kv_scale = tl.load(kv_scale_ptrs)
+        tl.store(o_scale_ptrs, kv_scale)
+
     tl.store(o_nope_ptrs, kv_nope)
     tl.store(o_rope_ptrs, kv_rope)
     return
 
 
 @torch.no_grad()
-def destindex_copy_kv(KV_nope, KV_rope, DestLoc, O_nope, O_rope):
+def destindex_copy_kv(KV_nope, KV_rope, DestLoc, O_nope, O_rope, O_scale=None, KV_scale=None):
     seq_len = DestLoc.shape[0]
     kv_nope_head_num = KV_nope.shape[1]
     kv_rope_head_num = KV_rope.shape[1]
@@ -71,9 +81,11 @@ def destindex_copy_kv(KV_nope, KV_rope, DestLoc, O_nope, O_rope):
     _fwd_kernel_destindex_copy_kv[grid](
         KV_nope,
         KV_rope,
+        KV_scale,
         DestLoc,
         O_nope,
         O_rope,
+        O_scale,
         KV_nope.stride(0),
         KV_nope.stride(1),
         KV_nope.stride(2),
@@ -88,6 +100,7 @@ def destindex_copy_kv(KV_nope, KV_rope, DestLoc, O_nope, O_rope):
         O_rope.stride(2),
         kv_nope_head_num,
         kv_rope_head_num,
+        HAS_SCALE=KV_scale is not None,
         BLOCK_DMODEL_NOPE=kv_nope_head_dim,
         BLOCK_DMODEL_ROPE=kv_rope_head_dim,
         num_warps=num_warps,

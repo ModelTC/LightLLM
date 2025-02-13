@@ -10,16 +10,20 @@ CUDA_CAPABILITY = torch.cuda.get_device_capability()
 @triton.jit
 def _sample_kv_kernel(
     KV_input,
+    KV_scale,
     KV_nope,
     KV_rope,
+    K_scale,
     B_start_loc,
     B_Seqlen,
     Req_to_tokens,
     B_req_idx,
     stride_input_dim,
+    stride_scale_dim,
     stride_nope_dim,
     stride_rope_dim,
     stride_req_to_tokens_b,
+    HAS_SCALE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_ROPE_DMODEL: tl.constexpr,
@@ -52,6 +56,11 @@ def _sample_kv_kernel(
     rope_ptrs = KV_rope + off_rope
     tl.store(nope_ptrs, kv_nope, mask=offs_m[:, None] < block_end_loc)
     tl.store(rope_ptrs, kv_rope, mask=offs_m[:, None] < block_end_loc)
+    if HAS_SCALE:
+        kv_scale = tl.load(KV_scale + kv_loc * stride_scale_dim, mask=offs_m < block_end_loc)
+        off_k_scale = cur_batch_start_loc + offs_m
+        k_scale_ptrs = K_scale + off_k_scale
+        tl.store(k_scale_ptrs, kv_scale, mask=offs_m < block_end_loc)
     return
 
 
@@ -63,6 +72,8 @@ def sample_kv(
     b_req_idx,
     b_seq_len,
     req_to_token_indexs,
+    kv_scale=None,
+    k_scale=None,
 ):
     BLOCK = 128 if not TESLA else 64
 
@@ -85,16 +96,20 @@ def sample_kv(
     b_start_loc = torch.cat([torch.zeros([1], device=b_seq_len.device, dtype=b_seq_len.dtype), b_seq_len[1:].cumsum(0)])
     _sample_kv_kernel[grid](
         kv_input,
+        kv_scale,
         kv_nope,
         kv_rope,
+        k_scale,
         b_start_loc,
         b_seq_len,
         req_to_token_indexs,
         b_req_idx,
         kv_input.stride(0),
+        kv_scale.stride(0) if kv_scale is not None else 0,
         kv_nope.stride(0),
         kv_rope.stride(0),
         req_to_token_indexs.stride(0),
+        HAS_SCALE=kv_scale is not None,
         BLOCK_M=BLOCK,
         BLOCK_DMODEL=nope_dim,
         BLOCK_ROPE_DMODEL=rope_dim,

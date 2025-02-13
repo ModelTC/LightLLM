@@ -18,6 +18,8 @@ def select_mem_manager_class(mode):
     elif "triton_int8kv" in mode:
         memory_manager_class = INT8KVMemoryManager
         logger.info("Model kv cache using mode triton int8kv")
+    elif "triton_fp8kv" in mode:
+        raise Exception("currently only for deepseek")
     else:
         memory_manager_class = MemoryManager
         logger.info("Model kv cache using mode normal")

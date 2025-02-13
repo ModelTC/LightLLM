@@ -7,6 +7,7 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.deepseek2_mem_manager import Deepseek2MemoryManager
+from lightllm.common.deepseek2_fp8kv_mem_manager import Deepseek2FP8KVMemoryManager
 from lightllm.utils.log_utils import init_logger
 
 
@@ -48,7 +49,10 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         return super()._verify_params()
 
     def _init_mem_manager(self):
-        self.mem_manager = Deepseek2MemoryManager(
+        manager_class = Deepseek2MemoryManager
+        if "triton_fp8kv" in self.mode:
+            manager_class = Deepseek2FP8KVMemoryManager
+        self.mem_manager = manager_class(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=1,
