@@ -3,7 +3,6 @@ import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
-from lightllm.common.basemodel.splitfuse_infer_struct import SplitFuseInferStateInfo
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.models.deepseek2.triton_kernel.context_flashattention_nopad import (
@@ -410,38 +409,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             self.softmax_scale,
             alloc_tensor_func=self.alloc_tensor,
         )
-
-    def _splitfuse_attention_kernel(
-        self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None
-    ) -> torch.Tensor:
-        q_nope = q[:, :, : -self.qk_rope_head_dim]
-        # split fuse moe can not use with acc mode.
-        o_tensor = (
-            self.alloc_tensor((q_nope.shape[0], q_nope.shape[1], self.kv_lora_rank), dtype=q_nope.dtype)
-            if out is None
-            else out
-        )
-        infer_state.start_event.record(torch.cuda.default_stream())
-        if infer_state.decode_req_num > 0:
-            o_tensor[0 : infer_state.decode_req_num, :] = self._token_attention_kernel(
-                q[0 : infer_state.decode_req_num],
-                infer_state.inner_decode_infer_status,
-                layer_weight,
-            )
-        if infer_state.prefill_req_num > 0:
-            infer_state.parrall_stream.wait_event(infer_state.start_event)
-            with torch.cuda.stream(infer_state.parrall_stream):
-                self._context_attention_kernel(
-                    q[infer_state.decode_req_num :],
-                    infer_state.mem_manager.kv_buffer[self.layer_num_],
-                    infer_state.inner_prefill_infer_status,
-                    layer_weight,
-                    out=o_tensor[infer_state.decode_req_num :, :],
-                )
-            infer_state.end_event.record(infer_state.parrall_stream)
-            torch.cuda.default_stream().wait_event(infer_state.end_event)
-
-        return o_tensor
 
     def _copy_kv_to_mem_cache_normal(self, buffer, mem_index, mem_manager):
         destindex_copy_kv(

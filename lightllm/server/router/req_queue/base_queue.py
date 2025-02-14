@@ -21,11 +21,11 @@ class BaseQueue:
         self.max_total_tokens = args.max_total_token_num - get_fixed_kv_len()
         assert args.batch_max_tokens is not None
         self.batch_max_tokens = args.batch_max_tokens
-        self.running_max_req_size = args.running_max_req_size  # 最大并非请求数量
-        self.waiting_req_list: List[Req] = []  # 当前等待队列
-        self.router_token_ratio = args.router_token_ratio  # 调度繁忙
+        self.running_max_req_size = args.running_max_req_size  # Maximum number of concurrent requests
+        self.waiting_req_list: List[Req] = []  # List of queued requests
+        self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
         self.router_max_new_token_len = args.router_max_new_token_len
-        self.pause_req_dict: Dict[int, Req] = {}  # 用于保存队列中被暂停的请求，暂停原因为 PAUSED_AND_OFFLOAD
+        self.pause_req_dict: Dict[int, Req] = {}  # List of paused requests
 
     def append(self, req: Req):
         req.sample_params.suggested_dp_index = self.dp_index

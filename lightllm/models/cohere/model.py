@@ -10,7 +10,6 @@ from lightllm.models.cohere.layer_infer.post_layer_infer import CoherePostLayerI
 from lightllm.models.cohere.layer_infer.transformer_layer_infer import CohereTransformerLayerInfer
 from lightllm.models.cohere.layer_weights.pre_and_post_layer_weight import CoherePreAndPostLayerWeight
 from lightllm.models.cohere.layer_weights.transformer_layer_weight import CohereTransformerLayerWeight
-from lightllm.models.cohere.splitfuse_infer_struct import CohereSplitFuseInferStateInfo
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.utils.log_utils import init_logger
@@ -27,7 +26,6 @@ class CohereTpPartModel(LlamaTpPartModel):
     post_layer_infer_class = CoherePostLayerInfer
 
     infer_state_class = CohereInferStateInfo
-    splitfuse_infer_state_class = CohereSplitFuseInferStateInfo
 
     def _init_to_get_rotary(self, default_base=10000):
         partial_head_dim = int(self.config.get("partial_rotary_factor", 1) * self.head_dim_)

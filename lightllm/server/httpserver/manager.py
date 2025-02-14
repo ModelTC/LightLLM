@@ -183,7 +183,7 @@ class HttpServerManager:
                     prompt_ids,
                     sampling_params,
                     self.tokenizer,
-                    splitfuse_block_size=get_env_start_args().splitfuse_block_size,
+                    chunked_prefill_size=self.args.chunked_prefill_size,
                 )
                 req_objs.append(req_obj)
 

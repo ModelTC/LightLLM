@@ -2,7 +2,6 @@ import torch
 import torch.distributed as dist
 import numpy as np
 
-from lightllm.common.basemodel.splitfuse_infer_struct import SplitFuseInferStateInfo
 from lightllm.models.gemma_2b.layer_weights.pre_and_post_layer_weight import Gemma_2bPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PreLayerInferTpl
@@ -42,8 +41,3 @@ class Gemma_2bPreLayerInfer(PreLayerInferTpl):
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings = self._norm(input_embdings, infer_state, layer_weight)
         return input_embdings
-
-    def splitfuse_forward(
-        self, input_ids, infer_state: SplitFuseInferStateInfo, layer_weight: Gemma_2bPreAndPostLayerWeight
-    ):
-        return self.token_forward(input_ids, infer_state, layer_weight)

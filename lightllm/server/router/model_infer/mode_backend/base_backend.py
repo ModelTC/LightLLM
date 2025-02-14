@@ -60,8 +60,8 @@ class ModeBackend:
         self.dp_size = kvargs.get("dp_size", 1)
         self.load_way = kvargs["load_way"]
         self.mode = kvargs["mode"]
-        self.is_splitfuse_mode = kvargs.get("is_splitfuse_mode", False)
-        self.splitfuse_block_size = kvargs.get("splitfuse_block_size", None)
+        self.enable_chunked_prefill = kvargs.get("enable_chunked_prefill", False)
+        self.chunked_prefill_size = kvargs.get("chunked_prefill_size", None)
         self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
@@ -123,6 +123,7 @@ class ModeBackend:
             "is_token_healing": kvargs.get("is_token_healing", False),
             "return_all_prompt_logics": self.return_all_prompt_logprobs,
             "use_dynamic_prompt_cache": self.use_dynamic_prompt_cache,
+            "enable_chunked_prefill": self.enable_chunked_prefill,
             "data_type": kvargs.get("data_type", "float16"),
             "graph_max_batch_size": kvargs.get("graph_max_batch_size", 16),
             "graph_max_len_in_batch": kvargs.get("graph_max_len_in_batch", 8196),

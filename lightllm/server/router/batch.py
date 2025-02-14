@@ -22,7 +22,7 @@ class Batch:
         return batch_input_tokens
 
     def get_batch_decode_need_tokens(self):
-        new_batch_decode_need_tokens = [0 for _ in range(self.dp_size)]  # 只有在 splitfuse 模式下有意义
+        new_batch_decode_need_tokens = [0 for _ in range(self.dp_size)]  # for chunked prefill
 
         for req in self.reqs:
             req_dp_index = req.sample_params.suggested_dp_index

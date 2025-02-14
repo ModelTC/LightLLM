@@ -3,7 +3,6 @@ import torch
 import torch.distributed as dist
 import numpy as np
 
-from lightllm.common.basemodel.splitfuse_infer_struct import SplitFuseInferStateInfo
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PreLayerInferTpl
@@ -42,8 +41,3 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
         if self.world_size_ > 1 and not self.enable_dp:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         return input_embdings
-
-    def splitfuse_forward(
-        self, input_ids, infer_state: SplitFuseInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
-    ):
-        return self.token_forward(input_ids, infer_state, layer_weight)

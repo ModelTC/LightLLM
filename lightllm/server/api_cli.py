@@ -103,7 +103,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
                         do not set it and keep the default value as 1.""",
     )
     parser.add_argument(
-        "--max_req_total_len", type=int, default=2048 + 1024, help="the max value for req_input_len + req_output_len"
+        "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
     )
     parser.add_argument(
         "--nccl_port", type=int, default=28765, help="the nccl_port to build a distributed environment for PyTorch"
@@ -139,15 +139,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--router_max_wait_tokens",
         type=int,
-        default=10,
+        default=6,
         help="schedule new requests after every router_max_wait_tokens decode steps.",
     )
 
     parser.add_argument("--use_dynamic_prompt_cache", action="store_true", help="use_dynamic_prompt_cache test")
 
-    parser.add_argument("--splitfuse_block_size", type=int, default=256, help="splitfuse block size")
-
-    parser.add_argument("--splitfuse_mode", action="store_true", help="use splitfuse mode")
+    parser.add_argument("--chunked_prefill_size", type=int, default=8192, help="chunked prefill size")
+    parser.add_argument("--enable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
     parser.add_argument("--simple_constraint_mode", action="store_true", help="output constraint mode")

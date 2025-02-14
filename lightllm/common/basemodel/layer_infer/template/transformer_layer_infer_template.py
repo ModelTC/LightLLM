@@ -3,7 +3,6 @@ import torch
 import torch.distributed as dist
 from ..transformer_layer_infer import TransformerLayerInfer
 from ...infer_struct import InferStateInfo
-from ...splitfuse_infer_struct import SplitFuseInferStateInfo
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from typing import Tuple
@@ -61,11 +60,6 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _token_attention_kernel(self, q, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:
         raise Exception("need to impl")
 
-    def _splitfuse_attention_kernel(
-        self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None
-    ) -> torch.Tensor:
-        raise Exception("need to impl")
-
     def _get_o(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
@@ -118,29 +112,6 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return
 
-    def _splitfuse_attention(self, input_embding, infer_state: SplitFuseInferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embding, infer_state, layer_weight)
-        cache_kv = self._pre_cache_kv(infer_state, layer_weight)
-        q, cache_kv = self._get_qkv(input1, cache_kv, infer_state, layer_weight)
-        input1 = None
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._splitfuse_attention_kernel(q, infer_state, layer_weight)
-        q = None
-        o = self._get_o(o, infer_state, layer_weight)
-        if self.world_size_ > 1:
-            dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
-        input_embding.add_(o.view(-1, self.embed_dim_))
-        return
-
-    def _splitfuse_ffn(self, input_embdings, infer_state: SplitFuseInferStateInfo, layer_weight):
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        ffn_out = self._ffn(input1, infer_state, layer_weight)
-        input1 = None
-        if self.world_size_ > 1:
-            dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
-        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
-        return
-
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         self._context_attention(input_embdings, infer_state, layer_weight=layer_weight)
         self._context_ffn(input_embdings, infer_state, layer_weight)
@@ -149,9 +120,4 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         self._token_attention(input_embdings, infer_state, layer_weight=layer_weight)
         self._token_ffn(input_embdings, infer_state, layer_weight)
-        return input_embdings
-
-    def splitfuse_forward(self, input_embdings, infer_state: SplitFuseInferStateInfo, layer_weight):
-        self._splitfuse_attention(input_embdings, infer_state, layer_weight=layer_weight)
-        self._splitfuse_ffn(input_embdings, infer_state, layer_weight)
         return input_embdings

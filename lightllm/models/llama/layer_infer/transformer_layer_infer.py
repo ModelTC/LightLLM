@@ -20,7 +20,6 @@ from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.models.llama.splitfuse_infer_struct import SplitFuseInferStateInfo
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv, destindex_copy_quantize_kv
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.models.llama.triton_kernel.ppl_quant_copy_kv import destindex_copy_dequantize_kv
@@ -105,13 +104,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_normal, self)
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
 
-        # bind splitfuse attention
-        if "triton_int8kv" in self.mode:
-            self._splitfuse_attention_kernel = partial(
-                LlamaTransformerLayerInfer._splitfuse_attention_kernel_int8kv, self
-            )
-        else:
-            self._splitfuse_attention_kernel = partial(LlamaTransformerLayerInfer._splitfuse_attention_kernel, self)
         return
 
     def _att_norm(
@@ -217,65 +209,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 infer_state.max_len_in_batch,
             )
 
-        return o_tensor
-
-    def _splitfuse_attention_kernel(
-        self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None
-    ) -> torch.Tensor:
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        infer_state.start_event.record(torch.cuda.default_stream())
-        if infer_state.decode_req_num > 0:
-            self._token_attention_kernel(
-                q[0 : infer_state.decode_req_num, :],
-                infer_state.inner_decode_infer_status,
-                layer_weight,
-                out=o_tensor[0 : infer_state.decode_req_num, :],
-            )
-        calcu_shape1 = (-1, self.tp_q_head_num_, self.head_dim_)
-        if infer_state.prefill_req_num > 0:
-            infer_state.parrall_stream.wait_event(infer_state.start_event)
-            # infer_state.start_event.wait(infer_state.parrall_stream)
-            with torch.cuda.stream(infer_state.parrall_stream):
-                # assert torch.cuda.current_stream().cuda_stream == infer_state.parrall_stream.cuda_stream
-                self._context_attention_kernel(
-                    q[infer_state.decode_req_num :, :].view(calcu_shape1),
-                    infer_state.mem_manager.kv_buffer[self.layer_num_],
-                    infer_state.inner_prefill_infer_status,
-                    layer_weight,
-                    out=o_tensor[infer_state.decode_req_num :, :].view(calcu_shape1),
-                )
-            infer_state.end_event.record(infer_state.parrall_stream)
-            torch.cuda.default_stream().wait_event(infer_state.end_event)
-            # infer_state.event.wait(torch.cuda.default_stream())
-            # assert torch.cuda.current_stream().cuda_stream == torch.cuda.default_stream().cuda_stream
-            # assert torch.cuda.default_stream().cuda_stream != infer_state.parrall_stream.cuda_stream
-        return o_tensor
-
-    def _splitfuse_attention_kernel_int8kv(
-        self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None
-    ) -> torch.Tensor:
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        infer_state.start_event.record(torch.cuda.default_stream())
-        if infer_state.decode_req_num > 0:
-            self._token_attention_kernel(
-                q[0 : infer_state.decode_req_num, :],
-                infer_state.inner_decode_infer_status,
-                layer_weight,
-                out=o_tensor[0 : infer_state.decode_req_num, :],
-            )
-        calcu_shape1 = (-1, self.tp_q_head_num_, self.head_dim_)
-        if infer_state.prefill_req_num > 0:
-            infer_state.parrall_stream.wait_event(infer_state.start_event)
-            with torch.cuda.stream(infer_state.parrall_stream):
-                self._context_attention_kernel_ppl_int8kv(
-                    q[infer_state.decode_req_num :, :].view(calcu_shape1),
-                    infer_state.mem_manager.kv_buffer[self.layer_num_],
-                    infer_state.inner_prefill_infer_status,
-                    layer_weight,
-                    out=o_tensor[infer_state.decode_req_num :, :].view(calcu_shape1),
-                )
-            infer_state.end_event.record(infer_state.parrall_stream)
-            torch.cuda.default_stream().wait_event(infer_state.end_event)
         return o_tensor
 
     def _get_o(

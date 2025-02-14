@@ -3,7 +3,7 @@ import numpy as np
 from lightllm.utils.envs_utils import get_unique_server_name
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
-from .req import Req, NormalReq, SplitFuseReq, TokenHealingReq
+from .req import Req, NormalReq, ChunkedPrefillReq, TokenHealingReq
 from .shm_array import ShmArray
 from .atomic_array_lock import AtomicShmArrayLock, AtomicLockItem
 from .atomic_lock import AtomicShmLock
@@ -30,8 +30,8 @@ class ShmReqManager:
 
     def get_req_class_type(self):
         args: StartArgs = get_env_start_args()
-        if args.splitfuse_mode:
-            return SplitFuseReq
+        if args.enable_chunked_prefill:
+            return ChunkedPrefillReq
         if args.token_healing_mode:
             return TokenHealingReq
         return NormalReq

@@ -292,6 +292,11 @@ class InferReq:
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
+    def get_chuncked_input_token_ids(self):
+        chunked_start = self.cur_kv_len
+        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+        return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
+
     def set_next_gen_token_id(self, next_token_id: int, logprob: float):
         index = self.get_cur_total_len()
         self.shm_req.shm_prompt_ids.arr[index] = next_token_id

@@ -4,7 +4,6 @@ import torch.functional as F
 import torch.distributed as dist
 import numpy as np
 from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
-from lightllm.common.basemodel.splitfuse_infer_struct import SplitFuseInferStateInfo
 
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from einops import rearrange
@@ -29,20 +28,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         return rmsnorm_forward(input, layer_weight.final_norm_weight_, eps=self.eps_)
 
     def _slice_get_last_input(self, input_embdings, infer_state: LlamaInferStateInfo):
-        if infer_state.is_splitfuse:
-            # for SplitFuse
-            batch_size = infer_state.batch_size
-            last_input = self.alloc_tensor((batch_size, self.embed_dim_), dtype=input_embdings.dtype)
-            tmp_ = torch.cat(
-                [
-                    torch.ones(infer_state.decode_req_num, dtype=torch.int32, device="cuda"),
-                    infer_state.prefill_b_seq_len - infer_state.prefill_b_split_ready_cache_len,
-                ],
-                dim=0,
-            )
-            last_index = torch.cumsum(tmp_, dim=0, dtype=torch.long) - 1
-            last_input[:, :] = input_embdings[last_index, :]
-            return last_input, batch_size
 
         if infer_state.is_prefill and infer_state.is_token_healing:
             batch_size = infer_state.batch_size
@@ -60,7 +45,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             last_input[:, :] = input_embdings[last_index, :]
             return last_input, select_token_num
 
-        if not infer_state.is_splitfuse and infer_state.is_prefill and not infer_state.return_all_prompt_logics:
+        if infer_state.is_prefill and not infer_state.return_all_prompt_logics:
             batch_size = infer_state.batch_size
             last_input = self.alloc_tensor((batch_size, self.embed_dim_), dtype=input_embdings.dtype)
             last_index = (
@@ -69,11 +54,11 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             last_input[:, :] = input_embdings[last_index, :]
             return last_input, batch_size
 
-        if not infer_state.is_splitfuse and infer_state.is_prefill and infer_state.return_all_prompt_logics:
+        if infer_state.is_prefill and infer_state.return_all_prompt_logics:
             total_tokens = infer_state.total_token_num
             return input_embdings, total_tokens
 
-        if not infer_state.is_splitfuse and not infer_state.is_prefill:
+        if not infer_state.is_prefill:
             batch_size = infer_state.batch_size
             return input_embdings[-batch_size:, :], batch_size
 
@@ -107,6 +92,3 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         ans_logics[:, :] = gather_data.permute(1, 0)
         gather_data = None
         return ans_logics
-
-    def splitfuse_forward(self, input_embdings, infer_state: SplitFuseInferStateInfo, layer_weight: BaseLayerWeight):
-        return self.token_forward(input_embdings, infer_state, layer_weight)

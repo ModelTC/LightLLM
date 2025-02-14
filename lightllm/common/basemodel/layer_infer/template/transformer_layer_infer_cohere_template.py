@@ -8,7 +8,6 @@ from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_temp
 from lightllm.utils.infer_utils import mark_cost_time
 
 from ...infer_struct import InferStateInfo
-from ...splitfuse_infer_struct import SplitFuseInferStateInfo
 from ..transformer_layer_infer import TransformerLayerInfer
 
 
@@ -69,11 +68,6 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
     def _token_attention_kernel(self, q, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:
         raise Exception("need to impl")
 
-    def _splitfuse_attention_kernel(
-        self, q, infer_state: SplitFuseInferStateInfo, layer_weight, out=None
-    ) -> torch.Tensor:
-        raise Exception("need to impl")
-
     def _get_o(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
@@ -118,25 +112,6 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         infer_state._ffn_out = ffn_out
         return
 
-    def _splitfuse_attention(self, input_embding, infer_state: SplitFuseInferStateInfo, layer_weight):
-        cache_kv = self._pre_cache_kv(infer_state, layer_weight)
-        q, cache_kv = self._get_qkv(input_embding, cache_kv, infer_state, layer_weight)
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._splitfuse_attention_kernel(q, infer_state, layer_weight)
-        q = None
-        o = self._get_o(o, infer_state, layer_weight)
-        if self.world_size_ > 1:
-            dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
-        infer_state._attn_out = o
-        return
-
-    def _splitfuse_ffn(self, input_embdings, infer_state: SplitFuseInferStateInfo, layer_weight):
-        ffn_out = self._ffn(input_embdings, infer_state, layer_weight)
-        if self.world_size_ > 1:
-            dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
-        infer_state._ffn_out = ffn_out
-        return
-
     def _cohere_residual(self, input_embdings, infer_state: InferStateInfo):
         # emb_addr = input_embdings.data_ptr()
         # attn_out_addr = infer_state._attn_out.data_ptr()
@@ -159,12 +134,5 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         input1 = self._att_norm(input_embdings, infer_state, layer_weight)
         self._token_attention(input1, infer_state, layer_weight=layer_weight)
         self._token_ffn(input1, infer_state, layer_weight)
-        self._cohere_residual(input_embdings, infer_state)
-        return input_embdings
-
-    def splitfuse_forward(self, input_embdings, infer_state: SplitFuseInferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        self._splitfuse_attention(input1, infer_state, layer_weight=layer_weight)
-        self._splitfuse_ffn(input1, infer_state, layer_weight)
         self._cohere_residual(input_embdings, infer_state)
         return input_embdings

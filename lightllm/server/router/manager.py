@@ -74,9 +74,9 @@ class RouterManager:
         self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
         self.model_rpc_ports = model_rpc_ports
 
-        self.is_splitfuse_mode = args.splitfuse_mode
         self.is_token_healing = self.args.token_healing_mode
-        self.splitfuse_block_size = args.splitfuse_block_size
+        self.chunked_prefill_size = args.chunked_prefill_size
+        self.enable_chunked_prefill = args.enable_chunked_prefill
 
         self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
         self.metric_client = MetricClient(metric_port)
@@ -136,8 +136,8 @@ class RouterManager:
             "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
             "nccl_port": self.args.nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
-            "is_splitfuse_mode": self.is_splitfuse_mode,
-            "splitfuse_block_size": self.splitfuse_block_size,
+            "enable_chunked_prefill": self.enable_chunked_prefill,
+            "chunked_prefill_size": self.chunked_prefill_size,
             "is_token_healing": self.args.token_healing_mode,
             "return_all_prompt_logprobs": self.args.return_all_prompt_logprobs,
             "use_reward_model": self.args.use_reward_model,
@@ -317,13 +317,11 @@ class RouterManager:
         start_time = time.time()
         self.metric_client.counter_inc("lightllm_batch_inference_count", "prefill")
         reqs = [r.to_router_rpc_obj() for r in batch.reqs]
-        if not self.is_splitfuse_mode:
-            # 在 非 splitfuse 模式下，才需要真的执行 prefill 的操作。
-            self.overlap_event.set()
-            await self.model_rpc_client.prefill(reqs)
-            batch.filter_out_finished_req(self.shm_req_manager)
-            # 发个None包触发一下detokenization
-            self.send_to_detokenization.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
+        self.overlap_event.set()
+        await self.model_rpc_client.prefill(reqs)
+        batch.filter_out_finished_req(self.shm_req_manager)
+        # 发个None包触发一下detokenization
+        self.send_to_detokenization.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
 
         logger.debug(f"Prefill Batch: {batch.simple_log()} \n")
         self.metric_client.histogram_observe(

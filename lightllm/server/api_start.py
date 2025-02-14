@@ -91,13 +91,12 @@ def normal_or_p_d_start(args):
     if args.static_quant:
         assert args.quant_type == "vllm-w8a8", "Only static parameter loading for vllm-w8a8 is supported."
 
-    # splitfuse_mode 和 cuda_graph 不能同时开启
-    if args.splitfuse_mode:
-        assert args.disable_cudagraph
+    if not args.enable_chunked_prefill:
+        args.chunked_prefill_size = 0
 
     # 这些模式不能同时设置。
     assert [
-        args.splitfuse_mode,
+        args.enable_chunked_prefill,
         args.diverse_mode,
         args.token_healing_mode,
         args.use_reward_model,
@@ -130,21 +129,20 @@ def normal_or_p_d_start(args):
     else:
         args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
-    if not args.splitfuse_mode:
+    if not args.enable_chunked_prefill:
         # 普通模式下
         if args.batch_max_tokens is None:
             args.batch_max_tokens = args.max_req_total_len
         else:
             assert args.batch_max_tokens >= args.max_req_total_len, "batch_max_tokens must >= max_req_total_len"
     else:
-        # splitfuse 模式下
-        # assert args.batch_max_tokens is not None, "need to set by yourself"
+        # chunked 模式下
         if args.batch_max_tokens is None:
-            args.batch_max_tokens = min(args.max_req_total_len, 16 * args.splitfuse_block_size)
+            args.batch_max_tokens = min(args.max_req_total_len, 2 * args.chunked_prefill_size)
 
         assert (
-            args.batch_max_tokens > args.splitfuse_block_size
-        ), "splitfuse_mode, batch_max_tokens must >= splitfuse_block_size"
+            args.batch_max_tokens >= args.chunked_prefill_size
+        ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size"
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
