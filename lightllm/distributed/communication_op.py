@@ -24,7 +24,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp
 from lightllm.utils.log_utils import init_logger
-from functools import partial
+from lightllm.utils.device_utils import has_nvlink
+from lightllm.utils.envs_utils import get_env_start_args
 
 original_all_reduce = torch.distributed.all_reduce
 original_all_gather_into_tensor = torch.distributed.all_gather_into_tensor
@@ -67,9 +68,12 @@ class CustomCommunicationOp:
             yield
 
     def set_custom_reduce(self):
-        ENABLE_VLLM_REDUCE = os.getenv("ENABLE_VLLM_REDUCE", "False").upper() in ["ON", "TRUE", "1"]
+        ENABLE_VLLM_REDUCE = os.getenv("ENABLE_VLLM_REDUCE", "True").upper() in ["ON", "TRUE", "1"]
         world_size = dist.get_world_size()
         ranks = list(range(world_size))
+
+        if not has_nvlink() or world_size not in [2, 4, 6, 8]:
+            ENABLE_VLLM_REDUCE = False
 
         # 创建新的 NCCL 组以防止原始 all_reduce 与 cudagraph 卡住
         if self.device_group is None:
@@ -93,11 +97,13 @@ class CustomCommunicationOp:
 
     def set_custom_gather(self):
         ENABLE_CUSTOM_GATHER = os.getenv("ENABLE_CUSTOM_GATHER", "False").upper() in ["ON", "TRUE", "1"]
+        args = get_env_start_args()
         world_size = dist.get_world_size()
         ranks = list(range(world_size))
         if self.device_group is None:
             self.device_group = dist.new_group(ranks, backend="nccl")
-        if ENABLE_CUSTOM_GATHER and HAS_LIGHTLLM_KERNEL:
+
+        if ENABLE_CUSTOM_GATHER and HAS_LIGHTLLM_KERNEL or args.disable_custom_allreduce:
             cpu_group = dist.new_group(ranks, backend="gloo")
             self.custom_gather = CustomAllgather(cpu_group, torch.cuda.current_device())
             logger.info("Enable Custom ALLGather.")

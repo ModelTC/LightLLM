@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+import subprocess
 
 
 def set_current_device_id(device_id: int):
@@ -103,3 +104,19 @@ def init_p2p(device_index):
 @lru_cache(maxsize=None)
 def kv_trans_use_p2p():
     return os.getenv("KV_TRANS_USE_P2P", "False").upper() in ["1", "TRUE", "ON"]
+
+
+def has_nvlink():
+    try:
+        # Call nvidia-smi to get the topology matrix
+        result = subprocess.check_output(["nvidia-smi", "topo", "--matrix"])
+        result = result.decode("utf-8")
+
+        # Check if the output contains 'NVLink'
+        if "NVLink" in result:
+            return True
+        else:
+            return False
+    except subprocess.CalledProcessError:
+        # If there's an error (e.g., nvidia-smi is not installed or another issue), assume no NVLink
+        return False

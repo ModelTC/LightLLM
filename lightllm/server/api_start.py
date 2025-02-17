@@ -94,6 +94,9 @@ def normal_or_p_d_start(args):
     if not args.enable_chunked_prefill:
         args.chunked_prefill_size = 0
 
+    if args.graph_max_len_in_batch == 0:
+        args.graph_max_len_in_batch = args.max_req_total_len
+
     # 这些模式不能同时设置。
     assert [
         args.enable_chunked_prefill,

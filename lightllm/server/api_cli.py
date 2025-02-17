@@ -159,6 +159,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_multimodal", action="store_true", help="Whether or not to allow to load additional multimodal models."
     )
+    parser.add_argument("--disable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")
     parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )
@@ -225,7 +226,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--graph_max_len_in_batch",
         type=int,
-        default=8192,
+        default=0,
         help="""Maximum sequence length that can be captured by the cuda graph for decodign stage.
                 The default value is 8192. It will turn into eagar mode if encounters a larger value. """,
     )

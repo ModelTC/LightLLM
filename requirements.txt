@@ -85,3 +85,4 @@ frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
 gunicorn==23.0.0
+vllm==0.7.2

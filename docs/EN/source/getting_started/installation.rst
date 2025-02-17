@@ -26,7 +26,7 @@ The easiest way to install Lightllm is by using the official image. You can dire
     $
     $ # Run the image
     $ docker run -it --gpus all -p 8080:8080            \
-    $   --shm-size 1g -v your_local_path:/data/         \
+    $   --shm-size 32g -v your_local_path:/data/         \
     $   ghcr.io/modeltc/lightllm:main /bin/bash
 
 You can also manually build and run the image from the source:
@@ -39,7 +39,7 @@ You can also manually build and run the image from the source:
     $
     $ # Run the image
     $ docker run -it --gpus all -p 8080:8080            \
-    $   --shm-size 1g -v your_local_path:/data/         \
+    $   --shm-size 32g -v your_local_path:/data/         \
     $   <image_name> /bin/bash
 
 Alternatively, you can use a script to automatically build and run the image:
@@ -81,16 +81,8 @@ NOTE: If you are using torch with cuda 11.x instead, run `pip install nvidia-ncc
 .. note::
 
     The Lightllm code has been tested on various GPUs, including V100, A100, A800, 4090, and H800.
-    If you are using A100, A800, or similar GPUs, it is recommended to install triton==3.0.0:
+    If you are using A100, A800, or similar GPUs, it is recommended to install triton==3.1.0:
 
     .. code-block:: console
 
-        $ pip install triton==3.0.0 --no-deps
-
-    If you are using H800, V100, or similar GPUs, it is recommended to install triton-nightly:
-
-    .. code-block:: console
-
-        $ pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly --no-deps
-
-    For more details, refer to: `issue <https://github.com/triton-lang/triton/issues/3619>`_ and `fix PR <https://github.com/triton-lang/triton/pull/3638>`_
+        $ pip install triton==3.1.0 --no-deps

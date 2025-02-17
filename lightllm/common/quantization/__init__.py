@@ -26,6 +26,17 @@ class Quantcfg:
         activation_scheme = network_config.get("activation_scheme", "dynamic")
         self.static_activation = activation_scheme == "static"
         self.hf_quantization_config = hf_quantization_config
+        self.hf_quantization_method = hf_quantization_config["quant_method"]
+        self._mapping_quant_method()
+
+    def _mapping_quant_method(self):
+        if self.hf_quantization_method == "fp8":
+            block_size = self.hf_quantization_config.get("weight_block_size", None)
+            if block_size == [128, 128]:
+                self.quant_type = "vllm-fp8w8a8-b128"
+            else:
+                # TODO: more quant method
+                pass
 
     def _parse_custom_cfg(self, custom_cfg_path):
         self.quant_cfg = collections.defaultdict(dict)
