@@ -38,16 +38,20 @@ def test_model_inference(world_size, model_class, batch_size, input_len, output_
 
 def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_len, ans_queue):
     import torch
-    from lightllm.distributed import set_custom_reduce
+    from lightllm.distributed import custom_comm_ops
+    from lightllm.utils.device_utils import set_current_device_id
+
     import torch.distributed as dist
 
     rank_id = model_kvargs["tp_rank"]
     world_size = model_kvargs["world_size"]
 
     torch.cuda.set_device(rank_id)
-
+    set_current_device_id(rank_id)
     dist.init_process_group("nccl", init_method="tcp://127.0.0.1:28765", rank=rank_id, world_size=world_size)
-    set_custom_reduce()
+
+    custom_comm_ops.set_custom_reduce()
+    custom_comm_ops.set_custom_gather()
     dist.barrier()
 
     torch.cuda.empty_cache()
@@ -59,7 +63,9 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
     test_data = test_data.reshape(-1)
     test_data = torch.from_numpy(test_data).cuda()
 
-    b_req_idx = model_part.req_manager.alloc(batch_size).int()
+    b_req_idx = torch.tensor(
+        [model_part.req_manager.alloc() for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+    )
     b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
@@ -68,7 +74,8 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         b_seq_len[i] = input_len
 
     total_token_num = input_len * batch_size
-    mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0])
+    mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0]).cuda()
+
     logics = model_part.forward(
         batch_size,
         total_token_num,
@@ -89,7 +96,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
         total_token_num += batch_size
         b_seq_len += 1
-        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0])
+        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0]).cuda()
         logics = model_part.forward(
             batch_size,
             total_token_num,
@@ -108,10 +115,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
     model_part.mem_manager.free_all()
     model_part.req_manager.free_all()
 
-    if rank_id == 0:
-        print("can use mem size:", model_part.mem_manager.can_use_mem_size)
-        print("can use req size:", model_part.req_manager.can_use_req_size)
-
     b_req_idx = None
     b_start_loc = None
     b_seq_len = None
@@ -124,7 +127,9 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
 
     prefill_start_time = time.time()
 
-    b_req_idx = model_part.req_manager.alloc(batch_size).int()
+    b_req_idx = torch.tensor(
+        [model_part.req_manager.alloc() for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+    )
     b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     for i in range(batch_size):
@@ -132,7 +137,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         b_seq_len[i] = input_len
 
     total_token_num = batch_size * input_len
-    mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0])
+    mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0]).cuda()
     logics = model_part.forward(
         batch_size,
         total_token_num,
@@ -159,7 +164,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
         b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
         total_token_num += batch_size
         b_seq_len += 1
-        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0])
+        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0]).cuda()
         logics = model_part.forward(
             batch_size,
             total_token_num,

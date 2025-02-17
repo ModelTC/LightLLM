@@ -9,7 +9,7 @@ from .httpserver.manager import HttpServerManager
 import json
 
 
-def format_tgi_params(params, num_beam: int):
+def format_tgi_params(params, num_beam: int = 1):
     """
     tgi params format -> lightllm server params format
     pub(crate) struct GenerateParameters {

@@ -25,6 +25,7 @@ from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.utils.config_utils import get_dtype
 from lightllm.utils.config_utils import get_config_json
 
+
 def get_model(weight_dir):
     model_cfg = get_config_json(weight_dir)
     model_type = model_cfg["model_type"]
@@ -68,7 +69,7 @@ def get_model(weight_dir):
 
 class TestModelInfer(unittest.TestCase):
     def test_model_infer(self):
-        model_dir = "/nvme/ci_performance/models/DeepSeek-V2-Lite-Chat/"
+        model_dir = "/nvme/models/llama3/Meta-Llama-3-8B/"
         model_class = get_model(model_dir)
         data_type = get_dtype(model_dir)
         mode = "triton_gqa_flashdecoding"
