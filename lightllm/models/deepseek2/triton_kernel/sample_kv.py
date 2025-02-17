@@ -72,6 +72,7 @@ def sample_kv(
     b_req_idx,
     b_seq_len,
     req_to_token_indexs,
+    b_kv_start_loc,
     kv_scale=None,
     k_scale=None,
 ):
@@ -93,14 +94,13 @@ def sample_kv(
     )
     num_warps = 4 if nope_dim <= 64 else 8
 
-    b_start_loc = torch.cat([torch.zeros([1], device=b_seq_len.device, dtype=b_seq_len.dtype), b_seq_len[1:].cumsum(0)])
     _sample_kv_kernel[grid](
         kv_input,
         kv_scale,
         kv_nope,
         kv_rope,
         k_scale,
-        b_start_loc,
+        b_kv_start_loc,
         b_seq_len,
         req_to_token_indexs,
         b_req_idx,
