@@ -81,4 +81,11 @@ In a new terminal, use the following command to test the model service:
     $           }'
 
 
+For DeepSeek-R1 benchmark, use the following command to test the model service:
+
+.. code-block:: console
+
+    $ cd test
+    $ python benchmark_client.py --num_clients 100 --input_num 2000 --tokenizer_path /nvme/DeepSeek-R1/ --url http://127.0.01:8000/generate_stream
+
 
