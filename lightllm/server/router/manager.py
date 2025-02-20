@@ -307,7 +307,7 @@ class RouterManager:
             paused_reqs = select_paused_reqs(
                 self.running_batch, self.pause_strategy, self.req_queue, self.max_total_token_num
             )
-            await self._pause_reqs(self.running_batch, paused_reqs)
+            await self._pause_reqs(paused_reqs)
             logger.debug(f"pasued req num: {self.req_queue.get_paused_req_num()}")
             self.has_wait_tokens = 0
             return
@@ -342,9 +342,9 @@ class RouterManager:
         )
         return
 
-    async def _pause_reqs(self, batch: Batch, pasue_reqs):
+    async def _pause_reqs(self, pasue_reqs):
         pasue_req_ids = [r.request_id for r in pasue_reqs]
-        await self.model_rpc_client.pause_reqs(batch.batch_id, pasue_req_ids)
+        await self.model_rpc_client.pause_reqs(pasue_req_ids)
         return
 
     def _filter_runing_batch(self):

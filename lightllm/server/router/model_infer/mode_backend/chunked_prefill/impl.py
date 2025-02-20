@@ -54,6 +54,8 @@ class ChunkedPrefillBackend(ModeBackend):
 
             req_obj.cur_kv_len = len(req_obj.get_chuncked_input_token_ids())
             if req_obj.cur_kv_len < req_obj.get_cur_total_len():
+                if self.tp_rank < self.dp_size:
+                    req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
                 continue
 
             req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
