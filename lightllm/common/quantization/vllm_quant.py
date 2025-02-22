@@ -198,7 +198,6 @@ class vLLMFP8w8a8B128QuantizationMethod(vLLMBaseQuantizationMethod):
                 dtype=input_tensor.dtype,
             )
         else:
-            qweight = qweight.t().contiguous().t()
             input_scale = input_scale.t().contiguous().t()
             torch.ops._C.cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
         return out

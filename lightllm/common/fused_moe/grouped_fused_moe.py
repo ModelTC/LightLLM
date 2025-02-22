@@ -331,7 +331,7 @@ def grouped_matmul_kernel(
             for step_k in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
                 # hint to Triton compiler to do proper loop pipelining
                 # tl.multiple_of(a_ptrs, [16, 16])
-                tl.multiple_of(b_ptrs, [16, 16])
+                # tl.multiple_of(b_ptrs, [16, 16])
 
                 if use_fp8_w8a8:
                     a = tl.load(a_ptrs, mask=(offs_am[None, :] < cur_m) & (offs_k[:, None] < k))
@@ -464,10 +464,10 @@ def grouped_matmul(
         token_input_scale,
         expert_to_weights_scale,
         expert_to_weights_scale.stride(0)
-        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 2
+        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim >= 1
         else 0,
         expert_to_weights_scale.stride(1)
-        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 2
+        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim >= 2
         else 0,
         expert_to_weights_scale.stride(2)
         if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 3
@@ -532,10 +532,10 @@ def grouped_matmul(
         token_input_scale,
         expert_to_weights_scale,
         expert_to_weights_scale.stride(0)
-        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 2
+        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim >= 1
         else 0,
         expert_to_weights_scale.stride(1)
-        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 2
+        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim >= 2
         else 0,
         expert_to_weights_scale.stride(2)
         if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 3

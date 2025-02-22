@@ -18,6 +18,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWBMMWeightNoTp,
 )
 from functools import partial
+from ..triton_kernel.weight_dequant import weight_dequant
 
 
 class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
@@ -116,8 +117,15 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
     def load_hf_weights(self, weights):
         if f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight" in weights:
             kv_b_proj_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight"]
+            # for deepseek_v3, the bmm operator is not quantized
+            if self.quant_cfg.quantized_weight:
+                kv_b_proj_ = weight_dequant(
+                    kv_b_proj_.cuda(),
+                    weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + self.weight_scale_suffix].cuda(),
+                ).cpu()
             weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight"] = self._load_kb(kv_b_proj_)
             weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight"] = self._load_vb(kv_b_proj_)
+
         if (
             self.quant_cfg.quantized_weight
             and f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + self.weight_scale_suffix in weights
@@ -184,15 +192,11 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
             self.data_type_,
             split_n_embed=self.tp_q_head_num_,
-            weight_scale_suffix=self.weight_scale_suffix,
-            act_scale_suffix=self.act_scale_suffix,
         )
         self.v_b_proj_ = ROWBMMWeight(
             f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
             self.data_type_,
             split_n_embed=self.tp_q_head_num_,
-            weight_scale_suffix=self.weight_scale_suffix,
-            act_scale_suffix=self.act_scale_suffix,
         )
         if self.enable_cc_method:
             self.cc_kv_b_proj_ = ROWMMWeight(
