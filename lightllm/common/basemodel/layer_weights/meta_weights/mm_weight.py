@@ -500,7 +500,8 @@ class ROWBMMWeight(BMMWeight):
         weight = weight.to(self.data_type_)
         block_size = weight.shape[-1] // scale.shape[-1]
         w_shape = weight.shape
-        scale = scale.unsqueeze(-1).repeat(1, 1, 1, block_size).reshape(w_shape[0], w_shape[1], -1)
+        s_shape = scale.shape
+        scale = scale.unsqueeze(-1).repeat(1, 1, 1, block_size).reshape(s_shape[0], s_shape[1], -1)
         scale = scale.unsqueeze(2).repeat(1, 1, block_size, 1).reshape(w_shape)
         return (weight * scale).to(self.data_type_)
 

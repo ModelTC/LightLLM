@@ -70,9 +70,9 @@ def grouped_topk(
         scores = torch.sigmoid(gating_output)
     else:
         scores = torch.softmax(gating_output, dim=-1)
-
+    old_scores = scores
     if correction_bias is not None:
-        scores.add_(correction_bias)
+        scores = scores + correction_bias
 
     num_token = scores.shape[0]
     group_scores = scores.view(num_token, num_expert_group, -1).max(dim=-1).values  # [n, n_group]
@@ -85,7 +85,43 @@ def grouped_topk(
         .reshape(num_token, -1)
     )  # [n, e]
     tmp_scores = scores.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
-    topk_weights, topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)
+    _, topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)
+    topk_weights = old_scores.gather(1, topk_ids)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+# biased_grouped_topk adapt from sgl-project/sglang/python/sglang/srt/layers/moe/topk.py
+def biased_grouped_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
+    scoring_func: str = "sigmoid",
+):
+    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+    scores = gating_output.sigmoid()
+    num_token = scores.shape[0]
+    scores_for_choice = scores.view(num_token, -1) + correction_bias.unsqueeze(0)
+    group_scores = (
+        scores_for_choice.view(num_token, num_expert_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
+    )  # [n, n_group]
+    group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]  # [n, top_k_group]
+    group_mask = torch.zeros_like(group_scores)  # [n, n_group]
+    group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
+    score_mask = (
+        group_mask.unsqueeze(-1)
+        .expand(num_token, num_expert_group, scores.shape[-1] // num_expert_group)
+        .reshape(num_token, -1)
+    )  # [n, e]
+    tmp_scores = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
+    _, topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)
+    topk_weights = scores.gather(1, topk_ids)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
@@ -161,6 +197,11 @@ def select_experts(
                 scoring_func=scoring_func,
             )
         else:
+            group_score_topk_num = 1
+            # for deepseek v3
+            if topk_group == 4 and num_expert_group == 8 and top_k == 8:
+                group_score_topk_num = 2
+
             topk_weights, topk_ids = triton_grouped_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
@@ -170,7 +211,9 @@ def select_experts(
                 num_expert_group=num_expert_group,
                 topk_group=topk_group,
                 scoring_func=scoring_func,
+                group_score_used_topk_num=group_score_topk_num,
             )
+
     elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(
             hidden_states=hidden_states, gating_output=router_logits, topk=top_k, renormalize=renormalize

@@ -167,7 +167,7 @@ class FusedMoeWeight(BaseWeight):
         expert_gate_up_proj_last = None
         expert_down_proj_last = None
         if self.e_score_correction_bias_name in weights:
-            self.e_score_correction_bias = self._cuda(self.e_score_correction_bias_name)
+            self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
 
         for i_experts_ep in range(n_expert_ep):
             expert_up_proj = None
@@ -223,6 +223,8 @@ class FusedMoeWeight(BaseWeight):
         if os.environ.get("ETP_MODE_ENABLED") == "true":
             self._load_hf_weights_etp(weights)
         else:
+            if self.e_score_correction_bias_name in weights:
+                self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
             for i_experts in range(self.n_routed_experts):
                 w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
                 w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"

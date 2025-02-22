@@ -103,22 +103,16 @@ def _fwd_kernel_with_v(
         qk = tl.where(offs_m[:, None] + prompt_cache_len >= start_n + offs_n[None, :], qk, float("-100000000.0"))
 
         # -- compute m_ij, p, l_ij
-        m_ij = tl.max(qk, 1)
-        p = tl.exp(qk - m_ij[:, None])
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk -= m_ij[:, None]
+        p = tl.math.exp2(qk)
         l_ij = tl.sum(p, 1)
+
         # -- update m_i and l_i
-        m_i_new = tl.maximum(m_i, m_ij)
-        alpha = tl.exp(m_i - m_i_new)
-        beta = tl.exp(m_ij - m_i_new)
-        l_i_new = alpha * l_i + beta * l_ij
+        alpha = tl.math.exp2(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
         # -- update output accumulator --
-        # scale p
-        p_scale = beta / l_i_new
-        p = p * p_scale[:, None]
-        # scale acc
-        acc_scale = l_i / l_i_new * alpha
-        acc_scale = tl.where(offs_m + prompt_cache_len >= start_n, acc_scale, 1.0)
-        acc = acc * acc_scale[:, None]
+        acc = acc * alpha[:, None]
         # update acc
         v = tl.load(
             v_ptrs + (cur_batch_in_kv_start_index + start_n) * stride_vbs,
@@ -126,10 +120,11 @@ def _fwd_kernel_with_v(
             other=0.0,
         )
         p = p.to(v.dtype)
-        acc += tl.dot(p, v)
+        acc = tl.dot(p, v, acc)
         # update m_i and l_i
-        l_i = l_i_new
-        m_i = m_i_new
+        m_i = m_ij
+
+    acc = acc / l_i[:, None]
     # initialize pointers to output
     off_o = (cur_batch_in_q_start_index + offs_m[:, None]) * stride_obs + cur_head * stride_oh + offs_d[None, :]
     out_ptrs = Out + off_o
@@ -170,7 +165,7 @@ def context_attention_fwd_with_v(
     if q_nope.dtype == torch.float32:
         BLOCK = BLOCK // 4
 
-    sm_scale = softmax_scale
+    sm_scale = softmax_scale * 1.4426950408889634
     batch, head = b_seq_len.shape[0], q_nope.shape[1]
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))  # batch, head,

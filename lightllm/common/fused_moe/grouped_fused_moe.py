@@ -33,6 +33,7 @@ from lightllm.utils.device_utils import (
 from .moe_kernel_configs import MoeGroupedGemmKernelConfig
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
+from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
 
 FFN_MOE_CHUNK_SIZE = 8 * 1024
 
@@ -223,7 +224,7 @@ def grouped_matmul_kernel(
     n,  # int
     expert_num,  # int
     topk_num,  # int
-    token_scale_ptr,  # [1,]
+    token_scale_ptr,  # [1,] for per tensor quant, or [token_num, hidden_dim // block_size] for per token, group quant
     weight_scale_ptr,  # [expert_num,] or [export_num, n // block_size_n, k // block_size_k]
     weight_scale_stride0,
     weight_scale_stride1,
@@ -306,7 +307,7 @@ def grouped_matmul_kernel(
 
             if use_fp8_w8a8:
                 if block_size_k > 0 and block_size_n > 0:
-                    a_scale = tl.load(token_scale_ptr, eviction_policy="evict_last")
+                    a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num) * (token_stride_0 // block_size_k)
                     offs_bsn = offs_bn // block_size_n
                     b_scale_ptrs = weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bsn * weight_scale_stride1
                 else:
@@ -342,8 +343,9 @@ def grouped_matmul_kernel(
                 if use_fp8_w8a8:
                     if block_size_k > 0 and block_size_n > 0:
                         offs_ks = step_k * BLOCK_SIZE_K // block_size_k
+                        a_scale = tl.load(a_scale_ptrs + offs_ks, mask=offs_am < cur_m, other=0.0)
                         b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
-                        accumulator += tl.dot(b, a) * a_scale * b_scale[:, None]
+                        accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
                     else:
                         accumulator = tl.dot(b, a, acc=accumulator)
                 else:
@@ -387,6 +389,7 @@ def grouped_matmul(
     expert_token_limit: int,
     mul_routed_weight: bool,
     use_fp8_w8a8: bool,
+    alloc_tensor_func=torch.empty,
     **run_config,
 ):
     """
@@ -417,7 +420,6 @@ def grouped_matmul(
         if expert_to_weights_scale.ndim == 3:
             block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
-
     if not run_config:
         run_config = MoeGroupedGemmKernelConfig.try_to_get_best_config(
             M=token_inputs.shape[0],
@@ -436,8 +438,22 @@ def grouped_matmul(
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
 
+    if block_size_k != 0:
+        # 如果使用了 block wise 量化，分块大小不能超过 block size
+        BLOCK_SIZE_K = min(BLOCK_SIZE_K, block_size_k)
+        assert BLOCK_SIZE_K == triton.next_power_of_2(BLOCK_SIZE_K)
+
     if use_fp8_w8a8:
-        token_inputs, token_input_scale = ops.scaled_fp8_quant(token_inputs, token_input_scale)
+        # 当权重使用 block wise 量化时，激活也使用 per token， group size 量化
+        if block_size_k == 0:
+            token_inputs, token_input_scale = ops.scaled_fp8_quant(token_inputs, token_input_scale)
+        else:
+            _m, _k = token_inputs.shape
+            assert _k % block_size_k == 0
+            input_scale = alloc_tensor_func((_m, _k // block_size_k), dtype=torch.float32, device=token_inputs.device)
+            qinput_tensor = alloc_tensor_func((_m, _k), dtype=expert_weights.dtype, device=token_inputs.device)
+            per_token_group_quant_fp8(token_inputs, block_size_k, qinput_tensor, input_scale)
+            token_inputs, token_input_scale = qinput_tensor, input_scale
 
     kernel = grouped_matmul_kernel.warmup(
         expert_token_limit,
@@ -579,7 +595,6 @@ def fused_experts_impl(
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
-
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
     CHUNK_SIZE = FFN_MOE_CHUNK_SIZE
@@ -632,6 +647,7 @@ def fused_experts_impl(
             expert_token_limit=2 ** 31 - 1,
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
+            alloc_tensor_func=alloc_tensor_func,
             **run_config,
         )
 
@@ -650,6 +666,7 @@ def fused_experts_impl(
             expert_token_limit=2 ** 31 - 1,
             mul_routed_weight=True,
             use_fp8_w8a8=use_fp8_w8a8,
+            alloc_tensor_func=alloc_tensor_func,
             **run_config,
         )
 

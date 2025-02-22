@@ -2,8 +2,8 @@ import torch
 import time
 import pytest
 import numpy as np
-from lightllm.common.fused_moe.topk_select import grouped_topk
 from lightllm.common.fused_moe.grouped_topk import triton_grouped_topk
+from lightllm.common.fused_moe.topk_select import biased_grouped_topk as grouped_topk
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -21,7 +21,9 @@ if torch.cuda.is_available():
     [
         (*a, b, c)
         for a in [(256, 4, 8, 8), (160, 3, 8, 6)]
-        for b in ["softmax", "sigmoid"]
+        for b in [
+            "sigmoid",
+        ]
         for c in [1, 8, 256, 1024, 2048, 4096, 8192]
     ],
 )
