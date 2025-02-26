@@ -32,3 +32,8 @@ def get_env_start_args():
     start_args: StartArgs = json.loads(os.environ["LIGHTLLM_START_ARGS"])
     start_args: StartArgs = EasyDict(start_args)
     return start_args
+
+
+@lru_cache(maxsize=None)
+def enable_env_vars(args):
+    return os.getenv(args, "False").upper() in ["ON", "TRUE", "1"]
