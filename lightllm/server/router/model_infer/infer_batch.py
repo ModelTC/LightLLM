@@ -7,7 +7,7 @@ import numpy as np
 import collections
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Union, Any
 from lightllm.common.req_manager import ReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
@@ -194,10 +194,15 @@ class InferSamplingParams:
 
         # output constraint states
         self.regular_constraint = self.shm_param.regular_constraint.to_str()
+        self.guided_grammar = self.shm_param.guided_grammar.to_str()
+        self.guided_json = self.shm_param.guided_json.to_str()
         if len(self.regular_constraint) == 0:
             self.regular_constraint = None
+        if len(self.guided_grammar) == 0:
+            self.guided_grammar = None
+        if len(self.guided_json) == 0:
+            self.guided_json = None
 
-        self.regex_guide = None
         self.fsm_current_state: int = 0
         self.allowed_token_ids = self.shm_param.allowed_token_ids.to_list()
         if len(self.allowed_token_ids) == 0:
@@ -217,7 +222,12 @@ class InferSamplingParams:
         return
 
     def has_constraint_setting(self) -> bool:
-        return self.regular_constraint is not None or self.allowed_token_ids is not None
+        return (
+            self.regular_constraint is not None
+            or self.allowed_token_ids is not None
+            or self.guided_grammar is not None
+            or self.guided_json is not None
+        )
 
 
 class InferReq:

@@ -14,7 +14,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-class SimpleConstraintBackend(ContinuesBatchBackend):
+class OutlinesConstraintBackend(ContinuesBatchBackend):
     def __init__(self) -> None:
         super().__init__()
 

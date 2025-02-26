@@ -41,7 +41,7 @@ class StartArgs:
     enable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)
     token_healing_mode: bool = field(default=False)
-    simple_constraint_mode: bool = field(default=False)
+    output_constraint_mode: str = field(default="none", metadata={"choices": ["none", "simple", "xgrammar"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
     cache_capacity: int = field(default=200)

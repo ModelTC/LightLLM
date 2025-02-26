@@ -15,7 +15,7 @@ def build_req_queue(args, router, dp_size: int):
         queue_class = ChunkedPrefillQueue
     if args.token_healing_mode:
         queue_class = ContinuesBatchQueue
-    if args.simple_constraint_mode:
+    if args.output_constraint_mode != "none":
         queue_class = ContinuesBatchQueue
     if args.first_token_constraint_mode:
         queue_class = ContinuesBatchQueue

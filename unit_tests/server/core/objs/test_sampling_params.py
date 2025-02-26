@@ -7,10 +7,30 @@ from lightllm.server.core.objs.sampling_params import (
     ExponentialDecayLengthPenalty,
     DecodeNode,
     SamplingParams,
+    GuidedGrammar,
+    GuidedJsonSchema,
     STOP_SEQUENCE_MAX_LENGTH,
     REGULAR_CONSTRAINT_MAX_LENGTH,
     ALLOWED_TOKEN_IDS_MAX_LENGTH,
 )
+
+grammar_str = r"""root ::= (expr "=" term)+
+expr ::= term ([-+*/] term)*
+term ::= num | "(" expr ")"
+num ::= [0-9]+"""
+
+schema_str = r"""{
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "Title": {"type": "string"},
+            "Date": {"type": "string"},
+            "Time": {"type": "string"}
+        },
+        "required": ["Title", "Time", "Date"]
+    }
+}"""
 
 
 @pytest.mark.parametrize(
@@ -56,6 +76,24 @@ def test_regular_constraint_initialization():
 
     with pytest.raises(AssertionError):
         constraint.initialize("a" * (REGULAR_CONSTRAINT_MAX_LENGTH + 1))
+
+
+def test_guided_grammar_initialization():
+    grammar = GuidedGrammar()
+    grammar.initialize(grammar_str)
+    assert grammar.to_str() == grammar_str
+
+    with pytest.raises(AssertionError):
+        grammar.initialize("a" * (REGULAR_CONSTRAINT_MAX_LENGTH + 1))
+
+
+def test_guided_json_schema_initialization():
+    schema = GuidedJsonSchema()
+    schema.initialize(schema_str)
+    assert schema.to_str() == schema_str
+
+    with pytest.raises(AssertionError):
+        schema.initialize("a" * (REGULAR_CONSTRAINT_MAX_LENGTH + 1))
 
 
 def test_allowed_token_ids_initialization():

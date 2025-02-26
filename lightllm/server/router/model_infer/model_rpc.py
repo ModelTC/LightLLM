@@ -13,7 +13,8 @@ from lightllm.server.router.model_infer.mode_backend import (
     DiversehBackend,
     RewardModelBackend,
     TokenHealingBackend,
-    SimpleConstraintBackend,
+    OutlinesConstraintBackend,
+    XgrammarBackend,
     FirstTokenConstraintBackend,
     ContinuesBatchBackendForPrefillNode,
     ContinuesBatchBackendForDecodeNode,
@@ -106,11 +107,16 @@ class ModelRpcServer:
         is_token_healing = kvargs.get("is_token_healing", False)
         is_first_token_constraint_mode = kvargs.get("is_first_token_constraint_mode", False)
         if kvargs.get("args", None) is not None:
-            is_simple_constraint_mode = kvargs.get("args", None).simple_constraint_mode
+            is_outlines_constraint_mode = kvargs.get("args", None).output_constraint_mode == "outlines"
+            is_xgrammar_constraint_mode = kvargs.get("args", None).output_constraint_mode == "xgrammar"
+            assert not (
+                is_outlines_constraint_mode and is_xgrammar_constraint_mode
+            ), "only one constraint mode can be true"
             is_prefill_node = kvargs.get("args", None).run_mode == "prefill"
             is_decode_node = kvargs.get("args", None).run_mode == "decode"
         else:
-            is_simple_constraint_mode = False
+            is_outlines_constraint_mode = False
+            is_xgrammar_constraint_mode = False
             is_prefill_node = False
             is_decode_node = False
         # use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
@@ -128,8 +134,10 @@ class ModelRpcServer:
             self.backend = DiversehBackend()
         elif is_token_healing:
             self.backend = TokenHealingBackend()
-        elif is_simple_constraint_mode:
-            self.backend = SimpleConstraintBackend()
+        elif is_outlines_constraint_mode:
+            self.backend = OutlinesConstraintBackend()
+        elif is_xgrammar_constraint_mode:
+            self.backend = XgrammarBackend()
         elif is_first_token_constraint_mode:
             self.backend = FirstTokenConstraintBackend()
         elif kvargs.get("dp_size", 1) > 1:
