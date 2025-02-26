@@ -47,6 +47,9 @@ class InternvlTokenizer:
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
         # TEXT<image>TEXT<image>TEXT --> TEXT<img></img>TEXT<img></img>TEXT
         image_tokens = IMG_START_TOKEN + IMG_END_TOKEN
+        if multimodal_params is None:
+            add_special_tokens = kwargs.get("add_special_tokens", True)
+            return self.tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
         image_count = len(multimodal_params.images)
         prompt = prompt.replace(IMG_TOKEN, image_tokens, image_count)
 

@@ -325,7 +325,8 @@ async def tokens(request: Request):
     try:
         request_dict = await request.json()
         prompt = request_dict.pop("text")
-        return JSONResponse({"ntokens": g_objs.httpserver_manager.tokens(prompt)}, status_code=200)
+        parameters = request_dict.pop("parameters")
+        return JSONResponse({"ntokens": g_objs.httpserver_manager.tokens(prompt, parameters)}, status_code=200)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
 
