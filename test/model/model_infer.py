@@ -39,7 +39,7 @@ def test_model_inference(world_size, model_class, batch_size, input_len, output_
 def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_len, ans_queue):
     import torch
     from lightllm.distributed import custom_comm_ops
-    from lightllm.utils.device_utils import set_current_device_id
+    from lightllm.utils.dist_utils import set_current_device_id
 
     import torch.distributed as dist
 

@@ -8,6 +8,9 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
+from lightllm.utils.dist_utils import get_global_rank
+from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
+
 
 logger = init_logger(__name__)
 
@@ -32,14 +35,10 @@ class MemoryManager:
         self.can_use_mem_size = self.size
 
         # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
-        from torch.distributed.distributed_c10d import _default_pg_init_method
+        from lightllm.utils.envs_utils import get_unique_server_name
 
-        nccl_port = re.search(r":(\d+)$", _default_pg_init_method).group(1)
-        assert nccl_port is not None
-        logger.info(f"mem manger get nccl port: {str(nccl_port)}")
-
-        rank_id = dist.get_rank()
-        self.shared_can_use_token_num = SharedInt(f"{str(nccl_port)}_mem_manger_can_use_token_num_{rank_id}")
+        rank_id = get_global_rank()
+        self.shared_can_use_token_num = SharedInt(f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_id}")
 
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._init_buffers(
@@ -56,12 +55,10 @@ class MemoryManager:
     def profile_size(self, mem_fraction):
         if self.size is not None:
             return
-        import torch.distributed as dist
 
-        tp_rank = dist.get_rank()
         world_size = dist.get_world_size()
         total_memory = get_total_gpu_memory()
-        available_memory = get_available_gpu_memory(tp_rank, world_size) - total_memory * (1 - mem_fraction)
+        available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         self.size = int(available_memory * 1024 ** 3 / cell_size)
         logger.info(
@@ -95,7 +92,6 @@ class MemoryManager:
         assert dp_size == 1
 
         # 先将数据发送到指定的一张卡上的buffer，再发送。
-        import torch.distributed as dist
 
         move_token_indexes = []
         for task in move_tasks:
@@ -137,7 +133,6 @@ class MemoryManager:
         assert dp_size == 1
 
         # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
-        import torch.distributed as dist
 
         move_token_indexes = []
         for task in move_tasks:
@@ -172,7 +167,6 @@ class MemoryManager:
         assert dp_size == 1
 
         # 先将数据发送到指定的一张卡上的buffer，再发送。
-        import torch.distributed as dist
 
         move_token_indexes = []
         for task in move_tasks:
@@ -201,7 +195,6 @@ class MemoryManager:
         assert dp_size == 1
 
         # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
-        import torch.distributed as dist
 
         move_token_indexes = []
         for task in move_tasks:
@@ -307,10 +300,23 @@ class ReadOnlyStaticsMemoryManager:
     读取一些统计信息
     """
 
-    def __init__(self, nccl_port, tp_size) -> None:
-        self.shared_tp_infos = [
-            SharedInt(f"{str(nccl_port)}_mem_manger_can_use_token_num_{tp_index}") for tp_index in range(tp_size)
-        ]
+    def __init__(self) -> None:
+        args = get_env_start_args()
+        self.global_world_size = args.tp
+        node_world_size = args.tp // args.nnodes
+        rank_start = args.node_rank * node_world_size
+        rank_end = (args.node_rank + 1) * node_world_size
+        self.shared_tp_infos = {
+            rank: SharedInt(f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank}")
+            for rank in range(rank_start, rank_end)
+        }
 
-    def get_unrefed_token_num(self, tp_index: int):
-        return self.shared_tp_infos[tp_index].get_value()
+    def get_unrefed_token_num(self, dp_rank: int):
+        args = get_env_start_args()
+        if args.dp == 1 and args.nnodes > 1:
+            # 兼容多机 dp size=1 的情况
+            rank_id = args.tp // args.nnodes * args.node_rank
+            return self.shared_tp_infos[rank_id].get_value()
+        dp_size = args.dp
+        dp_world_size = self.global_world_size // dp_size
+        return self.shared_tp_infos[dp_rank * dp_world_size].get_value()

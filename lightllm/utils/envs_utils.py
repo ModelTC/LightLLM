@@ -8,7 +8,7 @@ logger = init_logger(__name__)
 
 
 def set_unique_server_name(args):
-    os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.nccl_port)
+    os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.nccl_port) + "_" + str(args.node_rank)
     return
 
 

@@ -5,18 +5,19 @@ import torch
 from transformers import AutoModelForCausalLM
 import argparse
 from lightllm.common.build_utils import repair_config
+from lightllm.utils.dist_utils import get_current_device_id
 
 data_type_dict = {"float32": 4, "float16": 2, "bfloat16": 2, "fp32": 4, "fp16": 2, "bf16": 2, "int8": 1, "int4": 0.5}
 
 
-def get_available_gpu_memory(tp_rank, world_size):
+def get_available_gpu_memory(world_size):
     """
     Get available memory.
     """
     torch.cuda.empty_cache()
-    free_gpu_memory, _ = torch.cuda.mem_get_info(tp_rank)
+    free_gpu_memory, _ = torch.cuda.mem_get_info(get_current_device_id())
     if world_size > 1:
-        tensor = torch.tensor(free_gpu_memory, dtype=torch.float32).to(f"cuda:{tp_rank}")
+        tensor = torch.tensor(free_gpu_memory, dtype=torch.float32).to(f"cuda:{get_current_device_id()}")
         torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.MIN)
         free_gpu_memory = tensor.item()
     return free_gpu_memory / (1024 ** 3)

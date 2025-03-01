@@ -14,6 +14,7 @@ import concurrent.futures
 import zmq
 import zmq.asyncio
 import torch.multiprocessing as mp
+import torch.distributed as dist
 import multiprocessing
 from typing import Dict, List, Optional
 from .batch import Batch
@@ -32,6 +33,7 @@ from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.common.mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -41,18 +43,20 @@ class RouterManager:
         self.args = args
         self.model_weightdir = args.model_dir
         self.world_size = args.tp
+        self.nnodes = args.nnodes
+        self.node_rank = args.node_rank
         self.dp_size = args.dp
         self.load_way = args.load_way
         self.mode = args.mode
         self.max_total_token_num = args.max_total_token_num
         self.shm_req_manager = ShmReqManager()
         # 用共享内存进行共享，router 模块读取进行精确的调度估计
-        self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager(args.nccl_port, args.tp)
+        self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
-        self.shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load", self.dp_size)
+        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size)
         for dp_index in range(self.dp_size):
             self.shared_token_load.set_estimated_peak_token_count(0, dp_index)
             self.shared_token_load.set_frozened_token_count(0, dp_index)
@@ -65,7 +69,6 @@ class RouterManager:
         self.eos_id = args.eos_id
         self.has_wait_tokens = 0
         self.max_wait_tokens = args.router_max_wait_tokens
-
         context = zmq.asyncio.Context(2)
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{router_port}")
@@ -73,6 +76,14 @@ class RouterManager:
         self.send_to_detokenization = context.socket(zmq.PUSH)
         self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
         self.model_rpc_ports = model_rpc_ports
+
+        if args.nnodes > 1 and args.dp == 1:
+            self.mulitnode_group = dist.init_process_group(
+                backend="gloo",
+                init_method=f"tcp://{args.nccl_host}:{args.multinode_router_gloo_port}",
+                world_size=args.nnodes,
+                rank=args.node_rank,
+            )
 
         self.is_token_healing = self.args.token_healing_mode
         self.chunked_prefill_size = args.chunked_prefill_size
@@ -103,13 +114,16 @@ class RouterManager:
         self.rpc_event = multiprocessing.Event()
         self.rpc_finished_event = multiprocessing.Event()
 
-        for rank_id in range(self.world_size):
+        assert (self.world_size % self.nnodes) == 0
+        node_world_size = self.world_size // self.nnodes
+        for rank_id in range(self.node_rank * node_world_size, (self.node_rank + 1) * node_world_size):
             rpc_model = await start_model_process(
                 args=self.args,
-                tp_rank=rank_id,
+                rank=rank_id,
+                rank_in_node=rank_id % node_world_size,
+                node_world_size=node_world_size,
                 rpc_event=self.rpc_event,
                 rpc_finished_event=self.rpc_finished_event,
-                world_size=self.world_size,
                 info_queue=self.info_queue,
                 mem_queue=self.mem_queues[rank_id],
                 router_lock=self.router_lock,
@@ -134,6 +148,7 @@ class RouterManager:
             "mode": self.mode,
             "max_req_num": self.args.running_max_req_size + 8,
             "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
+            "nccl_host": self.args.nccl_host,
             "nccl_port": self.args.nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
             "enable_chunked_prefill": self.enable_chunked_prefill,
@@ -162,7 +177,7 @@ class RouterManager:
             self.args.max_total_token_num = self.max_total_token_num
         if self.args.use_dynamic_prompt_cache:
             self.radix_cache_client = RadixCacheReadOnlyClient(
-                str(self.args.nccl_port), self.max_total_token_num, tp_size=self.world_size
+                get_unique_server_name(), self.max_total_token_num, tp_size=self.world_size
             )
         self.req_queue = build_req_queue(self.args, self, self.dp_size)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
@@ -248,10 +263,20 @@ class RouterManager:
         if self.schedule_task is None:
 
             def get_new_batch():
+                limit_router_queue_length = None
+                if self.nnodes > 1 and self.args.dp == 1:
+                    # 使用 all_reduce 获取最小值
+                    limit_router_queue_length = len(self.req_queue.waiting_req_list)
+                    limit_router_queue_length_tensor = torch.tensor(
+                        limit_router_queue_length, dtype=torch.int32, device="cpu"
+                    )
+                    dist.all_reduce(limit_router_queue_length_tensor, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
+                    limit_router_queue_length = limit_router_queue_length_tensor.item()
+
                 self.overlap_event.wait(timeout=0.020)
                 self.overlap_event.clear()
-                time.sleep(0.003)  # 这里是为了保证能正确进入推理的流程，保证折叠成功。
-                new_batch = self.req_queue.generate_new_batch(running_batch)
+                time.sleep(0.003)
+                new_batch = self.req_queue.generate_new_batch(running_batch, limit_router_queue_length)
                 return new_batch
 
             self.schedule_task = asyncio.get_running_loop().run_in_executor(self.overlap_thread_pool, get_new_batch)

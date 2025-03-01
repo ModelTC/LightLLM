@@ -24,7 +24,7 @@ class ContinuesBatchQueueForPDDecode(BaseQueue):
         return
 
     # @calculate_time(show=True, min_cost_ms=10)
-    def generate_new_batch(self, current_batch: Batch):
+    def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
         # 如果当前已经被调度的请求数量超过了上限，直接不调度新的请求了。
         exist_req_num = self.get_batch_dp_req_size(current_batch) + len(self.pause_req_dict)
         req_is_full = exist_req_num >= self.running_max_req_size

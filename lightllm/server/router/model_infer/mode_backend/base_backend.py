@@ -3,6 +3,7 @@ import asyncio
 import numpy as np
 import rpyc
 import torch
+import socket
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
@@ -37,9 +38,13 @@ from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
-from lightllm.utils.device_utils import set_current_device_id
+from lightllm.utils.dist_utils import _init_distributed_env
+from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
+from lightllm.utils.dist_utils import get_dp_world_size, get_current_dp_rank, get_current_rank_in_dp
+from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
 import torch.distributed as dist
 
 
@@ -49,12 +54,13 @@ class ModeBackend:
         pass
 
     def init_model(self, kvargs):
-
         self.args = kvargs.get("args", None)
         # p d 分离模式下会有特殊的一些初始化, 所以需要传递
         # 模式参数到模型的初始化过程中进行控制
         self.run_mode = "normal" if self.args is None else self.args.run_mode
         self.is_multimodal = False
+        self.nnodes = self.args.nnodes
+        self.node_rank = self.args.node_rank
         self.tp_rank = kvargs["rank_id"]
         self.world_size = kvargs["world_size"]
         self.dp_size = kvargs.get("dp_size", 1)
@@ -71,8 +77,6 @@ class ModeBackend:
         self.logger = init_logger(__name__)
 
         self.weight_dir = kvargs["weight_dir"]
-        nccl_port_str = str(kvargs["nccl_port"])
-        self.shared_token_load = TokenLoad(f"{nccl_port_str}_shared_token_load", self.dp_size)
         # p d 分离模式，decode节点才会使用的参数
         self.pd_rpyc_ports = kvargs.get("pd_rpyc_ports", None)
         max_total_token_num = kvargs["max_total_token_num"]
@@ -81,19 +85,10 @@ class ModeBackend:
             assert self.dp_size == self.world_size, "Currently only self-sustaining dp_size == tp_size"
             os.environ["ENABLE_DP"] = "1"
 
-        torch.cuda.set_device(self.tp_rank)
-        set_current_device_id(self.tp_rank)
+        _init_distributed_env(kvargs)
+        self.init_rank_infos()
 
-        dist.init_process_group(
-            "nccl",
-            init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}',
-            rank=self.tp_rank,
-            world_size=self.world_size,
-        )
-        # warmup nccl communicator
-        _a = torch.zeros([1]).to(f"cuda:{self.tp_rank}")
-        dist.all_reduce(_a)
-        del _a
+        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size)
 
         from lightllm.distributed import custom_comm_ops
 
@@ -102,7 +97,7 @@ class ModeBackend:
 
         # 为 p d 分离模式添加的全局锁管理，用于做一些同步操作。 一定需要在
         # init_process_group 之后调用
-        g_infer_state_lock.obj = InferStateLock(name=nccl_port_str)
+        g_infer_state_lock.obj = InferStateLock(name=get_unique_server_name())
         g_infer_state_lock.dp_size = self.dp_size
         self.infer_state_lock = g_infer_state_lock
         # 防止InferStateLock 中的全局共享信息被重复异常初始化,导致同步异常的问题。
@@ -207,7 +202,7 @@ class ModeBackend:
         set_random_seed(2147483647)
         self.radix_cache = (
             RadixCache(
-                str(kvargs["nccl_port"]), self.model.mem_manager.size, self.tp_rank, mem_manager=self.model.mem_manager
+                get_unique_server_name(), self.model.mem_manager.size, self.tp_rank, mem_manager=self.model.mem_manager
             )
             if self.use_dynamic_prompt_cache
             else None
@@ -279,3 +274,26 @@ class ModeBackend:
         self.radix_cache.match_prefix(
             torch.tensor(model_cfg["prompt_cache_token_ids"], dtype=torch.int64, device="cpu"), update_refs=True
         )
+
+    def init_rank_infos(self):
+        self.node_world_size = get_node_world_size()
+        self.rank_in_node = get_current_rank_in_node()
+        self.current_device_id = get_current_device_id()
+        self.rank_in_dp = get_current_rank_in_dp()
+        self.dp_rank = get_current_dp_rank()
+        self.dp_world_size = get_dp_world_size()
+        self.global_rank = get_global_rank()
+        self.global_world_size = get_global_world_size()
+        self.dp_size = get_dp_size()
+
+        if self.nnodes > 1 and self.dp_size == 1:
+            if self.rank_in_node == 0:
+                self.is_master_in_dp = True
+            else:
+                self.is_master_in_dp = False
+        else:
+            if self.rank_in_dp == 0:
+                self.is_master_in_dp = True
+            else:
+                self.is_master_in_dp = False
+        return

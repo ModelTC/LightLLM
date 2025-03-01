@@ -69,7 +69,15 @@ class BaseQueue:
 
         return len([req for req in current_batch.reqs if req.sample_params.suggested_dp_index == self.dp_index])
 
-    def generate_new_batch(self, current_batch: Batch):
+    def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
+        """
+        args:
+            current_batch: current batch
+            limit_router_queue_length: the least length of waiting list across all nodes.
+            It only works when nnodes > 1 and dp_size == 1.
+        return:
+            new batch
+        """
         raise NotImplementedError()
 
     def calcu_batch_token_load(self, current_batch: Batch):

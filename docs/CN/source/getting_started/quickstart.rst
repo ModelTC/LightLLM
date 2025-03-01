@@ -56,6 +56,22 @@
 .. note::
     上面代码中的 ``--model_dir`` 参数需要修改为你本机实际的模型路径。
 
+单机H200部署 DeepSeek-R1 模型, 启动命令如下:
+
+.. code-block:: console
+
+    $ LOADWORKER=8 python -m lightllm.server.api_server --model_dir ~/models/DeepSeek-R1 --tp 8 --graph_max_batch_size 100
+
+.. note::
+    LOADWORKER 指定了模型加载的线程，可以提高模型加载的速度。--graph_max_batch_size 指定了要捕获的cudagraph的数量，将捕获从1到100的batch size的图。
+
+双机H100部署 DeepSeek-R1 模型，启动命令如下：
+
+.. code-block:: console
+    $ # Node 0
+    $ LOADWORKER=8 python -m lightllm.server.api_server --model_dir ~/models/DeepSeek-R1 --tp 16 --graph_max_batch_size 100 --nccl_host master_addr --nnodes 2 --node_rank 0
+    $ # Node 1
+    $ LOADWORKER=8 python -m lightllm.server.api_server --model_dir ~/models/DeepSeek-R1 --tp 16 --graph_max_batch_size 100 --nccl_host master_addr --nnodes 2 --node_rank 1
 
 3. （可选）测试模型服务
 -------------------------
@@ -74,4 +90,11 @@
     $            }
     $           }'
 
+
+对于DeepSeek-R1模型，可以用如下脚本进行测试：
+
+.. code-block:: console
+
+    $ cd test
+    $ python benchmark_client.py --num_clients 100 --input_num 2000 --tokenizer_path /nvme/DeepSeek-R1/ --url http://127.0.01:8000/generate_stream
 

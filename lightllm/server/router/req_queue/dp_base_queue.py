@@ -27,7 +27,7 @@ class DpQueue:
         return sum(queue.get_wait_req_num() for queue in self.inner_queues)
 
     # @calculate_time(show=True, min_cost_ms=10)
-    def generate_new_batch(self, current_batch: Batch):
+    def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
         batches = [self.inner_queues[dp_index].generate_new_batch(current_batch) for dp_index in range(self.dp_size)]
         return self._merge_batch(batches)
 

@@ -5,9 +5,8 @@ from typing import Optional, Tuple, List, Dict, Any
 from .base_weight import BaseWeight
 from lightllm.common.quantization import vLLMFP8w8a8QuantizationMethod
 from lightllm.common.quantization.quantize_method import QuantizationMethod
-from lightllm.utils.dist_utils import get_world_size, get_rank
+from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_device_id
 from lightllm.common.vllm_kernel import _custom_ops as ops
-from lightllm.utils.device_utils import get_current_device_id
 
 
 class FusedMoeWeight(BaseWeight):
@@ -39,7 +38,7 @@ class FusedMoeWeight(BaseWeight):
         self.n_routed_experts = n_routed_experts
         self.split_inter_size = split_inter_size
         self.data_type_ = data_type
-        self.tp_rank_ = get_rank()
+        self.tp_rank_ = get_global_rank()
         self.experts_up_projs = [None] * self.n_routed_experts
         self.experts_gate_projs = [None] * self.n_routed_experts
         self.experts_up_proj_scales = [None] * self.n_routed_experts
@@ -159,7 +158,7 @@ class FusedMoeWeight(BaseWeight):
                 delattr(self, "experts_gate_proj_scales")
 
     def _load_hf_weights_etp(self, weights):
-        world_size_ = get_world_size()
+        world_size_ = get_global_world_size()
         assert self.n_routed_experts % world_size_ == 0
         n_expert_ep = self.n_routed_experts // world_size_
 

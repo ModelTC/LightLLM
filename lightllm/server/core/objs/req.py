@@ -96,6 +96,14 @@ class Req(ctypes.Structure):
         ("cumlogprob", ctypes.c_float),
     ]
 
+    def get_str(self):
+        return (
+            f"request_id:{self.request_id}, input_len:{self.input_len},"
+            f"shm_cur_kv_len:{self.shm_cur_kv_len},"
+            f"shm_cur_output_len:{self.shm_cur_output_len},"
+            f"finish_status:{self.finish_status.is_finished()}"
+        )
+
     def init(
         self,
         request_id: int,

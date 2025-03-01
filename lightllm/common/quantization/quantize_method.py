@@ -1,6 +1,7 @@
 import torch
 from abc import ABC, abstractmethod
-from lightllm.utils.device_utils import get_current_device_id
+from lightllm.utils.dist_utils import get_current_device_id
+
 
 class QuantizationMethod(ABC):
     def __init__(self):

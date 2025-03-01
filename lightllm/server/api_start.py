@@ -10,10 +10,11 @@ from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from .visualserver.manager import start_visual_process
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name
+from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
+from lightllm.utils.multinode_utils import send_and_receive_node_ip
 
 logger = init_logger(__name__)
 
@@ -58,26 +59,16 @@ def setup_signal_handlers(http_server_process, process_manager):
     return
 
 
-def set_env(args):
-    import os
-
-    if args.static_quant:
-        os.environ["STATIC_QUANT"] = "1"
-    set_unique_server_name(args)
-    set_env_start_args(args)
-    return
-
-
 def normal_or_p_d_start(args):
+    set_unique_server_name(args)
 
     if args.run_mode not in ["normal", "prefill", "decode"]:
         return
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
-
     # 确保单机上多实列不冲突
     if args.zmq_mode == "ipc:///tmp/":
-        zmq_mode = f"{args.zmq_mode}_{str(args.nccl_port)}_"
+        zmq_mode = f"{args.zmq_mode}_{get_unique_server_name()}_"
         args.zmq_mode = None  # args 的参数不能直接设置，只能先设置None，再设置才能成功
         args.zmq_mode = zmq_mode
         logger.info(f"zmq mode head: {args.zmq_mode}")
@@ -208,7 +199,8 @@ def normal_or_p_d_start(args):
     if args.run_mode == "decode":
         args.router_max_wait_tokens = 0
 
-    set_env(args)
+    send_and_receive_node_ip(args)  # 多机用于收发node ip
+    set_env_start_args(args)
     logger.info(f"all start args:{args}")
 
     ports_locker.release_port()
@@ -280,6 +272,7 @@ def normal_or_p_d_start(args):
 
 
 def pd_master_start(args):
+    set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
 
@@ -291,7 +284,7 @@ def pd_master_start(args):
 
     args.metric_port = metric_port
 
-    set_env(args)
+    set_env_start_args(args)
 
     process_manager.start_submodule_processes(
         start_funcs=[

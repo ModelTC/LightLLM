@@ -16,7 +16,7 @@ from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrain
 from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.utils.device_utils import set_current_device_id
+from lightllm.utils.dist_utils import _init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
 
 
@@ -31,20 +31,11 @@ class VisualModelRpcServer(rpyc.Service):
         self.tp_rank_id = kvargs["tp_rank_id"]
         self.cache_port = kvargs["cache_port"]
         weight_dir = kvargs["weight_dir"]
-        visual_gpu_ids = kvargs["visual_gpu_ids"]
-        visual_nccl_port = kvargs["visual_nccl_port"]
         self.vit_rank_id = kvargs["vit_rank_id"]
         self.cache_client = rpyc.connect("localhost", self.cache_port)
         self.data_type = kvargs["data_type"]
 
-        torch.cuda.set_device(visual_gpu_ids[self.vit_rank_id])
-        set_current_device_id(visual_gpu_ids[self.vit_rank_id])
-        dist.init_process_group(
-            backend="nccl",
-            init_method=f"tcp://127.0.0.1:{visual_nccl_port}",
-            rank=self.tp_rank_id,
-            world_size=self.vit_tp,
-        )
+        _init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 
         try:

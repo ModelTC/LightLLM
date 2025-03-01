@@ -100,15 +100,13 @@ class VisualManager:
             if len(self.waiting_reqs) == 0:
                 await asyncio.sleep(0.01)  # 10ms
             else:
-                cur_batch_size = 0
-                reqs_need_infer = []
+                processing_group_reqs = []
                 uuids_need_infer = []
-                while cur_batch_size < self.infer_batch_size and len(self.waiting_reqs) > 0:
+                while len(self.waiting_reqs) > 0:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
                     is_aborted = shm_req.is_aborted
                     self.shm_req_manager.put_back_req_obj(shm_req)
-
                     if is_aborted:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
                         # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
@@ -118,33 +116,28 @@ class VisualManager:
 
                     multimodal_params = group_req_indexes.multimodal_params
 
-                    cur_uuids_need_infer = []
                     for img in multimodal_params.images:
                         if not self.cache_client.root.get_item_embed(img.uuid):
-                            cur_batch_size += 1
-                            cur_uuids_need_infer.append(img.uuid)
+                            uuids_need_infer.append(img.uuid)
 
-                    if len(cur_uuids_need_infer) == 0:
+                        if len(uuids_need_infer) == self.infer_batch_size:
+                            await self.infer_imgs(uuids_need_infer)
+                            uuids_need_infer = []
+                            for _group_req_indexes in processing_group_reqs:
+                                self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                            processing_group_reqs = []
+
+                    if len(uuids_need_infer) == 0:
                         self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     else:
-                        uuids_need_infer.extend(cur_uuids_need_infer)
-                        reqs_need_infer.append((group_req_indexes, len(uuids_need_infer) - 1))
+                        processing_group_reqs.append(group_req_indexes)
 
-                for start_index in range(0, len(uuids_need_infer), self.infer_batch_size):
-                    await self.infer_imgs(uuids_need_infer[start_index : (start_index + self.infer_batch_size)])
-                    finished_req_indexes = [
-                        group_req_indexes
-                        for group_req_indexes, mark_index in reqs_need_infer
-                        if mark_index < start_index + self.infer_batch_size
-                    ]
-                    reqs_need_infer = [
-                        (group_req_indexes, mark_index)
-                        for group_req_indexes, mark_index in reqs_need_infer
-                        if mark_index >= start_index + self.infer_batch_size
-                    ]
-
-                    for group_req_indexes in finished_req_indexes:
-                        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                if len(uuids_need_infer) > 0:
+                    await self.infer_imgs(uuids_need_infer)
+                    for _group_req_indexes in processing_group_reqs:
+                        self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                    processing_group_reqs = []
+                    uuids_need_infer = []
 
     async def loop_for_netio_req(self):
         while True:

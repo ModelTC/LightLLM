@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from lightllm.common.basemodel import PreAndPostLayerWeight
-from lightllm.utils.device_utils import get_current_device_id
+from lightllm.utils.dist_utils import get_current_device_id
 
 
 class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):

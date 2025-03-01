@@ -24,7 +24,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pd_master_ip",
         type=str,
-        default="127.0.0.1",
+        default="0.0.0.0",
         help="when run_mode set to prefill or decode, you need set this pd_mater_ip",
     )
     parser.add_argument(
@@ -93,6 +93,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
     )
+    parser.add_argument("--nnodes", type=int, default=1, help="the number of nodes")
+    parser.add_argument("--node_rank", type=int, default=0, help="the rank of the current node")
+    parser.add_argument(
+        "--multinode_httpmanager_port",
+        type=int,
+        default=12345,
+        help="the port for multinode http manager, default is 20000",
+    )
+    parser.add_argument(
+        "--multinode_router_gloo_port",
+        type=int,
+        default=20001,
+        help="the gloo port for multinode router, default is 20001",
+    )
     parser.add_argument("--tp", type=int, default=1, help="model tp parral size, the default is 1")
     parser.add_argument(
         "--dp",
@@ -104,6 +118,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
+    )
+    parser.add_argument(
+        "--nccl_host",
+        type=str,
+        default="127.0.0.1",
+        help="""The nccl_host to build a distributed environment for PyTorch.
+        When deploying in multi-node manner, the value should be set to the IP of the master node""",
     )
     parser.add_argument(
         "--nccl_port", type=int, default=28765, help="the nccl_port to build a distributed environment for PyTorch"
@@ -223,6 +244,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"
     )
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
+
     parser.add_argument(
         "--graph_max_batch_size",
         type=int,

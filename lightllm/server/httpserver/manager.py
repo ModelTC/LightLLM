@@ -5,14 +5,16 @@ import asyncio
 import uvloop
 import rpyc
 import time
+import copy
 import hashlib
 import datetime
 import websockets
 import pickle
 import ujson as json
+import multiprocessing
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Union, List, Tuple, Dict
+from typing import Union, List, Tuple, Dict, Optional
 from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole, ObjType
 from ..embed_cache.utils import get_shm_name_data, create_shm
@@ -49,6 +51,29 @@ class HttpServerManager:
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
+
+        self.multinode_req_manager = None
+        self.nnodes = args.nnodes
+        self.node_rank = args.node_rank
+        self.transfer_lock = asyncio.Lock()  # the lock for transfer to next module in multi node mode.
+        self.disable_abort = args.nnodes > 1 and args.dp == 1  # mulitnode dp=1 mode, disable abort
+        if args.nnodes > 1:
+            if args.node_rank == 0:
+                self.multinode_req_manager = []
+                for child_ip in args.child_ips:
+                    context = zmq.asyncio.Context(2)
+                    self.multinode_req_manager.append(context.socket(zmq.PUSH))
+                    self.multinode_req_manager[-1].connect(f"tcp://{child_ip}:{args.multinode_httpmanager_port}")
+                    logger.info(
+                        f"HttpServerManager connected to child node at {child_ip}:{args.multinode_httpmanager_port}"
+                    )
+            else:
+                context = zmq.asyncio.Context(2)
+                self.multinode_req_manager = context.socket(zmq.PULL)
+                self.multinode_req_manager.bind(f"tcp://*:{args.multinode_httpmanager_port}")
+                logger.info(
+                    f"HttpServerManager listening for child node requests on *:{args.multinode_httpmanager_port}"
+                )
 
         self.enable_multimodal = enable_multimodal
         if self.enable_multimodal:
@@ -126,6 +151,48 @@ class HttpServerManager:
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         return len(prompt_ids)
 
+    async def loop_for_request(self):
+        assert self.args.node_rank > 0
+        tasks = []
+        self.request_order_queue = []
+        while True:
+            (
+                prompt,
+                sampling_params,
+                multimodal_params,
+            ) = await self.multinode_req_manager.recv_pyobj()
+            self.request_order_queue.append(sampling_params.group_request_id)
+            results_generator = self.generate(prompt, sampling_params, multimodal_params, None)
+
+            async def generate_wrapper(results_generator):
+                async for _, _, _, _ in results_generator:
+                    pass
+
+            tasks.append(asyncio.create_task(generate_wrapper(results_generator)))
+            # cleanup
+            while len(tasks) > 0 and tasks[0].done():
+                tasks.pop(0)
+
+    def alloc_req_id(self, sampling_params):
+        # 请求的 id 可以由外部传入，也可以由内部生成，但是由外部传入的时候，要自己保证全局唯一性
+        # 否则会造成异常问题。目前限制 NORMAL 模式都使用内部id替换， P 和 D 模式按需设置
+        if self.pd_mode == NodeRole.NORMAL:
+            if not (self.nnodes > 1 and self.args.dp == 1):
+                group_request_id = self.id_gen.generate_id()
+            else:
+                if self.node_rank == 0:
+                    group_request_id = self.id_gen.generate_id()
+                else:
+                    assert sampling_params.group_request_id != -1
+                    group_request_id = sampling_params.group_request_id
+            sampling_params.group_request_id = group_request_id
+        elif self.pd_mode == NodeRole.P or self.pd_mode == NodeRole.D:
+            assert sampling_params.group_request_id is not None, "p d mode, group_request_id must be setting"
+            group_request_id = sampling_params.group_request_id
+        else:
+            assert False, "dead code path"
+        return group_request_id
+
     async def generate(
         self,
         prompt: Union[str, List[int]],
@@ -134,23 +201,19 @@ class HttpServerManager:
         request: Request,
     ) -> Tuple[int, str, dict, FinishStatus]:
         start_time = time.time()
-        # 请求的 id 可以由外部传入，也可以由内部生成，但是由外部传入的时候，要自己保证全局唯一性
-        # 否则会造成异常问题。目前限制 NORMAL 模式都使用内部id替换， P 和 D 模式按需设置
-        if self.pd_mode == NodeRole.NORMAL:
-            group_request_id = self.id_gen.generate_id()
-            sampling_params.group_request_id = group_request_id
-        elif self.pd_mode == NodeRole.P or self.pd_mode == NodeRole.D:
-            assert sampling_params.group_request_id is not None, "p d mode, group_request_id must be setting"
-            group_request_id = sampling_params.group_request_id
-        else:
-            assert False, "dead code path"
+        request_headers = request.headers if request is not None else {}
+        group_request_id = self.alloc_req_id(sampling_params)
 
         try:
+            old_multimodal_params = None
+            if self.nnodes > 1 and self.node_rank == 0 and self.args.dp == 1:
+                old_multimodal_params = copy.deepcopy(multimodal_params)
+
             if self.pd_mode.is_P_or_NORMAL():
                 multimodal_params.verify_and_preload()
 
             # 记录请求到达的相关信息
-            await self._log_req_header(request, group_request_id)
+            await self._log_req_header(request_headers, group_request_id)
             # 监控
             self.metric_client.counter_inc("lightllm_request_count")
 
@@ -191,11 +254,17 @@ class HttpServerManager:
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
             self.req_id_to_out_inf[group_request_id] = req_status
 
-            # 将请求转发给其他节点
-            await self.transfer_to_next_module(req_status.group_req_objs)
+            await self.transfer_to_next_module_or_node(
+                prompt, sampling_params, old_multimodal_params, req_status.group_req_objs
+            )
 
             results_generator = self._wait_to_token_package(
-                start_time, prompt_ids, group_request_id, sampling_params, req_status, request
+                start_time,
+                prompt_ids,
+                group_request_id,
+                sampling_params,
+                req_status,
+                request,
             )
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
                 # p d 模式下，将 token 数据放入到转发队列中
@@ -210,10 +279,10 @@ class HttpServerManager:
             raise e
         return
 
-    async def _log_req_header(self, request: Request, group_request_id: int):
+    async def _log_req_header(self, request_headers, group_request_id: int):
 
-        x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
-        x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
+        x_request_id = request_headers.get("X-Request-Id", "")
+        x_session_id = request_headers.get("X-Session-Id", "")
 
         format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
@@ -276,10 +345,44 @@ class HttpServerManager:
 
         return prompt_ids
 
+    async def transfer_to_next_module_or_node(
+        self,
+        prompt: str,
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        group_req_objs: Optional[GroupReqObjs] = None,
+    ):
+        # 多节点纯tp 运行模式下，保证请求能保持相同的顺序转发到其他节点和当前节点next module.
+        if self.nnodes > 1 and self.node_rank == 0 and self.args.dp == 1:
+            async with self.transfer_lock:
+                for sender in self.multinode_req_manager:
+                    sender.send_pyobj(
+                        (prompt, sampling_params, multimodal_params),
+                        protocol=pickle.HIGHEST_PROTOCOL,
+                    )
+                await self.transfer_to_next_module(group_req_objs)
+            return
+
+        if self.nnodes > 1 and self.node_rank > 0 and self.args.dp == 1:
+            while True:
+                if self.request_order_queue and self.request_order_queue[0] != group_req_objs.group_req_id:
+                    await asyncio.sleep(0.002)
+                    continue
+                else:
+                    async with self.transfer_lock:
+                        await self.transfer_to_next_module(group_req_objs)
+                        self.request_order_queue.pop(0)
+                    break
+            return
+
+        await self.transfer_to_next_module(group_req_objs)
+        return
+
     async def transfer_to_next_module(
         self,
-        group_req_objs: GroupReqObjs,
+        group_req_objs: Optional[GroupReqObjs] = None,
     ):
+
         if self.pd_mode == NodeRole.P:
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
@@ -340,7 +443,7 @@ class HttpServerManager:
             except asyncio.TimeoutError:
                 pass
 
-            if request is not None and await request.is_disconnected():
+            if not self.disable_abort and request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
                 raise Exception(f"req_id {group_request_id} disconnected")
 
@@ -376,7 +479,6 @@ class HttpServerManager:
                         self.per_token_costs.add(mean_per_token_cost_time_ms)
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
                         x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
-
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
                         self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
                         self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
@@ -460,6 +562,9 @@ class HttpServerManager:
         if self.pd_mode.is_P_or_D():
             self.forwarding_queue = AsyncQueue()
             asyncio.create_task(self.pd_handle_loop())
+
+        if self.args.node_rank > 0:
+            asyncio.create_task(self.loop_for_request())
 
         while True:
             try:

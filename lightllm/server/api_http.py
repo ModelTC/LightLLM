@@ -54,6 +54,7 @@ from .api_models import (
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
+from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
 
 logger = init_logger(__name__)
@@ -100,7 +101,7 @@ class G_Objs:
                 enable_multimodal=args.enable_multimodal,
                 metric_port=args.metric_port,
             )
-            self.shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load", args.dp)
+            self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", args.dp)
 
 
 g_objs = G_Objs()
