@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.0-runtime-ubuntu20.04 as base
+FROM nvcr.io/nvidia/tritonserver:24.04-py3-min as base
 ARG PYTORCH_VERSION=2.5.1
 ARG PYTHON_VERSION=3.9
 ARG CUDA_VERSION=12.4
@@ -37,6 +37,8 @@ WORKDIR /root
 
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu124
+
+RUN pip install --no-cache-dir nvidia-nccl-cu12==2.25.1  # for allreduce hang issues in multinode H100
 
 COPY . /lightllm
 RUN pip install -e /lightllm --no-cache-dir

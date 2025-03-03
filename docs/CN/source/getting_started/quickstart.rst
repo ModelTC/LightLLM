@@ -68,6 +68,7 @@
 双机H100部署 DeepSeek-R1 模型，启动命令如下：
 
 .. code-block:: console
+
     $ # Node 0
     $ LOADWORKER=8 python -m lightllm.server.api_server --model_dir ~/models/DeepSeek-R1 --tp 16 --graph_max_batch_size 100 --nccl_host master_addr --nnodes 2 --node_rank 0
     $ # Node 1
