@@ -20,6 +20,8 @@ _g_health_req_id_gen.generate_id()
 class HealthObj:
     _is_health: bool = True
     _is_health_checking: bool = False
+    _failure_count: int = 0
+    _failure_threshold: int = int(os.getenv("HEALTH_FAILURE_THRESHOLD", 3))
     timeout: int = int(os.getenv("HEALTH_TIMEOUT", 100))
 
     def begin_check(self):
@@ -29,10 +31,13 @@ class HealthObj:
         self._is_health_checking = False
 
     def set_unhealth(self):
-        self._is_health = False
+        self._failure_count += 1
+        if self._failure_count > self._failure_threshold:
+            self._is_health = False
 
     def set_health(self):
         self._is_health = True
+        self._failure_count = 0
 
     def is_health(self):
         return self._is_health
@@ -72,6 +77,7 @@ async def health_check(args, httpserver_manager: HttpServerManager, request: Req
             health_obj.set_health()
         except asyncio.TimeoutError:
             health_obj.set_unhealth()
+            logger.warning("Health check timeout!")
         return health_obj.is_health()
     except Exception as e:
         logger.exception(str(e))
