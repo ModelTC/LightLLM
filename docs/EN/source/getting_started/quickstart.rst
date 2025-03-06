@@ -35,7 +35,7 @@ Here is an example of how to download the model:
 
 .. code-block:: console
     
-    $ huggingface-cli download meta-llama/Llama-2-7b-chat --local-dir Llama-2-7b-chat
+    $ huggingface-cli download meta-llama/Llama-2-7b-chat-hf --local-dir Llama-2-7b-chat
 
 .. tip::
     The above code for downloading the model requires a stable internet connection and may take some time. You can use alternative download methods or other supported models as substitutes. For the latest list of supported models, please refer to the `project homepage <https://github.com/ModelTC/lightllm>`_.
@@ -71,15 +71,79 @@ For the DeepSeek-R1 model on two H100, it can be launched with the following com
     $ # Node 1
     $ LOADWORKER=8 python -m lightllm.server.api_server --model_dir ~/models/DeepSeek-R1 --tp 16 --graph_max_batch_size 100 --nccl_host master_addr --nnodes 2 --node_rank 1
 
+3. Start Model Service - Disaggregating Prefill and Decoding
+------------------------------------------------------------
 
-3. (Optional) Test the Model Service
+Find Local IP
+
+.. code-block:: console
+
+    $ hostname -i
+
+Run MPS (Optional)
+
+.. code-block:: console
+
+    $ nvidia-cuda-mps-control -d 
+
+Run pd_master Service
+
+.. code-block:: console
+
+    $ CUDA_VISIBLE_DEVICES=0  python -m lightllm.server.api_server \
+    $ --model_dir /your/model/path \
+    $ --run_mode "pd_master" \
+    $ --host /your/host/ip \
+    $ --port 60011
+
+Open a new terminal and run the prefill service
+
+.. code-block:: console
+
+    $ CUDA_VISIBLE_DEVICES=0,1 KV_TRANS_USE_P2P=1 LOADWORKER=1 python -m lightllm.server.api_server --model_dir /data/fengdahu/model/Qwen2-7B/ \
+    $ --run_mode "prefill" \
+    $ --host /your/host/ip \
+    $ --port 8017 \
+    $ --tp 2 \
+    $ --nccl_port 2732 \
+    $ --max_total_token_num 400000 \
+    $ --tokenizer_mode fast \
+    $ --pd_master_ip /your/host/ip \
+    $ --pd_master_port 60011 \
+    $ --use_dynamic_prompt_cache \
+    $ --max_req_total_len 16000 \
+    $ --running_max_req_size 128 \
+    $ --disable_cudagraph
+
+Open a new terminal and run the decoding service
+
+.. code-block:: console
+
+    $ CUDA_VISIBLE_DEVICES=2,3 KV_TRANS_USE_P2P=1 LOADWORKER=10 python -m lightllm.server.api_server --model_dir /data/fengdahu/model/Qwen2-7B/ \
+    $ --run_mode "decode" \
+    $ --host /your/host/ip \
+    $ --port 8118 \
+    $ --nccl_port 12322 \
+    $ --tp 2 \
+    $ --max_total_token_num 400000 \
+    $ --graph_max_len_in_batch 2048 \
+    $ --graph_max_batch_size 16 \
+    $ --tokenizer_mode fast \
+    $ --pd_master_ip /your/host/ip \
+    $ --pd_master_port 60011 \
+    $ --use_dynamic_prompt_cache 
+
+.. note::
+    The tp size for the prefill and decoding stages should remain consistent.
+
+4. (Optional) Test the Model Service
 --------------------------------------
 
 In a new terminal, use the following command to test the model service:
 
 .. code-block:: console
 
-    $ curl http://localhost:8000/generate \
+    $ curl http://server_ip:server_port/generate \
     $      -H "Content-Type: application/json" \
     $      -d '{
     $            "inputs": "What is AI?",

@@ -38,7 +38,7 @@
 
 .. code-block:: console
     
-    $ huggingface-cli download meta-llama/Llama-2-7b-chat --local-dir Llama-2-7b-chat
+    $ huggingface-cli download meta-llama/Llama-2-7b-chat-hf --local-dir Llama-2-7b-chat
 
 .. tip::
     上面的下载模型的代码需要科学上网，并且需要花费一定的时间，你可以使用其它下载方式或者其它支持的模型作为替代。最新的支持的模型的列表请查看 `项目主页 <https://github.com/ModelTC/lightllm>`_ 。
@@ -74,14 +74,80 @@
     $ # Node 1
     $ LOADWORKER=8 python -m lightllm.server.api_server --model_dir ~/models/DeepSeek-R1 --tp 16 --graph_max_batch_size 100 --nccl_host master_addr --nnodes 2 --node_rank 1
 
-3. （可选）测试模型服务
+3. PD 分离启动模型服务
+-------------------------
+查找本机IP
+
+.. code-block:: console
+
+    $ hostname -i
+
+运行MPS(可选, 有mps支持性能会好特别多，但是部分显卡和驱动环境开启mps会容易出现错误，建议升级驱动到较高版本，特别是H系列卡)
+
+.. code-block:: console
+
+    $ nvidia-cuda-mps-control -d 
+
+
+运行pd_master服务
+
+.. code-block:: console
+
+    $ CUDA_VISIBLE_DEVICES=0  python -m lightllm.server.api_server \
+    $ --model_dir /your/model/path \
+    $ --run_mode "pd_master" \
+    $ --host /your/host/ip \
+    $ --port 60011
+
+新建终端,运行prefill服务 
+
+.. code-block:: console
+
+    $ CUDA_VISIBLE_DEVICES=0,1 KV_TRANS_USE_P2P=1 LOADWORKER=1 python -m lightllm.server.api_server --model_dir /data/fengdahu/model/Qwen2-7B/ \
+    $ --run_mode "prefill" \
+    $ --host /your/host/ip \
+    $ --port 8017 \
+    $ --tp 2 \
+    $ --nccl_port 2732 \
+    $ --max_total_token_num 400000 \
+    $ --tokenizer_mode fast \
+    $ --pd_master_ip /your/host/ip \
+    $ --pd_master_port 60011 \
+    $ --use_dynamic_prompt_cache \
+    $ --max_req_total_len 16000 \
+    $ --running_max_req_size 128 \
+    $ --disable_cudagraph
+
+新建终端,运行decoding服务
+
+.. code-block:: console
+
+    $ CUDA_VISIBLE_DEVICES=2,3 KV_TRANS_USE_P2P=1 LOADWORKER=10 python -m lightllm.server.api_server --model_dir /data/fengdahu/model/Qwen2-7B/ \
+    $ --run_mode "decode" \
+    $ --host /your/host/ip \
+    $ --port 8118 \
+    $ --nccl_port 12322 \
+    $ --tp 2 \
+    $ --max_total_token_num 400000 \
+    $ --graph_max_len_in_batch 2048 \
+    $ --graph_max_batch_size 16 \
+    $ --tokenizer_mode fast \
+    $ --pd_master_ip /your/host/ip \
+    $ --pd_master_port 60011 \
+    $ --use_dynamic_prompt_cache 
+
+.. note::
+    prefill和decoding阶段的tp大小保持一致, 目前可以支持 prefill 和 decode 节点的数量是变化的，同时prefill 和 decode可以跨机部署。
+
+
+4. （可选）测试模型服务
 -------------------------
 
 在新的终端，使用下面的指令对模型服务进行测试：
 
 .. code-block:: console
 
-    $ curl http://localhost:8000/generate \
+    $ curl http://server_ip:server_port/generate \
     $      -H "Content-Type: application/json" \
     $      -d '{
     $            "inputs": "What is AI?",
