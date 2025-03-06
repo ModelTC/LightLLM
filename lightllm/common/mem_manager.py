@@ -8,7 +8,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
-from lightllm.utils.dist_utils import get_global_rank
+from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 
 
@@ -37,8 +37,10 @@ class MemoryManager:
         # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
         from lightllm.utils.envs_utils import get_unique_server_name
 
-        rank_id = get_global_rank()
-        self.shared_can_use_token_num = SharedInt(f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_id}")
+        rank_in_node = get_current_rank_in_node()
+        self.shared_can_use_token_num = SharedInt(
+            f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
+        )
 
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._init_buffers(
@@ -83,13 +85,10 @@ class MemoryManager:
         self.kv_move_buf_indexes = torch.arange(0, max_req_total_len + 8, dtype=torch.int64, device="cuda")
         return
 
-    def send_to_decode_node(self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int):
-        """
-        dp_size 是为 deepseekv2 类型，可以 dp 和 tp 混合模式运行的模型定制的参数，
-        普通tp模式下, dp_size 一定等于 1, dp_index 一定等于 0, 同时普通模式下, 这两个参数并不会
-        被真正使用
-        """
-        assert dp_size == 1
+    def send_to_decode_node(
+        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+    ):
+        assert dp_size_in_node == 1
 
         # 先将数据发送到指定的一张卡上的buffer，再发送。
 
@@ -123,14 +122,9 @@ class MemoryManager:
         return move_buffer
 
     def receive_from_prefill_node(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int
+        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
     ):
-        """
-        dp_size 是为 deepseekv2 类型，可以 dp 和 tp 混合模式运行的模型定制的参数，
-        普通tp模式下, dp_size 一定等于 1, 同时普通模式下, 这两个参数并不会
-        被真正使用
-        """
-        assert dp_size == 1
+        assert dp_size_in_node == 1
 
         # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
 
@@ -160,11 +154,13 @@ class MemoryManager:
         self.kv_buffer[layer_index : layer_index + 1, token_indexes, :, :] = buffer_tensor
         return
 
-    def send_to_decode_node_p2p(self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int):
+    def send_to_decode_node_p2p(
+        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+    ):
         """
         使用 p2p triton kernel 进行数据复制和传输的实现方式。
         """
-        assert dp_size == 1
+        assert dp_size_in_node == 1
 
         # 先将数据发送到指定的一张卡上的buffer，再发送。
 
@@ -190,9 +186,9 @@ class MemoryManager:
         return move_buffer
 
     def receive_from_prefill_node_p2p(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int
+        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
     ):
-        assert dp_size == 1
+        assert dp_size_in_node == 1
 
         # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
 
@@ -303,20 +299,16 @@ class ReadOnlyStaticsMemoryManager:
     def __init__(self) -> None:
         args = get_env_start_args()
         self.global_world_size = args.tp
-        node_world_size = args.tp // args.nnodes
-        rank_start = args.node_rank * node_world_size
-        rank_end = (args.node_rank + 1) * node_world_size
-        self.shared_tp_infos = {
-            rank: SharedInt(f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank}")
-            for rank in range(rank_start, rank_end)
-        }
+        self.node_world_size = args.tp // args.nnodes
+        self.dp_world_size = self.global_world_size // args.dp
+        # 兼容多机 dp size=1 纯 tp 模式的情况
+        self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
+        self.shared_tp_infos = [
+            SharedInt(f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}")
+            for rank_in_node in range(0, self.node_world_size, self.dp_world_size)
+        ]
 
-    def get_unrefed_token_num(self, dp_rank: int):
-        args = get_env_start_args()
-        if args.dp == 1 and args.nnodes > 1:
-            # 兼容多机 dp size=1 的情况
-            rank_id = args.tp // args.nnodes * args.node_rank
-            return self.shared_tp_infos[rank_id].get_value()
-        dp_size = args.dp
-        dp_world_size = self.global_world_size // dp_size
-        return self.shared_tp_infos[dp_rank * dp_world_size].get_value()
+    def get_unrefed_token_num(self, dp_rank_in_node: int):
+        if self.is_multinode_tp:
+            return self.shared_tp_infos[0].get_value()
+        return self.shared_tp_infos[dp_rank_in_node].get_value()

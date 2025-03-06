@@ -4,13 +4,13 @@ import time
 
 
 class TokenLoad:
-    def __init__(self, name, dp_size) -> None:
+    def __init__(self, name, dp_size_in_node) -> None:
         # 为数据并行保留的接口
-        self.dp_size = dp_size
+        self.dp_size_in_node = dp_size_in_node
         self.shared_token_load = SharedArray(
             name,
             shape=(
-                self.dp_size,
+                self.dp_size_in_node,
                 3,
             ),
             dtype=np.float64,
@@ -19,7 +19,7 @@ class TokenLoad:
         self.shared_token_infos = SharedArray(
             f"{name}_ext_infos",
             shape=(
-                self.dp_size,
+                self.dp_size_in_node,
                 2,
             ),
             dtype=np.int64,

@@ -15,11 +15,13 @@ class PDPrefillInferRpcServer(rpyc.Service):
     def __init__(self, backend: ContinuesBatchBackendForPrefillNode) -> None:
         super().__init__()
         self.backend = backend
+        self.device_id = self.backend.current_device_id
+        self.dp_rank_in_node = self.backend.dp_rank_in_node
+        self.is_master_in_dp = self.backend.is_master_in_dp
         return
 
     def on_connect(self, conn):
-        self.rank_id = dist.get_rank()
-        torch.cuda.set_device(f"cuda:{self.rank_id}")
+        torch.cuda.set_device(f"cuda:{self.device_id}")
         return
 
     # pd 分离模式会使用的一些接口，用于做一些全局信息管理
@@ -31,14 +33,16 @@ class PDPrefillInferRpcServer(rpyc.Service):
                 task, share_node = g_kv_move_task_cache.pop(group_req_id)
                 if share_node is not None:
                     self.backend.radix_cache.dec_node_ref_counter(share_node)
-                # 减少 tp 日志数量
-                if self.rank_id < self.backend.dp_size:
+                # 减少日志数量
+                if self.is_master_in_dp:
                     logger.info(f"unfrozen tokens for req id: {group_req_id}")
 
-            # 更新元数据
-            if self.rank_id < self.backend.dp_size:
+            # 更新调度元数据
+            if self.is_master_in_dp:
                 with g_router_lock.obj:
-                    self.backend.shared_token_load.add_frozened_token_count(-len(task.input_tokens), self.rank_id)
+                    self.backend.shared_token_load.add_frozened_token_count(
+                        -len(task.input_tokens), self.dp_rank_in_node
+                    )
         release_acquired_lock()
         return
 

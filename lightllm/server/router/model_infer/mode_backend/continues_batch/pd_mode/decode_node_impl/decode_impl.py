@@ -18,6 +18,7 @@ from rpyc.utils.server import ThreadedServer
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, g_router_lock
 from .decode_task_cache import g_success_kv_move_task_cache, KVMoveTask
 from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -29,10 +30,16 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
         self.mem_queue: mp.Queue = mem_queue
 
     def init_custom(self):
-        self.lock_nccl_group = dist.new_group(backend="gloo")
+        ranks = []
+        for i in range(self.dp_world_size):
+            ranks.append(i + self.global_dp_rank * self.dp_world_size)
+
+        self.lock_nccl_group = dist.new_group(ranks=ranks, backend="gloo")
+        logger.info(f"lock_nccl_group ranks {dist.get_rank(self.lock_nccl_group)}")
+
         from .decode_infer_rpyc import PDDecodeInferRpcServer
 
-        socket_path = f"/tmp/decode_node_infer_rpyc_{self.pd_rpyc_ports[self.tp_rank]}"
+        socket_path = f"/tmp/{get_unique_server_name()}_decode_node_infer_rpyc_{self.pd_rpyc_ports[self.rank_in_node]}"
         if os.path.exists(socket_path):
             os.remove(socket_path)
 
@@ -49,16 +56,7 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
         return
 
     def prefill(self, reqs: List[Tuple]):
-        # 当 dp_size 不等于 1 的时候，需要提前从发来的请求参数中
-        # 剔除掉不需要处理的请求参数, deepseekv2 这种特殊的模型
-        # 在 dp 模式下 tp_rank == dp_rank
-        if self.dp_size != 1:
-            cur_dp_index = self.tp_rank
-            reqs = [req for req in reqs if req[3] == cur_dp_index]
-
-        g_infer_state_lock.acquire()
-        g_infer_context.add_reqs(reqs, init_req_obj=False)  # 请求对象进行延迟初始化
-        g_infer_state_lock.release()
+        self._init_reqs(reqs, init_req_obj=False)
         return
 
     def decode(self):
@@ -98,7 +96,7 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
                 req_obj.out_token_id_count[next_token_id] += 1
                 req_obj.update_finish_status(self.eos_id)
 
-                if self.tp_rank < self.dp_size:
+                if self.is_master_in_dp:
                     # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
                     # finish_token_index finish_status candetoken_out_len 是
                     # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
@@ -138,7 +136,7 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
                 req_obj.set_next_gen_token_id(0, 0.0)
                 req_obj.cur_output_len += 1
 
-                if self.tp_rank < self.dp_size:
+                if self.is_master_in_dp:
                     req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
                     req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
                     req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
@@ -148,10 +146,10 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
                     req_id = req_obj.shm_req.request_id
                     logger.error(f"req_id: {req_id} forced to finished, it not in g_success_kv_move_task_cache")
 
-        if self.tp_rank < self.dp_size:
+        if self.is_master_in_dp:
             with g_router_lock.obj:
-                self.shared_token_load.add_frozened_token_count(-remove_count, self.tp_rank)
-                self.shared_token_load.add_estimated_peak_token_count(estimated_peak_token_count, self.tp_rank)
+                self.shared_token_load.add_frozened_token_count(-remove_count, self.dp_rank_in_node)
+                self.shared_token_load.add_estimated_peak_token_count(estimated_peak_token_count, self.dp_rank_in_node)
         return
 
     def filter_finished_reqs(self, finished_reqs: List[InferReq]):

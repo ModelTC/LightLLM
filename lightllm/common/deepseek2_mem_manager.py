@@ -40,9 +40,9 @@ class Deepseek2MemoryManager(MemoryManager):
         return
 
     def send_to_decode_node(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["Deepseek2MemoryManager"], dp_size: int
+        self, move_tasks: List[KVMoveTask], mem_managers: List["Deepseek2MemoryManager"], dp_size_in_node: int
     ):
-        assert dp_size == 1
+        assert dp_size_in_node == 1
 
         # 先将数据发送到指定的一张卡上的buffer，再发送。
         move_token_indexes = []
@@ -66,9 +66,9 @@ class Deepseek2MemoryManager(MemoryManager):
         return move_buffer
 
     def receive_from_prefill_node(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int
+        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
     ):
-        assert dp_size == 1
+        assert dp_size_in_node == 1
 
         # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
         move_token_indexes = []
@@ -97,11 +97,13 @@ class Deepseek2MemoryManager(MemoryManager):
         self.kv_buffer[layer_index : layer_index + 1, token_indexes, :, :] = buffer_tensor
         return
 
-    def send_to_decode_node_p2p(self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int):
+    def send_to_decode_node_p2p(
+        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+    ):
         """
         使用 p2p triton kernel 进行数据复制和传输的实现方式。
         """
-        assert dp_size == 1
+        assert dp_size_in_node == 1
 
         move_token_indexes = []
         for task in move_tasks:
@@ -124,9 +126,9 @@ class Deepseek2MemoryManager(MemoryManager):
         return move_buffer
 
     def receive_from_prefill_node_p2p(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size: int
+        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
     ):
-        assert dp_size == 1
+        assert dp_size_in_node == 1
 
         move_token_indexes = []
         for task in move_tasks:

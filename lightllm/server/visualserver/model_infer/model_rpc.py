@@ -16,7 +16,7 @@ from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrain
 from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.utils.dist_utils import _init_vision_distributed_env
+from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
 
 
@@ -35,7 +35,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.cache_client = rpyc.connect("localhost", self.cache_port)
         self.data_type = kvargs["data_type"]
 
-        _init_vision_distributed_env(kvargs)
+        init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 
         try:

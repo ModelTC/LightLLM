@@ -9,8 +9,8 @@ from lightllm.common.basemodel.infer_lock import g_router_lock
 
 
 class ContinuesBatchQueueForPDDecode(BaseQueue):
-    def __init__(self, args, router, dp_index, dp_size) -> None:
-        super().__init__(args, router, dp_index, dp_size)
+    def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
+        super().__init__(args, router, dp_index, dp_size_in_node)
 
     def _init_cache_list(self, current_batch: Batch, is_busy):
         if current_batch is not None:
@@ -47,7 +47,7 @@ class ContinuesBatchQueueForPDDecode(BaseQueue):
                 break
 
         if len(can_run_list) != 0:
-            new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size=self.dp_size)
+            new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
             for req in abort_req_list:
                 self.router.shm_req_manager.put_back_req_obj(req)
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]

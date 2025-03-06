@@ -38,13 +38,14 @@ from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
-from lightllm.utils.dist_utils import _init_distributed_env
+from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_dp_rank, get_current_rank_in_dp
+from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
+from lightllm.utils.dist_utils import get_dp_rank_in_node
 import torch.distributed as dist
 
 
@@ -64,6 +65,8 @@ class ModeBackend:
         self.tp_rank = kvargs["rank_id"]
         self.world_size = kvargs["world_size"]
         self.dp_size = kvargs.get("dp_size", 1)
+        # dp_size_in_node 计算兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
+        self.dp_size_in_node = max(1, self.dp_size // self.nnodes)
         self.load_way = kvargs["load_way"]
         self.mode = kvargs["mode"]
         self.enable_chunked_prefill = kvargs.get("enable_chunked_prefill", False)
@@ -85,10 +88,10 @@ class ModeBackend:
             assert self.dp_size == self.world_size, "Currently only self-sustaining dp_size == tp_size"
             os.environ["ENABLE_DP"] = "1"
 
-        _init_distributed_env(kvargs)
+        init_distributed_env(kvargs)
         self.init_rank_infos()
 
-        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size)
+        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
 
         from lightllm.distributed import custom_comm_ops
 
@@ -97,8 +100,13 @@ class ModeBackend:
 
         # 为 p d 分离模式添加的全局锁管理，用于做一些同步操作。 一定需要在
         # init_process_group 之后调用
-        g_infer_state_lock.obj = InferStateLock(name=get_unique_server_name())
-        g_infer_state_lock.dp_size = self.dp_size
+        g_infer_state_lock.obj = InferStateLock(
+            name=get_unique_server_name(),
+            rank_in_dp=self.rank_in_dp,
+            dp_rank_in_node=self.dp_rank_in_node,
+            dp_world_size=self.dp_world_size,
+        )
+        g_infer_state_lock.dp_world_size = self.dp_world_size
         self.infer_state_lock = g_infer_state_lock
         # 防止InferStateLock 中的全局共享信息被重复异常初始化,导致同步异常的问题。
         # 所以做一次barrier等待
@@ -202,7 +210,10 @@ class ModeBackend:
         set_random_seed(2147483647)
         self.radix_cache = (
             RadixCache(
-                get_unique_server_name(), self.model.mem_manager.size, self.tp_rank, mem_manager=self.model.mem_manager
+                get_unique_server_name(),
+                self.model.mem_manager.size,
+                self.rank_in_node,
+                mem_manager=self.model.mem_manager,
             )
             if self.use_dynamic_prompt_cache
             else None
@@ -239,7 +250,7 @@ class ModeBackend:
         raise NotImplementedError()
 
     def pause_reqs(self, req_ids):
-        if self.dp_size != 1:
+        if self.dp_size_in_node != 1:
             req_ids = [req_id for req_id in req_ids if req_id in g_infer_context.requests_mapping]
 
         g_infer_context.pause_reqs(req_ids)
@@ -247,9 +258,9 @@ class ModeBackend:
 
     # 一些可以复用的单元功能函数
     def _init_reqs(self, reqs: List[Tuple], init_req_obj=True):
-        if self.dp_size != 1:
-            cur_dp_index = self.tp_rank
-            reqs = [req for req in reqs if req[3] == cur_dp_index]
+        if self.dp_size_in_node != 1:
+            dp_rank_in_node = self.dp_rank_in_node
+            reqs = [req for req in reqs if req[3] == dp_rank_in_node]
 
         g_infer_state_lock.acquire()
         g_infer_context.add_reqs(reqs, init_req_obj=init_req_obj)
@@ -280,7 +291,8 @@ class ModeBackend:
         self.rank_in_node = get_current_rank_in_node()
         self.current_device_id = get_current_device_id()
         self.rank_in_dp = get_current_rank_in_dp()
-        self.dp_rank = get_current_dp_rank()
+        self.global_dp_rank = get_global_dp_rank()
+        self.dp_rank_in_node = get_dp_rank_in_node()
         self.dp_world_size = get_dp_world_size()
         self.global_rank = get_global_rank()
         self.global_world_size = get_global_world_size()

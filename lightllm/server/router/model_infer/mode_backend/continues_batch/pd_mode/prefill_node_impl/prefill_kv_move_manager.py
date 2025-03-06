@@ -26,6 +26,7 @@ from lightllm.utils.net_utils import get_hostname_ip
 from ..task_queue import TaskQueue
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.envs_utils import get_unique_server_name
 
 KV_MOVE_MAX_NUM = 16
 
@@ -311,13 +312,19 @@ class TransProcessObj:
 class PrefillKVMoveManager:
     def __init__(self, args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
         self.args = args
-        self.dp_size = self.args.dp
+        # args.dp // args.nnodes 在跨机tp的场景下，可能为0
+        self.dp_size_in_node = max(1, args.dp // args.nnodes)
+        self.node_world_size = args.tp // args.nnodes
+        self.dp_world_size = args.tp // args.dp
+        # 不支持跨机tp的pd 分离策略
+        assert self.dp_world_size <= self.node_world_size
+
         self.info_queue = info_queue
         self.mem_queues = mem_queues
         self.infer_rpyc_objs: List[PDPrefillInferRpcServer] = []
         self.node_id_to_trans_obj: Dict[str, TransProcessObj] = {}
-        for port in self.args.pd_tp_infer_rpyc_ports:
-            socket_path = f"/tmp/prefill_node_infer_rpyc_{port}"
+        for port in self.args.pd_node_infer_rpyc_ports:
+            socket_path = f"/tmp/{get_unique_server_name()}_prefill_node_infer_rpyc_{port}"
             from rpyc.utils.factory import unix_connect
 
             con = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
@@ -331,7 +338,7 @@ class PrefillKVMoveManager:
 
         self.kv_trans_lock = threading.Lock()
         # 需要每个卡有一个锁来规划每次只能有一个tran obj 操作对应显卡上的传输任务。
-        self.device_locks = [threading.Lock() for _ in range(self.args.tp)]
+        self.device_locks = [threading.Lock() for _ in range(self.node_world_size)]
 
         # 释放token的task队列
         self.release_task_queue = TaskQueue(lambda datas: datas[0:KV_MOVE_MAX_NUM], fail_func=None)
@@ -358,7 +365,7 @@ class PrefillKVMoveManager:
         return
 
     def get_next_device_index(self):
-        counts = [0 for _ in range(self.args.tp)]
+        counts = [0 for _ in range(self.node_world_size)]
         for obj in self.node_id_to_trans_obj.values():
             counts[obj.device_index] += 1
         device_index = int(np.argmin(counts))
@@ -413,26 +420,20 @@ class PrefillKVMoveManager:
             raise e
 
     def _remove_req_refs_from_prompt_cache(self, tasks: List[KVMoveTask]):
-        if self.dp_size == 1:
-            with self.infer_rpyc_lock:
-                futures: List[AsyncResult] = []
-                for conn in self.infer_rpyc_objs:
-                    futures.append(
-                        rpyc.async_(conn.remove_req_refs_from_prompt_cache)([task.group_request_id for task in tasks])
-                    )
-                asyncio.run(self.wait_all_future_finish(futures))
-        else:
-            with self.infer_rpyc_lock:
-                dp_to_tasks = collections.defaultdict(list)
-                for task in tasks:
-                    dp_to_tasks[task.prefill_dp_index].append(task)
-                futures: List[AsyncResult] = []
-                for prefill_dp_index, _tasks in dp_to_tasks.items():
-                    conn = self.infer_rpyc_objs[prefill_dp_index]
+        with self.infer_rpyc_lock:
+            dp_to_tasks = collections.defaultdict(list)
+            for task in tasks:
+                dp_to_tasks[task.prefill_dp_index].append(task)
+            futures: List[AsyncResult] = []
+            for prefill_dp_index, _tasks in dp_to_tasks.items():
+                conn_start = prefill_dp_index * self.dp_world_size
+                conn_end = (prefill_dp_index + 1) * self.dp_world_size
+                conns = self.infer_rpyc_objs[conn_start:conn_end]
+                for conn in conns:
                     futures.append(
                         rpyc.async_(conn.remove_req_refs_from_prompt_cache)([task.group_request_id for task in _tasks])
                     )
-                asyncio.run(self.wait_all_future_finish(futures))
+            asyncio.run(self.wait_all_future_finish(futures))
         return
 
     def _put_mem_manager_to_mem_queue(self):

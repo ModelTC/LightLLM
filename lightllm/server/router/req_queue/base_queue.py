@@ -7,10 +7,10 @@ from lightllm.utils.config_utils import get_fixed_kv_len
 
 
 class BaseQueue:
-    def __init__(self, args, router, dp_index, dp_size) -> None:
+    def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         self.args = args
         self.dp_index = dp_index
-        self.dp_size = dp_size
+        self.dp_size_in_node = dp_size_in_node
         from lightllm.server.router.manager import RouterManager
 
         self.router: RouterManager = router
@@ -64,7 +64,7 @@ class BaseQueue:
     def get_batch_dp_req_size(self, current_batch: Batch):
         if current_batch is None:
             return 0
-        if self.dp_size == 1:
+        if self.dp_size_in_node == 1:
             return len(current_batch.reqs)
 
         return len([req for req in current_batch.reqs if req.sample_params.suggested_dp_index == self.dp_index])

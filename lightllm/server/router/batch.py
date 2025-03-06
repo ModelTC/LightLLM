@@ -8,11 +8,11 @@ logger = init_logger(__name__)
 
 
 class Batch:
-    def __init__(self, batch_id, reqs: List[Req], dp_size: int):
+    def __init__(self, batch_id, reqs: List[Req], dp_size_in_node: int):
         self.batch_id = batch_id
         self.reqs = reqs
         self.id_to_reqs = {req.request_id: req for req in reqs}
-        self.dp_size = dp_size
+        self.dp_size_in_node = dp_size_in_node
         return
 
     def input_tokens(self):
@@ -22,7 +22,7 @@ class Batch:
         return batch_input_tokens
 
     def get_batch_decode_need_tokens(self):
-        new_batch_decode_need_tokens = [0 for _ in range(self.dp_size)]  # for chunked prefill
+        new_batch_decode_need_tokens = [0 for _ in range(self.dp_size_in_node)]  # for chunked prefill
 
         for req in self.reqs:
             req_dp_index = req.sample_params.suggested_dp_index

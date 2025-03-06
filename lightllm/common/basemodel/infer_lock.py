@@ -17,28 +17,32 @@ logger = init_logger(__name__)
 
 
 class InferStateLock:
-    def __init__(self, name):
+    def __init__(self, name, rank_in_dp: int, dp_rank_in_node: int, dp_world_size: int):
         self.infer_lock = threading.Lock()
+        self.dp_rank_in_node = dp_rank_in_node
+        # sync_world_size 应该是 min(dp_world_size, node_world_size)
+        self.dp_world_size = dp_world_size
+        self.rank_in_dp = rank_in_dp
         # 默认开 128 tp 的空间, 现在应该没什么卡能开这么大的tp 吧
-        self.lock_tp_infos = SharedArray(f"{name}_lock_tp_infos", shape=(129,), dtype=np.int64)
+        self.lock_tp_infos = SharedArray(
+            f"{name}_dp_rank_{str(self.dp_rank_in_node)}_lock_tp_infos", shape=(self.dp_world_size + 1,), dtype=np.int64
+        )
         self.lock_tp_infos.arr[:] = 0
-        self.rank_id = dist.get_rank()
-        self.world_size = dist.get_world_size()
 
     def add_cur_mark(self):
-        self.lock_tp_infos.arr[self.rank_id] += 1
+        self.lock_tp_infos.arr[self.rank_in_dp] += 1
 
     def get_cur_mark(self):
-        return self.lock_tp_infos.arr[self.rank_id]
+        return self.lock_tp_infos.arr[self.rank_in_dp]
 
     def get_max_mark_in_group(self):
-        return np.max(self.lock_tp_infos.arr[0 : self.world_size])
+        return np.max(self.lock_tp_infos.arr[0 : self.dp_world_size])
 
     def judge_cur_mark_equal_max_mark_in_group(self):
         return self.get_cur_mark() == self.get_max_mark_in_group()
 
     def judge_mark_in_group_all_same(self):
-        marks = self.lock_tp_infos.arr[0 : self.world_size]
+        marks = self.lock_tp_infos.arr[0 : self.dp_world_size]
         return bool(np.all(marks == marks[0]))
 
     def acquire_lock_and_update_cur_mark(self):
@@ -49,11 +53,11 @@ class InferStateLock:
         self.infer_lock.release()
 
     def set_group_wait_mark(self):
-        if self.rank_id == 0:
+        if self.rank_in_dp == 0:
             self.lock_tp_infos.arr[-1] = 1
 
     def unset_group_wait_mark(self):
-        if self.rank_id == 0:
+        if self.rank_in_dp == 0:
             self.lock_tp_infos.arr[-1] = 0
 
     def get_group_wait_mark(self):
@@ -63,7 +67,7 @@ class InferStateLock:
 @dataclass
 class G_Infer_Lock:
     obj: InferStateLock = None
-    dp_size: int = None
+    dp_world_size: int = None
 
     def acquire(self):
         if self.obj is not None:
@@ -86,9 +90,8 @@ g_infer_state_lock = G_Infer_Lock()
 
 # 下面两个函数需要配对使用
 def acquire_lock_until_ready(nccl_group):
-    # 在 deepseekv2 的tp dp 混合运行模式下, 不需要多个推理进程间做协调同步
-    # 所以直接加锁，解锁即可
-    if g_infer_state_lock.dp_size != 1:
+    # 单卡一tp不用过度加锁
+    if g_infer_state_lock.dp_world_size == 1:
         g_infer_state_lock.obj.infer_lock.acquire()
         return
 
@@ -118,7 +121,7 @@ def release_acquired_lock():
 @dataclass
 class G_Router_Lock:
     """
-    保护pd分离模式下, 一些数据的操作。
+    保护pd分离模式下, 一些调度相关信息数据的操作。
     """
 
     obj = None  # 进程锁对象

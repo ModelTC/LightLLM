@@ -22,6 +22,7 @@ import numpy as np
 from rpyc import AsyncResult
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -249,14 +250,20 @@ class DecodeKVMoveManager(rpyc.Service):
     def __init__(self, args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
         super().__init__()
         self.args = args
-        self.dp_size = args.dp
+        # args.dp // args.nnodes 在跨机tp的场景下，可能为0
+        self.dp_size_in_node = max(1, args.dp // args.nnodes)
+        self.node_world_size = args.tp // args.nnodes
+        self.dp_world_size = args.tp // args.dp
+        # 不支持跨机tp的pd 分离策略
+        assert self.dp_world_size <= self.node_world_size
+
         self.info_queue = info_queue
         self.mem_queues = mem_queues
         self.infer_rpyc_lock = threading.Lock()
         self.infer_rpyc_objs: List[PDDecodeInferRpcServer] = []
         self.node_id_to_trans_obj: Dict[str, TransProcessObj] = {}
-        for port in self.args.pd_tp_infer_rpyc_ports:
-            socket_path = f"/tmp/decode_node_infer_rpyc_{port}"
+        for port in self.args.pd_node_infer_rpyc_ports:
+            socket_path = f"/tmp/{get_unique_server_name()}_decode_node_infer_rpyc_{port}"
             from rpyc.utils.factory import unix_connect
 
             con = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
@@ -276,7 +283,7 @@ class DecodeKVMoveManager(rpyc.Service):
 
         self.kv_trans_lock = threading.Lock()
         # 需要每个卡有一个锁来规划每次只能有一个tran obj 操作对应显卡上的传输任务。
-        self.device_locks = [threading.Lock() for _ in range(self.args.tp)]
+        self.device_locks = [threading.Lock() for _ in range(self.node_world_size)]
         return
 
     def put_to_fail_release_task_queue(self, task: Union[KVMoveTask, List[KVMoveTask]]):
@@ -301,70 +308,54 @@ class DecodeKVMoveManager(rpyc.Service):
         await asyncio.gather(*[asyncio.to_thread(future.wait) for future in futures])
         return
 
-    def _tp_alloc_to_frozen_some_tokens(self, tasks: List[KVMoveTask]) -> List[Optional[List[int]]]:
-        assert self.dp_size == 1
-        with self.infer_rpyc_lock:
-            futures: List[AsyncResult] = []
-            for conn in self.infer_rpyc_objs:
-                futures.append(rpyc.async_(conn.alloc_to_frozen_some_tokens)(tasks))
-            asyncio.run(self.wait_all_future_finish(futures))
-            return obtain(futures[0].value)
-
     def _dp_alloc_to_frozen_some_tokens(self, dp_tasks: List[List[KVMoveTask]]) -> List[List[Optional[List[int]]]]:
-        assert self.dp_size != 1
         with self.infer_rpyc_lock:
             futures = []
-            for dp_index in range(self.dp_size):
-                conn = self.infer_rpyc_objs[dp_index]
-                futures.append(rpyc.async_(conn.alloc_to_frozen_some_tokens)(dp_tasks[dp_index]))
+            for dp_index in range(self.dp_size_in_node):
+                conn_start = dp_index * self.dp_world_size
+                conn_end = (dp_index + 1) * self.dp_world_size
+                conns = self.infer_rpyc_objs[conn_start:conn_end]
+                for conn in conns:
+                    futures.append(rpyc.async_(conn.alloc_to_frozen_some_tokens)(dp_tasks[dp_index]))
+
             asyncio.run(self.wait_all_future_finish(futures))
-            ans_values = [obtain(futures[dp_index].value) for dp_index in range(self.dp_size)]
+            ans_values = [
+                obtain(futures[dp_index * self.dp_world_size].value) for dp_index in range(self.dp_size_in_node)
+            ]
             return ans_values
 
     def _put_kv_received_to_radix_cache(self, tasks: List[KVMoveTask]) -> None:
-        if self.dp_size == 1:
-            with self.infer_rpyc_lock:
-                futures: List[AsyncResult] = []
-                for conn in self.infer_rpyc_objs:
-                    futures.append(
-                        rpyc.async_(conn.put_kv_received_to_radix_cache)([task.group_request_id for task in tasks])
-                    )
-                asyncio.run(self.wait_all_future_finish(futures))
-        else:
-            with self.infer_rpyc_lock:
-                dp_to_tasks = collections.defaultdict(list)
-                for task in tasks:
-                    dp_to_tasks[task.decode_dp_index].append(task)
-                futures: List[AsyncResult] = []
-                for decode_dp_index, _tasks in dp_to_tasks.items():
-                    conn = self.infer_rpyc_objs[decode_dp_index]
+        with self.infer_rpyc_lock:
+            dp_to_tasks = collections.defaultdict(list)
+            for task in tasks:
+                dp_to_tasks[task.decode_dp_index].append(task)
+            futures: List[AsyncResult] = []
+            for decode_dp_index, _tasks in dp_to_tasks.items():
+                conn_start = decode_dp_index * self.dp_world_size
+                conn_end = (decode_dp_index + 1) * self.dp_world_size
+                conns = self.infer_rpyc_objs[conn_start:conn_end]
+                for conn in conns:
                     futures.append(
                         rpyc.async_(conn.put_kv_received_to_radix_cache)([task.group_request_id for task in _tasks])
                     )
-                asyncio.run(self.wait_all_future_finish(futures))
+            asyncio.run(self.wait_all_future_finish(futures))
         return
 
     def _fail_to_realese_forzen_tokens(self, tasks: List[KVMoveTask]) -> None:
-        if self.dp_size == 1:
-            with self.infer_rpyc_lock:
-                futures: List[AsyncResult] = []
-                for conn in self.infer_rpyc_objs:
-                    futures.append(
-                        rpyc.async_(conn.fail_to_realese_forzen_tokens)([task.group_request_id for task in tasks])
-                    )
-                asyncio.run(self.wait_all_future_finish(futures))
-        else:
-            with self.infer_rpyc_lock:
-                dp_to_tasks = collections.defaultdict(list)
-                for task in tasks:
-                    dp_to_tasks[task.decode_dp_index].append(task)
-                futures: List[AsyncResult] = []
-                for decode_dp_index, _tasks in dp_to_tasks.items():
-                    conn = self.infer_rpyc_objs[decode_dp_index]
+        with self.infer_rpyc_lock:
+            dp_to_tasks = collections.defaultdict(list)
+            for task in tasks:
+                dp_to_tasks[task.decode_dp_index].append(task)
+            futures: List[AsyncResult] = []
+            for decode_dp_index, _tasks in dp_to_tasks.items():
+                conn_start = decode_dp_index * self.dp_world_size
+                conn_end = (decode_dp_index + 1) * self.dp_world_size
+                conns = self.infer_rpyc_objs[conn_start:conn_end]
+                for conn in conns:
                     futures.append(
                         rpyc.async_(conn.fail_to_realese_forzen_tokens)([task.group_request_id for task in _tasks])
                     )
-                asyncio.run(self.wait_all_future_finish(futures))
+            asyncio.run(self.wait_all_future_finish(futures))
         return
 
     def _unfrozen_time_out_reqs_tokens(self) -> None:
@@ -427,44 +418,35 @@ class DecodeKVMoveManager(rpyc.Service):
             trans_obj = self.get_trans_obj(tasks[0])
             assert trans_obj is not None
 
-            if self.dp_size == 1:
-                list_decode_token_indexes = self._tp_alloc_to_frozen_some_tokens(tasks)
-                for i, task in enumerate(tasks):
-                    decode_token_indexes = list_decode_token_indexes[i]
-                    if decode_token_indexes is None:
-                        logger.info(f"req id {task.id()} request_data_transfer fail, server is busy")
-                        ans_list.append(None)
-                    else:
-                        task.decode_dp_index = 0
-                        task.decode_token_indexes = decode_token_indexes
-                        task.move_kv_len = len(decode_token_indexes)
-                        ans_list.append(task.move_kv_len)
-                        alloc_tokened_tasks.append(task)
-            else:
-                id_to_test_range = {task.group_request_id: random.shuffle(list(range(self.dp_size))) for task in tasks}
-                id_has_result = {}
-                for test_index in range(self.dp_size):
-                    dp_tasks = [[] for _ in range(self.dp_size)]
-                    for task in tasks:
-                        if task.group_request_id not in id_has_result:
-                            test_dp_index = id_to_test_range[task.group_request_id][test_index]
-                            dp_tasks[test_dp_index].append(task)
-                    if not all(len(t) == 0 for t in dp_tasks):
-                        dp_tasks_ans = self._dp_alloc_to_frozen_some_tokens(dp_tasks)
-                        for dp_index in range(self.dp_size):
-                            for task, decode_token_indexes in zip(dp_tasks[dp_index], dp_tasks_ans[dp_index]):
-                                if decode_token_indexes is not None:
-                                    id_has_result[task.group_request_id] = (dp_index, decode_token_indexes)
+            id_to_test_range = {}
+            for task in tasks:
+                test_dp_indexes = list(range(self.dp_size_in_node))
+                random.shuffle(test_dp_indexes)
+                id_to_test_range[task.group_request_id] = test_dp_indexes
+
+            id_has_result = {}
+            for test_index in range(self.dp_size_in_node):
+                dp_tasks = [[] for _ in range(self.dp_size_in_node)]
                 for task in tasks:
-                    if task.group_request_id in id_has_result:
-                        task.decode_dp_index = id_has_result[task.group_request_id][0]
-                        task.decode_token_indexes = id_has_result[task.group_request_id][1]
-                        task.move_kv_len = len(task.decode_token_indexes)
-                        ans_list.append(task.move_kv_len)
-                        alloc_tokened_tasks.append(task)
-                    else:
-                        logger.info(f"req id {task.id()} request_data_transfer fail, server is busy")
-                        ans_list.append(None)
+                    if task.group_request_id not in id_has_result:
+                        test_dp_index = id_to_test_range[task.group_request_id][test_index]
+                        dp_tasks[test_dp_index].append(task)
+                if not all(len(t) == 0 for t in dp_tasks):
+                    dp_tasks_ans = self._dp_alloc_to_frozen_some_tokens(dp_tasks)
+                    for dp_index in range(self.dp_size_in_node):
+                        for task, decode_token_indexes in zip(dp_tasks[dp_index], dp_tasks_ans[dp_index]):
+                            if decode_token_indexes is not None:
+                                id_has_result[task.group_request_id] = (dp_index, decode_token_indexes)
+            for task in tasks:
+                if task.group_request_id in id_has_result:
+                    task.decode_dp_index = id_has_result[task.group_request_id][0]
+                    task.decode_token_indexes = id_has_result[task.group_request_id][1]
+                    task.move_kv_len = len(task.decode_token_indexes)
+                    ans_list.append(task.move_kv_len)
+                    alloc_tokened_tasks.append(task)
+                else:
+                    logger.info(f"req id {task.id()} request_data_transfer fail, server is busy")
+                    ans_list.append(None)
 
         except BaseException as e:
             self.put_to_fail_release_task_queue(alloc_tokened_tasks)
@@ -485,7 +467,7 @@ class DecodeKVMoveManager(rpyc.Service):
         return ans_list
 
     def get_next_device_index(self):
-        counts = [0 for _ in range(self.args.tp)]
+        counts = [0 for _ in range(self.node_world_size)]
         for obj in self.node_id_to_trans_obj.values():
             counts[obj.device_index] += 1
         device_index = int(np.argmin(counts))

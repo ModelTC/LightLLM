@@ -23,7 +23,7 @@ class OutlinesConstraintBackend(ContinuesBatchBackend):
         import lightllm.server.router.model_infer.mode_backend.continues_batch.outlines_patch.impl as _nouse_
 
         # remove outlines cache
-        if self.tp_rank == 0:
+        if self.rank_in_node == 0:
             cache_path = os.path.join(os.path.expanduser("~"), ".cache/outlines")
             if os.path.exists(cache_path) and os.path.isdir(cache_path):
                 shutil.rmtree(cache_path)
@@ -115,7 +115,7 @@ class OutlinesConstraintBackend(ContinuesBatchBackend):
             if req_obj.finish_status.is_finished() or req_obj.shm_req.router_aborted:
                 finished_req_ids.append(req_obj.shm_req.request_id)
 
-            if self.tp_rank < self.dp_size:
+            if self.is_master_in_dp:
                 # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
                 # finish_token_index finish_status candetoken_out_len 是
                 # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。

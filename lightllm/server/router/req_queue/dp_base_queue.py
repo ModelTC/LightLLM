@@ -9,14 +9,14 @@ logger = init_logger(__name__)
 
 
 class DpQueue:
-    def __init__(self, args, router, base_queue_class, dp_size) -> None:
-        self.dp_size = dp_size
+    def __init__(self, args, router, base_queue_class, dp_size_in_node) -> None:
+        self.dp_size_in_node = dp_size_in_node
         self.base_queue_class = base_queue_class
         from lightllm.server.router.manager import RouterManager
 
         self.router: RouterManager = router
         self.inner_queues: List[BaseQueue] = [
-            base_queue_class(args, router, dp_index, dp_size) for dp_index in range(self.dp_size)
+            base_queue_class(args, router, dp_index, dp_size_in_node) for dp_index in range(self.dp_size_in_node)
         ]
         return
 
@@ -28,7 +28,9 @@ class DpQueue:
 
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
-        batches = [self.inner_queues[dp_index].generate_new_batch(current_batch) for dp_index in range(self.dp_size)]
+        batches = [
+            self.inner_queues[dp_index].generate_new_batch(current_batch) for dp_index in range(self.dp_size_in_node)
+        ]
         return self._merge_batch(batches)
 
     def _merge_batch(self, dp_batches: List[Batch]):
@@ -42,10 +44,9 @@ class DpQueue:
 
     def append(self, req: Req):
         suggested_dp_index = req.sample_params.suggested_dp_index
-        if suggested_dp_index is None or suggested_dp_index >= self.dp_size or suggested_dp_index < 0:
-            if suggested_dp_index is not None and (suggested_dp_index >= self.dp_size or suggested_dp_index < 0):
-                logger.error(f"input req {req.request_id} dp index {suggested_dp_index} has error")
-            suggested_dp_index = random.randint(0, self.dp_size - 1)
+        if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
+            logger.error(f"input req {req.request_id} dp index {suggested_dp_index} has error")
+            suggested_dp_index = random.randint(0, self.dp_size_in_node - 1)
             req.sample_params.suggested_dp_index = suggested_dp_index
             self.inner_queues[suggested_dp_index].append(req)
         else:
@@ -54,12 +55,11 @@ class DpQueue:
 
     def extend(self, req_group: List[Req]):
         # 同一个组的，要分配在同一个 dp 上，效率最高
-        index = random.randint(0, self.dp_size - 1)
+        index = random.randint(0, self.dp_size_in_node - 1)
         for req in req_group:
             suggested_dp_index = req.sample_params.suggested_dp_index
-            if suggested_dp_index is None or suggested_dp_index >= self.dp_size or suggested_dp_index < 0:
-                if suggested_dp_index is not None and (suggested_dp_index >= self.dp_size or suggested_dp_index < 0):
-                    logger.error(f"input req {req.request_id} dp index {suggested_dp_index} has error")
+            if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
+                logger.error(f"input req {req.request_id} dp index {suggested_dp_index} has error")
                 req.sample_params.suggested_dp_index = index
                 self.inner_queues[index].append(req)
             else:
@@ -75,7 +75,7 @@ class DpQueue:
 
     def update_token_load(self, current_batch: Batch, force_update=False):
         if self.router.shared_token_load.need_update_dynamic_max_load() or force_update:
-            for dp_index in range(self.dp_size):
+            for dp_index in range(self.dp_size_in_node):
                 estimated_peak_token_count, dynamic_max_load = self.inner_queues[dp_index].calcu_batch_token_load(
                     current_batch
                 )

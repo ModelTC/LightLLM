@@ -305,7 +305,7 @@ async def start_model_process(
 ):
     import lightllm.utils.rpyc_fix_utils as _
 
-    # 单卡时不使用 rpc
+    # 单卡单机时不使用 rpc
     if node_world_size == 1 and args.nnodes == 1:
         return ModelRpcServer(
             args,

@@ -37,7 +37,7 @@ class RewardModelBackend(ContinuesBatchBackend):
             if req_obj.finish_status.is_finished() or req_obj.shm_req.router_aborted:
                 finished_req_ids.append(req_obj.shm_req.request_id)
 
-            if self.tp_rank < self.dp_size:
+            if self.is_master_in_dp:
                 # 写入 reward_score
                 req_obj.shm_req.reward_score = score
 

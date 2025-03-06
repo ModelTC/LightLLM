@@ -39,13 +39,19 @@ logger = init_logger(__name__)
 
 
 class RouterManager:
-    def __init__(self, args, router_port, detokenization_port, model_rpc_ports, metric_port):
+    def __init__(self, args, router_port, detokenization_port, metric_port):
         self.args = args
         self.model_weightdir = args.model_dir
         self.world_size = args.tp
+        self.node_world_size = self.world_size // args.nnodes
         self.nnodes = args.nnodes
         self.node_rank = args.node_rank
         self.dp_size = args.dp
+        # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
+        self.dp_size_in_node = max(1, args.dp // self.nnodes)
+        self.is_multinode_tp = args.nnodes > 1 and args.dp == 1
+        # 判断是否是保守调度，保守调度不会发生暂停 req 的情况，但是有些场景可能影响吞吐
+        self.is_safe_schedule = args.router_token_ratio == 0.0
         self.load_way = args.load_way
         self.mode = args.mode
         self.max_total_token_num = args.max_total_token_num
@@ -56,8 +62,8 @@ class RouterManager:
         self.radix_cache_client = None
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
-        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size)
-        for dp_index in range(self.dp_size):
+        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
+        for dp_index in range(self.dp_size_in_node):
             self.shared_token_load.set_estimated_peak_token_count(0, dp_index)
             self.shared_token_load.set_frozened_token_count(0, dp_index)
             self.shared_token_load.set_current_load(0.0, dp_index)
@@ -75,9 +81,8 @@ class RouterManager:
 
         self.send_to_detokenization = context.socket(zmq.PUSH)
         self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
-        self.model_rpc_ports = model_rpc_ports
 
-        if args.nnodes > 1 and args.dp == 1:
+        if self.is_multinode_tp:
             self.mulitnode_group = dist.init_process_group(
                 backend="gloo",
                 init_method=f"tcp://{args.nccl_host}:{args.multinode_router_gloo_port}",
@@ -167,7 +172,7 @@ class RouterManager:
             "batch_max_tokens": self.args.batch_max_tokens,
             "quant_type": self.args.quant_type,
             "quant_cfg": self.args.quant_cfg,
-            "pd_rpyc_ports": self.args.pd_tp_infer_rpyc_ports,  # 非 pd 模式可以不设置
+            "pd_rpyc_ports": self.args.pd_node_infer_rpyc_ports,  # 非 pd 模式可以不设置
         }
 
         await self.model_rpc_client.init_model(kvargs=kvargs)
@@ -177,9 +182,12 @@ class RouterManager:
             self.args.max_total_token_num = self.max_total_token_num
         if self.args.use_dynamic_prompt_cache:
             self.radix_cache_client = RadixCacheReadOnlyClient(
-                get_unique_server_name(), self.max_total_token_num, tp_size=self.world_size
+                get_unique_server_name(),
+                self.max_total_token_num,
+                node_world_size=self.node_world_size,
+                dp_world_size=self.world_size // self.dp_size,
             )
-        self.req_queue = build_req_queue(self.args, self, self.dp_size)
+        self.req_queue = build_req_queue(self.args, self, self.dp_size_in_node)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
 
         if self.args.run_mode == "prefill":
@@ -223,7 +231,7 @@ class RouterManager:
             counter_count += 1
             if self.running_batch is not None:
                 if counter_count % 50 == 0:
-                    for dp_index in range(self.dp_size):
+                    for dp_index in range(self.dp_size_in_node):
                         token_ratio1 = self.get_used_tokens(dp_index) / self.max_total_token_num
                         token_ratio2 = (
                             self.max_total_token_num
@@ -244,7 +252,7 @@ class RouterManager:
                 self.metric_client.gauge_set(
                     "lightllm_batch_current_max_tokens",
                     int(
-                        sum(self.shared_token_load.get_dynamic_max_load(d_i) for d_i in range(self.dp_size))
+                        sum(self.shared_token_load.get_dynamic_max_load(d_i) for d_i in range(self.dp_size_in_node))
                         * self.max_total_token_num
                     ),
                 )
@@ -264,7 +272,7 @@ class RouterManager:
 
             def get_new_batch():
                 limit_router_queue_length = None
-                if self.nnodes > 1 and self.args.dp == 1:
+                if self.is_multinode_tp:
                     # 使用 all_reduce 获取最小值
                     limit_router_queue_length = len(self.req_queue.waiting_req_list)
                     limit_router_queue_length_tensor = torch.tensor(
@@ -381,11 +389,11 @@ class RouterManager:
         # p d 分离模式下，目前只能使用保守调度，保证请求放入进行decode的时候
         # 显存token肯定是够用的。
         # deepseekv2 dp 模式下,采用保守调度，也肯定够用
-        if self.is_pd_run_mode or self.dp_size > 1:
+        if self.is_pd_run_mode or self.dp_size_in_node > 1 or self.is_safe_schedule:
             return True
 
         # 下面的判定条件，只在 dp 为 1 的情况下启用
-        assert self.dp_size == 1
+        assert self.dp_size_in_node == 1
         return batch.get_batch_decode_need_tokens()[0] + self.get_used_tokens(0) <= self.max_total_token_num
 
     def get_used_tokens(self, dp_index):
@@ -410,7 +418,7 @@ class RouterManager:
         return
 
 
-def start_router_process(args, router_port, detokenization_port, model_rpc_ports, metric_port, pipe_writer):
+def start_router_process(args, router_port, detokenization_port, metric_port, pipe_writer):
     # 注册 graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     start_parent_check_thread()
@@ -420,7 +428,6 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
             args,
             router_port=router_port,
             detokenization_port=detokenization_port,
-            model_rpc_ports=model_rpc_ports,
             metric_port=metric_port,
         )
 

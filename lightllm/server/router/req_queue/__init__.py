@@ -5,7 +5,7 @@ from .chunked_prefill.impl import ChunkedPrefillQueue
 from .dp_base_queue import DpQueue
 
 
-def build_req_queue(args, router, dp_size: int):
+def build_req_queue(args, router, dp_size_in_node: int):
     queue_class = None
     if args.run_mode == "decode":
         queue_class = ContinuesBatchQueueForPDDecode
@@ -22,7 +22,7 @@ def build_req_queue(args, router, dp_size: int):
     if queue_class is None:
         queue_class = ContinuesBatchQueue
 
-    if dp_size == 1:
-        return queue_class(args, router, 0, dp_size)
+    if dp_size_in_node == 1:
+        return queue_class(args, router, 0, dp_size_in_node)
     else:
-        return DpQueue(args, router, queue_class, dp_size)
+        return DpQueue(args, router, queue_class, dp_size_in_node)

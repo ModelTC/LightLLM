@@ -165,13 +165,13 @@ def normal_or_p_d_start(args):
     ports_locker = PortLocker(already_uesd_ports)
     ports_locker.lock_port()
 
+    node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=6 + args.tp + args.tp + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=6 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     router_port, detokenization_port, detokenization_pub_port, visual_port, cache_port, metric_port = can_use_ports[0:6]
-    model_rpc_ports = can_use_ports[6 : 6 + args.tp]
-    can_use_ports = can_use_ports[6 + args.tp :]
+    can_use_ports = can_use_ports[6:]
 
     visual_model_tp_ports = []
     for _ in range(args.visual_dp):
@@ -188,7 +188,7 @@ def normal_or_p_d_start(args):
     args.metric_port = metric_port
 
     # 申请在 p d 分离模式下，会用的端口
-    args.pd_tp_infer_rpyc_ports = can_use_ports[0 : args.tp]
+    args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
     args.pd_node_id = uuid.uuid4().int
     # p 节点用来建立torch kv 传输分布组的可用端口范围
@@ -231,7 +231,7 @@ def normal_or_p_d_start(args):
     process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[
-            (args, router_port, detokenization_port, model_rpc_ports, metric_port),
+            (args, router_port, detokenization_port, metric_port),
             (args, detokenization_port, detokenization_pub_port),
         ],
     )

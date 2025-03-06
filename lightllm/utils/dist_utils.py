@@ -7,11 +7,39 @@ import torch
 # global_world_size 全局的 world size 大小， 如两节点 8 卡，该值为 16
 # dp_size 如果部署形态是一个推理实列包含几个数据并行的推理实列，则 dp size 为整个系统中的 dp 并行数量
 # dp_world_size 每一个dp 数据并行占用的卡数
-# dp_rank 指每个dp 数据并行在整个推理实列中dp的rank号， 如果 16卡部署，4 dp size， 则存在 0 - 3 4个dp_rank
-# 值，其中 0-3号卡为 dp_rank 0, 4-8 为 dp_rank 1， 9-12 为dp_rank 2, 13-15为dp_rank 3
+# global_dp_rank 指每个dp 数据并行在整个推理实列中dp的rank号， 如果 16卡部署，4 dp size， 则存在 0 - 3 4个global_dp_rank
+# 值，其中 0-3号卡为 global_dp_rank 0, 4-8 为 global_dp_rank 1， 9-12 为global_dp_rank 2, 13-15为dglobal_dp_rank 3
 # rank_in_dp 指在一个dp内的rank序号。
 # node_world_size 指一个推理节点的使用的卡数，如两机 tp 推理，如果两机器8卡，则 node_world_size 为 8.
 # rank_in_node 指在一个node内的rank序号，如两机8卡推理，每机上的rank序号都是0-8
+# dp_rank_in_node 指的是在一个node节点中存在的dp_rank的序号，如果两机8卡，每4卡一个dp，则存在两个node，
+# 其中 node 0 上，存在两个dp，其 dp_rank_in_node 分别为 0， 1 在 node 1 上， 也存在两个dp，其 dp_rank_in_node
+# 也分别为 0， 1, 在一个node内的操作，几乎大部分都是使用 dp_rank_in_node 信息。
+
+# 下面是一个 2 node， 16卡， dp_size 4 的 rank 信息结构图：
+# +------+--------------+----------------+-------------+--------------+------------------+
+# | card | global_rank  | global_dp_rank | rank_in_dp  | rank_in_node | dp_rank_in_node  |
+# +------+--------------+----------------+-------------+--------------+------------------+
+# |  0   |      0       |        0       |      0      |      0       |         0        |
+# |  1   |      1       |        0       |      1      |      1       |         0        |
+# |  2   |      2       |        0       |      2      |      2       |         0        |
+# |  3   |      3       |        0       |      3      |      3       |         0        |
+# +------+--------------+----------------+-------------+--------------+------------------+
+# |  4   |      4       |        1       |      0      |      4       |         1        |
+# |  5   |      5       |        1       |      1      |      5       |         1        |
+# |  6   |      6       |        1       |      2      |      6       |         1        |
+# |  7   |      7       |        1       |      3      |      7       |         1        |
+# +------+--------------+----------------+-------------+--------------+------------------+
+# |  8   |      8       |        2       |      0      |      0       |         0        |
+# |  9   |      9       |        2       |      1      |      1       |         0        |
+# | 10   |     10       |        2       |      2      |      2       |         0        |
+# | 11   |     11       |        2       |      3      |      3       |         0        |
+# +------+--------------+----------------+-------------+--------------+------------------+
+# | 12   |     12       |        3       |      0      |      4       |         1        |
+# | 13   |     13       |        3       |      1      |      5       |         1        |
+# | 14   |     14       |        3       |      2      |      6       |         1        |
+# | 15   |     15       |        3       |      3      |      7       |         1        |
+# +------+--------------+----------------+-------------+--------------+------------------+
 
 
 def set_environ(environ_name, value):
@@ -25,7 +53,7 @@ def get_environ(environ_name):
     return value
 
 
-def _init_vision_distributed_env(kvargs):
+def init_vision_distributed_env(kvargs):
     world_size = kvargs["vit_tp"]
     set_global_rank(kvargs["tp_rank_id"])
     set_global_world_size(world_size)
@@ -45,7 +73,7 @@ def _init_vision_distributed_env(kvargs):
     del _a
 
 
-def _init_distributed_env(kvargs):
+def init_distributed_env(kvargs):
     assert kvargs["world_size"] % kvargs["args"].nnodes == 0, "world_size should be divided by nnodes"
     node_world_size = kvargs["world_size"] // kvargs["args"].nnodes
 
@@ -53,10 +81,14 @@ def _init_distributed_env(kvargs):
     set_global_world_size(kvargs["world_size"])
     set_dp_size(kvargs.get("dp_size", 1))
     set_dp_world_size(get_global_world_size() // get_dp_size())
-    set_current_dp_rank(get_global_rank() // get_dp_world_size())
+    set_global_dp_rank(get_global_rank() // get_dp_world_size())
     set_current_rank_in_dp(get_global_rank() % get_dp_world_size())
     set_current_rank_in_node(get_global_rank() % node_world_size)
     set_node_world_size(node_world_size)
+
+    nnodes = kvargs["args"].nnodes
+    dp_size_in_node = max(1, get_dp_size() // nnodes)
+    set_dp_rank_in_node(get_global_dp_rank() % dp_size_in_node)
 
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
@@ -108,12 +140,20 @@ def get_dp_world_size():
     return int(get_environ("LIGHTLLM_DP_WORLD_SIZE"))
 
 
-def set_current_dp_rank(rank: int):
-    set_environ("LIGHTLLM_CURRENT_DP_RANK", rank)
+def set_global_dp_rank(rank: int):
+    set_environ("LIGHTLLM_GLOBAL_DP_RANK", rank)
 
 
-def get_current_dp_rank():
-    return int(get_environ("LIGHTLLM_CURRENT_DP_RANK"))
+def get_global_dp_rank():
+    return int(get_environ("LIGHTLLM_GLOBAL_DP_RANK"))
+
+
+def set_dp_rank_in_node(rank: int):
+    set_environ("LIGHTLLM_DP_RANK_IN_NODE", rank)
+
+
+def get_dp_rank_in_node():
+    return int(get_environ("LIGHTLLM_DP_RANK_IN_NODE"))
 
 
 def set_current_rank_in_dp(rank: int):

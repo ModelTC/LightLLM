@@ -101,7 +101,8 @@ class G_Objs:
                 enable_multimodal=args.enable_multimodal,
                 metric_port=args.metric_port,
             )
-            self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", args.dp)
+            dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
+            self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", dp_size_in_node)
 
 
 g_objs = G_Objs()

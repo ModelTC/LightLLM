@@ -68,7 +68,7 @@ class OverlapBackend(ModeBackend):
             req_obj.out_token_id_count[next_token_id] += 1
             req_obj.update_finish_status(self.eos_id)
 
-            if self.tp_rank < self.dp_size:
+            if self.is_master_in_dp:
                 # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
                 # finish_token_index finish_status candetoken_out_len 是
                 # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。

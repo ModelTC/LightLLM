@@ -33,6 +33,9 @@ def _init_env(
     os.environ["NCCL_SOCKET_NTHREADS"] = "1"
     torch.backends.cudnn.enabled = False
 
+    dp_size_in_node = max(1, args.dp // args.nnodes)
+    node_world_size = args.tp // args.nnodes
+
     try:
         # 注册graceful 退出的处理
         graceful_registry(inspect.currentframe().f_code.co_name)
@@ -40,7 +43,7 @@ def _init_env(
 
         task_out_queue.put("proc_start")
         mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
-        assert len(mem_managers) == args.tp
+        assert len(mem_managers) == node_world_size
         task_out_queue.put("get_mem_managers_ok")
         import torch.distributed as dist
         from datetime import timedelta
@@ -58,9 +61,9 @@ def _init_env(
                     logger.info(f"trans start: {move_tasks[0].to_prefill_log_info()}")
                     cur_mem = mem_managers[device_index]
                     if kv_trans_use_p2p():
-                        cur_mem.send_to_decode_node_p2p(move_tasks, mem_managers, args.dp)
+                        cur_mem.send_to_decode_node_p2p(move_tasks, mem_managers, dp_size_in_node)
                     else:
-                        cur_mem.send_to_decode_node(move_tasks, mem_managers, args.dp)
+                        cur_mem.send_to_decode_node(move_tasks, mem_managers, dp_size_in_node)
                     logger.info(f"trans finished: {move_tasks[0].to_prefill_log_info()} move len: {total_move_kv_len}")
                 torch.cuda.synchronize()
                 logger.info(

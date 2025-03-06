@@ -5,8 +5,8 @@ from lightllm.server.router.req_queue.base_queue import BaseQueue
 
 
 class BeamContinuesBatchQueue(BaseQueue):
-    def __init__(self, args, router, dp_index, dp_size) -> None:
-        super().__init__(args, router, dp_index, dp_size)
+    def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
+        super().__init__(args, router, dp_index, dp_size_in_node)
         return
 
     def _init_cache_list(self, current_batch: Batch, is_busy):
@@ -129,7 +129,7 @@ class BeamContinuesBatchQueue(BaseQueue):
                         req.is_paused = False
 
         if len(can_run_list) != 0:
-            new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size=self.dp_size)
+            new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
             for req in abort_req_list:
                 self.router.shm_req_manager.put_back_req_obj(req)
 
