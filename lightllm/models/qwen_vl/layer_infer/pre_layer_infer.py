@@ -58,6 +58,10 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             img_weight = torch.cat(img_weight, dim=0).to(device=device, dtype=dtype)
         else:
             img_weight = torch.empty((0, hidden_size), device=device, dtype=dtype)
+        assert img_weight.shape[1] == hidden_size, (
+            f"Dimension mismatch: text weight dimension is {hidden_size}, "
+            f"but image weight dimension is {img_weight.shape[1]}"
+        )
         # each tp will fill the img embeds, should divide by world_size
         img_weight = img_weight / self.world_size_
         img_start_token_ids = torch.Tensor(img_start_token_ids).to(device=device, dtype=torch.long)

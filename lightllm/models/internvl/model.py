@@ -31,7 +31,7 @@ class InternvlTokenizer:
 
         self.llm_model_type = model_cfg.get("llm_config").get("model_type")
         self.tokenizer = tokenizer
-        self.image_length = 256
+        self.image_length = int(os.environ.get("INTERNVL_IMAGE_LENGTH", 256))
 
         self.image_start_tag = IMG_START_TOKEN
         self.image_start_id = tokenizer.convert_tokens_to_ids(self.image_start_tag)
