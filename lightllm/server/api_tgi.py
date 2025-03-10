@@ -169,6 +169,7 @@ async def tgi_generate_stream_impl(request: Request, httpserver_manager: HttpSer
                     "logprob": metadata.get("logprob", None),
                     "special": metadata.get("special", False),
                     "count_output_tokens": metadata.get("count_output_tokens", 0),
+                    "prompt_tokens": metadata.get("prompt_tokens", 0),
                 },
                 "generated_text": None,
                 "finished": finish_status.is_finished(),

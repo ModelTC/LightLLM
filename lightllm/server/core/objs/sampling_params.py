@@ -6,6 +6,7 @@ from lightllm.server.req_id_generator import MAX_BEST_OF
 
 _SAMPLING_EPS = 1e-5
 DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in ["ON", "TRUE", "1"]
+SKIP_SPECIAL_TOKENS = os.getenv("SKIP_SPECIAL_TOKENS", "True").upper() in ["ON", "TRUE", "1"]
 
 # 从环境变量获取最大长度限制
 STOP_SEQUENCE_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_MAX_LENGTH", 256))
@@ -299,7 +300,8 @@ class SamplingParams(ctypes.Structure):
         self.group_request_id = kwargs.get("group_request_id", -1)
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
-        self.skip_special_tokens = kwargs.get("skip_special_tokens", True)
+        self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
+
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
