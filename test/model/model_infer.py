@@ -1,28 +1,31 @@
 import numpy as np
 from multiprocessing import Queue
 import multiprocessing
-import os
+from lightllm.utils.dist_utils import init_distributed_env
 
 
-def test_model_inference(world_size, model_class, batch_size, input_len, output_len, extra_model_kvargs):
+def test_model_inference(args, model_class):
     ans_queue = Queue()
     workers = []
-    for rank_id in range(world_size):
+    for rank_id in range(args.tp):
         model_kvargs = {
-            "tp_rank": rank_id,
-            "world_size": world_size,
+            "args": args,
+            "nccl_host": args.nccl_host,
+            "nccl_port": args.nccl_port,
+            "rank_id": rank_id,
+            "world_size": args.tp,
+            "weight_dir": args.model_dir,
             "load_way": "HF",
-            "max_total_token_num": None,
-            "mem_faction": 0.8,
-            "max_req_num": max(batch_size, 1000),
-            "batch_max_tokens": input_len,
+            "max_total_token_num": args.max_total_token_num,
+            "mem_faction": args.mem_fraction,
+            "max_req_num": max(args.batch_size, 1000),
+            "batch_max_tokens": args.input_len,
             "run_mode": "normal",
-            "max_seq_length": (input_len + output_len),
+            "max_seq_length": (args.input_len + args.output_len),
         }
-        model_kvargs.update(extra_model_kvargs)
-
         proc = multiprocessing.Process(
-            target=tppart_model_infer, args=(model_class, model_kvargs, batch_size, input_len, output_len, ans_queue)
+            target=tppart_model_infer,
+            args=(model_class, model_kvargs, args.batch_size, args.input_len, args.output_len, ans_queue),
         )
         proc.start()
         workers.append(proc)
@@ -43,12 +46,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
 
     import torch.distributed as dist
 
-    rank_id = model_kvargs["tp_rank"]
-    world_size = model_kvargs["world_size"]
-
-    torch.cuda.set_device(rank_id)
-    set_current_device_id(rank_id)
-    dist.init_process_group("nccl", init_method="tcp://127.0.0.1:28765", rank=rank_id, world_size=world_size)
+    init_distributed_env(model_kvargs)
 
     custom_comm_ops.set_custom_reduce()
     custom_comm_ops.set_custom_gather()
@@ -155,6 +153,7 @@ def tppart_model_infer(model_class, model_kvargs, batch_size, input_len, output_
     predict_ids = predict_ids.detach().cpu().numpy()
 
     torch.cuda.synchronize()
+    rank_id = model_kvargs["rank_id"]
     if rank_id == 0:
         print("prefill time cost:", (time.time() - prefill_start_time) * 1000)
 

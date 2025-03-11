@@ -5,6 +5,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import unittest
 from model_infer import test_model_inference
+from lightllm.server.api_cli import make_argument_parser
+from lightllm.utils.envs_utils import set_env_start_args, get_env_start_args
 from lightllm.models.bloom.model import BloomTpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.starcoder.model import StarcoderTpPartModel
@@ -22,7 +24,6 @@ from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.cohere.model import CohereTpPartModel
 from lightllm.models.mixtral.model import MixtralTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
-from lightllm.utils.config_utils import get_dtype
 from lightllm.utils.config_utils import get_config_json
 
 
@@ -61,7 +62,7 @@ def get_model(weight_dir):
         model_cls = CohereTpPartModel
     elif model_type == "phi3":
         model_cls = Phi3TpPartModel
-    elif model_type == "deepseek_v2":
+    elif model_type in ["deepseek_v2", "deepseek_v3"]:
         model_cls = Deepseek2TpPartModel
 
     return model_cls
@@ -69,43 +70,21 @@ def get_model(weight_dir):
 
 class TestModelInfer(unittest.TestCase):
     def test_model_infer(self):
-        model_dir = "/nvme/models/llama3/Meta-Llama-3-8B/"
+        args = get_env_start_args()
+        model_dir = args.model_dir
         model_class = get_model(model_dir)
-        data_type = get_dtype(model_dir)
-        mode = "triton_gqa_flashdecoding"
-        world_size = 1
-        batch_size = 1
-        input_len = 1024
-        output_len = 128
-        disable_cudagraph = False
-        graph_max_batch_size = batch_size
-        graph_max_len_in_batch = 2048
-        quant_type = None
-        quant_cfg = None
-        extra_model_kvargs = {
-            "weight_dir": model_dir,
-            "mode": mode,
-            "data_type": data_type,
-            "disable_cudagraph": disable_cudagraph,
-            "graph_max_batch_size": graph_max_batch_size,
-            "graph_max_len_in_batch": graph_max_len_in_batch,
-            "quant_type": quant_type,
-            "quant_cfg": quant_cfg,  # path for mixed quantization config.
-        }
-
-        test_model_inference(
-            world_size=world_size,
-            model_class=model_class,
-            batch_size=batch_size,
-            input_len=input_len,
-            output_len=output_len,
-            extra_model_kvargs=extra_model_kvargs,
-        )
+        test_model_inference(args, model_class)
         return
 
 
 if __name__ == "__main__":
     import torch
 
+    parser = make_argument_parser()
+    parser.add_argument("--batch_size", type=int, default=1, help="batch size")
+    parser.add_argument("--input_len", type=int, default=128, help="input sequence length")
+    parser.add_argument("--output_len", type=int, default=128, help="output sequence length")
+    args = parser.parse_args()
+    set_env_start_args(args)
     torch.multiprocessing.set_start_method("spawn")
-    unittest.main()
+    unittest.main(argv=["first-arg-is-ignored"])
