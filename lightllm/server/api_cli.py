@@ -262,7 +262,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--quant_type",
         type=str,
-        default=None,
+        default="none",
         help="""Quantization method: ppl-w4a16-128 | flashllm-w6a16
                         | ao-int4wo-[32,64,128,256] | ao-int8wo | ao-fp8w8a16 | ao-fp6w6a16
                         | vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128

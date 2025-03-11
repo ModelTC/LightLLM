@@ -9,21 +9,23 @@ import triton
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward, torch_rms_norm
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 
 
 class ViTTransformerLayerInfer:
     """ """
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
+    def __init__(self, layer_num, network_config, mode=[]):
+        self.tp_rank_ = get_current_rank_in_dp()
+        self.tp_world_size_ = get_dp_world_size()
         self.eps_ = network_config["layer_norm_eps"]
         self.head_num = network_config["num_attention_heads"]
-        self.tp_padding_head_num = network_config["padding_head_num"] // world_size
+        self.tp_padding_head_num = network_config["padding_head_num"] // self.tp_world_size_
         self.head_dim_ = network_config["hidden_size"] // network_config["num_attention_heads"]
         self.embed_dim_ = network_config["hidden_size"]
         self.qk_norm = network_config["qk_normalization"]
         self.tp_padding_embed_dim_ = self.tp_padding_head_num * self.head_dim_
-        self.tp_rank_ = tp_rank
-        self.world_size_ = world_size
+
         self.network_config_ = network_config
         self.mode = mode
         self.layer_num_ = layer_num
@@ -46,7 +48,7 @@ class ViTTransformerLayerInfer:
         input_dtype = input.dtype
         input = input.to(torch.float32)
         tp_variance = input.pow(2).sum(-1, keepdim=True)
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(tp_variance, op=dist.ReduceOp.SUM, async_op=False)
         variance = tp_variance / self.embed_dim_
         input = input * torch.rsqrt(variance + self.eps_)
@@ -60,7 +62,7 @@ class ViTTransformerLayerInfer:
         else:
             b = torch.nn.functional.layer_norm(
                 input,
-                normalized_shape=[1024],
+                normalized_shape=[input.shape[-1]],
                 weight=layer_weight.att_norm_weight_.weight,
                 bias=layer_weight.att_norm_weight_.bias,
                 eps=layer_weight.layer_norm_eps,
@@ -73,7 +75,7 @@ class ViTTransformerLayerInfer:
         else:
             return torch.nn.functional.layer_norm(
                 input,
-                normalized_shape=[1024],
+                normalized_shape=[input.shape[-1]],
                 weight=layer_weight.ffn_norm_weight_.weight,
                 bias=layer_weight.ffn_norm_weight_.bias,
                 eps=layer_weight.layer_norm_eps,
@@ -127,7 +129,7 @@ class ViTTransformerLayerInfer:
             q, k = self._qk_norm(q, k, layer_weight)
         o = self._context_attention_kernel(q, k, v)
         o = self._get_o(o, layer_weight)
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
         input_embding.add_(o)
         return
@@ -136,7 +138,7 @@ class ViTTransformerLayerInfer:
         input1 = self._ffn_norm(input_embdings, layer_weight)
         ffn_out = self._ffn(input1, layer_weight)
         input1 = None
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings.add_(ffn_out)
         return

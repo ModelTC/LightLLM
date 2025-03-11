@@ -12,9 +12,9 @@ from lightllm.models.llama.triton_kernel.embedding import embedding
 class Gemma_2bPreLayerInfer(PreLayerInferTpl):
     """ """
 
-    def __init__(self, tp_rank, world_size, network_config, mode):
-        super().__init__(tp_rank, world_size, network_config, mode)
-        tp_vob_ids = np.linspace(0, network_config["vocab_size"], self.world_size_ + 1, dtype=np.int64)
+    def __init__(self, network_config, mode):
+        super().__init__(network_config, mode)
+        tp_vob_ids = np.linspace(0, network_config["vocab_size"], self.tp_world_size_ + 1, dtype=np.int64)
         self.vob_start_id_, self.vob_end_id_ = int(tp_vob_ids[self.tp_rank_]), int(tp_vob_ids[self.tp_rank_ + 1])
         self.normfactor = network_config["hidden_size"] ** 0.5
         return
@@ -27,7 +27,7 @@ class Gemma_2bPreLayerInfer(PreLayerInferTpl):
             (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), dtype=layer_weight.data_type_
         )
         embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings = self._norm(input_embdings, infer_state, layer_weight)
         return input_embdings
@@ -37,7 +37,7 @@ class Gemma_2bPreLayerInfer(PreLayerInferTpl):
             (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), dtype=layer_weight.data_type_
         )
         embedding(input_ids, layer_weight.wte_weight_, self.vob_start_id_, self.vob_end_id_, input_embdings)
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings = self._norm(input_embdings, infer_state, layer_weight)
         return input_embdings

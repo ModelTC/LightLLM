@@ -5,14 +5,18 @@ import os
 import time
 
 from lightllm.models.vit.model import VisionTransformer
+from lightllm.utils.dist_utils import init_vision_distributed_env
 
 
 def test_model_inference(world_size, weight_dir, quant_type=None):
     workers = []
     for rank_id in range(world_size):
         kvargs = {
-            "tp_rank": rank_id,
-            "world_size": world_size,
+            "vit_tp": world_size,
+            "tp_rank_id": rank_id,
+            "vit_rank_id": rank_id,
+            "visual_gpu_ids": list(range(world_size)),
+            "visual_nccl_port": 28766,
             "weight_dir": weight_dir,
             "data_type": "bf16",
             "quant_type": quant_type,
@@ -30,19 +34,13 @@ def test_model_inference(world_size, weight_dir, quant_type=None):
 
 def tppart_model_infer(model_kvargs):
     import torch
-    from lightllm.distributed import set_custom_reduce
+    from lightllm.distributed import custom_comm_ops
     import torch.distributed as dist
 
-    rank_id = model_kvargs["tp_rank"]
-    world_size = model_kvargs["world_size"]
-
-    torch.cuda.set_device(rank_id)
-    os.environ["CURRENT_DEVICE_ID"] = str(rank_id)
-    dist.init_process_group("nccl", init_method="tcp://127.0.0.1:28765", rank=rank_id, world_size=world_size)
-    from lightllm.distributed import custom_comm_ops
-
+    rank_id = model_kvargs["tp_rank_id"]
+    init_vision_distributed_env(model_kvargs)
     custom_comm_ops.set_custom_reduce()
-    dist.barrier()
+
     torch.cuda.empty_cache()
     model_part = VisionTransformer(model_kvargs)
     test_data = torch.randn((13, 3, 448, 448)).cuda().to(torch.bfloat16)
@@ -58,7 +56,6 @@ def tppart_model_infer(model_kvargs):
         model_part.forward(test_data)
     torch.cuda.synchronize()
     end_time = time.time()
-
     if rank_id == 0:
         print("time total cost(ms):", (end_time - start_time) / 50 * 1000)
 
@@ -69,6 +66,6 @@ if __name__ == "__main__":
     import torch
 
     world_size = 2
-    weight_dir = "your_multimodal_vit_path"
+    weight_dir = "/nvme/models/InternVL2/InternVL2-8B/"
     torch.multiprocessing.set_start_method("spawn")
-    test_model_inference(world_size, weight_dir, "vllm-w8a8")
+    test_model_inference(world_size, weight_dir, "none")

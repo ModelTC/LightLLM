@@ -37,8 +37,8 @@ class Starcoder2TpPartModel(TpPartBaseModel):
 
     def _verify_params(self):
         assert self.load_way in ["HF"], "mistral only supports HF format to load Now!"
-        assert self.config["num_key_value_heads"] % self.world_size_ == 0
-        assert self.config["num_attention_heads"] % self.world_size_ == 0
+        assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
+        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         return
 
     def _init_custom(self):
@@ -49,7 +49,7 @@ class Starcoder2TpPartModel(TpPartBaseModel):
         self.mem_manager = select_mem_manager_class(self.mode)(
             self.max_total_token_num,
             dtype=self.data_type,
-            head_num=self.config["num_key_value_heads"] // self.world_size_,
+            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
             head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
             layer_num=self.config["num_hidden_layers"],
             mem_fraction=self.mem_fraction,

@@ -12,8 +12,8 @@ from lightllm.models.qwen.infer_struct import QwenInferStateInfo
 class QwenTransformerLayerInfer(LlamaTransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+    def __init__(self, layer_num, network_config, mode=[]):
+        super().__init__(layer_num, network_config, mode)
         return
 
     def _get_qkv(self, input_emb, cache_kv, infer_state: QwenInferStateInfo, layer_weight: QwenTransformerLayerWeight):

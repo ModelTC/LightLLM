@@ -18,8 +18,8 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 class Phi3TransformerLayerInfer(LlamaTransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+    def __init__(self, layer_num, network_config, mode=[]):
+        super().__init__(layer_num, network_config, mode)
         return
 
     def _bind_attention(self):

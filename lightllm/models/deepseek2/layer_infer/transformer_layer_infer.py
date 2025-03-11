@@ -29,7 +29,7 @@ from lightllm.utils.envs_utils import enable_env_vars
 
 
 class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
+    def __init__(self, layer_num, network_config, mode=[]):
         self.tp_k_head_num_ = 1
         self.tp_v_head_num_ = 1
         self.qk_nope_head_dim = network_config["qk_nope_head_dim"]
@@ -62,7 +62,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                 mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
         self.enable_cc_method = not os.getenv("DISABLE_CC_METHOD", "False").upper() in ["ON", "TRUE", "1"]
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+        super().__init__(layer_num, network_config, mode)
         self.enable_dp = os.getenv("ENABLE_DP", "0").upper() in ["ON", "TRUE", "1"]
         if self.enable_dp:
             self.tp_q_head_num_ = int(self.tp_q_head_num_ * self.world_size_)

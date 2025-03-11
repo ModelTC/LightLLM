@@ -13,8 +13,8 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 class StarcoderTransformerLayerInfer(BloomTransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+    def __init__(self, layer_num, network_config, mode=[]):
+        super().__init__(layer_num, network_config, mode)
         self.tp_k_head_num_ = 1
         self.tp_v_head_num_ = 1
         self._bind_func()

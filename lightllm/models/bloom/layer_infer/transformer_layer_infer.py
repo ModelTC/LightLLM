@@ -16,10 +16,10 @@ from lightllm.utils.infer_utils import mark_cost_time
 class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     """ """
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode):
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+    def __init__(self, layer_num, network_config, mode):
+        super().__init__(layer_num, network_config, mode)
         self.eps_ = network_config["layer_norm_epsilon"]
-        self.tp_q_head_num_ = network_config["num_attention_heads"] // self.world_size_
+        self.tp_q_head_num_ = network_config["num_attention_heads"] // self.tp_world_size_
         self.tp_k_head_num_ = self.tp_q_head_num_
         self.tp_v_head_num_ = self.tp_q_head_num_
         self.tp_o_head_num_ = self.tp_q_head_num_

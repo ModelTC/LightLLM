@@ -37,8 +37,8 @@ class MixtralTpPartModel(TpPartBaseModel):
 
     def _verify_params(self):
         assert self.load_way in ["HF"], "mixtral only supports HF format to load Now!"
-        assert self.config["num_key_value_heads"] % self.world_size_ == 0
-        assert self.config["num_attention_heads"] % self.world_size_ == 0
+        assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
+        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         return
 
     def _init_custom(self):
@@ -49,7 +49,7 @@ class MixtralTpPartModel(TpPartBaseModel):
         self.mem_manager = MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
-            head_num=self.config["num_key_value_heads"] // self.world_size_,
+            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
             head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
             layer_num=self.config["num_hidden_layers"],
             always_copy=False,

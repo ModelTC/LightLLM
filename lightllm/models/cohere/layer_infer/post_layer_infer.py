@@ -12,8 +12,8 @@ from lightllm.common.basemodel import PostLayerInferTpl
 
 
 class CoherePostLayerInfer(PostLayerInferTpl):
-    def __init__(self, tp_rank, world_size, network_config, mode):
-        super().__init__(tp_rank, world_size, network_config, mode)
+    def __init__(self, network_config, mode):
+        super().__init__(network_config, mode)
         self.eps_ = network_config["layer_norm_eps"]
         self.vocab_size_ = network_config["vocab_size"]
         self.embed_dim_ = network_config["n_embed"]
@@ -79,15 +79,15 @@ class CoherePostLayerInfer(PostLayerInferTpl):
         logic_batch = torch.mm(layer_weight.lm_head_weight_, last_input)
 
         last_input = None
-        if self.world_size_ == 1:
+        if self.tp_world_size_ == 1:
             gather_data = logic_batch
         else:
             gather_data = self.alloc_tensor(
                 (self.vocab_size_, token_num), device=logic_batch.device, dtype=input_embdings_dtype
             )
-            split_indexes = np.linspace(0, self.vocab_size_, self.world_size_ + 1, dtype=np.int64)
+            split_indexes = np.linspace(0, self.vocab_size_, self.tp_world_size_ + 1, dtype=np.int64)
             dist.all_gather(
-                [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.world_size_)],
+                [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
                 logic_batch,
                 group=None,
                 async_op=False,

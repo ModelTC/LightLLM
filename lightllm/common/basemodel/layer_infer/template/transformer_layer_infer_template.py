@@ -11,8 +11,8 @@ from typing import Tuple
 class TransformerLayerInferTpl(TransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode):
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+    def __init__(self, layer_num, network_config, mode):
+        super().__init__(layer_num, network_config, mode)
         # need to set by subclass
         self.eps_ = 1e-5
         self.tp_q_head_num_ = -1
@@ -75,7 +75,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.world_size_ > 1 and not self.enable_dp:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
         input_embding.add_(o.view(-1, self.embed_dim_))
         return
@@ -84,7 +84,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
-        if self.world_size_ > 1 and not self.enable_dp:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return
@@ -98,7 +98,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.world_size_ > 1 and not self.enable_dp:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
         input_embding.add_(o.view(-1, self.embed_dim_))
         return
@@ -107,7 +107,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
-        if self.world_size_ > 1 and not self.enable_dp:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return

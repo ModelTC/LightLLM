@@ -115,8 +115,6 @@ class ModeBackend:
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
         model_kvargs = {
-            "tp_rank": self.tp_rank,
-            "world_size": self.world_size,
             "weight_dir": self.weight_dir,
             "max_total_token_num": max_total_token_num,
             "load_way": self.load_way,

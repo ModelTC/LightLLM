@@ -8,7 +8,7 @@ from .triton_quant.triton_quant import *
 
 
 class Quantcfg:
-    def __init__(self, network_config, quant_type=None, custom_cfg_path=None):
+    def __init__(self, network_config, quant_type="none", custom_cfg_path=None):
         self.layer_num = network_config["n_layer"]
         self.quant_type = quant_type
         self.network_config_ = network_config
@@ -48,28 +48,20 @@ class Quantcfg:
 
         self.quant_type = data["quant_type"]
         for layer_quant_cfg in data.get("mix_bits", []):
-            layer_name = layer_quant_cfg["layer_name"]
+            print(layer_quant_cfg)
+            name = layer_quant_cfg["name"]
             layer_nums = layer_quant_cfg.get("layer_nums", range(self.layer_num))
             layer_quant_type = layer_quant_cfg["quant_type"]
             for layer_num in layer_nums:
-                self.quant_cfg[layer_num].update({layer_name: layer_quant_type})
+                self.quant_cfg[layer_num].update({name: layer_quant_type})
 
-    def get_quant_type(self, layer_num, layer_name):
-        return self.quant_cfg[layer_num][layer_name]
+    def get_quant_type(self, layer_num, name):
+        layer_config = self.quant_cfg.get(layer_num, None)
+        if layer_config is None:
+            return self.quant_type
+        quant_type = layer_config.get(name, self.quant_type)
+        return quant_type
 
-    def set_quant_type(self, layer_num, layer_name, quant_type):
-        self.quant_cfg[layer_num][layer_name] = quant_type
-
-    def get_mixed_list(self, layer_num):
-        return self.quant_cfg[layer_num].keys()
-
-    def get_default_quant_method(self):
-        if self.quant_type is None:
-            return None
-        return QUANTMETHODS.get(self.quant_type)
-
-    def get_quant_method(self, layer_num, layer_name):
-        if self.quant_type is None:
-            return None
-        layer_cfg = self.quant_cfg[layer_num]
-        return QUANTMETHODS.get(layer_cfg[layer_name])
+    def get_quant_method(self, layer_num, name):
+        quant_type = self.get_quant_type(layer_num, name)
+        return QUANTMETHODS.get(quant_type)

@@ -15,8 +15,8 @@ from lightllm.models.llama.triton_kernel.token_attention_nopad_softmax import to
 
 
 class Starcoder2TransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+    def __init__(self, layer_num, network_config, mode=[]):
+        super().__init__(layer_num, network_config, mode)
         self._bind_func()
 
     def _bind_func(self):

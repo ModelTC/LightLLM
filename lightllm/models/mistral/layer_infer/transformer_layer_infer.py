@@ -10,9 +10,9 @@ from lightllm.models.mistral.triton_kernel.token_attention_nopad_att1 import tok
 class MistralTransformerLayerInfer(LlamaTransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
+    def __init__(self, layer_num, network_config, mode=[]):
         self.sliding_window = network_config.get("sliding_window", None)
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+        super().__init__(layer_num, network_config, mode)
         self.head_dim_ = network_config.get("head_dim", self.head_dim_)
         return
 

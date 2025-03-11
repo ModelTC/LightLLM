@@ -48,8 +48,6 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = LlavaVisionModel()
             elif self.model_type == "internvl_chat":
                 kvargs = {
-                    "tp_rank": self.tp_rank_id,
-                    "world_size": self.vit_tp,
                     "weight_dir": weight_dir,
                     "data_type": self.data_type,
                     "quant_type": kvargs["quant_type"],

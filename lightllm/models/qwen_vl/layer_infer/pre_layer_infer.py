@@ -26,8 +26,8 @@ infer_state.multimodal_params: batch list of MultimodalParams-dict like:
 
 
 class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
-    def __init__(self, tp_rank, world_size, network_config, mode):
-        super().__init__(tp_rank, world_size, network_config, mode)
+    def __init__(self, network_config, mode):
+        super().__init__(network_config, mode)
         return
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
@@ -63,7 +63,7 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             f"but image weight dimension is {img_weight.shape[1]}"
         )
         # each tp will fill the img embeds, should divide by world_size
-        img_weight = img_weight / self.world_size_
+        img_weight = img_weight / self.tp_world_size_
         img_start_token_ids = torch.Tensor(img_start_token_ids).to(device=device, dtype=torch.long)
         img_token_lens = torch.Tensor(img_token_lens).to(device=device, dtype=torch.long)
         img_start_locs = torch.Tensor(img_start_locs).to(device=device, dtype=torch.long)
@@ -79,6 +79,6 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             self.vob_start_id_,
             self.vob_end_id_,
         )
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(out, op=dist.ReduceOp.SUM, async_op=False)
         return out

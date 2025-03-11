@@ -159,14 +159,12 @@ class vLLMFP8w8a8B128QuantizationMethod(vLLMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.block_size = 128
+        self.weight_scale_suffix = "weight_scale_inv"
+        self.act_scale_suffix = None  # no support for static input tensor scale for ds model.
 
     def quantize(self, weight: torch.Tensor):
-        if self.is_moe:
-            return self.quantize_moe(weight)
-        qweight, weight_scale = ops.scaled_fp8_quant(
-            weight.contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
-        )
-        return qweight.transpose(0, 1), weight_scale
+
+        raise Exception("Not implemented")
 
     def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
         qweight, weight_scale, input_scale = weights

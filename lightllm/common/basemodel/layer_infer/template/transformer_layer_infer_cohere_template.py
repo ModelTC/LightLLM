@@ -14,8 +14,8 @@ from ..transformer_layer_infer import TransformerLayerInfer
 class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
     """ """
 
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode):
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+    def __init__(self, layer_num, network_config, mode):
+        super().__init__(layer_num, network_config, mode)
 
         self.use_qk_norm_ = self.network_config_.get("use_qk_norm", False)
         return
@@ -81,14 +81,14 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
         infer_state._attn_out = o
         return
 
     def _context_ffn(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         ffn_out = self._ffn(input_embdings, infer_state, layer_weight)
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
         infer_state._ffn_out = ffn_out
         return
@@ -100,14 +100,14 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
         infer_state._attn_out = o
         return
 
     def _token_ffn(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         ffn_out = self._ffn(input_embdings, infer_state, layer_weight)
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
         infer_state._ffn_out = ffn_out
         return

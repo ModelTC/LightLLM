@@ -14,7 +14,7 @@ class QuantMethodFactory:
         return decorator
 
     def get(self, key, *args, **kwargs):
-        if key == "no_quant":
+        if key == "none":
             return None
         quant_method_class = self._quant_methods.get(key)
         if not quant_method_class:

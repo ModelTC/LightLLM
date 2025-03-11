@@ -5,14 +5,15 @@ import torch.distributed as dist
 import numpy as np
 
 from lightllm.models.vit.layer_weights.pre_and_post_layer_weight import ViTPreAndPostLayerWeight
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 
 
 class ViTPreLayerInfer:
     """ """
 
-    def __init__(self, tp_rank, world_size, network_config, mode):
-        self.tp_rank_ = tp_rank
-        self.world_size_ = world_size
+    def __init__(self, network_config, mode):
+        self.tp_rank_ = get_current_rank_in_dp()
+        self.tp_world_size_ = get_dp_world_size()
         self.network_config_ = network_config
         self.mode = mode
         return
@@ -33,16 +34,16 @@ class ViTPreLayerInfer:
             [layer_weight.position_embedding[:, :1, :], layer_weight._get_pos_embed(height, width)], dim=1
         )
         embeddings = embeddings + position_embedding.to(target_dtype)
-        if self.world_size_ == 1:
+        if self.tp_world_size_ == 1:
             return embeddings
         gather_embedding = torch.empty(
-            (embeddings.shape[2] * self.world_size_, batch_size, embeddings.shape[1]),
+            (embeddings.shape[2] * self.tp_world_size_, batch_size, embeddings.shape[1]),
             device=embeddings.device,
             dtype=target_dtype,
         )
-        split_indexes = np.linspace(0, layer_weight.embed_dim, self.world_size_ + 1, dtype=np.int64)
+        split_indexes = np.linspace(0, layer_weight.embed_dim, self.tp_world_size_ + 1, dtype=np.int64)
         dist.all_gather(
-            [gather_embedding[split_indexes[i] : split_indexes[i + 1], :, :] for i in range(self.world_size_)],
+            [gather_embedding[split_indexes[i] : split_indexes[i + 1], :, :] for i in range(self.tp_world_size_)],
             embeddings.permute(2, 0, 1).contiguous(),
             group=None,
             async_op=False,

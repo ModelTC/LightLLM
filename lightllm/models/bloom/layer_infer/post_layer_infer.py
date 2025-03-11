@@ -12,9 +12,9 @@ from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
 class BloomPostLayerInfer(PostLayerInferTpl):
     """ """
 
-    def __init__(self, tp_rank, world_size, network_config, mode):
-        super().__init__(tp_rank, world_size, network_config, mode)
-        assert network_config["vocab_size"] % self.world_size_ == 0
+    def __init__(self, network_config, mode):
+        super().__init__(network_config, mode)
+        assert network_config["vocab_size"] % self.tp_world_size_ == 0
         self.eps_ = network_config["layer_norm_epsilon"]
         self.vocab_size_ = network_config["vocab_size"]
         self.embed_dim_ = network_config["n_embed"]
@@ -42,15 +42,15 @@ class BloomPostLayerInfer(PostLayerInferTpl):
         last_input = rearrange(last_input, "batch embed_dim -> embed_dim batch").contiguous().reshape(-1, batch_size)
         logic_batch = torch.mm(layer_weight.lm_head_weight_, last_input)
         last_input = None
-        if self.world_size_ == 1:
+        if self.tp_world_size_ == 1:
             gather_data = logic_batch
         else:
             gather_data = self.alloc_tensor(
                 (self.vocab_size_, batch_size), device=logic_batch.device, dtype=input_embdings_dtype
             )
-            split_size = self.vocab_size_ // self.world_size_
+            split_size = self.vocab_size_ // self.tp_world_size_
             dist.all_gather(
-                [gather_data[i * split_size : (i + 1) * split_size, :] for i in range(self.world_size_)],
+                [gather_data[i * split_size : (i + 1) * split_size, :] for i in range(self.tp_world_size_)],
                 logic_batch,
                 group=None,
                 async_op=False,

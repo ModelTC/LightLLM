@@ -10,17 +10,15 @@ def rename_weight_keys(weights):
     keys = list(weights.keys())
     for k in keys:
         if prefix in k:
-            weights[k[len(prefix):]] = weights[k]
+            weights[k[len(prefix) :]] = weights[k]
 
 
 class LlavaPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
-    def __init__(self, tp_rank, world_size, data_type, network_config, mode):
-        super().__init__(tp_rank, world_size, data_type, network_config, mode)
+    def __init__(self, data_type, network_config, mode):
+        super().__init__(data_type, network_config, mode)
         return
 
     def load_hf_weights(self, weights):
         rename_weight_keys(weights)
         super().load_hf_weights(weights)
         return
-
-

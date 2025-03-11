@@ -9,8 +9,8 @@ from lightllm.models.mixtral.layer_weights.transformer_layer_weight import Mixtr
 
 
 class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, tp_rank, world_size, network_config, mode=[]):
-        super().__init__(layer_num, tp_rank, world_size, network_config, mode)
+    def __init__(self, layer_num, network_config, mode=[]):
+        super().__init__(layer_num, network_config, mode)
         self.num_local_experts = network_config["num_local_experts"]
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
         self.renormalize = True

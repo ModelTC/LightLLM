@@ -9,14 +9,12 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
     def __init__(
         self,
         layer_num,
-        tp_rank,
-        world_size,
         data_type,
         network_config,
         mode=[],
         quant_cfg=None,
     ):
-        super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode, quant_cfg)
+        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
         return
 
     def _init_weight(self):
@@ -39,6 +37,8 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
         self._k_bias_name = None
         self._v_weight_name = f"model.layers.{self.layer_num_}.self_attn.v_proj.weight"
         self._v_bias_name = None
+        self._kv_weight_name = f"model.layers.{self.layer_num_}.self_attn.kv_proj.weight"
+        self._kv_bias_name = None
         self._o_weight_name = f"model.layers.{self.layer_num_}.self_attn.o_proj.weight"
         self._o_bias_name = None
 
@@ -46,6 +46,8 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
         self._gate_bias_name = None
         self._up_weight_name = f"model.layers.{self.layer_num_}.mlp.up_proj.weight"
         self._up_bias_name = None
+        self._gate_up_weight_name = f"model.layers.{self.layer_num_}.mlp.gate_up_proj.weight"
+        self._gate_up_bias_name = None
         self._down_weight_name = f"model.layers.{self.layer_num_}.mlp.down_proj.weight"
         self._down_bias_name = None
 
@@ -55,30 +57,49 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
         self._ffn_norm_bias_name = None
 
     def _init_qkv(self):
-        q_split_n_embed = self.head_dim * self.n_head // self.world_size_
-        kv_split_n_embed = self.head_dim * self.n_kv_head // self.world_size_
-        self.q_proj = ROWMMWeight(self._q_weight_name, self.data_type_, q_split_n_embed, bias_name=self._q_bias_name)
+        self.q_proj = ROWMMWeight(
+            weight_name=self._q_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._q_bias_name,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="q_proj",
+        )
         self.kv_proj = MultiROWMMWeight(
-            [self._k_weight_name, self._v_weight_name],
-            self.data_type_,
-            kv_split_n_embed,
+            weight_names=[self._k_weight_name, self._v_weight_name],
+            data_type=self.data_type_,
             bias_names=[self._k_bias_name, self._v_bias_name],
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="kv_proj",
         )
 
     def _init_o(self):
-        o_split_n_embed = self.head_dim * self.n_head // self.world_size_
-        self.o_proj = COLMMWeight(self._o_weight_name, self.data_type_, o_split_n_embed, bias_name=self._o_bias_name)
+        self.o_proj = COLMMWeight(
+            weight_name=self._o_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._o_bias_name,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="o_proj",
+        )
 
     def _init_ffn(self):
-        split_inter_size = self.n_inter // self.world_size_
         self.gate_up_proj = MultiROWMMWeight(
-            [self._gate_weight_name, self._up_weight_name],
-            self.data_type_,
-            split_inter_size,
+            weight_names=[self._gate_weight_name, self._up_weight_name],
+            data_type=self.data_type_,
             bias_names=[self._gate_bias_name, self._up_bias_name],
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="gate_up_proj",
         )
         self.down_proj = COLMMWeight(
-            self._down_weight_name, self.data_type_, split_inter_size, bias_name=self._down_bias_name
+            weight_name=self._down_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._down_bias_name,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="down_proj",
         )
 
     def _init_norm(self):

@@ -3,13 +3,13 @@ from lightllm.common.basemodel import PreAndPostLayerWeight
 
 
 class Starcoder2PreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, tp_rank, world_size, data_type, network_config, mode):
-        super().__init__(tp_rank, world_size, data_type, network_config, mode)
+    def __init__(self, data_type, network_config, mode):
+        super().__init__(data_type, network_config, mode)
         return
 
     def load_hf_weights(self, weights):
         vob_size = self.network_config_["vocab_size"]
-        split_indexes = np.linspace(0, vob_size, self.world_size_ + 1, dtype=np.int64)
+        split_indexes = np.linspace(0, vob_size, self.tp_world_size_ + 1, dtype=np.int64)
         split_start = split_indexes[self.tp_rank_]
         split_end = split_indexes[self.tp_rank_ + 1]
         if "model.embed_tokens.weight" in weights:

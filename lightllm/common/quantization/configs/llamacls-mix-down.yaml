@@ -1,5 +1,5 @@
 quant_type: vllm-w8a8
 mix_bits:
-  - layer_name: "down_proj"
-    quant_type: "no_quant"
+  - name: "down_proj"
+    quant_type: "none"
     layer_nums: [1, 2, 3] # Defaults to all layers, or you can specify a layer_num list.

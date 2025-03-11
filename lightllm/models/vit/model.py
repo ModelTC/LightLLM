@@ -17,6 +17,7 @@ from typing import List, Union
 from io import BytesIO
 from rpyc.utils.classic import obtain
 from lightllm.common.quantization import Quantcfg
+from lightllm.utils.dist_utils import get_dp_world_size
 
 
 logger = init_logger(__name__)
@@ -34,8 +35,7 @@ class VisionTransformer:
     post_layer_infer_class = ViTPostLayerInfer
 
     def __init__(self, kvargs):
-        self.tp_rank_ = kvargs["tp_rank"]
-        self.world_size_ = kvargs["world_size"]
+        self.tp_world_size_ = get_dp_world_size()
         self.weight_dir_ = kvargs["weight_dir"]
         self.load_way = kvargs.get("load_way", "HF")
         self.mode = [m.replace("int4weight", "w4a16").replace("int8weight", "w8a16") for m in kvargs.get("mode", [])]
@@ -71,23 +71,21 @@ class VisionTransformer:
         self.config["padding_head_num"] = self.config["num_attention_heads"]
 
         head_dim = self.config["hidden_size"] // self.config["num_attention_heads"]
-        if self.config["num_attention_heads"] % self.world_size_ != 0:
+        if self.config["num_attention_heads"] % self.tp_world_size_ != 0:
             padding_head_num = (
-                self.config["num_attention_heads"] + self.world_size_ - 1
-            ) // self.world_size_ * self.world_size_ - self.config["num_attention_heads"]
+                self.config["num_attention_heads"] + self.tp_world_size_ - 1
+            ) // self.tp_world_size_ * self.tp_world_size_ - self.config["num_attention_heads"]
             self.config["padding_hidden_size"] = padding_head_num * head_dim
             self.config["padding_head_num"] += padding_head_num
         return
 
     def _init_weights(self):
         self.pre_post_weight = self.pre_and_post_weight_class(
-            self.tp_rank_, self.world_size_, self.data_type, network_config=self.config, mode=self.mode
+            self.data_type, network_config=self.config, mode=self.mode
         )
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 i,
-                self.tp_rank_,
-                self.world_size_,
                 self.data_type,
                 network_config=self.config,
                 mode=self.mode,
@@ -111,16 +109,10 @@ class VisionTransformer:
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_infer_layer(self):
-        self.pre_infer = self.pre_layer_infer_class(
-            tp_rank=self.tp_rank_, world_size=self.world_size_, network_config=self.config, mode=self.mode
-        )
-        self.post_infer = self.post_layer_infer_class(
-            tp_rank=self.tp_rank_, world_size=self.world_size_, network_config=self.config, mode=self.mode
-        )
+        self.pre_infer = self.pre_layer_infer_class(network_config=self.config, mode=self.mode)
+        self.post_infer = self.post_layer_infer_class(network_config=self.config, mode=self.mode)
         self.layers_infer = [
-            self.transformer_layer_infer_class(
-                i, tp_rank=self.tp_rank_, world_size=self.world_size_, network_config=self.config, mode=self.mode
-            )
+            self.transformer_layer_infer_class(i, network_config=self.config, mode=self.mode)
             for i in range(self.config["num_hidden_layers"])
         ]
         return

@@ -90,13 +90,11 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
     def _init_weights(self):
         self.pre_post_weight = self.pre_and_post_weight_class(
-            self.tp_rank_, self.world_size_, self.data_type, network_config=self.config, mode=self.mode
+            self.data_type, network_config=self.config, mode=self.mode
         )
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 i,
-                self.tp_rank_,
-                self.world_size_,
                 self.data_type,
                 network_config=self.config,
                 mode=self.mode,
@@ -116,17 +114,11 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         return
 
     def _init_infer_layer(self):
-        self.pre_infer = self.pre_layer_infer_class(
-            tp_rank=self.tp_rank_, world_size=self.world_size_, network_config=self.config, mode=self.mode
-        )
-        self.post_infer = self.post_layer_infer_class(
-            tp_rank=self.tp_rank_, world_size=self.world_size_, network_config=self.config, mode=self.mode
-        )
+        self.pre_infer = self.pre_layer_infer_class(network_config=self.config, mode=self.mode)
+        self.post_infer = self.post_layer_infer_class(network_config=self.config, mode=self.mode)
         self.layers_infer = [
             self.transformer_layer_infer_class(
                 i,
-                tp_rank=self.tp_rank_,
-                world_size=self.world_size_,
                 network_config=self.config,
                 mode=self.mode,
             )

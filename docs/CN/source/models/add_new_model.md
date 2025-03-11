@@ -99,9 +99,7 @@ class TpPartBaseModel:
     # infer state class
     infer_state_class = InferStateInfo
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
-        self.tp_rank_ = tp_rank
-        self.world_size_ = world_size
+    def __init__(self, weight_dir, max_total_token_num, load_way="HF", mode=[]):
         self.weight_dir_ = weight_dir
         self.max_total_token_num = max_total_token_num
         self.load_way = load_way
@@ -159,7 +157,7 @@ class BloomPreAndPostLayerWeight(PreAndPostLayerWeight):
             self.final_norm_bias_ = self._cuda(weights["ln_f.bias"])
         if "word_embeddings.weight" in weights:
             vob_size = self.network_config_["vocab_size"]
-            split_vob_size = vob_size // self.world_size_
+            split_vob_size = vob_size // self.tp_world_size_
             self.wte_weight_ = self._cuda(weights["word_embeddings.weight"][split_vob_size *
                                                                  self.tp_rank_: split_vob_size * (self.tp_rank_ + 1), :])
             self.lm_head_weight_ = self.wte_weight_
@@ -195,9 +193,9 @@ class BloomTransformerLayerWeight(TransformerLayerWeight):
 
     def init_static_params(self):
         head_num = self.network_config_["num_attention_heads"]
-        tp_head_num = head_num // self.world_size_
+        tp_head_num = head_num // self.tp_world_size_
         tmp_alibi = self._generate_alibi(head_num, dtype=torch.float32)
-        assert head_num % self.world_size_ == 0
+        assert head_num % self.tp_world_size_ == 0
         self.tp_alibi = tmp_alibi[self.tp_rank_ * tp_head_num: (self.tp_rank_ + 1) * tp_head_num].contiguous().cuda()
         return
     
@@ -239,7 +237,7 @@ class BloomTransformerLayerWeight(TransformerLayerWeight):
 
         if f"h.{self.layer_num_}.self_attention.query_key_value.weight" in weights:
             n_embed = self.network_config_["n_embed"]
-            split_n_embed = n_embed // self.world_size_
+            split_n_embed = n_embed // self.tp_world_size_
             head_num = self.network_config_["num_attention_heads"]
             att_qkv_dense_weight = weights[f"h.{self.layer_num_}.self_attention.query_key_value.weight"].reshape(head_num, 3, -1, n_embed)
             self.q_weight_ = self._cuda(att_qkv_dense_weight[:,
@@ -265,7 +263,7 @@ class BloomTransformerLayerWeight(TransformerLayerWeight):
                                                                                    1))
         if f"h.{self.layer_num_}.self_attention.query_key_value.bias" in weights:
             n_embed = self.network_config_["n_embed"]
-            split_n_embed = n_embed // self.world_size_
+            split_n_embed = n_embed // self.tp_world_size_
             head_num = self.network_config_["num_attention_heads"]
             att_qkv_dense_bias = weights[f"h.{self.layer_num_}.self_attention.query_key_value.bias"].reshape(head_num, 3, -1)
             self.q_bias_ = self._cuda(att_qkv_dense_bias[:, 0, :].reshape(-1)[split_n_embed *
@@ -277,7 +275,7 @@ class BloomTransformerLayerWeight(TransformerLayerWeight):
 
         if f"h.{self.layer_num_}.self_attention.dense.weight" in weights:
             n_embed = self.network_config_["n_embed"]
-            split_n_embed = n_embed // self.world_size_
+            split_n_embed = n_embed // self.tp_world_size_
             self.o_weight_ = self._cuda(weights[f"h.{self.layer_num_}.self_attention.dense.weight"][:,
                                                                                                      split_n_embed * self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)].transpose(0, 1))
         if f"h.{self.layer_num_}.self_attention.dense.bias" in weights:
@@ -292,19 +290,19 @@ class BloomTransformerLayerWeight(TransformerLayerWeight):
         # ffn params
         if f"h.{self.layer_num_}.mlp.dense_h_to_4h.weight" in weights:
             n_embed = self.network_config_["n_embed"] * 4
-            split_n_embed = n_embed // self.world_size_
+            split_n_embed = n_embed // self.tp_world_size_
             self.ffn_1_weight_ = weights[f"h.{self.layer_num_}.mlp.dense_h_to_4h.weight"]
             self.ffn_1_weight_ = self._cuda(self.ffn_1_weight_[split_n_embed * self.tp_rank_: split_n_embed *
                                                     (self.tp_rank_ + 1), :].transpose(0, 1))
 
         if f"h.{self.layer_num_}.mlp.dense_h_to_4h.bias" in weights:
             n_embed = self.network_config_["n_embed"] * 4
-            split_n_embed = n_embed // self.world_size_
+            split_n_embed = n_embed // self.tp_world_size_
             self.ffn_1_bias_ = self._cuda(weights[f"h.{self.layer_num_}.mlp.dense_h_to_4h.bias"][split_n_embed *
                                                                                       self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)])
         if f"h.{self.layer_num_}.mlp.dense_4h_to_h.weight" in weights:
             n_embed = self.network_config_["n_embed"] * 4
-            split_n_embed = n_embed // self.world_size_
+            split_n_embed = n_embed // self.tp_world_size_
             self.ffn_2_weight_ = weights[f"h.{self.layer_num_}.mlp.dense_4h_to_h.weight"]
             self.ffn_2_weight_ = self._cuda(self.ffn_2_weight_[:, split_n_embed *
                                                     self.tp_rank_: split_n_embed * (self.tp_rank_ + 1)].transpose(0, 1))
@@ -353,7 +351,7 @@ class BloomPreLayerInfer(PreLayerInferTpl):
     def __init__(self, tp_rank, world_size, network_config, mode):
         super().__init__(tp_rank, world_size, network_config, mode)
         self.eps_ = network_config["layer_norm_epsilon"]
-        tp_vocab_size_ = network_config["vocab_size"] // self.world_size_
+        tp_vocab_size_ = network_config["vocab_size"] // self.tp_world_size_
         self.vob_start_id_ = tp_vocab_size_ * self.tp_rank_
         self.vob_end_id_ = tp_vocab_size_ * (self.tp_rank_ + 1)
         return
@@ -370,7 +368,7 @@ class BloomPreLayerInfer(PreLayerInferTpl):
         tmp_input_ids[input_mask] = 0
         input_embdings = torch.embedding(layer_weight.wte_weight_, tmp_input_ids, padding_idx=-1)
         input_embdings[input_mask] = 0.0
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings = self._norm(input_embdings, infer_state, layer_weight)
         return input_embdings
@@ -381,7 +379,7 @@ class BloomPreLayerInfer(PreLayerInferTpl):
         tmp_input_ids[input_mask] = 0
         input_embdings = torch.embedding(layer_weight.wte_weight_, tmp_input_ids, padding_idx=-1)
         input_embdings[input_mask] = 0.0
-        if self.world_size_ > 1:
+        if self.tp_world_size_ > 1:
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings = self._norm(input_embdings, infer_state, layer_weight)
         return input_embdings
@@ -411,7 +409,7 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     def __init__(self, layer_num, tp_rank, world_size, network_config, mode):
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
         self.eps_ = network_config["layer_norm_epsilon"]
-        self.tp_q_head_num_ = network_config["num_attention_heads"] // self.world_size_
+        self.tp_q_head_num_ = network_config["num_attention_heads"] // self.tp_world_size_
         self.tp_k_head_num_ = self.tp_q_head_num_
         self.tp_v_head_num_ = self.tp_q_head_num_
         self.tp_o_head_num_ = self.tp_q_head_num_
@@ -470,7 +468,7 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         o = torch.addmm(layer_weight.o_bias_,
                         input.view(-1, self.tp_q_head_num_ * self.head_dim_),
                         layer_weight.o_weight_,
-                        beta=1.0 / self.world_size_)
+                        beta=1.0 / self.tp_world_size_)
         return o
     
     def _ffn(self, input, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
@@ -478,7 +476,7 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         input = None
         gelu_out = torch.nn.functional.gelu(ffn1_out, approximate='tanh')
         ffn1_out = None
-        ffn2_out = torch.addmm(layer_weight.ffn_2_bias_, gelu_out, layer_weight.ffn_2_weight_, beta=1.0 / self.world_size_)
+        ffn2_out = torch.addmm(layer_weight.ffn_2_bias_, gelu_out, layer_weight.ffn_2_weight_, beta=1.0 / self.tp_world_size_)
         gelu_out = None
         return ffn2_out
 ~~~
@@ -503,7 +501,7 @@ class BloomPostLayerInfer(PostLayerInferTpl):
 
     def __init__(self, tp_rank, world_size, network_config, mode):
         super().__init__(tp_rank, world_size, network_config, mode)
-        assert (network_config["vocab_size"] % self.world_size_ == 0)
+        assert (network_config["vocab_size"] % self.tp_world_size_ == 0)
         self.eps_ = network_config["layer_norm_epsilon"]
         self.vocab_size_ = network_config["vocab_size"]
         self.embed_dim_ = network_config["n_embed"]
@@ -529,13 +527,13 @@ class BloomPostLayerInfer(PostLayerInferTpl):
         last_input = rearrange(last_input, "batch embed_dim -> embed_dim batch").contiguous().reshape(-1, batch_size)
         logic_batch = torch.mm(layer_weight.lm_head_weight_, last_input)
         last_input = None
-        if self.world_size_ == 1:
+        if self.tp_world_size_ == 1:
             gather_data = logic_batch
         else:
             gather_data = torch.empty((self.vocab_size_, batch_size), device=logic_batch.device, dtype=torch.float16)
-            split_size = self.vocab_size_ // self.world_size_
+            split_size = self.vocab_size_ // self.tp_world_size_
             dist.all_gather([gather_data[i * split_size: (i + 1) * split_size, :]
-                            for i in range(self.world_size_)], logic_batch, group=None, async_op=False)
+                            for i in range(self.tp_world_size_)], logic_batch, group=None, async_op=False)
         logic_batch = None
 
         if not return_logics:

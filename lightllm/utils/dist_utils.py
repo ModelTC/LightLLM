@@ -54,9 +54,12 @@ def get_environ(environ_name):
 
 
 def init_vision_distributed_env(kvargs):
-    world_size = kvargs["vit_tp"]
-    set_global_rank(kvargs["tp_rank_id"])
-    set_global_world_size(world_size)
+    tp_world_size = kvargs["vit_tp"]
+    dp_size = kvargs.get("dp_size", 1)
+    tp_rank_id = kvargs["tp_rank_id"]
+    set_dp_size(dp_size)
+    set_dp_world_size(tp_world_size)
+    set_current_rank_in_dp(tp_rank_id)
     visual_gpu_ids = kvargs["visual_gpu_ids"]
     device_id = visual_gpu_ids[kvargs["vit_rank_id"]]
     set_current_device_id(device_id)
@@ -65,7 +68,7 @@ def init_vision_distributed_env(kvargs):
         "nccl",
         init_method=f'tcp://127.0.0.1:{kvargs["visual_nccl_port"]}',
         rank=kvargs["tp_rank_id"],
-        world_size=world_size,
+        world_size=tp_world_size,
     )
     # warmup nccl communicator
     _a = torch.zeros([1]).to(f"cuda:{device_id}")

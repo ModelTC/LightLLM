@@ -1,16 +1,11 @@
-import torch
-import math
-import numpy as np
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight, NormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight
 
 
 class StarcoderTransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(
-            layer_num, tp_rank, world_size, data_type, network_config, mode, quant_cfg, layer_prefix="transformer.h"
-        )
-        assert network_config["num_attention_heads"] % self.world_size_ == 0
+    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, mode, quant_cfg, layer_prefix="transformer.h")
+        assert network_config["num_attention_heads"] % self.tp_world_size_ == 0
 
     def load_hf_weights(self, weights):
         n_embed = self.network_config_["hidden_size"]
@@ -55,10 +50,19 @@ class StarcoderTransformerLayerWeight(LlamaTransformerLayerWeight):
         self._ffn_norm_bias_name = f"transformer.h.{self.layer_num_}.ln_2.bias"
 
     def _init_ffn(self):
-        split_inter_size = self.n_inter // self.world_size_
         self.gate_up_proj = ROWMMWeight(
-            self._gate_up_weight_name, self.data_type_, split_inter_size, bias_name=self._gate_up_weight_name
+            weight_name=self._gate_up_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._gate_up_bias_name,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="gate_up_proj",
         )
         self.down_proj = COLMMWeight(
-            self._down_weight_name, self.data_type_, split_inter_size, bias_name=self._down_bias_name
+            weight_name=self._down_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._down_bias_name,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="down_proj",
         )

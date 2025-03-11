@@ -31,8 +31,8 @@ class Gemma_2bTpPartModel(LlamaTpPartModel):
 
     def _verify_params(self):
         assert self.load_way in ["HF"], "gemma only supports HF format to load Now!"
-        # assert self.config["num_key_value_heads"] % self.world_size_ == 0
-        assert self.config["num_attention_heads"] % self.world_size_ == 0
+        # assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
+        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         return
 
     def _init_mem_manager(self):

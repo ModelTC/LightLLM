@@ -1,24 +1,19 @@
-import torch
-import math
-import numpy as np
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
-    COLMMWeight,
-    NormWeight,
-    FusedMoeWeight,
+    FusedMoeWeightTP,
+    FusedMoeWeightEP,
 )
 
 logger = init_logger(__name__)
 
 
 class MixtralTransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[], quant_cfg=None):
+    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
         super().__init__(
             layer_num,
-            tp_rank,
-            world_size,
             data_type,
             network_config,
             mode,
@@ -40,13 +35,21 @@ class MixtralTransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_moe(self, weights):
         inter_size = self.network_config_["intermediate_size"]
-        split_inter_size = inter_size // self.world_size_
+        split_inter_size = inter_size // self.tp_world_size_
 
         self.moe_gate = ROWMMWeight(
-            self.moe_gate_weight_name, self.data_type_, 0, bias_name=self.moe_gate_bias_name, disable_tp=True
+            weight_name=self.moe_gate_weight_name,
+            data_type=self.data_type_,
+            bias_name=self.moe_gate_bias_name,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="moe_gate",
+            tp_rank=0,
+            tp_size=1,  # no tensor parallelism
         )
 
-        self.experts = FusedMoeWeight(
+        load_func = FusedMoeWeightEP if enable_env_vars("ETP_MODE_ENABLED") else FusedMoeWeightTP
+        self.experts = load_func(
             gate_proj_name="w1",
             down_proj_name="w2",
             up_proj_name="w3",

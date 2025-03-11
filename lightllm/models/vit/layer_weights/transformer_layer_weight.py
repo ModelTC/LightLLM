@@ -15,8 +15,8 @@ from lightllm.utils.dist_utils import get_current_device_id
 
 
 class ViTTransformerLayerWeight(TransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
         return
 
     def _cuda(self, cpu_tensor):
@@ -81,31 +81,42 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
         self._init_norm()
 
     def _init_qkv(self):
-        n_embed = self.network_config_["hidden_size"]
-        qkv_split_n_embed = (n_embed + self.padding_hidden_size) // self.world_size_
         self.qkv_proj = MultiROWMMWeight(
-            [self._q_weight_name, self._k_weight_name, self._v_weight_name],
-            self.data_type_,
-            qkv_split_n_embed,
+            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
+            data_type=self.data_type_,
             bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="qkv_proj",
         )
 
     def _init_o(self):
-        n_embed = self.network_config_["hidden_size"]
-        o_split_n_embed = (n_embed + self.padding_hidden_size) // self.world_size_
-        self.o_proj = COLMMWeight(self._o_weight_name, self.data_type_, o_split_n_embed, bias_name=self._o_bias_name)
+        self.o_proj = COLMMWeight(
+            weight_name=self._o_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._o_bias_name,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="o_proj",
+        )
 
     def _init_ffn(self):
-        inter_size = self.network_config_["intermediate_size"]
-        split_inter_size = inter_size // self.world_size_
         self.ffn_1_proj_ = ROWMMWeight(
-            self.fc1_weight_name_,
-            self.data_type_,
-            split_inter_size,
+            weight_name=self.fc1_weight_name_,
+            data_type=self.data_type_,
             bias_name=self.fc1_bias_name_,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="ffn_1_proj",
         )
+
         self.ffn_2_proj_ = COLMMWeight(
-            self.fc2_weight_name_, self.data_type_, split_inter_size, bias_name=self.fc2_bias_name_
+            weight_name=self.fc2_weight_name_,
+            data_type=self.data_type_,
+            bias_name=self.fc2_bias_name_,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="ffn_2_proj",
         )
 
     def _init_norm(self):
@@ -117,7 +128,7 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
         )
         if self.qk_norm:
             n_embed = self.network_config_["hidden_size"]
-            split_n_embed = (n_embed + self.padding_hidden_size) // self.world_size_
+            split_n_embed = (n_embed + self.padding_hidden_size) // self.tp_world_size_
             self.q_norm_weight_ = TpNormWeight(self._q_norm_weight_name, self.data_type_, split_n_embed)
             self.k_norm_weight_ = TpNormWeight(self._k_norm_weight_name, self.data_type_, split_n_embed)
 

@@ -48,8 +48,8 @@ def generate_alibi(n_head, dtype=torch.float16):
 
 
 class BloomTransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode, quant_cfg=None):
-        super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, mode, quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
         return
 
     def _parse_config(self):
@@ -59,8 +59,8 @@ class BloomTransformerLayerWeight(LlamaTransformerLayerWeight):
         self.n_kv_head = self.network_config_["num_attention_heads"]
         self.head_dim = self.network_config_.get("head_dim", self.n_embed // self.n_head)
         # 计算生成alibi
-        assert self.n_head % self.world_size_ == 0
-        tp_head_num = self.n_head // self.world_size_
+        assert self.n_head % self.tp_world_size_ == 0
+        tp_head_num = self.n_head // self.tp_world_size_
         tmp_alibi = generate_alibi(self.n_head, dtype=torch.float32)
         self.tp_alibi = tmp_alibi[self.tp_rank_ * tp_head_num : (self.tp_rank_ + 1) * tp_head_num].contiguous().cuda()
 
@@ -107,10 +107,19 @@ class BloomTransformerLayerWeight(LlamaTransformerLayerWeight):
         return
 
     def _init_ffn(self):
-        split_inter_size = self.n_inter // self.world_size_
         self.gate_up_proj = ROWMMWeight(
-            self._gate_up_weight_name, self.data_type_, split_inter_size, bias_name=self._gate_up_bias_name
+            weight_name=self._gate_up_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._gate_up_bias_name,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="gate_up_proj",
         )
         self.down_proj = COLMMWeight(
-            self._down_weight_name, self.data_type_, split_inter_size, bias_name=self._down_bias_name
+            weight_name=self._down_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._down_bias_name,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="down_proj",
         )

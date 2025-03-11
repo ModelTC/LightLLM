@@ -2,14 +2,15 @@ import torch
 import torch.functional as F
 import torch.distributed as dist
 from lightllm.models.vit.layer_weights.pre_and_post_layer_weight import ViTPreAndPostLayerWeight
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 
 
 class ViTPostLayerInfer:
     """ """
 
-    def __init__(self, tp_rank, world_size, network_config, mode):
-        self.tp_rank_ = tp_rank
-        self.world_size_ = world_size
+    def __init__(self, network_config, mode):
+        self.tp_rank_ = get_current_rank_in_dp()
+        self.tp_world_size_ = get_dp_world_size()
         self.network_config_ = network_config
         self.mode = mode
         self.llm_hidden_size = network_config["llm_hidden_size"]
@@ -47,12 +48,12 @@ class ViTPostLayerInfer:
 
         vit_embeds_out = torch.addmm(
             layer_weight.mlp1_3_bias_,
-            vit_embeds_gelu.view(-1, self.llm_hidden_size // self.world_size_),
+            vit_embeds_gelu.view(-1, self.llm_hidden_size // self.tp_world_size_),
             layer_weight.mlp1_3_weight_,
-            beta=1.0 / self.world_size_,
+            beta=1.0 / self.tp_world_size_,
         )
 
-        if self.world_size_ == 1:
+        if self.tp_world_size_ == 1:
             return vit_embeds_out.view(batch_size, -1, self.llm_hidden_size)
 
         dist.all_reduce(vit_embeds_out, op=dist.ReduceOp.SUM, async_op=False)
