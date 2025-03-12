@@ -6,6 +6,7 @@ from .mem_manager import MemoryManager
 from typing import List, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
+from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_d_node, kv_trans_v2_for_p_node
 
 logger = init_logger(__name__)
 
@@ -103,50 +104,99 @@ class Deepseek2MemoryManager(MemoryManager):
         """
         使用 p2p triton kernel 进行数据复制和传输的实现方式。
         """
-        assert dp_size_in_node == 1
+        if not hasattr(self, "mem_ptrs_dict"):
+            self.mem_ptrs_dict = {}
+            for layer_index in range(self.layer_num):
+                mems_ptr = []
+                for i in range(0, len(mem_managers), len(mem_managers) // dp_size_in_node):
+                    mems_ptr.append(mem_managers[i].kv_buffer[layer_index, :, :, :].data_ptr())
+                mems_ptr = torch.tensor(mems_ptr, dtype=torch.uint64, device="cuda")
+                self.mem_ptrs_dict[layer_index] = mems_ptr
 
         move_token_indexes = []
+        token_dp_indexes = []
         for task in move_tasks:
             if task.move_kv_len != 0:
                 move_token_indexes.extend(task.prefill_token_indexes[-task.move_kv_len :])
+                token_dp_indexes.extend([task.prefill_dp_index for _ in range(task.move_kv_len)])
 
         move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
+        token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device="cuda")
         for layer_index in range(self.layer_num):
-            move_buffer = self._get_kv_move_data_p2p(move_token_indexes, layer_index, self.kv_move_buffer)
+            move_buffer = self._get_kv_move_data_p2p(
+                move_token_indexes, token_dp_indexes, layer_index, self.kv_move_buffer, dp_size_in_node
+            )
             dist.send(move_buffer, dst=1)
         return
 
-    def _get_kv_move_data_p2p(self, token_indexes: torch.Tensor, layer_index: int, kv_move_buffer: torch.Tensor):
+    def _get_kv_move_data_p2p(
+        self,
+        token_indexes: torch.Tensor,
+        token_dp_indexes: torch.Tensor,
+        layer_index: int,
+        kv_move_buffer: torch.Tensor,
+        dp_size_in_node: int,
+    ):
         move_token_num = len(token_indexes)
         move_size = self.kv_buffer.numel() // self.layer_num // self.size * move_token_num
         move_buffer = kv_move_buffer.view(-1)[0:move_size].view(move_token_num, self.head_num, self.head_dim)
-        kv_trans(
-            self.kv_buffer[layer_index, :, :, :], token_indexes, move_buffer, self.kv_move_buf_indexes[0:move_token_num]
+        kv_trans_v2_for_p_node(
+            input_mems=self.mem_ptrs_dict[layer_index],
+            input_idx=token_indexes,
+            input_dp_idx=token_dp_indexes,
+            output=move_buffer,
+            output_idx=self.kv_move_buf_indexes[0:move_token_num],
+            dp_size_in_node=dp_size_in_node,
         )
         return move_buffer
 
     def receive_from_prefill_node_p2p(
         self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
     ):
-        assert dp_size_in_node == 1
+        if not hasattr(self, "mem_ptrs_dict"):
+            self.mem_ptrs_dict = {}
+            for layer_index in range(self.layer_num):
+                mems_ptr = []
+                for i in range(0, len(mem_managers)):
+                    mems_ptr.append(mem_managers[i].kv_buffer[layer_index, :, :, :].data_ptr())
+                mems_ptr = torch.tensor(mems_ptr, dtype=torch.uint64, device="cuda")
+                self.mem_ptrs_dict[layer_index] = mems_ptr
 
         move_token_indexes = []
+        token_dp_indexes = []
         for task in move_tasks:
             if task.move_kv_len != 0:
                 move_token_indexes.extend(task.decode_token_indexes[-task.move_kv_len :])
+                token_dp_indexes.extend([task.decode_dp_index for _ in range(task.move_kv_len)])
 
         move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
+        token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device="cuda")
 
         token_num = len(move_token_indexes)
         move_size = self.kv_buffer.numel() // self.layer_num // self.size * token_num
         recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(token_num, self.head_num, self.head_dim)
         for layer_index in range(self.layer_num):
             dist.recv(recive_buffer, src=0)
-            for i, mem in enumerate(mem_managers):
-                mem._write_kv_move_data_p2p(move_token_indexes, recive_buffer, layer_index)
+            self._write_kv_move_data_p2p(
+                move_token_indexes, token_dp_indexes, recive_buffer, layer_index, dp_size_in_node
+            )
         return
 
-    def _write_kv_move_data_p2p(self, token_indexes: torch.Tensor, buffer_tensor: torch.Tensor, layer_index):
+    def _write_kv_move_data_p2p(
+        self,
+        token_indexes: torch.Tensor,
+        token_dp_indexes: torch.Tensor,
+        buffer_tensor: torch.Tensor,
+        layer_index,
+        dp_size_in_node: int,
+    ):
         move_token_num = len(token_indexes)
-        kv_trans(buffer_tensor, self.kv_move_buf_indexes[0:move_token_num], self.kv_buffer[layer_index], token_indexes)
+        kv_trans_v2_for_d_node(
+            output_mems=self.mem_ptrs_dict[layer_index],
+            output_idx=token_indexes,
+            output_dp_idx=token_dp_indexes,
+            input=buffer_tensor,
+            input_idx=self.kv_move_buf_indexes[0:move_token_num],
+            dp_size_in_node=dp_size_in_node,
+        )
         return
