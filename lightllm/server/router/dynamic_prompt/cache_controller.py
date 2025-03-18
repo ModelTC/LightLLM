@@ -87,7 +87,11 @@ class HiCacheController:
                 task = self.read_queue.get()
                 if task.ready():
                     # TODO: 将读到的内容存入 memory manager 中
-                    pass
+                    node_hash = task.hashs[0]
+                    if node_hash in self.node_cache:
+                        node = self.node_cache[node_hash]
+                        node.cache_indices = self.mem_manager.store(node.cache_indices, task.value)
+                        print(f"Node {node_hash} loaded with {len(node.cache_indices)} cache indices")
                 else:
                     pending_reads.append(task)
             
@@ -118,12 +122,13 @@ class HiCacheController:
     
     def _persist_node(self, node):
         """将节点持久化到磁盘"""
+        print(f"Persisting node {node.hash} with {len(node.token_ids)} tokens")
         if not node.hash:
             # 为新节点生成hash
             node.hash = f"node_{id(node)}_{time.time()}"
         
         # TODO: 将对应的kvcache写入磁盘
-        task = self.service.create(hashs=[node.hash], mode="w")
+        task = self.service.create(hashs=[node.hash], value=self.mem_manager.to_kvcache(node.cache_indices), mode="w")
         self.service.commit(task)
         self.write_queue.put(task)
         self.node_cache[node.hash] = node
@@ -141,6 +146,7 @@ class HiCacheController:
         if self.token_kvcache_size is None:
             kvcache = self.mem_manager.to_kvcache(indices[:1])  # 计算单个token的kvcache
             self.token_kvcache_size = get_torch_tensor_size(kvcache)
+            print(f"Single token KV cache size: {self.token_kvcache_size} bytes, Block size: {BLOCK_SIZE}")
         
         current = self.root
         position = 0
@@ -148,9 +154,11 @@ class HiCacheController:
         
         while position < len(token_ids):
             token_id = token_ids[position]
+            print(f"Writing token {token_id} at position {position}, current node has {len(current.token_ids)} tokens")
             child_key = (token_id, relative_position)
             
             if child_key in current.children:
+                print(f"Child key {child_key} found in current.children")
                 child_info = current.children[child_key]
                 assert isinstance(child_info[0], CacheNode)
                 child_hash = child_info[0].hash
@@ -172,6 +180,7 @@ class HiCacheController:
                 else:
                     # 当前节点已满，需要创建新节点
                     new_node = CacheNode(parent=current, split_token_idx=len(current.token_ids))
+                    print(f"Creating new node at split position {new_node.split_token_idx}, parent hash: {current.hash}")
                     
                     # 将token添加到新节点
                     new_node.token_ids.append(token_ids[position])
@@ -206,6 +215,7 @@ class HiCacheController:
         
         while position < len(token_ids):
             token_id = token_ids[position]
+            print(f"Reading token {token_id} at position {position}, current node has {len(current.token_ids)} tokens")
             
             # 检查当前节点的token
             if relative_position < len(current.token_ids) and current.token_ids[relative_position] == token_id:
