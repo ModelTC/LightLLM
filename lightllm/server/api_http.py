@@ -142,11 +142,12 @@ async def healthcheck(request: Request):
         return JSONResponse({"message": "Error"}, status_code=503)
     from lightllm.utils.health_check import health_check, health_obj
 
-    asyncio.create_task(health_check(g_objs.args, g_objs.httpserver_manager, None))
-    if health_obj.is_health():
-        return JSONResponse({"message": "Ok"}, status_code=200)
-    else:
-        return JSONResponse({"message": "Error"}, status_code=503)
+    health_task = asyncio.create_task(health_check(g_objs.args, g_objs.httpserver_manager, None))
+    if not health_obj.is_health():
+        await health_task
+    return JSONResponse(
+        {"message": "Ok" if health_obj.is_health() else "Error"}, status_code=200 if health_obj.is_health() else 503
+    )
 
 
 @app.get("/token_load", summary="Get the current server's load of tokens")

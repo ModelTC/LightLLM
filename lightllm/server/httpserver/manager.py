@@ -173,9 +173,12 @@ class HttpServerManager:
             while len(tasks) > 0 and tasks[0].done():
                 tasks.pop(0)
 
-    def alloc_req_id(self, sampling_params):
+    def alloc_req_id(self, sampling_params, is_health_req: bool = False):
         # 请求的 id 可以由外部传入，也可以由内部生成，但是由外部传入的时候，要自己保证全局唯一性
         # 否则会造成异常问题。目前限制 NORMAL 模式都使用内部id替换， P 和 D 模式按需设置
+        # health 请求 request_id 为负数，直接返回
+        if is_health_req:
+            return sampling_params.group_request_id
         if self.pd_mode == NodeRole.NORMAL:
             if not (self.nnodes > 1 and self.args.dp == 1):
                 group_request_id = self.id_gen.generate_id()
@@ -199,10 +202,11 @@ class HttpServerManager:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
+        is_health_req: bool = False,
     ) -> Tuple[int, str, dict, FinishStatus]:
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
-        group_request_id = self.alloc_req_id(sampling_params)
+        group_request_id = self.alloc_req_id(sampling_params, is_health_req)
 
         try:
             old_multimodal_params = None
@@ -215,21 +219,17 @@ class HttpServerManager:
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
             # 监控
-            self.metric_client.counter_inc("lightllm_request_count")
 
             prompt_ids = await self._encode(
                 prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
             )
             prompt_tokens = len(prompt_ids)
             # 监控
-            self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
-            self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
-            verify_time_begin = time.time()
+            if group_request_id > 0:
+                self.metric_client.counter_inc("lightllm_request_count")
+                self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
+                self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
             prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
-            verify_time_end = time.time()
-            self.metric_client.histogram_observe(
-                "lightllm_request_validation_duration", verify_time_end - verify_time_begin
-            )
 
             # 申请资源并存储
             alloced_req_indexes = []
@@ -472,7 +472,6 @@ class HttpServerManager:
                     if finish_status.is_finished():
                         unfinished_count -= 1
 
-                    # 所有子请求完成后，就删除占用的资源
                     if unfinished_count == 0:
                         total_cost_time_ms = (time.time() - start_time) * 1000
                         mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
@@ -480,8 +479,6 @@ class HttpServerManager:
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
                         x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
-                        self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
-                        self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
                             f"X-Request-Id:{x_request_id} "
@@ -493,6 +490,11 @@ class HttpServerManager:
                             f"prompt_cache_len:{prompt_cache_len} "
                             f"prompt_cache_ratio:{prompt_cache_ratio} "
                         )
+                        if group_request_id < 0:
+                            # health 探测请求，不记录日志和监控
+                            return
+                        self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
+                        self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
                         self.metric_client.histogram_observe(
                             "lightllm_request_inference_duration", total_cost_time_ms / 1000.0
                         )

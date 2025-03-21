@@ -18,7 +18,7 @@ _g_health_req_id_gen.generate_id()
 
 @dataclass
 class HealthObj:
-    _is_health: bool = True
+    _is_health: bool = False
     _is_health_checking: bool = False
     _failure_count: int = 0
     _failure_threshold: int = int(os.getenv("HEALTH_FAILURE_THRESHOLD", 3))
@@ -65,11 +65,12 @@ async def health_check(args, httpserver_manager: HttpServerManager, request: Req
         sampling_params = SamplingParams()
         sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
         sampling_params.verify()
-        if args.run_mode in ["prefill", "decode"]:
-            sampling_params.group_request_id = -_g_health_req_id_gen.generate_id()  # health monitor 的 id 是负的
+        sampling_params.group_request_id = -_g_health_req_id_gen.generate_id()  # health monitor 的 id 是负的
         multimodal_params_dict = request_dict.get("multimodal_params", {})
         multimodal_params = MultimodalParams(**multimodal_params_dict)
-        results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request)
+        results_generator = httpserver_manager.generate(
+            prompt, sampling_params, multimodal_params, request, is_health_req=True
+        )
 
         async def check_timeout(results_generator):
             async for _, _, _, _ in results_generator:
