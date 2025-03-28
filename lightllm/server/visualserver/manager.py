@@ -169,7 +169,12 @@ def start_visual_process(args, router_port, visual_port, cache_port, model_rpc_p
         raise e
 
     pipe_writer.send("init ok")
+
+    def handle_exception(loop, context):
+        logger.exception(f"VisualServer Caught exception: {str(context)}")
+
     loop = asyncio.new_event_loop()
+    loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
     loop.create_task(visualserver.loop_for_fwd())
     loop.run_until_complete(visualserver.loop_for_netio_req())

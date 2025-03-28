@@ -34,12 +34,10 @@ def test_model_inference(world_size, weight_dir, quant_type=None):
 
 def tppart_model_infer(model_kvargs):
     import torch
-    from lightllm.distributed import custom_comm_ops
     import torch.distributed as dist
 
     rank_id = model_kvargs["tp_rank_id"]
     init_vision_distributed_env(model_kvargs)
-    custom_comm_ops.set_custom_reduce()
 
     torch.cuda.empty_cache()
     model_part = VisionTransformer(model_kvargs)

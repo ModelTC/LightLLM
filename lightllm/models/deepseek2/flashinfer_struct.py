@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import torch.distributed as dist
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-from lightllm.utils.envs_utils import enable_env_vars
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
 
 
@@ -17,11 +17,11 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         super().init_some_extra_state(model, input_ids)
         self.flashinfer_extra_state = model.flashinfer_extra_state
-        
+
         import flashinfer
 
         if not self.is_prefill:
-            if enable_env_vars("ENABLE_FLASHINFER_DECODE_MLA"):
+            if get_env_start_args().enable_flashinfer_decode:
                 self.q_indptr = torch.arange(self.batch_size + 1, dtype=torch.int32).to(input_ids.device)
                 self.kv_indices = torch.empty(
                     self.batch_size * self.flashinfer_extra_state.max_seq_length, dtype=torch.int32
@@ -58,7 +58,7 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
                         self.flashinfer_extra_state.kv_data_type,
                     )
         else:
-            if enable_env_vars("ENABLE_FLASHINFER_PREFILLED"):
+            if get_env_start_args().enable_flashinfer_prefill:
                 q_starts = torch.cat(
                     [self.b_start_loc, self.b_start_loc[-1:] + (self.b_seq_len - self.b_ready_cache_len)[-1:]], dim=0
                 ).int()
@@ -85,7 +85,7 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
 
     def copy_for_cuda_graph(self, new_infer_state):
         super().copy_for_cuda_graph(new_infer_state)
-        if enable_env_vars("ENABLE_FLASHINFER_DECODE_MLA") and not self.is_prefill:
+        if get_env_start_args().enable_flashinfer_decode and not self.is_prefill:
             self.decode_wrapper.plan(
                 new_infer_state.q_indptr,
                 new_infer_state.kv_starts,

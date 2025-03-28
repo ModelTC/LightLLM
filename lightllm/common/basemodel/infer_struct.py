@@ -1,6 +1,7 @@
 import torch
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
+from lightllm.distributed import CustomProcessGroup
 
 
 class InferStateInfo:
@@ -35,6 +36,11 @@ class InferStateInfo:
         self.use_dynamic_prompt_cache = False
         self.multimodal_params = None
         self.is_cuda_graph = False  # 标记是否是cuda graph的捕获推理
+        self.dist_group: CustomProcessGroup = None
+
+        # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
+        # 在一些细节场景下需要有该信息区分一些资源的申请和管理。
+        self.microbatch_index: int = 0
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         pass
@@ -44,5 +50,5 @@ class InferStateInfo:
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None:
-                    attr_.copy_(attr_value)
+                    attr_.copy_(attr_value, non_blocking=True)
         return

@@ -11,6 +11,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel import PostLayerInferTpl
 from lightllm.utils.infer_utils import mark_cost_time
+from lightllm.distributed.communication_op import all_gather
 
 
 class LlamaPostLayerInfer(PostLayerInferTpl):
@@ -21,7 +22,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         self.eps_ = network_config["rms_norm_eps"]
         self.vocab_size_ = network_config["vocab_size"]
         self.embed_dim_ = network_config["n_embed"]
-        self.enable_dp = os.getenv("ENABLE_DP", "0").upper() in ["ON", "TRUE", "1"]
         return
 
     def _norm(self, input, infer_state, layer_weight: LlamaPreAndPostLayerWeight) -> torch.Tensor:
@@ -81,14 +81,61 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         else:
             gather_data = self.alloc_tensor((self.vocab_size_, token_num), dtype=input_embdings_dtype)
             split_indexes = np.linspace(0, self.vocab_size_, self.tp_world_size_ + 1, dtype=np.int64)
-            dist.all_gather(
+            all_gather(
                 [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
                 logic_batch,
-                group=None,
+                group=infer_state.dist_group,
                 async_op=False,
             )
         logic_batch = None
-        ans_logics = self.alloc_tensor((token_num, self.vocab_size_), dtype=torch.float32, is_graph_out=True)
+        ans_logics = self.alloc_tensor(
+            (token_num, self.vocab_size_),
+            dtype=torch.float32,
+            is_graph_out=True,
+            microbatch_index=infer_state.microbatch_index,
+        )
         ans_logics[:, :] = gather_data.permute(1, 0)
         gather_data = None
         return ans_logics
+
+    def tpsp_token_forward(
+        self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
+    ):
+        if self.tp_world_size_ > 1:
+            assert len(input_embdings.shape) == 2
+            token_num, hidden_dim = input_embdings.shape
+            gather_data = torch.empty(
+                (self.tp_world_size_ * token_num, hidden_dim), device=input_embdings.device, dtype=input_embdings.dtype
+            )
+            all_gather(
+                [gather_data[i * token_num : (i + 1) * token_num, :] for i in range(self.tp_world_size_)],
+                input_embdings,
+                group=infer_state.dist_group,
+                async_op=False,
+            )
+            # len(infer_state.position_sin) 获取真实输入长度
+            input_embdings = gather_data[0 : len(infer_state.position_sin)]
+
+        return self.token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
+
+    def overlap_tpsp_token_forward(
+        self,
+        input_embdings: torch.Tensor,
+        input_embdings1: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        infer_state1: LlamaInferStateInfo,
+        layer_weight: BaseLayerWeight,
+    ):
+        if getattr(infer_state, "hook", None) is not None:
+            infer_state.hook()
+            infer_state.hook = None
+
+        logics = self.tpsp_token_forward(input_embdings, infer_state, layer_weight=layer_weight)
+
+        if getattr(infer_state1, "hook", None) is not None:
+            infer_state1.hook()
+            infer_state1.hook = None
+
+        logics1 = self.tpsp_token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
+
+        return logics, logics1

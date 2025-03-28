@@ -135,12 +135,7 @@ internlm2-1_8b
 
     $ python -m lightllm.server.api_server 
     $           --model_dir ~/models/internlm2-1_8b  \
-    $           --enable_chunked_prefill                     \
     $           --trust_remote_code               
-
-.. tip::
-
-    ``--enable_chunked_prefill`` 表示使用chunkedprefill进行长文本推理。
 
 
 **测试服务**

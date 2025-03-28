@@ -6,9 +6,11 @@ logger = init_logger(__name__)
 
 
 def send_and_receive_node_ip(args):
-    # 传输子node的ip
-    if args.nnodes > 1:
-
+    # 在多节点tp的部署形式中，0 号节点作为主节点，其他节点作为
+    # 从节点，0 号节点需要知道所有从节点的ip信息，这样才能构建
+    # 一些通信组件转发请求信息给从节点。
+    is_multinode_tp = args.dp == 1 and args.nnodes > 1
+    if is_multinode_tp:
         if args.node_rank == 0:
             args.child_ips = None
             args.child_ips = []

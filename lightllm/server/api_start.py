@@ -79,18 +79,12 @@ def normal_or_p_d_start(args):
         args.mem_fraction > 0 and args.mem_fraction < 1
     ), f"Invalid mem_fraction {args.mem_fraction}, The expected value is between 0 and 1."
 
-    if args.static_quant:
-        assert args.quant_type == "vllm-w8a8", "Only static parameter loading for vllm-w8a8 is supported."
-
-    if not args.enable_chunked_prefill:
-        args.chunked_prefill_size = 0
-
     if args.graph_max_len_in_batch == 0:
         args.graph_max_len_in_batch = args.max_req_total_len
 
     # 这些模式不能同时设置。
     assert [
-        args.enable_chunked_prefill,
+        args.disable_chunked_prefill,
         args.diverse_mode,
         args.token_healing_mode,
         args.use_reward_model,
@@ -123,7 +117,7 @@ def normal_or_p_d_start(args):
     else:
         args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
-    if not args.enable_chunked_prefill:
+    if args.disable_chunked_prefill:
         # 普通模式下
         if args.batch_max_tokens is None:
             args.batch_max_tokens = args.max_req_total_len

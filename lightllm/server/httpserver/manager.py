@@ -57,7 +57,8 @@ class HttpServerManager:
         self.node_rank = args.node_rank
         self.transfer_lock = asyncio.Lock()  # the lock for transfer to next module in multi node mode.
         self.disable_abort = args.nnodes > 1 and args.dp == 1  # mulitnode dp=1 mode, disable abort
-        if args.nnodes > 1:
+        self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
+        if self.is_multinode_tp:
             if args.node_rank == 0:
                 self.multinode_req_manager = []
                 for child_ip in args.child_ips:
@@ -547,7 +548,7 @@ class HttpServerManager:
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
 
             # 先保留这个关键得日志，用于方便定位重构中的问题。
-            if time.time() - pre_time_mark > 20:
+            if time.time() - pre_time_mark > 120:
                 pre_time_mark = time.time()
                 for req_status in self.req_id_to_out_inf.values():
                     logger.info(

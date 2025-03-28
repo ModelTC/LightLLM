@@ -203,7 +203,7 @@ class HttpServerManagerForPDMaster:
                     if old_max_new_tokens != 1:
                         finish_status = FinishStatus(FinishStatus.NO_FINISH)
                     else:
-                        finish_status = FinishStatus(finish_status)
+                        finish_status = FinishStatus(FinishStatus.FINISHED_LENGTH)
                     # 得到 p 节点返回的 prompt_ids 信息
                     if metadata.get("prompt_ids", None) is not None:
                         prompt_ids = metadata.get("prompt_ids")

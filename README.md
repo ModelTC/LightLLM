@@ -59,11 +59,6 @@ We welcome any coopoeration and contribution. If there is a project requires lig
 
     </details>
 
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=ModelTC/lightllm&type=Timeline)](https://star-history.com/#ModelTC/lightllm&Timeline)
-
 ## Community
 
 For further information and discussion, [join our discord server](https://discord.gg/WzzfwVSguU). Welcome to be a member and look forward to your contribution!
@@ -78,5 +73,7 @@ We learned a lot from the following projects when developing LightLLM.
 - [Faster Transformer](https://github.com/NVIDIA/FasterTransformer)
 - [Text Generation Inference](https://github.com/huggingface/text-generation-inference)
 - [vLLM](https://github.com/vllm-project/vllm)
+- [SGLang](https://github.com/sgl-project/sglang)
+- [flashinfer](https://github.com/flashinfer-ai/flashinfer/tree/main)
 - [Flash Attention 1&2](https://github.com/Dao-AILab/flash-attention)
 - [OpenAI Triton](https://github.com/openai/triton)

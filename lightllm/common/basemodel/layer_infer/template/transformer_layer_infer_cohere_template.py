@@ -9,6 +9,7 @@ from lightllm.utils.infer_utils import mark_cost_time
 
 from ...infer_struct import InferStateInfo
 from ..transformer_layer_infer import TransformerLayerInfer
+from lightllm.distributed.communication_op import all_reduce
 
 
 class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
@@ -82,14 +83,14 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         q = None
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
-            dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
+            all_reduce(o, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
         infer_state._attn_out = o
         return
 
     def _context_ffn(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         ffn_out = self._ffn(input_embdings, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
-            dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
+            all_reduce(ffn_out, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
         infer_state._ffn_out = ffn_out
         return
 
@@ -101,14 +102,14 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         q = None
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
-            dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
+            all_reduce(o, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
         infer_state._attn_out = o
         return
 
     def _token_ffn(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         ffn_out = self._ffn(input_embdings, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
-            dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
+            all_reduce(ffn_out, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
         infer_state._ffn_out = ffn_out
         return
 

@@ -19,12 +19,20 @@ def _per_token_group_quant_fp8(
     eps,
     fp8_min,
     fp8_max,
+    xs_m,
+    xs_n,
+    xs_row_major: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     g_id = tl.program_id(0)
     y_ptr += g_id * y_stride
     y_q_ptr += g_id * y_stride
-    y_s_ptr += g_id
+    if xs_row_major:
+        y_s_ptr += g_id
+    else:
+        row_id = g_id // xs_n
+        col_id = g_id % xs_n
+        y_s_ptr += col_id * xs_m + row_id  # col major
 
     cols = tl.arange(0, BLOCK)  # N <= BLOCK
     mask = cols < N
@@ -59,6 +67,8 @@ def per_token_group_quant_fp8(
     assert x.shape[-1] % group_size == 0, "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
 
+    xs_row_major = x_s.is_contiguous()
+    xs_m, xs_n = x_s.shape
     finfo = torch.finfo(dtype)
     fp8_max = finfo.max
 
@@ -66,7 +76,6 @@ def per_token_group_quant_fp8(
 
     M = x.numel() // group_size
     N = group_size
-
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
@@ -80,6 +89,9 @@ def per_token_group_quant_fp8(
         eps,
         fp8_min=fp8_min,
         fp8_max=fp8_max,
+        xs_m=xs_m,
+        xs_n=xs_n,
+        xs_row_major=xs_row_major,
         BLOCK=BLOCK,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -108,9 +120,10 @@ if __name__ == "__main__":
     x = torch.randn((1024, 8192), dtype=torch.bfloat16).cuda()
 
     x_q = torch.randn((1024, 8192)).cuda().to(torch.float8_e4m3fn)
-    x_s = torch.randn((1024, 8192 // group_size), dtype=torch.float32).cuda()
-
+    # x_s = torch.randn((1024, 8192 // group_size), dtype=torch.float32).cuda()
+    x_s = torch.randn((8192 // group_size, 1024 + 10), dtype=torch.float32).cuda().t()
     per_token_group_quant_fp8(x, group_size, x_q, x_s)
+    x_s = x_s[:1024]
     th_x_q, th_x_s = torch_quant(x, group_size)
     print("th_x_s - x_s", torch.abs(th_x_s - x_s.reshape(-1)).max())
     print("th_x_q - x_q", torch.abs(th_x_q.to(torch.float32) - x_q.to(torch.float32)).max())

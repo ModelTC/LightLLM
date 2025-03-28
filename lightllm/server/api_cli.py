@@ -167,7 +167,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use_dynamic_prompt_cache", action="store_true", help="use_dynamic_prompt_cache test")
 
     parser.add_argument("--chunked_prefill_size", type=int, default=8192, help="chunked prefill size")
-    parser.add_argument("--enable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
+    parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
 
@@ -187,7 +187,33 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_multimodal", action="store_true", help="Whether or not to allow to load additional multimodal models."
     )
-    parser.add_argument("--disable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")
+    parser.add_argument("--enable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")
+    parser.add_argument("--enable_custom_allgather", action="store_true", help="Whether to enable cutom allgather.")
+    parser.add_argument(
+        "--enable_tpsp_mix_mode",
+        action="store_true",
+        help="""inference backend will use TP SP Mixed running mode.
+        only llama and deepseek v3 model supported now.""",
+    )
+    parser.add_argument(
+        "--enable_decode_microbatch_overlap",
+        action="store_true",
+        help="""inference backend will use microbatch overlap mode for decode.
+        only deepseekv3 model supported now.""",
+    )
+    parser.add_argument(
+        "--enable_flashinfer_prefill",
+        action="store_true",
+        help="""inference backend will use the attention kernel of flashinfer for prefill,
+        only deepseekv3 model supported now.""",
+    )
+    parser.add_argument(
+        "--enable_flashinfer_decode",
+        action="store_true",
+        help="""inference backend will use the attention kernel of flashinfer for decode,
+        only deepseekv3 model supported now.""",
+    )
+
     parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )
@@ -289,10 +315,5 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="""Path of quantization config. It can be used for mixed quantization.
             Examples can be found in lightllm/common/quantization/configs.""",
-    )
-    parser.add_argument(
-        "--static_quant",
-        action="store_true",
-        help="whether to load static quantized weights. Currently, only vllm-w8a8 is supported.",
     )
     return parser

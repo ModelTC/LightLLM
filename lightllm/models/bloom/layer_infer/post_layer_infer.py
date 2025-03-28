@@ -1,12 +1,12 @@
 import torch
 import torch.functional as F
-import torch.distributed as dist
 import numpy as np
 
 from lightllm.models.bloom.layer_weights.pre_and_post_layer_weight import BloomPreAndPostLayerWeight
 from einops import rearrange
 from lightllm.common.basemodel import InferStateInfo, PostLayerInferTpl
 from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
+from lightllm.distributed.communication_op import all_gather
 
 
 class BloomPostLayerInfer(PostLayerInferTpl):
@@ -49,10 +49,10 @@ class BloomPostLayerInfer(PostLayerInferTpl):
                 (self.vocab_size_, batch_size), device=logic_batch.device, dtype=input_embdings_dtype
             )
             split_size = self.vocab_size_ // self.tp_world_size_
-            dist.all_gather(
+            all_gather(
                 [gather_data[i * split_size : (i + 1) * split_size, :] for i in range(self.tp_world_size_)],
                 logic_batch,
-                group=None,
+                group=infer_state.dist_group,
                 async_op=False,
             )
         logic_batch = None

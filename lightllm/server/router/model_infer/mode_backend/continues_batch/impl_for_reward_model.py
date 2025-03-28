@@ -2,7 +2,7 @@ import torch
 from typing import List, Tuple
 from .impl import ContinuesBatchBackend
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams, g_infer_context
-from .pre_process import prepare_prefill_inputs, prepare_decode_inputs
+from lightllm.server.router.model_infer.mode_backend.generic_pre_process import prepare_prefill_inputs
 from lightllm.server.core.objs import FinishStatus
 
 
@@ -13,7 +13,8 @@ class RewardModelBackend(ContinuesBatchBackend):
     def prefill(self, reqs: List[Tuple]):
         req_ids = self._init_reqs(reqs, init_req_obj=True)
 
-        kwargs, run_reqs = prepare_prefill_inputs(req_ids, self.is_multimodal)
+        req_objs = self._trans_req_ids_to_req_objs(req_ids)
+        kwargs, run_reqs = prepare_prefill_inputs(req_objs, is_chuncked_mode=False, is_multimodal=self.is_multimodal)
 
         scores: torch.Tensor = self.model.forward(**kwargs)
         scores = scores.unsqueeze(1).detach().cpu().float().numpy()

@@ -37,3 +37,8 @@ def get_env_start_args():
 @lru_cache(maxsize=None)
 def enable_env_vars(args):
     return os.getenv(args, "False").upper() in ["ON", "TRUE", "1"]
+
+
+@lru_cache(maxsize=None)
+def get_deepep_num_max_dispatch_tokens_per_rank():
+    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK", 256))

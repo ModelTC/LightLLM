@@ -8,6 +8,7 @@ from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.server.embed_cache.utils import bytes2tensor, read_shm, get_shm_name_embed
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
+from lightllm.distributed.communication_op import all_reduce
 
 
 """
@@ -80,5 +81,5 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             self.vob_end_id_,
         )
         if self.tp_world_size_ > 1:
-            dist.all_reduce(out, op=dist.ReduceOp.SUM, async_op=False)
+            all_reduce(out, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
         return out

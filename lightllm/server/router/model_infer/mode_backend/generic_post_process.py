@@ -2,7 +2,7 @@ import torch
 from typing import List
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 from dataclasses import dataclass
-from ...infer_batch import InferReq, g_infer_context
+from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 
 
 def sample(logits, reqs, eos_id: List[int] = [2]):

@@ -50,6 +50,7 @@ class MemoryManager:
             head_dim,
             layer_num,
         )
+        self.HOLD_TOKEN_MEMINDEX = self.size
 
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
@@ -71,7 +72,11 @@ class MemoryManager:
         return
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        self.kv_buffer = torch.empty((layer_num, size, 2 * head_num, head_dim), dtype=dtype, device="cuda")
+        # 在初始化 kv_buffer 的时候，每层多初始化了一个 token，这个 token 永远不会被真的被对外
+        # 分配，内部实际也没有管理，这个token是预留来对一些特殊的运行模式，如多dp下，overlap microbatch
+        # 等模式下 padding 一些请求，使推理过程可以正常运行采用的，其索引值为size，存储在HOLD_TOKEN_MEMINDEX
+        # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
+        self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
 
     def alloc_kv_move_buffer(self, max_req_total_len):
         """
@@ -244,6 +249,7 @@ class MemoryManager:
         if isinstance(free_index, list):
             self.mem_state.numpy()[start:end] = free_index
         else:
+            # 从 gpu 到 cpu 的拷贝操作是流内阻塞操作
             self.mem_state[start:end] = free_index
 
         self.mark_start -= len(free_index)

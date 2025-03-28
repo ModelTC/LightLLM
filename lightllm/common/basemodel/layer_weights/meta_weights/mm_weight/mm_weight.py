@@ -178,10 +178,7 @@ class MMWeight:
         if quant_cfg is None:
             return None, False
         quant_method = quant_cfg.get_quant_method(layer_num_, name)
-        quant_type = quant_cfg.get_quant_type(layer_num_, name)
         quantized_weight = quant_cfg.quantized_weight
-        if quant_method is not None:
-            logger.info(f"Layer {layer_num_} {name} is set to {quant_type}")
         return quant_method, quantized_weight
 
     @classmethod

@@ -3,7 +3,7 @@ import torch.distributed as dist
 import rpyc
 from typing import Dict, List, Tuple
 from rpyc.utils.classic import obtain
-from .prefill_impl import ContinuesBatchBackendForPrefillNode
+from .prefill_impl import ChunckedPrefillForPrefillNode
 from lightllm.common.basemodel.infer_lock import g_router_lock, acquire_lock_until_ready, release_acquired_lock
 from .prefill_task_cache import g_kv_move_task_cache
 from lightllm.utils.log_utils import init_logger
@@ -12,7 +12,7 @@ logger = init_logger(__name__)
 
 
 class PDPrefillInferRpcServer(rpyc.Service):
-    def __init__(self, backend: ContinuesBatchBackendForPrefillNode) -> None:
+    def __init__(self, backend: ChunckedPrefillForPrefillNode) -> None:
         super().__init__()
         self.backend = backend
         self.device_id = self.backend.current_device_id

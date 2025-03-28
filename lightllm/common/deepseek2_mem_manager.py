@@ -15,16 +15,10 @@ class Deepseek2MemoryManager(MemoryManager):
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
 
-        self.dp_use_token_index = self.size
-
     def get_cell_size(self):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        # deepseek model 的 kv pool 每 layer 会多申请一个， 预留给 dp 运行模式下，用于平衡各个 dp 间的batch size
-        # 保持一致。具体操作就是如果在 dp 2 的情况下， dp_1 decode batch size 是 10， dp_2 decode batch size 是
-        # 5, 会利用预留的一个token位置，构建一个长度为1的fake 请求，让 dp_2 的 decode batch size padding 到 10，
-        # 这样 dp_1 和 dp_2 的 batch size就一样了，这样可以更容易进行 all gather cuda graph 等操作。
         self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda")
 
         # todo, etp or edp use the same work buffer here

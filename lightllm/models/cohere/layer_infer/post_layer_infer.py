@@ -9,6 +9,7 @@ from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerW
 
 from einops import rearrange
 from lightllm.common.basemodel import PostLayerInferTpl
+from lightllm.distributed.communication_op import all_gather
 
 
 class CoherePostLayerInfer(PostLayerInferTpl):
@@ -86,10 +87,10 @@ class CoherePostLayerInfer(PostLayerInferTpl):
                 (self.vocab_size_, token_num), device=logic_batch.device, dtype=input_embdings_dtype
             )
             split_indexes = np.linspace(0, self.vocab_size_, self.tp_world_size_ + 1, dtype=np.int64)
-            dist.all_gather(
+            all_gather(
                 [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
                 logic_batch,
-                group=None,
+                group=infer_state.dist_group,
                 async_op=False,
             )
         gather_data = gather_data * self.logits_scale

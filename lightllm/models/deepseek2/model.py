@@ -1,4 +1,5 @@
 import torch
+from typing import final
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -10,7 +11,9 @@ from lightllm.common.deepseek2_mem_manager import Deepseek2MemoryManager
 from lightllm.common.deepseek2_fp8kv_mem_manager import Deepseek2FP8KVMemoryManager
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
-from lightllm.utils.envs_utils import enable_env_vars
+from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
+from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 
 
 logger = init_logger(__name__)
@@ -19,13 +22,13 @@ logger = init_logger(__name__)
 class FlashInferStateExtraInfo:
     def __init__(self, model):
         num_heads = model.config["num_attention_heads"]
-        self.tp_q_head_num = num_heads if enable_env_vars("ENABLE_DP") else num_heads // model.world_size_
+        self.tp_q_head_num = num_heads // get_dp_world_size()
         self.qk_nope_head_dim = model.qk_nope_head_dim
         self.qk_rope_head_dim = model.qk_rope_head_dim
         self.kv_lora_rank = model.kv_lora_rank
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
-        self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(model.tp_rank_)
+        self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(get_current_device_id())
         self.max_seq_length = model.max_seq_length
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
         if model.config["rope_scaling"] is not None:
@@ -44,14 +47,15 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     # infer class
     transformer_layer_infer_class = Deepseek2TransformerLayerInfer
 
-    enable_flashinfer = enable_env_vars("ENABLE_FLASHINFER_PREFILLED") or enable_env_vars(
-        "ENABLE_FLASHINFER_DECODE_MLA"
-    )
-
     # infer state class
-    infer_state_class = Deepseek2FlashInferStateInfo if enable_flashinfer else Deepseek2InferStateInfo
+    infer_state_class = Deepseek2InferStateInfo
 
     def __init__(self, kvargs):
+        self.enable_flashinfer = (
+            get_env_start_args().enable_flashinfer_prefill or get_env_start_args().enable_flashinfer_decode
+        )
+        if self.enable_flashinfer:
+            self.infer_state_class = Deepseek2FlashInferStateInfo
         super().__init__(kvargs)
         return
 
@@ -167,3 +171,9 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         self._sin_cached = (freqs.sin() * _mscale).to(self.data_type).cuda()
 
         return
+
+    @final
+    def _context_forward(self, input_ids, infer_state):
+        predict_logics = super()._context_forward(input_ids, infer_state)
+        dist_group_manager.clear_deepep_buffer()
+        return predict_logics

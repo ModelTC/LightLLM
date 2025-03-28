@@ -19,7 +19,6 @@ from ..triton_kernel.weight_dequant import weight_dequant
 
 class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        self.enable_dp = os.getenv("ENABLE_DP", "0").upper() in ["ON", "TRUE", "1"]
         self.enable_cc_method = not os.getenv("DISABLE_CC_METHOD", "False").upper() in ["ON", "TRUE", "1"]
         super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
         return
@@ -226,21 +225,37 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         )
 
         self._load_mlp(f"model.layers.{self.layer_num_}.mlp.shared_experts")
-
-        load_func = FusedMoeWeightEP if enable_env_vars("ETP_MODE_ENABLED") else FusedMoeWeightTP
-        self.experts = load_func(
-            gate_proj_name="gate_proj",
-            down_proj_name="down_proj",
-            up_proj_name="up_proj",
-            e_score_correction_bias_name=self.e_score_correction_bias_name,
-            weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
-            n_routed_experts=self.n_routed_experts,
-            split_inter_size=moe_intermediate_size // self.tp_world_size_,
-            data_type=self.data_type_,
-            network_config=self.network_config_,
-            layer_num=self.layer_num_,
-            quant_cfg=self.quant_cfg,
-        )
+        moe_mode = os.getenv("MOE_MODE", "TP")
+        assert moe_mode in ["EP", "TP"]
+        if moe_mode == "TP":
+            self.experts = FusedMoeWeightTP(
+                gate_proj_name="gate_proj",
+                down_proj_name="down_proj",
+                up_proj_name="up_proj",
+                e_score_correction_bias_name=self.e_score_correction_bias_name,
+                weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
+                n_routed_experts=self.n_routed_experts,
+                split_inter_size=moe_intermediate_size // self.tp_world_size_,
+                data_type=self.data_type_,
+                network_config=self.network_config_,
+                layer_num=self.layer_num_,
+                quant_cfg=self.quant_cfg,
+            )
+        elif moe_mode == "EP":
+            self.experts = FusedMoeWeightEP(
+                gate_proj_name="gate_proj",
+                down_proj_name="down_proj",
+                up_proj_name="up_proj",
+                e_score_correction_bias_name=self.e_score_correction_bias_name,
+                weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
+                n_routed_experts=self.n_routed_experts,
+                data_type=self.data_type_,
+                network_config=self.network_config_,
+                layer_num=self.layer_num_,
+                quant_cfg=self.quant_cfg,
+            )
+        else:
+            raise ValueError(f"Unsupported moe mode: {moe_mode}")
 
     def _init_ffn(self):
         self._load_mlp(f"model.layers.{self.layer_num_}.mlp")

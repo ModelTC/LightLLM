@@ -12,8 +12,8 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, InferSampli
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.pd_io_struct import KVMoveTask, DecodeNodeInfo
 from lightllm.utils.log_utils import init_logger
-from ...pre_process import prepare_prefill_inputs, prepare_decode_inputs
-from ...post_process import sample
+from lightllm.server.router.model_infer.mode_backend.generic_pre_process import prepare_prefill_inputs
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.infer_lock import g_router_lock, g_infer_state_lock
 from rpyc.utils.server import ThreadedServer
 from .prefill_task_cache import g_kv_move_task_cache
@@ -23,7 +23,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 logger = init_logger(__name__)
 
 
-class ContinuesBatchBackendForPrefillNode(ModeBackend):
+class ChunckedPrefillForPrefillNode(ModeBackend):
     def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
         super().__init__()
         self.info_queue: mp.Queue = info_queue
@@ -56,63 +56,39 @@ class ContinuesBatchBackendForPrefillNode(ModeBackend):
         return
 
     def prefill(self, reqs: List[Tuple]):
-        req_ids = self._init_reqs(reqs)
-        self.forward(req_ids, is_prefill=True)
+        self._init_reqs(reqs)
         return
 
     def decode(self):
-        pass
+        uinit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
+            g_infer_context.infer_req_ids,
+            no_decode=True,
+        )
+        assert len(uinit_reqs) == 0
+        assert len(decode_reqs) == 0
+
+        self._filter_reqs(aborted_reqs)
+
+        if ok_finished_reqs:
+            self.prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(ok_finished_reqs)
+            self._filter_reqs(ok_finished_reqs)
+
+        if prefill_reqs:
+            kwargs, run_reqs = prepare_prefill_inputs(
+                prefill_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
+            )
+
+            logits = self.model.forward(**kwargs)
+            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
+            next_token_ids = next_token_ids.detach().cpu().numpy()
+            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+
+            self._post_handle(
+                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=True, do_filter_finished_reqs=False
+            )
         return
 
-    def forward(self, req_ids: List[int], is_prefill):
-        assert is_prefill is True
-
-        kwargs, run_reqs = prepare_prefill_inputs(req_ids, self.is_multimodal)
-
-        logits = self.model.forward(**kwargs)
-
-        next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-        next_token_ids = next_token_ids.detach().cpu().numpy()
-        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
-        finished_req_ids = []
-
-        for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
-            # prefill and decode is same
-            req_obj: InferReq = req_obj
-            req_obj.cur_kv_len = req_obj.get_cur_total_len()
-            # 只需要有真实采样的进程写入最后结果即可，由于其他进程没有做运算，所以其fake结果
-            # 不能写入。
-            if self.is_master_in_dp:
-                req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
-            req_obj.cur_output_len += 1
-
-            req_obj.out_token_id_count[next_token_id] += 1
-            req_obj.update_finish_status(self.eos_id)
-
-            if req_obj.finish_status.is_finished() or req_obj.shm_req.router_aborted:
-                finished_req_ids.append(req_obj.shm_req.request_id)
-
-            if self.is_master_in_dp:
-                # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
-                # finish_token_index finish_status candetoken_out_len 是
-                # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
-                req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
-                req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
-
-                if req_obj.finish_status.is_finished():
-                    req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                    req_obj.shm_req.finish_status = req_obj.finish_status
-
-                req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
-
-        if is_prefill:
-            self.prefill_req_handle_and_frozen_tokens(run_reqs)
-
-        g_infer_context.filter(finished_req_ids)
-        return
-
-    def prefill_req_handle_and_frozen_tokens(self, run_reqs: List[InferReq]):
+    def prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, run_reqs: List[InferReq]):
         # 提前在radix cache中回收相关的信息，并添加引用信息
         if self.is_master_in_dp:
             logger.info("prefill_req_handle_and_frozen_tokens")

@@ -133,7 +133,7 @@ def test_grouped_matmul():
         ans_list.append(t_ans)
 
     true_out = torch.cat(ans_list, dim=0)
-    logger.info(f"grouped_matmul max delta {torch.max(torch.abs(out - 0.5*true_out))}")
+
     assert torch.allclose(0.5 * true_out, out, atol=1e-2, rtol=0)
 
 

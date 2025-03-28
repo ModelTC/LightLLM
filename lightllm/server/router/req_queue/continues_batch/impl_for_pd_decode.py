@@ -8,7 +8,7 @@ from lightllm.server.router.req_queue.base_queue import BaseQueue
 from lightllm.common.basemodel.infer_lock import g_router_lock
 
 
-class ContinuesBatchQueueForPDDecode(BaseQueue):
+class QueueForPDDecode(BaseQueue):
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
 
@@ -58,14 +58,18 @@ class ContinuesBatchQueueForPDDecode(BaseQueue):
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):
         is_busy = self.is_busy()
         self._init_cache_list(current_batch, is_busy)
-        self.cache_len_list.sort(key=lambda x: -x[1])
-        left_out_len_array = np.array([e[1] for e in self.cache_len_list])
-        has_run_len_array = np.array([e[0] for e in self.cache_len_list])
-        cum_run_len_array = np.cumsum(has_run_len_array)
-        size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
-        need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
-        return (
-            need_max_token_num,
-            (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
-            / self.max_total_tokens,
-        )
+        if len(self.cache_len_list) != 0:
+            self.cache_len_list.sort(key=lambda x: -x[1])
+            left_out_len_array = np.array([e[1] for e in self.cache_len_list])
+            has_run_len_array = np.array([e[0] for e in self.cache_len_list])
+            cum_run_len_array = np.cumsum(has_run_len_array)
+            size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
+            need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
+        else:
+            need_max_token_num = 0
+        with g_router_lock.obj:
+            return (
+                need_max_token_num,
+                (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
+                / self.max_total_tokens,
+            )

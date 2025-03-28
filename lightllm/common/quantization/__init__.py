@@ -5,6 +5,10 @@ from .ppl_quant import *
 from .torchao_quant import *
 from .vllm_quant import *
 from .triton_quant.triton_quant import *
+from .deepgemm_quant import *
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class Quantcfg:
@@ -33,7 +37,14 @@ class Quantcfg:
         if self.hf_quantization_method == "fp8":
             block_size = self.hf_quantization_config.get("weight_block_size", None)
             if block_size == [128, 128]:
-                self.quant_type = "vllm-fp8w8a8-b128"
+                from lightllm.common.quantization.deepgemm_quant import HAS_DEEPGEMM
+
+                if HAS_DEEPGEMM:
+                    self.quant_type = "deepgemm-fp8w8a8-b128"
+                else:
+                    self.quant_type = "vllm-fp8w8a8-b128"
+                logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
+
             else:
                 # TODO: more quant method
                 pass

@@ -3,8 +3,11 @@ from .impl import ContinuesBatchBackend
 from typing import List, Tuple
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, InferSamplingParams
-from .pre_process import prepare_prefill_inputs, prepare_decode_inputs
-from .post_process import sample
+from lightllm.server.router.model_infer.mode_backend.generic_pre_process import (
+    prepare_prefill_inputs,
+    prepare_decode_inputs,
+)
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.tokenizer import get_tokenizer
 
 
@@ -36,10 +39,8 @@ class TokenHealingBackend(ContinuesBatchBackend):
 
     def prefill(self, reqs: List[Tuple]):
         req_ids = self._init_reqs(reqs)
-
-        # 在 token_healing 的模式下，暂时不能启用 dynamic prompt cache
-        assert self.radix_cache is None
-        kwargs, run_reqs = prepare_prefill_inputs(req_ids)
+        req_objs = self._trans_req_ids_to_req_objs(req_ids)
+        kwargs, run_reqs = prepare_prefill_inputs(req_objs, is_chuncked_mode=False, is_multimodal=self.is_multimodal)
 
         logics = self.model.forward(**kwargs)
 
@@ -63,107 +64,67 @@ class TokenHealingBackend(ContinuesBatchBackend):
         next_token_ids = next_token_ids.detach().cpu().numpy()
         next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
-        finished_req_ids = []
-
-        for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
-            req_obj: InferReq = req_obj
-            req_obj.cur_kv_len = req_obj.get_cur_total_len()
-
-            req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
-            req_obj.cur_output_len += 1
-
-            req_obj.out_token_id_count[next_token_id] += 1
-            req_obj.update_finish_status(self.eos_id)
-
-            next_token = self.token_id_to_token[int(next_token_id)]
-
-            if len(req_obj.prefix_str) != 0:
-                if req_obj.prefix_str.startswith(next_token):
-                    req_obj.prefix_str = req_obj.prefix_str[len(next_token) :]
-                elif next_token.startswith(req_obj.prefix_str):
-                    req_obj.prefix_str = ""
-                else:
-                    assert False, "dead path"
-
-            if req_obj.finish_status.is_finished() or req_obj.shm_req.router_aborted:
-                finished_req_ids.append(req_obj.shm_req.request_id)
-
-            if self.is_master_in_dp:
-                # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
-                # finish_token_index finish_status candetoken_out_len 是
-                # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
-                req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
-                req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
-
-                if req_obj.finish_status.is_finished():
-                    req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                    req_obj.shm_req.finish_status = req_obj.finish_status
-
-                req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
-
-        g_infer_context.filter(finished_req_ids)
+        self._post_handle(
+            run_reqs,
+            next_token_ids,
+            next_token_logprobs,
+            is_chuncked_mode=False,
+            do_filter_finished_reqs=False,
+            extra_post_req_handle_func=self._update_tokenhealing_req_prefix_str,
+        )
         return
 
     def decode(self):
-        # 当前token headling 不支持 prompt cache
-        assert self.radix_cache is None
-        kwargs, run_reqs = prepare_decode_inputs(g_infer_context.infer_req_ids)
+        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
+            g_infer_context.infer_req_ids
+        )
+        assert len(uninit_reqs) == 0
+        assert len(prefill_reqs) == 0
 
-        logits = self.model.forward(**kwargs)
+        if aborted_reqs:
+            g_infer_context.filter_reqs(aborted_reqs)
 
-        # 对 logits 添加 prefix 限制
-        all_no_prefix = all([len(e.prefix_str) == 0 for e in run_reqs])
-        if not all_no_prefix:
-            mask = torch.ones_like(logits, dtype=torch.bool)
-            for i, run_obj in enumerate(run_reqs):
-                self._mask_decode_not_prefix_token(i, run_obj, mask)
+        if decode_reqs:
+            kwargs, run_reqs = prepare_decode_inputs(decode_reqs)
+            logits = self.model.forward(**kwargs)
+            self._overlap_req_init_and_filter(uninit_reqs=[], ok_finished_reqs=ok_finished_reqs, clear_list=True)
 
-            logits[mask] = -1000000.0
-        # self._topk_repair(run_reqs)
-        next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-        # self._topk_recover(run_reqs)
-        next_token_ids = next_token_ids.detach().cpu().numpy()
-        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+            # 对 logits 添加 prefix 限制
+            all_no_prefix = all([len(e.prefix_str) == 0 for e in run_reqs])
+            if not all_no_prefix:
+                mask = torch.ones_like(logits, dtype=torch.bool)
+                for i, run_obj in enumerate(run_reqs):
+                    self._mask_decode_not_prefix_token(i, run_obj, mask)
 
-        finished_req_ids = []
+                logits[mask] = -1000000.0
+            # self._topk_repair(run_reqs)
+            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
+            # self._topk_recover(run_reqs)
+            next_token_ids = next_token_ids.detach().cpu().numpy()
+            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
-        for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
-            req_obj: InferReq = req_obj
-            req_obj.cur_kv_len = req_obj.get_cur_total_len()
+            self._post_handle(
+                run_reqs,
+                next_token_ids,
+                next_token_logprobs,
+                is_chuncked_mode=False,
+                do_filter_finished_reqs=False,
+                extra_post_req_handle_func=self._update_tokenhealing_req_prefix_str,
+            )
 
-            req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
-            req_obj.cur_output_len += 1
+        self._overlap_req_init_and_filter(uninit_reqs=[], ok_finished_reqs=ok_finished_reqs, clear_list=True)
+        return
 
-            req_obj.out_token_id_count[next_token_id] += 1
-            req_obj.update_finish_status(self.eos_id)
+    def _update_tokenhealing_req_prefix_str(self, req_obj: InferReq, next_token_id, next_token_logprob):
+        next_token = self.token_id_to_token[int(next_token_id)]
 
-            next_token = self.token_id_to_token[int(next_token_id)]
-
-            if len(req_obj.prefix_str) != 0:
-                if req_obj.prefix_str.startswith(next_token):
-                    req_obj.prefix_str = req_obj.prefix_str[len(next_token) :]
-                elif next_token.startswith(req_obj.prefix_str):
-                    req_obj.prefix_str = ""
-                else:
-                    assert False, "dead path"
-
-            if req_obj.finish_status.is_finished() or req_obj.shm_req.router_aborted:
-                finished_req_ids.append(req_obj.shm_req.request_id)
-
-            if self.is_master_in_dp:
-                # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
-                # finish_token_index finish_status candetoken_out_len 是
-                # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
-                req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
-                req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
-
-                if req_obj.finish_status.is_finished():
-                    req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                    req_obj.shm_req.finish_status = req_obj.finish_status
-
-                req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
-
-        g_infer_context.filter(finished_req_ids)
+        if len(req_obj.prefix_str) != 0:
+            if req_obj.prefix_str.startswith(next_token):
+                req_obj.prefix_str = req_obj.prefix_str[len(next_token) :]
+            elif next_token.startswith(req_obj.prefix_str):
+                req_obj.prefix_str = ""
+            else:
+                assert False, "dead path"
         return
 
     def _mask_not_prefix_token(self, i, run_obj: InferReq, mask):

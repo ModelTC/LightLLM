@@ -178,7 +178,7 @@ class W8A8B128MultiROWMMWeight(UnquantizedMultiROWMMWeight):
                 self.weight_scales[i] = weight_scale
 
     def _process_weight_scale(self, weight_scale) -> None:
-        self.weight_scale = weight_scale.transpose(0, 1).cuda(get_current_device_id())
+        self.weight_scale = weight_scale.cuda(get_current_device_id()).transpose(0, 1)
 
     def _process_weight(self, weight) -> None:
         self.weight = weight.cuda(get_current_device_id()).transpose(0, 1)

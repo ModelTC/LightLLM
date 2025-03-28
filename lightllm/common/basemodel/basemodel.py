@@ -17,6 +17,9 @@ from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.distributed.communication_op import CustomProcessGroup, dist_group_manager
+from lightllm.common.basemodel.microbatch_overlap_objs import DecodeMicroBatch
 
 logger = init_logger(__name__)
 
@@ -53,16 +56,15 @@ class TpPartBaseModel:
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
-        enable_chunked_prefill = kvargs.get("enable_chunked_prefill", False)  # chunked prefill is default on.
-        self.use_dynamic_prompt_cache = self.use_dynamic_prompt_cache or enable_chunked_prefill
         self.data_type = kvargs.get("data_type", "float16")
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
-        self.quant_type = kvargs.get("quant_type", None)
+        self.quant_type = kvargs.get("quant_type", "none")
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
+        self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
         self._init_datatype()
         self._init_config()
@@ -98,7 +100,6 @@ class TpPartBaseModel:
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
-
         return
 
     @final
@@ -207,7 +208,10 @@ class TpPartBaseModel:
             None if self.disable_cudagraph else CudaGraph(self.graph_max_batch_size, self.graph_max_len_in_batch)
         )
         if self.graph is not None:
-            self.graph.warmup(self)
+            if get_env_start_args().enable_decode_microbatch_overlap:
+                self.graph.warmup_overlap(self)
+            else:
+                self.graph.warmup(self)
 
     def _init_custom(self):
         pass
@@ -296,6 +300,7 @@ class TpPartBaseModel:
             dtype=self.data_type,
             device="cuda",
         )
+        infer_state.dist_group = dist_group_manager.get_default_group()
 
         init_req_to_token_indexes(
             self.req_manager.req_to_token_indexs,
@@ -346,6 +351,7 @@ class TpPartBaseModel:
             dtype=self.data_type,
             device="cuda",
         )
+        infer_state.dist_group = dist_group_manager.get_default_group()
         copy_kv_index_to_req(self.req_manager.req_to_token_indexs, b_req_idx, b_seq_len, infer_state.mem_index)
 
         infer_state.init_some_extra_state(self, input_ids)
@@ -359,31 +365,142 @@ class TpPartBaseModel:
             predict_logics = self._token_forward(input_ids, infer_state)
         return predict_logics
 
+    @torch.no_grad()
+    def microbatch_overlap_decode(self, batch: DecodeMicroBatch, batch1: DecodeMicroBatch):
+        assert batch.batch_size == batch1.batch_size
+        assert batch.mem_indexes.is_cuda
+        assert batch1.mem_indexes.is_cuda
+        input_ids, input_ids1 = batch.input_ids, batch1.input_ids
+
+        def create_inferstate(cur_batch: DecodeMicroBatch, batch_index):
+            infer_state = self.infer_state_class()
+            infer_state.is_prefill = False
+            infer_state.batch_size = cur_batch.batch_size
+            infer_state.total_token_num = cur_batch.total_token_num
+            infer_state.max_len_in_batch = cur_batch.max_len_in_batch
+            infer_state.use_dynamic_prompt_cache = self.use_dynamic_prompt_cache
+            assert cur_batch.b_req_idx.shape[0] == cur_batch.b_start_loc.shape[0] == cur_batch.b_seq_len.shape[0]
+            infer_state.b_req_idx = cur_batch.b_req_idx
+            infer_state.b_start_loc = cur_batch.b_start_loc
+            infer_state.b_seq_len = cur_batch.b_seq_len
+            infer_state.multimodal_params = None
+            infer_state.microbatch_index = batch_index
+
+            infer_state.mem_manager = self.mem_manager
+            infer_state.req_manager = self.req_manager
+
+            # 在使用 cuda graph 特性的时候，必须保证每次推理的流程一致
+            # 所以不再使用分配连续的mem带来的优化，保证推理流程的一致
+            infer_state.mem_is_contiguous = False
+            infer_state.mem_index = cur_batch.mem_indexes
+            infer_state.kv_buffer = torch.empty(
+                (cur_batch.batch_size, self.tp_k_head_num_ + self.tp_v_head_num_, self.head_dim_),
+                dtype=self.data_type,
+                device="cuda",
+            )
+            infer_state.dist_group = dist_group_manager.get_group(batch_index)
+            copy_kv_index_to_req(
+                self.req_manager.req_to_token_indexs, cur_batch.b_req_idx, cur_batch.b_seq_len, infer_state.mem_index
+            )
+            return infer_state
+
+        infer_state = create_inferstate(batch, 0)
+        infer_state1 = create_inferstate(batch1, 1)
+
+        infer_state.init_some_extra_state(self, input_ids)
+        infer_state1.init_some_extra_state(self, input_ids1)
+
+        batch_size = batch.batch_size
+        max_len_in_batch = max(batch.max_len_in_batch, batch1.max_len_in_batch)
+
+        if self.graph is not None and self.graph.can_run(batch_size, max_len_in_batch):
+            if self.graph.need_capture(batch_size):
+                infer_state.is_cuda_graph = True
+                infer_state1.is_cuda_graph = True
+
+                predict_logics, predict_logics1 = self.graph.capture_decode(
+                    self._overlap_tpsp_token_forward,
+                    input_ids,
+                    infer_state,
+                    input_ids1=input_ids1,
+                    infer_state1=infer_state1,
+                )
+            else:
+                predict_logics, predict_logics1 = self.graph.replay(
+                    input_ids, infer_state, input_ids1=input_ids1, infer_state1=infer_state1
+                )
+        else:
+            predict_logics, predict_logics1 = self._overlap_tpsp_token_forward(
+                input_ids, infer_state, input_ids1=input_ids1, infer_state1=infer_state1
+            )
+        return predict_logics, predict_logics1
+
     @final
     def _context_forward(self, input_ids, infer_state: InferStateInfo):
+        run_mode_index = 1 if self.enable_tpsp_mix_mode else 0
         g_cache_manager.cache_env_in()
         cuda_input_ids = input_ids
-        input_embs = self.pre_infer.context_forward(cuda_input_ids, infer_state, self.pre_post_weight)
-        for i in range(0, self.layers_num):
-            input_embs = self.layers_infer[i].context_forward(input_embs, infer_state, self.trans_layers_weight[i])
-        predict_logics = self.post_infer.token_forward(input_embs, infer_state, self.pre_post_weight)
+
+        pre_method = (self.pre_infer.context_forward, self.pre_infer.tpsp_context_forward)[run_mode_index]
+        input_embs = pre_method(cuda_input_ids, infer_state, self.pre_post_weight)
+
+        for i in range(self.layers_num):
+            layer = self.layers_infer[i]
+            layer_method = (layer.context_forward, layer.tpsp_context_forward)[run_mode_index]
+            input_embs = layer_method(input_embs, infer_state, self.trans_layers_weight[i])
+
+        post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
+        predict_logics = post_method(input_embs, infer_state, self.pre_post_weight)
+
         g_cache_manager.cache_env_out()
         return predict_logics
 
     @final
     def _token_forward(self, input_ids, infer_state: InferStateInfo):
+        run_mode_index = 1 if self.enable_tpsp_mix_mode else 0
         g_cache_manager.cache_env_in(
             is_cuda_graph=infer_state.is_cuda_graph,
             cur_batch_size=infer_state.batch_size,
             cuda_graph_max_batch_size=self.graph_max_batch_size,
         )
         cuda_input_ids = input_ids
-        input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
-        for i in range(0, self.layers_num):
-            input_embs = self.layers_infer[i].token_forward(input_embs, infer_state, self.trans_layers_weight[i])
-        predict_logics = self.post_infer.token_forward(input_embs, infer_state, self.pre_post_weight)
+        pre_method = (self.pre_infer.token_forward, self.pre_infer.tpsp_token_forward)[run_mode_index]
+        input_embs = pre_method(cuda_input_ids, infer_state, self.pre_post_weight)
+        for i in range(self.layers_num):
+            layer = self.layers_infer[i]
+            layer_method = (layer.token_forward, layer.tpsp_token_forward)[run_mode_index]
+            input_embs = layer_method(input_embs, infer_state, self.trans_layers_weight[i])
+
+        post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
+        predict_logics = post_method(input_embs, infer_state, self.pre_post_weight)
+
         g_cache_manager.cache_env_out()
         return predict_logics
+
+    @final
+    def _overlap_tpsp_token_forward(
+        self, input_ids, infer_state: InferStateInfo, input_ids1, infer_state1: InferStateInfo
+    ):
+        g_cache_manager.cache_env_in(
+            is_cuda_graph=infer_state.is_cuda_graph,
+            cur_batch_size=infer_state.batch_size,
+            cuda_graph_max_batch_size=self.graph_max_batch_size,
+        )
+        input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(
+            input_ids, input_ids1, infer_state, infer_state1, self.pre_post_weight
+        )
+
+        for i in range(self.layers_num):
+            input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_token_forward(
+                input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
+            )
+
+        predict_logics, predict_logics1 = self.post_infer.overlap_tpsp_token_forward(
+            input_embs, input_embs1, infer_state, infer_state1, self.pre_post_weight
+        )
+
+        g_cache_manager.cache_env_out()
+        return predict_logics, predict_logics1
 
     @final
     @torch.no_grad()

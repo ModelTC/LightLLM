@@ -16,9 +16,11 @@ from lightllm.server.router.model_infer.mode_backend import (
     OutlinesConstraintBackend,
     XgrammarBackend,
     FirstTokenConstraintBackend,
-    ContinuesBatchBackendForPrefillNode,
+    DPChunkedPrefillBackend,
     ContinuesBatchBackendForDecodeNode,
-    DPBackend,
+    DPForDecodeNode,
+    ChunckedPrefillForPrefillNode,
+    DPChunkedForPrefillNode,
 )
 from lightllm.server.core.objs import RpcShmParams, RpcShmResults, ShmSyncStatusArray
 from lightllm.utils.log_utils import init_logger
@@ -104,7 +106,7 @@ class ModelRpcServer:
         # 填充真正的 rank_id 参数
         kvargs["rank_id"] = self.rank
         self.world_size = kvargs["world_size"]
-        enable_chunked_prefill = kvargs.get("enable_chunked_prefill", False)
+        disable_chunked_prefill = kvargs.get("disable_chunked_prefill", False)
         return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
         use_reward_model = kvargs.get("use_reward_model", False)
         diverse_mode = kvargs.get("diverse_mode", False)
@@ -123,13 +125,19 @@ class ModelRpcServer:
             is_xgrammar_constraint_mode = False
             is_prefill_node = False
             is_decode_node = False
-        # use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
+
         if is_prefill_node:
-            self.backend = ContinuesBatchBackendForPrefillNode(self.info_queue, self.mem_queue)
+            if kvargs.get("args", None).dp > 1:
+                self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
+            else:
+                self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
         elif is_decode_node:
-            self.backend = ContinuesBatchBackendForDecodeNode(self.info_queue, self.mem_queue)
-        elif enable_chunked_prefill:
-            self.backend = ChunkedPrefillBackend()
+            if kvargs.get("args", None).dp > 1:
+                self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
+            else:
+                self.backend = ContinuesBatchBackendForDecodeNode(self.info_queue, self.mem_queue)
+        elif kvargs.get("dp_size", 1) > 1:
+            self.backend = DPChunkedPrefillBackend()
         elif use_reward_model:
             self.backend = RewardModelBackend()
         elif return_all_prompt_logprobs:
@@ -144,10 +152,10 @@ class ModelRpcServer:
             self.backend = XgrammarBackend()
         elif is_first_token_constraint_mode:
             self.backend = FirstTokenConstraintBackend()
-        elif kvargs.get("dp_size", 1) > 1:
-            self.backend = DPBackend()
-        else:
+        elif disable_chunked_prefill:
             self.backend = ContinuesBatchBackend()
+        else:
+            self.backend = ChunkedPrefillBackend()
 
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)

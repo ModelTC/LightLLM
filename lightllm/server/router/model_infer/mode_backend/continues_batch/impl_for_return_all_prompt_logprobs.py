@@ -3,8 +3,8 @@ from .impl import ContinuesBatchBackend
 from typing import List, Tuple
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams, g_infer_context
-from .pre_process import prepare_prefill_inputs
-from .post_process import sample
+from lightllm.server.router.model_infer.mode_backend.generic_pre_process import prepare_prefill_inputs
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 
 
 class ReturnPromptLogProbBackend(ContinuesBatchBackend):
@@ -16,7 +16,8 @@ class ReturnPromptLogProbBackend(ContinuesBatchBackend):
         assert self.radix_cache is None
         req_ids = self._init_reqs(run_reqs, init_req_obj=True)
 
-        kwargs, run_reqs = prepare_prefill_inputs(req_ids)
+        req_objs = self._trans_req_ids_to_req_objs(req_ids)
+        kwargs, run_reqs = prepare_prefill_inputs(req_objs, is_chuncked_mode=False, is_multimodal=self.is_multimodal)
 
         prompt_all_logits = self.model.forward(**kwargs)
         input_ids = kwargs["input_ids"]

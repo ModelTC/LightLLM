@@ -30,11 +30,13 @@ class ShmReqManager:
 
     def get_req_class_type(self):
         args: StartArgs = get_env_start_args()
-        if args.enable_chunked_prefill:
-            return ChunkedPrefillReq
         if args.token_healing_mode:
             return TokenHealingReq
-        return NormalReq
+
+        if args.disable_chunked_prefill:
+            return NormalReq
+        else:
+            return ChunkedPrefillReq
 
     def get_max_req_num(self):
         args: StartArgs = get_env_start_args()

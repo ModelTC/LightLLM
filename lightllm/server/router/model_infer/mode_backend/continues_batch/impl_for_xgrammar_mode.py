@@ -4,8 +4,11 @@ import torch
 from typing import List, Tuple
 
 from .impl import ContinuesBatchBackend
-from .pre_process import prepare_prefill_inputs, prepare_decode_inputs
-from .post_process import sample
+from lightllm.server.router.model_infer.mode_backend.generic_pre_process import (
+    prepare_prefill_inputs,
+    prepare_decode_inputs,
+)
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.server.core.objs import FinishStatus
@@ -41,7 +44,9 @@ class XgrammarBackend(ContinuesBatchBackend):
         import xgrammar as xgr
 
         req_ids = self._init_reqs(reqs)
-        kwargs, run_reqs = prepare_prefill_inputs(req_ids, is_multimodal=self.is_multimodal)
+        req_objs = self._trans_req_ids_to_req_objs(req_ids)
+
+        kwargs, run_reqs = prepare_prefill_inputs(req_objs, is_chuncked_mode=False, is_multimodal=self.is_multimodal)
 
         logics = self.model.forward(**kwargs)
 
@@ -63,68 +68,66 @@ class XgrammarBackend(ContinuesBatchBackend):
         next_token_ids = next_token_ids.detach().cpu().numpy()
         next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
-        self.post_handel(run_reqs, next_token_ids, next_token_logprobs)
+        self._post_handle(
+            run_reqs,
+            next_token_ids,
+            next_token_logprobs,
+            is_chuncked_mode=False,
+            do_filter_finished_reqs=False,
+            extra_post_req_handle_func=self._update_xgrammer_fsm,
+        )
 
         return
 
     @calculate_time(show=True, min_cost_ms=200)
     def decode(self):
-        import xgrammar as xgr
+        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
+            g_infer_context.infer_req_ids
+        )
+        assert len(uninit_reqs) == 0
+        assert len(prefill_reqs) == 0
 
-        kwargs, run_reqs = prepare_decode_inputs(g_infer_context.infer_req_ids)
-        run_reqs: List[InferReq] = run_reqs
+        if aborted_reqs:
+            g_infer_context.filter_reqs(aborted_reqs)
 
-        logits = self.model.forward(**kwargs)
+        if decode_reqs:
+            kwargs, run_reqs = prepare_decode_inputs(decode_reqs)
+            logits = self.model.forward(**kwargs)
 
-        all_has_no_constraint = all([not e.sampling_param.has_constraint_setting() for e in run_reqs])
-        if not all_has_no_constraint:
-            for i, run_obj in enumerate(run_reqs):
-                self._mask_req_out_token(i, run_obj, logits[i])
+            self._overlap_req_init_and_filter(uninit_reqs=[], ok_finished_reqs=ok_finished_reqs, clear_list=True)
 
-        logits[logits == float("-inf")] = -1000000.0
-        next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-        next_token_ids = next_token_ids.detach().cpu().numpy()
-        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+            all_has_no_constraint = all([not e.sampling_param.has_constraint_setting() for e in run_reqs])
+            if not all_has_no_constraint:
+                for i, run_obj in enumerate(run_reqs):
+                    self._mask_req_out_token(i, run_obj, logits[i])
 
-        self.post_handel(run_reqs, next_token_ids, next_token_logprobs)
+            logits[logits == float("-inf")] = -1000000.0
+            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
+            next_token_ids = next_token_ids.detach().cpu().numpy()
+            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+
+            self._post_handle(
+                run_reqs,
+                next_token_ids,
+                next_token_logprobs,
+                is_chuncked_mode=False,
+                do_filter_finished_reqs=False,
+                extra_post_req_handle_func=self._update_xgrammer_fsm,
+            )
+
+        self._overlap_req_init_and_filter(uninit_reqs=[], ok_finished_reqs=ok_finished_reqs, clear_list=True)
         return
 
-    def post_handel(self, run_reqs: List[InferReq], next_token_ids, next_token_logprobs):
+    def _update_xgrammer_fsm(self, req_obj: InferReq, next_token_id, next_token_logprob):
         import xgrammar as xgr
 
-        finished_req_ids = []
+        if not hasattr(req_obj.sampling_param, "xgrammar_matcher"):
+            return
 
-        for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
-            # prefill and decode is same
-            req_obj: InferReq = req_obj
-            req_obj.cur_kv_len = req_obj.get_cur_total_len()
-
-            req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
-            req_obj.cur_output_len += 1
-
-            req_obj.out_token_id_count[next_token_id] += 1
-            req_obj.update_finish_status(self.eos_id)
-
-            matcher = req_obj.sampling_param.xgrammar_matcher
-            assert matcher.accept_token(next_token_id)
-
-            if req_obj.finish_status.is_finished() or req_obj.shm_req.router_aborted or matcher.is_terminated():
-                finished_req_ids.append(req_obj.shm_req.request_id)
-
-            if self.is_master_in_dp:
-                # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
-                # finish_token_index finish_status candetoken_out_len 是
-                # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
-                req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
-                req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
-
-                if req_obj.finish_status.is_finished():
-                    req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                    req_obj.shm_req.finish_status = req_obj.finish_status
-
-                req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
-
-        g_infer_context.filter(finished_req_ids)
+        matcher = req_obj.sampling_param.xgrammar_matcher
+        assert matcher.accept_token(next_token_id)
+        if matcher.is_terminated():
+            req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
         return
 
     def _mask_req_out_token(self, i, run_obj: InferReq, logits):

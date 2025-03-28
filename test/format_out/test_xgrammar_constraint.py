@@ -4,7 +4,8 @@ import json
 import threading
 from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("/mnt/nvme0/models/Meta-Llama-3.1-8B-Instruct")
+# NOTE: To test, change the model path here
+tokenizer = AutoTokenizer.from_pretrained("/path/to/model")
 
 
 class RequestThread(threading.Thread):
@@ -24,6 +25,7 @@ class RequestThread(threading.Thread):
 
 url = "http://0.0.0.0:8888/generate"
 headers = {"Content-Type": "application/json"}
+
 json_grammar_ebnf_str = r"""
 root ::= basic_array | basic_object
 basic_any ::= basic_number | basic_string | basic_boolean | basic_null | basic_array | basic_object
@@ -38,7 +40,6 @@ basic_array ::= "[" ("" | ws basic_any (ws "," ws basic_any)*) ws "]"
 basic_object ::= "{" ("" | ws basic_string ws ":" ws basic_any ( ws "," ws basic_string ws ":" ws basic_any)*) ws "}"
 ws ::= [ \n\t]*
 """
-
 json_schema_str = r"""
 {
     "type": "array",
@@ -78,9 +79,7 @@ json_schema_str = r"""
     }
 }
 """
-
 person_schema = r"""{
-  "title": "Person",
   "type": "object",
   "properties": {
     "name": {
@@ -93,14 +92,8 @@ person_schema = r"""{
   "required": ["name", "age"]
 }
 """
-
-system_prompt = open("system.md", "r").read()
-user_input = open("user.md", "r").read()
-
-# user_input = """generate a person information for me, for example, {'name': 'John', 'age': 25}."""
-
+user_input = """generate a person information for me, for example, {'name': 'John', 'age': 25}."""
 messages = [
-    {"role": "system", "content": system_prompt},
     {"role": "user", "content": user_input},
 ]
 
@@ -109,30 +102,23 @@ inputs = tokenizer.apply_chat_template(messages, tokenize=False)
 for i in range(1):
     data = {
         "inputs": inputs,
-        # 'temperature': 0.1,
         "parameters": {
             "do_sample": False,
-            # "guided_json": json_schema_str,
+            "guided_json": json_schema_str,
             "max_new_tokens": 200,
         },
     }
     thread = RequestThread(url, headers, data)
     thread.start()
 
-# time.sleep(2)
-
-# for i in range(20):
-#     data = {
-#         "inputs": "12-(25+16)*7=",
-#         "parameters": {
-#             "do_sample": False,
-#             "ignore_eos": True,
-#             "max_new_tokens": 200,
-#             "guided_grammar": r"""root ::= (expr "=" term)+
-# expr  ::= term ([-+*/] term)*
-# term  ::= num | "(" expr ")"
-# num   ::= [0-9]+""",
-#         },
-#     }
-#     thread = RequestThread(url, headers, data)
-#     thread.start()
+for i in range(1):
+    data = {
+        "inputs": inputs,
+        "parameters": {
+            "do_sample": False,
+            "guided_grammar": json_grammar_ebnf_str,
+            "max_new_tokens": 200,
+        },
+    }
+    thread = RequestThread(url, headers, data)
+    thread.start()

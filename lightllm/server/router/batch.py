@@ -33,7 +33,7 @@ class Batch:
     def filter_out_finished_req(self, shm_req_manager: ShmReqManager):
         unfinished_req_ids = []
         for req in self.reqs:
-            # 更新aborted 标记，可以触发推理进程主动退出aborted得请求。
+            # 更新aborted 标记，可以触发推理进程主动退出aborted的请求。
             if req.is_aborted:
                 req.router_aborted = True
 

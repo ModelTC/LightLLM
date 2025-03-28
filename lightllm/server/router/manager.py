@@ -50,6 +50,7 @@ class RouterManager:
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
         self.is_multinode_tp = args.nnodes > 1 and args.dp == 1
+        self.is_multinode_and_multidp = args.nnodes > 1 and args.dp > 1
         # 判断是否是保守调度，保守调度不会发生暂停 req 的情况，但是有些场景可能影响吞吐
         self.is_safe_schedule = args.router_token_ratio == 0.0
         self.load_way = args.load_way
@@ -92,7 +93,7 @@ class RouterManager:
 
         self.is_token_healing = self.args.token_healing_mode
         self.chunked_prefill_size = args.chunked_prefill_size
-        self.enable_chunked_prefill = args.enable_chunked_prefill
+        self.disable_chunked_prefill = args.disable_chunked_prefill
 
         self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
         self.metric_client = MetricClient(metric_port)
@@ -156,7 +157,7 @@ class RouterManager:
             "nccl_host": self.args.nccl_host,
             "nccl_port": self.args.nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
-            "enable_chunked_prefill": self.enable_chunked_prefill,
+            "disable_chunked_prefill": self.disable_chunked_prefill,
             "chunked_prefill_size": self.chunked_prefill_size,
             "is_token_healing": self.args.token_healing_mode,
             "return_all_prompt_logprobs": self.args.return_all_prompt_logprobs,
@@ -238,9 +239,11 @@ class RouterManager:
                             - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
                         ) / self.max_total_token_num
                         d_i = dp_index
+                        frozen_token_num = self.shared_token_load.get_frozened_token_count(d_i)
                         logger.debug(
                             f"dp_i {d_i} current batch size: {len(self.running_batch.reqs)} \n"
                             f"dp_i {d_i} paused req num: {self.req_queue.get_paused_req_num()} \n"
+                            f"dp_i {d_i} frozen token num: {frozen_token_num} \n"
                             f"dp_i {d_i} token used ratio: {token_ratio1} not contain prompt cache tree unrefed token\n"
                             f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token"
                         )
@@ -263,6 +266,9 @@ class RouterManager:
                     self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
                     self.metric_client.gauge_set("lightllm_queue_size", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_current_max_tokens", 0.0)
+                    for dp_i in range(self.dp_size_in_node):
+                        frozen_token_num = self.shared_token_load.get_frozened_token_count(dp_i)
+                        logger.debug(f"dp_i {dp_i} frozen token num: {frozen_token_num} \n")
 
             if self.running_batch is None:
                 await asyncio.sleep(0.01)  # 10ms
@@ -313,6 +319,13 @@ class RouterManager:
                 await self._prefill_batch(self.running_batch)
                 self._filter_runing_batch()
                 self.has_wait_tokens = self.max_wait_tokens
+            elif self.is_multinode_and_multidp:
+                # 在多节点多 dp 的模式下，如果当前 running_batch 为None, 也需要不断的调用 decode 操作，
+                # 因为其他节点上的dp可能存在运行的请求，所以本节点也需要调用decode，推理后端的backend会
+                # padding 一些fake的请求来使推理过程可以正常完成。主要是给 deepseekv3 这种类型的大模型
+                # 使用的，其ep并行模式下需要所有节点协同。
+                await self._decode_batch(self.running_batch)
+
             return
 
         # 有运行请求，当持续decode的次数到达一个阈值，或者有上次预调度的结果存在的时。
@@ -367,7 +380,9 @@ class RouterManager:
         self.metric_client.counter_inc("lightllm_batch_inference_count", "decode")
         self.overlap_event.set()
         await self.model_rpc_client.decode()
-        batch.filter_out_finished_req(self.shm_req_manager)
+        # 在 self.is_multinode_and_multidp 为 True 时，传入的 batch 对象可能为 None。
+        if batch is not None:
+            batch.filter_out_finished_req(self.shm_req_manager)
         # 发个None包触发一下detokenization
         self.send_to_detokenization.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
         self.metric_client.histogram_observe(
@@ -444,7 +459,12 @@ def start_router_process(args, router_port, detokenization_port, metric_port, pi
         raise
 
     pipe_writer.send("init ok")
+
+    def handle_exception(loop, context):
+        logger.exception(f"Router Caught exception: {str(context)}")
+
     loop = asyncio.new_event_loop()
+    loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
     loop.create_task(router.loop_for_fwd())
     loop.run_until_complete(router.loop_for_netio_req())

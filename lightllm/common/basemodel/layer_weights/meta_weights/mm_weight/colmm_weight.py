@@ -83,7 +83,7 @@ class W8A8B128COLMMWeight(MMWeightTpl):
         return weight_scale[:, scale_start:scale_end].to(torch.float)
 
     def _process_weight_scale(self, weight_scale) -> None:
-        self.weight_scale = weight_scale.transpose(0, 1).cuda(get_current_device_id())
+        self.weight_scale = weight_scale.cuda(get_current_device_id()).transpose(0, 1)
 
     def _load_scales(self, weights: Dict[str, torch.Tensor]) -> None:
         if self.weight_scale_name in weights:

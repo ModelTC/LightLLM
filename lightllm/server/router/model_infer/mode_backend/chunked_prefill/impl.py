@@ -2,13 +2,14 @@ import torch
 from typing import List, Tuple
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
-from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.envs_utils import get_env_start_args
-from .pre_process import prepare_prefill_inputs, prepare_decode_inputs
-from ..continues_batch.post_process import sample
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+from lightllm.server.router.model_infer.mode_backend.generic_pre_process import (
+    prepare_prefill_inputs,
+    prepare_decode_inputs,
+)
 
 
 logger = init_logger(__name__)
@@ -20,65 +21,55 @@ class ChunkedPrefillBackend(ModeBackend):
         self.forward_step = 0
         args = get_env_start_args()
         self.max_wait_step = args.router_max_wait_tokens
+        self.need_prefill_count = 0
 
     def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs)
-        self.forward_step = 0  # prefill first
+        self._init_reqs(reqs, init_req_obj=False)
+        self.need_prefill_count += 1
         return
 
     def decode(self):
-        kwargs, run_reqs = prepare_decode_inputs(g_infer_context.infer_req_ids)
-        self.forward_batch(kwargs, run_reqs)
-        if len(run_reqs) == 0 or self.forward_step % self.max_wait_step == 0:
-            # run prefill
-            kwargs, run_reqs = prepare_prefill_inputs(g_infer_context.infer_req_ids)
-            self.forward_batch(kwargs, run_reqs)
+        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
+            g_infer_context.infer_req_ids
+        )
+
+        if aborted_reqs:
+            g_infer_context.filter_reqs(aborted_reqs)
+
+        # 先 decode
+        if decode_reqs:
+            kwargs, run_reqs = prepare_decode_inputs(decode_reqs)
+            logits = self.model.forward(**kwargs)
+            self._overlap_req_init_and_filter(
+                uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
+            )
+            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
+            next_token_ids = next_token_ids.detach().cpu().numpy()
+            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+            self._post_handle(
+                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=False, do_filter_finished_reqs=False
+            )
+            logits = None
+
+        # 再 prefill
+        if len(decode_reqs) == 0 or (self.forward_step % self.max_wait_step == 0) or (self.need_prefill_count > 0):
+            if prefill_reqs:
+                self.need_prefill_count -= 1
+                kwargs, run_reqs = prepare_prefill_inputs(
+                    prefill_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
+                )
+                logits = self.model.forward(**kwargs)
+                self._overlap_req_init_and_filter(
+                    uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
+                )
+                next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
+                next_token_ids = next_token_ids.detach().cpu().numpy()
+                next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+                self._post_handle(
+                    run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=True, do_filter_finished_reqs=False
+                )
+                logits = None
+
+        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         self.forward_step += 1
-        return
-
-    def forward_batch(self, kwargs, run_reqs):
-        if len(run_reqs) == 0:
-            return
-        logits = self.model.forward(**kwargs)
-        next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-        next_token_ids = next_token_ids.detach().cpu().numpy()
-        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-        self.post_handel(run_reqs, next_token_ids, next_token_logprobs)
-        return
-
-    def post_handel(self, run_reqs: List[InferReq], next_token_ids, next_token_logprobs):
-        finished_req_ids = []
-
-        for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
-            req_obj: InferReq = req_obj
-
-            req_obj.cur_kv_len = len(req_obj.get_chuncked_input_token_ids())
-            if req_obj.cur_kv_len < req_obj.get_cur_total_len():
-                if self.is_master_in_dp:
-                    req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
-                continue
-
-            req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
-            req_obj.cur_output_len += 1
-
-            req_obj.out_token_id_count[next_token_id] += 1
-            req_obj.update_finish_status(self.eos_id)
-
-            if req_obj.finish_status.is_finished() or req_obj.shm_req.router_aborted:
-                finished_req_ids.append(req_obj.shm_req.request_id)
-
-            if self.is_master_in_dp:
-                # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
-                # finish_token_index finish_status candetoken_out_len 是
-                # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
-                req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
-                req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
-
-                if req_obj.finish_status.is_finished():
-                    req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                    req_obj.shm_req.finish_status = req_obj.finish_status
-
-                req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
-
-        g_infer_context.filter(finished_req_ids)
         return

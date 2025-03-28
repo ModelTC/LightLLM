@@ -2,12 +2,10 @@ import torch
 import numpy as np
 from typing import List
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
-from lightllm.utils.infer_utils import calculate_time
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 
-# @calculate_time(show=True, min_cost_ms=1)
-def prepare_prefill_inputs(req_ids: List[int], is_multimodal=False):
+
+def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool, is_multimodal=False):
     run_reqs = []
     nopad_total_token_num = 0
     nopad_max_len_in_batch = 0
@@ -18,15 +16,18 @@ def prepare_prefill_inputs(req_ids: List[int], is_multimodal=False):
     nopad_b_seq_len = []
     batch_multimodal_params = []
     b_ready_cache_len = []
-    for request_id in req_ids:
-        req: InferReq = g_infer_context.requests_mapping[request_id]
+    for req in req_objs:
 
         run_reqs.append(req)
         batch_multimodal_params.append(req.multimodal_params)
         nopad_b_req_idx.append(req.req_idx)
         nopad_b_start_loc.append(start_loc)
 
-        input_token_ids = req.get_input_token_ids()
+        if is_chuncked_mode:
+            input_token_ids = req.get_chuncked_input_token_ids()
+        else:
+            input_token_ids = req.get_input_token_ids()
+
         seq_len = len(input_token_ids)
         input_token_len = seq_len - req.cur_kv_len
 
@@ -55,7 +56,7 @@ def prepare_prefill_inputs(req_ids: List[int], is_multimodal=False):
     g_infer_state_lock.release()
 
     kwargs = {
-        "batch_size": len(req_ids),
+        "batch_size": len(run_reqs),
         "total_token_num": nopad_total_token_num,
         "max_len_in_batch": nopad_max_len_in_batch,
         "input_ids": input_ids,
@@ -72,8 +73,7 @@ def prepare_prefill_inputs(req_ids: List[int], is_multimodal=False):
     return kwargs, run_reqs
 
 
-# @calculate_time(show=True, min_cost_ms=1)
-def prepare_decode_inputs(req_ids: List[int]):
+def prepare_decode_inputs(req_objs: List[InferReq]):
     run_reqs = []
     nopad_total_token_num = 0
     nopad_max_len_in_batch = 0
@@ -82,8 +82,7 @@ def prepare_decode_inputs(req_ids: List[int]):
     nopad_b_req_idx = []
     nopad_b_start_loc = []
     nopad_b_seq_len = []
-    for request_id in req_ids:
-        req: InferReq = g_infer_context.requests_mapping[request_id]
+    for req in req_objs:
         run_reqs.append(req)
         nopad_b_req_idx.append(req.req_idx)
         nopad_b_start_loc.append(start_loc)
@@ -109,7 +108,7 @@ def prepare_decode_inputs(req_ids: List[int]):
     g_infer_state_lock.release()
 
     kwargs = {
-        "batch_size": len(req_ids),
+        "batch_size": len(run_reqs),
         "total_token_num": nopad_total_token_num,
         "max_len_in_batch": nopad_max_len_in_batch,
         "input_ids": input_ids,
