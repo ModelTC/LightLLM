@@ -55,7 +55,7 @@ def get_environ(environ_name):
 
 def init_vision_distributed_env(kvargs):
     tp_world_size = kvargs["vit_tp"]
-    dp_size = kvargs.get("dp_size", 1)
+    dp_size = 1
     tp_rank_id = kvargs["tp_rank_id"]
     set_dp_size(dp_size)
     set_dp_world_size(tp_world_size)
