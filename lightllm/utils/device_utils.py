@@ -94,12 +94,8 @@ def has_nvlink():
         # Call nvidia-smi to get the topology matrix
         result = subprocess.check_output(["nvidia-smi", "topo", "--matrix"])
         result = result.decode("utf-8")
-
         # Check if the output contains 'NVLink'
-        if "NVLink" in result:
-            return True
-        else:
-            return False
+        return any(f"NV{i}" in result for i in range(1, 8))
     except subprocess.CalledProcessError:
         # If there's an error (e.g., nvidia-smi is not installed or another issue), assume no NVLink
         return False
