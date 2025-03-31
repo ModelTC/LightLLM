@@ -196,6 +196,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         only llama and deepseek v3 model supported now.""",
     )
     parser.add_argument(
+        "--enable_prefill_microbatch_overlap",
+        action="store_true",
+        help="""inference backend will use microbatch overlap mode for prefill.
+        only deepseekv3 model supported now.""",
+    )
+    parser.add_argument(
         "--enable_decode_microbatch_overlap",
         action="store_true",
         help="""inference backend will use microbatch overlap mode for decode.
@@ -213,7 +219,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""inference backend will use the attention kernel of flashinfer for decode,
         only deepseekv3 model supported now.""",
     )
-
     parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )

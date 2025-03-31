@@ -51,3 +51,13 @@ class BaseLayerInfer:
         layer_weight: BaseLayerWeight,
     ):
         raise Exception("need to impl")
+
+    def overlap_tpsp_context_forward(
+        self,
+        input0: torch.Tensor,
+        input1: torch.Tensor,
+        infer_state: InferStateInfo,
+        infer_state1: InferStateInfo,
+        layer_weight: BaseLayerWeight,
+    ):
+        raise Exception("need to impl")

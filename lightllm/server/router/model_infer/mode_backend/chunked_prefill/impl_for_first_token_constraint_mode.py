@@ -86,13 +86,11 @@ class FirstTokenConstraintBackend(ChunkedPrefillBackend):
         # to do remove all zeros_like, ones_like, use triton kernel
         # replace
         if any([req.cur_output_len == 0 for req in run_reqs]):
-            with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-                mask = torch.zeros_like(logits, dtype=torch.bool)
-                for i, req in enumerate(run_reqs):
-                    if req.cur_output_len == 0:
-                        mask[i, :] = True
-                        mask[i, self.first_allowed_tokens] = False
-            torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
+            mask = torch.zeros_like(logits, dtype=torch.bool)
+            for i, req in enumerate(run_reqs):
+                if req.cur_output_len == 0:
+                    mask[i, :] = True
+                    mask[i, self.first_allowed_tokens] = False
             # 不能使用 logits[mask] = -1000000.0
             # 会存在诡异的多流异步问题, 可能是torch的bug
             new_logits = torch.where(mask, self.fill_value, logits)

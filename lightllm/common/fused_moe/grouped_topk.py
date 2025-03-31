@@ -223,7 +223,7 @@ def triton_grouped_topk(
 
     scores_buffer = torch.empty((token_num, total_expert_num), dtype=dtype, device="cuda")
     out_topk_weights = torch.empty((token_num, topk), dtype=torch.float32, device="cuda")
-    out_topk_ids = torch.empty((token_num, topk), dtype=torch.int32, device="cuda")
+    out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device="cuda")
 
     assert total_expert_num % num_expert_group == 0
 

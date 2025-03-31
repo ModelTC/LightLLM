@@ -4,10 +4,21 @@ import threading
 from typing import Optional, Tuple, List, Dict, Any
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_device_id
 from .base_weight import BaseWeight
-from lightllm.common.fused_moe.grouped_fused_moe_ep import fused_experts_impl, masked_group_gemm
+from lightllm.common.fused_moe.grouped_fused_moe_ep import fused_experts_impl, masked_group_gemm, tma_aligned_quantize
+from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.distributed import dist_group_manager
 from lightllm.common.fused_moe.topk_select import select_experts
 from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
+from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
+from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
+
+try:
+    import deep_gemm
+except:
+    logger.warning("no deepep or deep_gemm")
 
 
 class FusedMoeWeightEP(BaseWeight):
@@ -141,12 +152,149 @@ class FusedMoeWeightEP(BaseWeight):
         )
         return recv_x, masked_m, topk_idx, topk_weights, handle, hook
 
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ):
+        topk_weights, topk_idx = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            correction_bias=self.e_score_correction_bias,
+            use_grouped_topk=self.use_grouped_topk,
+            top_k=self.num_experts_per_tok,
+            renormalize=self.norm_topk_prob,
+            topk_group=self.topk_group,
+            num_expert_group=self.n_group,
+            scoring_func=self.scoring_func,
+        )
+        topk_idx = topk_idx.to(torch.long)
+        buffer = dist_group_manager.ep_buffer
+        num_experts = self.n_routed_experts
+        M, K = hidden_states.shape
+        w1, w1_scale = self.w1
+        block_size_k = 0
+        if w1.ndim == 3:
+            block_size_k = w1.shape[2] // w1_scale.shape[2]
+        assert block_size_k == 128, "block_size_k must be 128"
+        input_scale = torch.empty((M, K // block_size_k), dtype=torch.float32, device=hidden_states.device)
+        qinput_tensor = torch.empty((M, K), dtype=w1.dtype, device=hidden_states.device)
+        per_token_group_quant_fp8(hidden_states, block_size_k, qinput_tensor, input_scale)
+
+        # get_dispatch_layout
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            previous_event,
+        ) = buffer.get_dispatch_layout(
+            topk_idx, num_experts, previous_event=None, async_finish=True, allocate_on_comm_stream=False
+        )
+
+        # normal dispatch
+        # recv_x [recive_num_tokens, hidden] recv_x_scale [recive_num_tokens, hidden // block_size]
+        # recv_topk_idx [recive_num_tokens, topk_num]
+        # recv_topk_weights [recive_num_tokens, topk_num]
+        # num_recv_tokens_per_expert_list list [cur_node_expert_num] padding with expert_alignment=128
+        recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, event = buffer.dispatch(
+            (qinput_tensor, input_scale),
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            num_tokens_per_rank=num_tokens_per_rank,
+            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+            is_token_in_rank=is_token_in_rank,
+            num_tokens_per_expert=num_tokens_per_expert,
+            previous_event=previous_event,
+            async_finish=True,
+            allocate_on_comm_stream=False,
+            expert_alignment=128,
+        )
+
+        def hook():
+            event.current_stream_wait()
+
+        return qinput_tensor, recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, hook
+
     def masked_group_gemm(
         self, recv_x: Tuple[torch.Tensor], masked_m: torch.Tensor, dtype: torch.dtype, expected_m: int
     ):
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2
         return masked_group_gemm(recv_x, masked_m, dtype, w1, w1_scale, w2, w2_scale, expected_m=expected_m)
+
+    def prefilled_group_gemm(
+        self,
+        num_recv_tokens_per_expert_list,
+        recv_x: Tuple[torch.Tensor],
+        recv_topk_idx: torch.Tensor,
+        hidden_states: torch.Tensor,
+        qinput_tensor: torch.Tensor,
+        recv_topk_weights: torch.Tensor,
+    ):
+        w1, w1_scale = self.w1
+        w2, w2_scale = self.w2
+        _, K = hidden_states.shape
+        _, N, _ = w1.shape
+        # scatter
+        all_tokens = sum(num_recv_tokens_per_expert_list)  # calcu padding all nums.
+        # gather_out shape [recive_num_tokens, hidden]
+        gather_out = torch.empty_like(recv_x[0], device=hidden_states.device, dtype=hidden_states.dtype)
+        if all_tokens > 0:
+            input_tensor = (
+                torch.empty((all_tokens, K), device=hidden_states.device, dtype=qinput_tensor.dtype),
+                torch.empty((all_tokens, K // 128), device=hidden_states.device, dtype=torch.float32),
+            )
+            # when m_indices is filled ok.
+            # m_indices show token use which expert, example, [0, 0, 0, 0, .... 1, 1, 1, 1,...., cur_expert_num - 1, ..]
+            # the count of 0 is num_recv_tokens_per_expert_list[0], the count of 1 is num_recv_tokens_per_expert_list[1]
+            # ...
+            m_indices = torch.empty(all_tokens, device=hidden_states.device, dtype=torch.int32)
+            # output_index shape [recive_num_tokens, topk_num]
+            # output_index use to show the token index in input_tensor
+            output_index = torch.empty_like(recv_topk_idx)
+
+            num_recv_tokens_per_expert = torch.tensor(
+                num_recv_tokens_per_expert_list, device=hidden_states.device, dtype=torch.int32
+            )
+
+            expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
+
+            ep_scatter(
+                recv_x[0],
+                recv_x[1],
+                recv_topk_idx,
+                num_recv_tokens_per_expert,
+                expert_start_loc,
+                input_tensor[0],
+                input_tensor[1],
+                m_indices,
+                output_index,
+            )
+
+            # groupgemm (contiguous layout)
+            gemm_out_a = torch.empty((all_tokens, N), device=hidden_states.device, dtype=hidden_states.dtype)
+
+            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
+
+            # silu_and_mul_fwd + qaunt
+            # TODO fused kernel
+            silu_out = torch.empty((all_tokens, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
+
+            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
+            qsilu_out, qsilu_out_scale = tma_aligned_quantize(silu_out)
+
+            # groupgemm (contiguous layout)
+            gemm_out_b = torch.empty((all_tokens, K), device=hidden_states.device, dtype=hidden_states.dtype)
+
+            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices
+            )
+
+            # gather and local reduce
+            ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
+
+        return gather_out
 
     def low_latency_combine(
         self,
@@ -158,6 +306,26 @@ class FusedMoeWeightEP(BaseWeight):
         combined_x, event_overlap, hook = dist_group_manager.ep_buffer.low_latency_combine(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=True
         )
+        return combined_x, hook
+
+    def combine(
+        self,
+        gemm_out_b: torch.Tensor,
+        handle: Any,
+    ):
+        # normal combine
+        combined_x, _, event = dist_group_manager.ep_buffer.combine(
+            gemm_out_b,
+            handle,
+            topk_weights=None,
+            async_finish=True,
+            previous_event=None,
+            allocate_on_comm_stream=False,
+        )
+
+        def hook():
+            event.current_stream_wait()
+
         return combined_x, hook
 
     def _fuse(self):

@@ -6,25 +6,21 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_con
 
 
 def sample(logits, reqs, eos_id: List[int] = [2]):
-
-    with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-        (
-            presence_penalties,
-            frequency_penalties,
-            repetition_penalties,
-            exponential_decay_length_penalties,
-            temperatures,
-            top_ps,
-            top_ks,
-            p_token_ids,
-            p_token_counts,
-            p_cumsum_seq_len,
-            p_max_len_in_batch,
-            length_penalty_idx,
-            mask_eos_reqs,
-        ) = _get_post_sample_tensors(reqs)
-
-    torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
+    (
+        presence_penalties,
+        frequency_penalties,
+        repetition_penalties,
+        exponential_decay_length_penalties,
+        temperatures,
+        top_ps,
+        top_ks,
+        p_token_ids,
+        p_token_counts,
+        p_cumsum_seq_len,
+        p_max_len_in_batch,
+        length_penalty_idx,
+        mask_eos_reqs,
+    ) = _get_post_sample_tensors(reqs)
 
     logits = logits.contiguous()
 
@@ -103,33 +99,34 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         p_seq_len.append(len(id_to_count))
         p_max_len_in_batch = max(p_max_len_in_batch, len(id_to_count))
 
-    presence_penalties = torch.tensor(presence_penalties, dtype=torch.float, device="cuda")
-    frequency_penalties = torch.tensor(frequency_penalties, dtype=torch.float, device="cuda")
-    repetition_penalties = torch.tensor(repetition_penalties, dtype=torch.float, device="cuda")
-    exponential_decay_length_penalties = torch.tensor(
-        exponential_decay_length_penalties, dtype=torch.float, device="cuda"
+    presence_penalties_cpu = torch.tensor(presence_penalties, dtype=torch.float, device="cpu", pin_memory=True)
+    frequency_penalties_cpu = torch.tensor(frequency_penalties, dtype=torch.float, device="cpu", pin_memory=True)
+    repetition_penalties_cpu = torch.tensor(repetition_penalties, dtype=torch.float, device="cpu", pin_memory=True)
+    exponential_decay_length_penalties_cpu = torch.tensor(
+        exponential_decay_length_penalties, dtype=torch.float, device="cpu", pin_memory=True
     )
-    temperatures = torch.tensor(temperatures, dtype=torch.float, device="cuda")
-    top_ps = torch.tensor(top_ps, dtype=torch.float, device="cuda")
-    top_ks = torch.tensor(top_ks, dtype=torch.int32, device="cuda")
-    p_token_ids = torch.tensor(p_token_ids, dtype=torch.int32, device="cuda")
-    p_token_counts = torch.tensor(p_token_counts, dtype=torch.int32, device="cuda")
-    p_seq_len = torch.tensor(p_seq_len, dtype=torch.int32, device="cuda")
-    p_cumsum_seq_len = torch.cumsum(p_seq_len, dim=0, dtype=torch.int32)
-    length_penalty_idx = torch.tensor(length_penalty_idx, dtype=torch.int32, device="cuda")
-    mask_eos_reqs = torch.tensor(mask_eos_reqs, dtype=torch.bool, device="cuda")
+    temperatures_cpu = torch.tensor(temperatures, dtype=torch.float, device="cpu", pin_memory=True)
+    top_ps_cpu = torch.tensor(top_ps, dtype=torch.float, device="cpu", pin_memory=True)
+    top_ks_cpu = torch.tensor(top_ks, dtype=torch.int32, device="cpu", pin_memory=True)
+    p_token_ids_cpu = torch.tensor(p_token_ids, dtype=torch.int32, device="cpu", pin_memory=True)
+    p_token_counts_cpu = torch.tensor(p_token_counts, dtype=torch.int32, device="cpu", pin_memory=True)
+    p_seq_len_cpu = torch.tensor(p_seq_len, dtype=torch.int32, device="cpu", pin_memory=True)
+    length_penalty_idx_cpu = torch.tensor(length_penalty_idx, dtype=torch.int32, device="cpu", pin_memory=True)
+    mask_eos_reqs_cpu = torch.tensor(mask_eos_reqs, dtype=torch.bool, device="cpu", pin_memory=True)
+    p_cumsum_seq_len_cpu = torch.cumsum(p_seq_len_cpu, dim=0, dtype=torch.int32).pin_memory()
+
     return (
-        presence_penalties,
-        frequency_penalties,
-        repetition_penalties,
-        exponential_decay_length_penalties,
-        temperatures,
-        top_ps,
-        top_ks,
-        p_token_ids,
-        p_token_counts,
-        p_cumsum_seq_len,
+        presence_penalties_cpu.cuda(non_blocking=True),
+        frequency_penalties_cpu.cuda(non_blocking=True),
+        repetition_penalties_cpu.cuda(non_blocking=True),
+        exponential_decay_length_penalties_cpu.cuda(non_blocking=True),
+        temperatures_cpu.cuda(non_blocking=True),
+        top_ps_cpu.cuda(non_blocking=True),
+        top_ks_cpu.cuda(non_blocking=True),
+        p_token_ids_cpu.cuda(non_blocking=True),
+        p_token_counts_cpu.cuda(non_blocking=True),
+        p_cumsum_seq_len_cpu.cuda(non_blocking=True),
         p_max_len_in_batch,
-        length_penalty_idx,
-        mask_eos_reqs,
+        length_penalty_idx_cpu.cuda(non_blocking=True),
+        mask_eos_reqs_cpu.cuda(non_blocking=True),
     )

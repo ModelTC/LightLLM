@@ -636,3 +636,15 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         input_embdings = self.tpsp_token_forward(input_embdings, infer_state, layer_weight=layer_weight)
         input_embdings1 = self.tpsp_token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
         return input_embdings, input_embdings1
+
+    def overlap_tpsp_context_forward(
+        self,
+        input_embdings: torch.Tensor,
+        input_embdings1: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        infer_state1: LlamaInferStateInfo,
+        layer_weight: LlamaTransformerLayerWeight,
+    ):
+        input_embdings = self.tpsp_context_forward(input_embdings, infer_state, layer_weight=layer_weight)
+        input_embdings1 = self.tpsp_context_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
+        return input_embdings, input_embdings1
