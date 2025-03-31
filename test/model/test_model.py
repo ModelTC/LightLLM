@@ -24,7 +24,7 @@ from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.cohere.model import CohereTpPartModel
 from lightllm.models.mixtral.model import MixtralTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
-from lightllm.utils.config_utils import get_config_json
+from lightllm.utils.config_utils import get_config_json, get_dtype
 
 
 def get_model(weight_dir):
@@ -71,6 +71,8 @@ def get_model(weight_dir):
 class TestModelInfer(unittest.TestCase):
     def test_model_infer(self):
         args = get_env_start_args()
+        if args.data_type is None:
+            args.data_type = get_dtype(args.model_dir)
         model_dir = args.model_dir
         model_class = get_model(model_dir)
         test_model_inference(args, model_class)
@@ -88,6 +90,11 @@ if __name__ == "__main__":
         "--profile",
         action="store_true",
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
+    )
+    parser.add_argument(
+        "--torch_profile",
+        action="store_true",
+        help="Enable torch profiler to profile the model",
     )
     args = parser.parse_args()
     set_env_start_args(args)
