@@ -437,7 +437,6 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_prefill(self, batch: PrefillMicroBatch, batch1: PrefillMicroBatch):
-        assert batch.batch_size == batch1.batch_size
         assert batch.mem_indexes.is_cuda
         assert batch1.mem_indexes.is_cuda
         input_ids, input_ids1 = batch.input_ids, batch1.input_ids
