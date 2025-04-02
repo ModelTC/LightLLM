@@ -78,7 +78,6 @@ tiktoken==0.7.0
 matplotlib==3.8.2
 psutil==5.9.4
 prometheus_client==0.20.0
-outlines==0.2.1
 cchardet==2.1.7
 ujson==5.10.0
 frozendict==2.4.6
@@ -87,3 +86,5 @@ easydict==1.13
 gunicorn==23.0.0
 vllm==0.7.2
 flashinfer-python==0.2.2
+sglang-kernel==0.0.5.post4
+outlines==0.2.1

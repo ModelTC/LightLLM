@@ -19,7 +19,6 @@ setup(
     install_requires=[
         "pyzmq",
         "uvloop",
-        "torch",
         "transformers",
         "einops",
         "packaging",

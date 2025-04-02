@@ -126,6 +126,7 @@ async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerMana
                 "generated_tokens": count_output_tokens_dict[sub_id],
                 "finish_reason": finish_status_dict[sub_id].get_finish_reason(),
                 "tokens": tokens_dict[sub_id],
+                "prompt_tokens": tokens_dict[sub_id][0]["prompt_tokens"],
             }
         if prompt_token_ids is not None:
             ret["prompt_token_ids"] = prompt_token_ids

@@ -70,6 +70,7 @@ def sample_kv(
     kv_nope,
     kv_rope,
     b_req_idx,
+    max_value_in_b_seq_len,
     b_seq_len,
     req_to_token_indexs,
     b_kv_start_loc,
@@ -87,7 +88,7 @@ def sample_kv(
 
     batch = b_seq_len.shape[0]
 
-    max_input_len = b_seq_len.max()
+    max_input_len = max_value_in_b_seq_len
     grid = (
         batch,
         triton.cdiv(max_input_len, BLOCK),

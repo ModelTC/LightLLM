@@ -19,7 +19,7 @@ def custom_cat(tensors):
 
     start_loc = 0
     for t, size in zip(tensors, sizes):
-        out_tensor[start_loc : (start_loc + size)].copy_(t, non_blocking=True)
+        out_tensor[start_loc : (start_loc + size)].copy_(t)
         start_loc += size
 
     return out_tensor

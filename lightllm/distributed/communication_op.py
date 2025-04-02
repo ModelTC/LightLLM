@@ -34,6 +34,7 @@ from lightllm.utils.dist_utils import (
     get_global_rank,
     get_current_rank_in_dp,
 )
+from lightllm.utils.device_utils import get_device_sm_count
 from contextlib import nullcontext, contextmanager
 
 logger = init_logger(__name__)
@@ -54,7 +55,12 @@ except:
 
 try:
     import deep_ep
+    from deep_gemm.jit_kernels.utils import set_num_sms
 
+    deepep_sms = int(os.getenv("DEEPEP_SMS", deep_ep.Buffer.num_sms))
+    device_sms = get_device_sm_count()
+    deep_ep.Buffer.set_num_sms(deepep_sms)
+    set_num_sms(device_sms - deepep_sms)
     HAS_DEEPEP = True
 except:
     HAS_DEEPEP = False

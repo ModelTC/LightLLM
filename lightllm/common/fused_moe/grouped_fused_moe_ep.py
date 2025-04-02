@@ -8,8 +8,10 @@ import torch.distributed as dist
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.fused_moe.moe_silu_and_mul_mix_quant_ep import silu_and_mul_masked_post_quant_fwd
-from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
-from lightllm.common.quantization.deepgemm_quant import get_tma_aligned_size
+from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
+    per_token_group_quant_fp8,
+    tma_align_input_scale,
+)
 from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
 import numpy as np
@@ -20,8 +22,6 @@ try:
     from deep_ep import Buffer, EventOverlap
     import deep_gemm
 
-    # Set the number of SMs to use
-    Buffer.set_num_sms(20)
 except:
     logger.warning("no deepep or deep_gemm")
 
@@ -30,12 +30,10 @@ def tma_aligned_quantize(
     input_tensor: torch.Tensor, block_size: int = 128, dtype: torch.dtype = torch.float8_e4m3fn
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     m, k = input_tensor.shape
-    padded_m = get_tma_aligned_size(m, 4)  # the dtype of input_scale is torch.float32
-    input_scale = torch.empty((k // block_size, padded_m), dtype=torch.float32, device=input_tensor.device).t()
+    input_scale = torch.empty((m, k // block_size), dtype=torch.float32, device=input_tensor.device)
     qinput_tensor = torch.empty((m, k), dtype=dtype, device=input_tensor.device)
     per_token_group_quant_fp8(input_tensor, block_size, qinput_tensor, input_scale)
-    input_scale = input_scale[:m, :]
-
+    input_scale = tma_align_input_scale(input_scale)
     return qinput_tensor, input_scale
 
 
@@ -147,10 +145,10 @@ def fused_experts_impl(
         # gather_out shape [recive_num_tokens, hidden]
         gather_out = torch.empty_like(recv_x[0], device=hidden_states.device, dtype=hidden_states.dtype)
         if all_tokens > 0:
-            input_tensor = (
+            input_tensor = [
                 torch.empty((all_tokens, K), device=hidden_states.device, dtype=qinput_tensor.dtype),
                 torch.empty((all_tokens, K // 128), device=hidden_states.device, dtype=torch.float32),
-            )
+            ]
             # when m_indices is filled ok.
             # m_indices show token use which expert, example, [0, 0, 0, 0, .... 1, 1, 1, 1,...., cur_expert_num - 1, ..]
             # the count of 0 is num_recv_tokens_per_expert_list[0], the count of 1 is num_recv_tokens_per_expert_list[1]
@@ -161,8 +159,8 @@ def fused_experts_impl(
             output_index = torch.empty_like(recv_topk_idx)
 
             num_recv_tokens_per_expert = torch.tensor(
-                num_recv_tokens_per_expert_list, device=hidden_states.device, dtype=torch.int32
-            )
+                num_recv_tokens_per_expert_list, dtype=torch.int32, pin_memory=True, device="cpu"
+            ).cuda(non_blocking=True)
 
             expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
 
@@ -180,7 +178,7 @@ def fused_experts_impl(
 
             # groupgemm (contiguous layout)
             gemm_out_a = torch.empty((all_tokens, N), device=hidden_states.device, dtype=hidden_states.dtype)
-
+            input_tensor[1] = tma_align_input_scale(input_tensor[1])
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
 
             # silu_and_mul_fwd + qaunt

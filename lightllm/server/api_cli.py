@@ -163,6 +163,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=6,
         help="schedule new requests after every router_max_wait_tokens decode steps.",
     )
+    parser.add_argument(
+        "--disable_aggressive_schedule",
+        action="store_true",
+        help="""aggressive schedule can lead to frequent prefill interruptions during decode.
+                disabling it allows the router_max_wait_tokens parameter to work more effectively.""",
+    )
 
     parser.add_argument("--use_dynamic_prompt_cache", action="store_true", help="use_dynamic_prompt_cache test")
 

@@ -89,7 +89,7 @@ def normal_or_p_d_start(args):
         args.token_healing_mode,
         args.use_reward_model,
         args.return_all_prompt_logprobs,
-        args.first_token_constraint_mode,
+        args.output_constraint_mode != "none",
     ].count(True) <= 1
     # 部分模式目前还无法与dynamic_prompt_cache一起跑，to do。
     if args.use_dynamic_prompt_cache:

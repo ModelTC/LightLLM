@@ -11,6 +11,13 @@ def test_torch_cat():
     repeat_rope(dest, source)
     torch.equal(dest[:, 0, :], source)
     torch.equal(dest[:, -1, :], source)
+
+    source = torch.randn((100, 1, 128), device="cuda")
+    dest = torch.randn((100, 64, 128), device="cuda")
+
+    repeat_rope(dest, source)
+    torch.equal(dest[:, 0, :], source)
+    torch.equal(dest[:, -1, :], source)
     return
 
 

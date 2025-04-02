@@ -48,7 +48,6 @@ def _fwd_kernel_ep_scatter_2(
     recv_topk,
     recv_topk_stride0,
     recv_topk_stride1,
-    num_recv_tokens_per_expert,
     output_tensor,
     output_tensor_stride0,
     output_tensor_stride1,
@@ -58,39 +57,30 @@ def _fwd_kernel_ep_scatter_2(
     output_index,
     output_index_stride0,
     output_index_stride1,
-    m_indices,
     topk_num: tl.constexpr,
-    num_experts: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     HIDDEN_SIZE_PAD: tl.constexpr,
     SCALE_HIDDEN_SIZE: tl.constexpr,
     SCALE_HIDDEN_SIZE_PAD: tl.constexpr,
-    BLOCK_E: tl.constexpr,
-    BLOCK_D: tl.constexpr,
 ):
     start_token_id = tl.program_id(0)
     grid_num = tl.num_programs(0)
 
+    offset_in = tl.arange(0, HIDDEN_SIZE_PAD)
+    mask = offset_in < HIDDEN_SIZE
+
+    offset_in_s = tl.arange(0, SCALE_HIDDEN_SIZE_PAD)
+    mask_s = offset_in_s < SCALE_HIDDEN_SIZE
+
     for token_id in range(start_token_id, total_token_num, grid_num):
+        to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
+        to_copy_s = tl.load(recv_x_scale + token_id * recv_x_scale_stride0 + offset_in_s, mask=mask_s)
+
         for topk_index in tl.range(0, topk_num, 1, num_stages=4):
             expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
             if expert_id >= 0:
                 dest_token_index = tl.atomic_add(expert_start_loc + expert_id, 1)
                 tl.store(output_index + token_id * output_index_stride0 + topk_index, dest_token_index)
-
-        offset_in = tl.arange(0, HIDDEN_SIZE_PAD)
-        mask = offset_in < HIDDEN_SIZE
-
-        offset_in_s = tl.arange(0, SCALE_HIDDEN_SIZE_PAD)
-        mask_s = offset_in_s < SCALE_HIDDEN_SIZE
-
-        to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
-        to_copy_s = tl.load(recv_x_scale + token_id * recv_x_scale_stride0 + offset_in_s, mask=mask_s)
-
-        for topk_index in range(0, topk_num):
-            expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
-            if expert_id >= 0:
-                dest_token_index = tl.load(output_index + token_id * output_index_stride0 + topk_index)
                 output_tensor_ptr = output_tensor + dest_token_index * output_tensor_stride0
                 output_tensor_scale_ptr = output_tensor_scale + dest_token_index * output_tensor_scale_stride0
                 tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
@@ -143,7 +133,6 @@ def ep_scatter(
         recv_topk,
         recv_topk.stride(0),
         recv_topk.stride(1),
-        num_recv_tokens_per_expert,
         output_tensor,
         output_tensor.stride(0),
         output_tensor.stride(1),
@@ -153,16 +142,12 @@ def ep_scatter(
         output_index,
         output_index.stride(0),
         output_index.stride(1),
-        m_indices,
         topk_num=recv_topk.shape[1],
-        num_experts=num_experts,
         num_warps=num_warps,
         HIDDEN_SIZE=hidden_size,
         HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
         SCALE_HIDDEN_SIZE=hidden_size // BLOCK_D,
         SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size // BLOCK_D),
-        BLOCK_E=BLOCK_E,
-        BLOCK_D=BLOCK_D,
     )
     return
 
@@ -217,11 +202,12 @@ def ep_gather(
     input_index: torch.Tensor,
     output_tensor: torch.Tensor,
 ):
-    BLOCK_D = 128  # block size of quantization
-    num_warps = 4
+    BLOCK_D = 1024  # block size of quantization
+    num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
-    grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 16 * 1024))
+    assert hidden_size % BLOCK_D == 0
+    grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](
         num_tokens,
         input_tensor,

@@ -1,8 +1,10 @@
 import os
 import json
+import torch
 from easydict import EasyDict
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
+
 
 logger = init_logger(__name__)
 
@@ -18,7 +20,15 @@ def get_unique_server_name():
     return service_uni_name
 
 
+def set_cuda_arch(args):
+    if args.enable_flashinfer_prefill or args.enable_flashinfer_decode:
+        capability = torch.cuda.get_device_capability()
+        arch = f"{capability[0]}.{capability[1]}"
+        os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"
+
+
 def set_env_start_args(args):
+    set_cuda_arch(args)
     if not isinstance(args, dict):
         args = vars(args)
     os.environ["LIGHTLLM_START_ARGS"] = json.dumps(args)

@@ -83,8 +83,8 @@ if __name__ == "__main__":
     import torch
 
     parser = make_argument_parser()
-    parser.add_argument("--batch_size", type=int, default=128, help="batch size")
-    parser.add_argument("--input_len", type=int, default=64, help="input sequence length")
+    parser.add_argument("--batch_size", type=int, default=2, help="batch size")
+    parser.add_argument("--input_len", type=int, default=4096, help="input sequence length")
     parser.add_argument("--output_len", type=int, default=128, help="output sequence length")
     parser.add_argument(
         "--profile",

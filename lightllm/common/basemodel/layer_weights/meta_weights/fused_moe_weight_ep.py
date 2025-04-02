@@ -9,7 +9,10 @@ from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.distributed import dist_group_manager
 from lightllm.common.fused_moe.topk_select import select_experts
 from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
-from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
+from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
+    per_token_group_quant_fp8,
+    tma_align_input_scale,
+)
 from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.utils.log_utils import init_logger
 
@@ -152,7 +155,7 @@ class FusedMoeWeightEP(BaseWeight):
         )
         return recv_x, masked_m, topk_idx, topk_weights, handle, hook
 
-    def dispatch(
+    def select_experts_and_quant_input(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -168,9 +171,6 @@ class FusedMoeWeightEP(BaseWeight):
             num_expert_group=self.n_group,
             scoring_func=self.scoring_func,
         )
-        topk_idx = topk_idx.to(torch.long)
-        buffer = dist_group_manager.ep_buffer
-        num_experts = self.n_routed_experts
         M, K = hidden_states.shape
         w1, w1_scale = self.w1
         block_size_k = 0
@@ -180,7 +180,17 @@ class FusedMoeWeightEP(BaseWeight):
         input_scale = torch.empty((M, K // block_size_k), dtype=torch.float32, device=hidden_states.device)
         qinput_tensor = torch.empty((M, K), dtype=w1.dtype, device=hidden_states.device)
         per_token_group_quant_fp8(hidden_states, block_size_k, qinput_tensor, input_scale)
+        return topk_weights, topk_idx.to(torch.long), (qinput_tensor, input_scale)
 
+    def dispatch(
+        self,
+        qinput_tensor: Tuple[torch.Tensor],
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        overlap_event: Optional[Any] = None,
+    ):
+        buffer = dist_group_manager.ep_buffer
+        num_experts = self.n_routed_experts
         # get_dispatch_layout
         (
             num_tokens_per_rank,
@@ -189,16 +199,10 @@ class FusedMoeWeightEP(BaseWeight):
             is_token_in_rank,
             previous_event,
         ) = buffer.get_dispatch_layout(
-            topk_idx, num_experts, previous_event=None, async_finish=True, allocate_on_comm_stream=False
+            topk_idx, num_experts, previous_event=overlap_event, async_finish=True, allocate_on_comm_stream=True
         )
-
-        # normal dispatch
-        # recv_x [recive_num_tokens, hidden] recv_x_scale [recive_num_tokens, hidden // block_size]
-        # recv_topk_idx [recive_num_tokens, topk_num]
-        # recv_topk_weights [recive_num_tokens, topk_num]
-        # num_recv_tokens_per_expert_list list [cur_node_expert_num] padding with expert_alignment=128
         recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, event = buffer.dispatch(
-            (qinput_tensor, input_scale),
+            qinput_tensor,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
             num_tokens_per_rank=num_tokens_per_rank,
@@ -207,14 +211,14 @@ class FusedMoeWeightEP(BaseWeight):
             num_tokens_per_expert=num_tokens_per_expert,
             previous_event=previous_event,
             async_finish=True,
-            allocate_on_comm_stream=False,
+            allocate_on_comm_stream=True,
             expert_alignment=128,
         )
 
         def hook():
             event.current_stream_wait()
 
-        return qinput_tensor, recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, hook
+        return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, hook
 
     def masked_group_gemm(
         self, recv_x: Tuple[torch.Tensor], masked_m: torch.Tensor, dtype: torch.dtype, expected_m: int
@@ -228,35 +232,35 @@ class FusedMoeWeightEP(BaseWeight):
         num_recv_tokens_per_expert_list,
         recv_x: Tuple[torch.Tensor],
         recv_topk_idx: torch.Tensor,
-        hidden_states: torch.Tensor,
-        qinput_tensor: torch.Tensor,
         recv_topk_weights: torch.Tensor,
+        hidden_dtype=torch.bfloat16,
     ):
+        device = recv_x[0].device
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2
-        _, K = hidden_states.shape
+        _, K = recv_x[0].shape
         _, N, _ = w1.shape
         # scatter
         all_tokens = sum(num_recv_tokens_per_expert_list)  # calcu padding all nums.
         # gather_out shape [recive_num_tokens, hidden]
-        gather_out = torch.empty_like(recv_x[0], device=hidden_states.device, dtype=hidden_states.dtype)
+        gather_out = torch.empty_like(recv_x[0], device=device, dtype=hidden_dtype)
         if all_tokens > 0:
-            input_tensor = (
-                torch.empty((all_tokens, K), device=hidden_states.device, dtype=qinput_tensor.dtype),
-                torch.empty((all_tokens, K // 128), device=hidden_states.device, dtype=torch.float32),
-            )
+            input_tensor = [
+                torch.empty((all_tokens, K), device=device, dtype=recv_x[0].dtype),
+                torch.empty((all_tokens, K // 128), device=device, dtype=torch.float32),
+            ]
             # when m_indices is filled ok.
             # m_indices show token use which expert, example, [0, 0, 0, 0, .... 1, 1, 1, 1,...., cur_expert_num - 1, ..]
             # the count of 0 is num_recv_tokens_per_expert_list[0], the count of 1 is num_recv_tokens_per_expert_list[1]
             # ...
-            m_indices = torch.empty(all_tokens, device=hidden_states.device, dtype=torch.int32)
+            m_indices = torch.empty(all_tokens, device=device, dtype=torch.int32)
             # output_index shape [recive_num_tokens, topk_num]
             # output_index use to show the token index in input_tensor
             output_index = torch.empty_like(recv_topk_idx)
 
             num_recv_tokens_per_expert = torch.tensor(
-                num_recv_tokens_per_expert_list, device=hidden_states.device, dtype=torch.int32
-            )
+                num_recv_tokens_per_expert_list, dtype=torch.int32, pin_memory=True, device="cpu"
+            ).cuda(non_blocking=True)
 
             expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
 
@@ -271,26 +275,25 @@ class FusedMoeWeightEP(BaseWeight):
                 m_indices,
                 output_index,
             )
-
+            input_tensor[1] = tma_align_input_scale(input_tensor[1])
             # groupgemm (contiguous layout)
-            gemm_out_a = torch.empty((all_tokens, N), device=hidden_states.device, dtype=hidden_states.dtype)
+            gemm_out_a = torch.empty((all_tokens, N), device=device, dtype=hidden_dtype)
 
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
 
             # silu_and_mul_fwd + qaunt
             # TODO fused kernel
-            silu_out = torch.empty((all_tokens, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
+            silu_out = torch.empty((all_tokens, N // 2), device=device, dtype=hidden_dtype)
 
             silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
             qsilu_out, qsilu_out_scale = tma_aligned_quantize(silu_out)
 
             # groupgemm (contiguous layout)
-            gemm_out_b = torch.empty((all_tokens, K), device=hidden_states.device, dtype=hidden_states.dtype)
+            gemm_out_b = torch.empty((all_tokens, K), device=device, dtype=hidden_dtype)
 
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
                 (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices
             )
-
             # gather and local reduce
             ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
 
@@ -312,6 +315,7 @@ class FusedMoeWeightEP(BaseWeight):
         self,
         gemm_out_b: torch.Tensor,
         handle: Any,
+        overlap_event: Optional[Any] = None,
     ):
         # normal combine
         combined_x, _, event = dist_group_manager.ep_buffer.combine(
@@ -319,8 +323,8 @@ class FusedMoeWeightEP(BaseWeight):
             handle,
             topk_weights=None,
             async_finish=True,
-            previous_event=None,
-            allocate_on_comm_stream=False,
+            previous_event=overlap_event,
+            allocate_on_comm_stream=True,
         )
 
         def hook():

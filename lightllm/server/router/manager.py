@@ -26,7 +26,7 @@ from lightllm.server.core.objs import ShmReqManager
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .stats import Stats
 from .pause_strategy import Fcfs, select_paused_reqs
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.basemodel.infer_lock import g_router_lock
@@ -266,9 +266,11 @@ class RouterManager:
                     self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
                     self.metric_client.gauge_set("lightllm_queue_size", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_current_max_tokens", 0.0)
-                    for dp_i in range(self.dp_size_in_node):
-                        frozen_token_num = self.shared_token_load.get_frozened_token_count(dp_i)
-                        logger.debug(f"dp_i {dp_i} frozen token num: {frozen_token_num} \n")
+                    # 60s print once
+                    if log_time_ready("frozen_info", 60):
+                        for dp_i in range(self.dp_size_in_node):
+                            frozen_token_num = self.shared_token_load.get_frozened_token_count(dp_i)
+                            logger.debug(f"dp_i {dp_i} frozen token num: {frozen_token_num} \n")
 
             if self.running_batch is None:
                 await asyncio.sleep(0.01)  # 10ms
@@ -318,7 +320,11 @@ class RouterManager:
                 self.running_batch = new_batch
                 await self._prefill_batch(self.running_batch)
                 self._filter_runing_batch()
-                self.has_wait_tokens = self.max_wait_tokens
+
+                # 激进调度控制
+                if not self.args.disable_aggressive_schedule:
+                    self.has_wait_tokens = self.max_wait_tokens
+
             elif self.is_multinode_and_multidp:
                 # 在多节点多 dp 的模式下，如果当前 running_batch 为None, 也需要不断的调用 decode 操作，
                 # 因为其他节点上的dp可能存在运行的请求，所以本节点也需要调用decode，推理后端的backend会
@@ -333,7 +339,11 @@ class RouterManager:
             new_mini_batch = await self.get_schedule_result(self.running_batch)
             self.has_wait_tokens = 0
             if new_mini_batch is not None:
-                self.has_wait_tokens = self.max_wait_tokens
+
+                # 激进调度控制
+                if not self.args.disable_aggressive_schedule:
+                    self.has_wait_tokens = self.max_wait_tokens
+
                 self.stats_tool.count_prompt_tokens(new_mini_batch)
                 await self._prefill_batch(new_mini_batch)
                 if not new_mini_batch.is_clear():

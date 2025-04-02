@@ -7,7 +7,7 @@ from transformers import PretrainedConfig
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
-from lightllm.common.basemodel.microbatch_overlap_objs import DecodeMicroBatch
+from lightllm.common.basemodel.microbatch_overlap_objs import DecodeMicroBatch, PrefillMicroBatch
 from torch.profiler import profile, record_function, ProfilerActivity
 
 
@@ -51,6 +51,66 @@ def test_model_inference(args, model_class):
     while not ans_queue.empty():
         assert ans_queue.get()
     return
+
+
+def overlap_prefill(
+    model_part,
+    batch_size,
+    max_len_in_batch,
+    input_ids,
+    mem_indexes,
+    b_req_idx,
+    b_start_loc,
+    b_seq_len,
+    total_token_num,
+    b_ready_cache_len,
+):
+
+    _0_batch_size = batch_size // 2
+    _0_total_token_num = total_token_num // 2
+    _0_max_len_in_batch = max_len_in_batch
+    _0_input_ids = input_ids[: total_token_num // 2]
+    _0_mem_indexes = mem_indexes[: total_token_num // 2]
+    _0_b_req_idx = b_req_idx[: batch_size // 2]
+    _0_b_seq_len = b_seq_len[: batch_size // 2]
+    _0_b_start_loc = b_start_loc[: batch_size // 2]
+    _o_b_ready_cache_len = b_ready_cache_len[: batch_size // 2]
+    micro_batch1 = PrefillMicroBatch(
+        _0_batch_size,
+        _0_total_token_num,
+        _0_max_len_in_batch,
+        _0_input_ids,
+        _0_mem_indexes,
+        _0_b_req_idx,
+        _0_b_start_loc,
+        _0_b_seq_len,
+        _o_b_ready_cache_len,
+    )
+
+    _1_batch_size = batch_size - batch_size // 2
+    _1_total_token_num = total_token_num - total_token_num // 2
+    _1_max_len_in_batch = max_len_in_batch
+    _1_input_ids = input_ids[total_token_num // 2 :]
+    _1_mem_indexes = mem_indexes[total_token_num // 2 :]
+    _1_b_req_idx = b_req_idx[batch_size // 2 :]
+    _1_b_seq_len = b_seq_len[batch_size // 2 :]
+    _1_b_start_loc = b_start_loc[: batch_size // 2]
+    _1_b_ready_cache_len = b_ready_cache_len[batch_size // 2 :]
+
+    micro_batch2 = PrefillMicroBatch(
+        _1_batch_size,
+        _1_total_token_num,
+        _1_max_len_in_batch,
+        _1_input_ids,
+        _1_mem_indexes,
+        _1_b_req_idx,
+        _1_b_start_loc,
+        _1_b_seq_len,
+        _1_b_ready_cache_len,
+    )
+
+    logits, logits1 = model_part.microbatch_overlap_prefill(micro_batch1, micro_batch2)
+    return torch.cat((logits, logits1), dim=0)
 
 
 def overlap_decode(
@@ -121,7 +181,7 @@ def torch_profile(fn, log_dir=None):
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
         record_shapes=False,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir)
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir),
     ) as prof:
         fn()
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
@@ -138,7 +198,7 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
 
     enable_decode_overlap = args.enable_decode_microbatch_overlap
     group_size = 1
-    if enable_decode_overlap:
+    if enable_decode_overlap or args.enable_prefill_microbatch_overlap:
         assert batch_size % 2 == 0, "batch size must be even number"
         group_size = 2
     init_distributed_env(model_kvargs)
@@ -171,19 +231,32 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
 
     total_token_num = input_len * batch_size
     mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0]).cuda()
-
-    logics = model_part.forward(
-        batch_size,
-        total_token_num,
-        input_len,
-        test_data,
-        mem_indexes,
-        b_req_idx,
-        b_start_loc,
-        b_seq_len,
-        b_ready_cache_len=b_ready_cache_len,
-        is_prefill=True,
-    )
+    if args.enable_prefill_microbatch_overlap:
+        logics = overlap_prefill(
+            model_part,
+            batch_size,
+            input_len,
+            test_data,
+            mem_indexes,
+            b_req_idx,
+            b_start_loc,
+            b_seq_len,
+            total_token_num,
+            b_ready_cache_len,
+        )
+    else:
+        logics = model_part.forward(
+            batch_size,
+            total_token_num,
+            input_len,
+            test_data,
+            mem_indexes,
+            b_req_idx,
+            b_start_loc,
+            b_seq_len,
+            b_ready_cache_len=b_ready_cache_len,
+            is_prefill=True,
+        )
     prob_out = torch.softmax(logics, dim=-1)
     predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
     predict_ids = predict_ids.detach().cpu().numpy()
@@ -255,40 +328,32 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
         if args.profile:
             proton.start(name="forward_prefill", context="python")
 
-    if args.torch_profile:
-        print("Profile Prefill")
-        try:
-            torch_profile(
-                lambda: model_part.forward(
-                    batch_size,
-                    total_token_num,
-                    input_len,
-                    test_data,
-                    mem_indexes,
-                    b_req_idx,
-                    b_start_loc,
-                    b_seq_len,
-                    b_ready_cache_len=b_ready_cache_len,
-                    is_prefill=True,
-                ),
-                log_dir=f"./logs_decode_overlap/forward_prefill_{model_kvargs['rank_id']}",
-            )
-        except Exception as e:
-            print(str(e))
-            raise
-
-    logics = model_part.forward(
-        batch_size,
-        total_token_num,
-        input_len,
-        test_data,
-        mem_indexes,
-        b_req_idx,
-        b_start_loc,
-        b_seq_len,
-        b_ready_cache_len=b_ready_cache_len,
-        is_prefill=True,
-    )
+    if args.enable_prefill_microbatch_overlap:
+        logics = overlap_prefill(
+            model_part,
+            batch_size,
+            input_len,
+            test_data,
+            mem_indexes,
+            b_req_idx,
+            b_start_loc,
+            b_seq_len,
+            total_token_num,
+            b_ready_cache_len,
+        )
+    else:
+        logics = model_part.forward(
+            batch_size,
+            total_token_num,
+            input_len,
+            test_data,
+            mem_indexes,
+            b_req_idx,
+            b_start_loc,
+            b_seq_len,
+            b_ready_cache_len=b_ready_cache_len,
+            is_prefill=True,
+        )
     prob_out = torch.softmax(logics, dim=-1)
     predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
     predict_ids = predict_ids.detach().cpu().numpy()
@@ -299,6 +364,45 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
         if args.profile:
             proton.finalize()
         print("prefill time cost:", (time.time() - prefill_start_time) * 1000)
+
+    if args.torch_profile:
+        print("Profile Prefill")
+        try:
+            if args.enable_prefill_microbatch_overlap:
+                torch_profile(
+                    lambda: overlap_prefill(
+                        model_part,
+                        batch_size,
+                        input_len,
+                        test_data,
+                        mem_indexes,
+                        b_req_idx,
+                        b_start_loc,
+                        b_seq_len,
+                        total_token_num,
+                        b_ready_cache_len,
+                    ),
+                    log_dir=f"./logs_sglang_4k/forward_prefill_{model_kvargs['rank_id']}",
+                )
+            else:
+                torch_profile(
+                    lambda: model_part.forward(
+                        batch_size,
+                        total_token_num,
+                        input_len,
+                        test_data,
+                        mem_indexes,
+                        b_req_idx,
+                        b_start_loc,
+                        b_seq_len,
+                        b_ready_cache_len=b_ready_cache_len,
+                        is_prefill=True,
+                    ),
+                    log_dir=f"./logs_sglang_4k/forward_prefill_{model_kvargs['rank_id']}",
+                )
+        except Exception as e:
+            print(str(e))
+            raise
 
     if rank_id == 0:
         if args.profile:
@@ -337,7 +441,7 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                         b_seq_len,
                         total_token_num,
                     ),
-                    log_dir=f"./logs_decode_overlap/forward_decode_{model_kvargs['rank_id']}",
+                    log_dir=f"./logs_sglang_4k/forward_decode_{model_kvargs['rank_id']}",
                 )
         else:
             logits = decode(
@@ -351,7 +455,7 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                 b_seq_len,
                 total_token_num,
             )
-            if i ==0 and args.torch_profile:
+            if i == 0 and args.torch_profile:
                 torch_profile(
                     lambda: decode(
                         model_part,
@@ -364,7 +468,7 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                         b_seq_len,
                         total_token_num,
                     ),
-                    log_dir=f"./logs_decode_overlap/forward_decode_{model_kvargs['rank_id']}",
+                    log_dir=f"./logs_sglang_4k/forward_decode_{model_kvargs['rank_id']}",
                 )
 
         prob_out = torch.softmax(logits, dim=-1)
