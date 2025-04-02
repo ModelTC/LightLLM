@@ -79,7 +79,7 @@ def get_tokenizer(
         tokenizer = LlavaTokenizer(tokenizer, model_cfg)
     elif model_type == "qwen" and "visual" in model_cfg:
         tokenizer = QWenVLTokenizer(tokenizer, model_cfg)
-    elif model_type == "qwen2_vl" and "vision_config" in model_cfg:
+    elif model_type in ["qwen2_vl", "qwen2_5_vl"] and "vision_config" in model_cfg:
         from transformers import AutoProcessor
 
         image_processor = AutoProcessor.from_pretrained(tokenizer_name)

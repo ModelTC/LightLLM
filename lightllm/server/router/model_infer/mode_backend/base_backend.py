@@ -177,7 +177,7 @@ class ModeBackend:
                     self.model = Qwen2RewardTpPartModel(model_kvargs)
                 else:
                     self.model = Qwen2TpPartModel(model_kvargs)
-            elif self.model_type == "qwen2_vl":
+            elif self.model_type in ["qwen2_vl", "qwen2_5_vl"]:
                 self.model = Qwen2VLTpPartModel(model_kvargs)
                 self.is_multimodal = True
             elif self.model_type == "gemma":
