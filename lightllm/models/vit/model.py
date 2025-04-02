@@ -7,6 +7,7 @@ from lightllm.models.vit.layer_infer.transformer_layer_infer import ViTTransform
 from lightllm.models.vit.layer_weights.pre_and_post_layer_weight import ViTPreAndPostLayerWeight
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
 from lightllm.models.vit.layer_weights.hf_load_utils import load_hf_weights
+from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.vit import get_load_image_func
@@ -135,20 +136,20 @@ class VisionTransformer:
         return input_embs
 
     @torch.no_grad()
-    def encode(self, image_uuids: List):
+    def encode(self, images: List[ImageItem]):
         img_tensors = []
         valid_ids = []
         valid_id = 0
         uuids = []
-        for i, url in enumerate(image_uuids):
-            if isinstance(url, int):
-                uuids.append(url)
-                image_data = read_shm(get_shm_name_data(url))
+        for i, img in enumerate(images):
+            if isinstance(img, ImageItem):
+                uuids.append(img.uuid)
+                image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
-                t = self.load_image_func(image_data)
+                t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
                 img_tensors.append(t)
             else:
-                raise Exception("Unsupport input types: {} for {}".format(type(url), url))
+                raise Exception("Unsupport input types: {} for {}".format(type(img), img))
 
             cur_num = img_tensors[-1].shape[0]
             valid_ids.append([valid_id, valid_id + cur_num])
@@ -159,7 +160,6 @@ class VisionTransformer:
 
         imgs = torch.cat(img_tensors, dim=0)
         pixel_values = imgs.cuda().to(dtype=self.data_type)
-        print(pixel_values.shape, pixel_values.dtype)
         all_img_embeds = self.forward(pixel_values)
         return all_img_embeds, uuids, valid_ids
 

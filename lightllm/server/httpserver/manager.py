@@ -9,6 +9,7 @@ import copy
 import hashlib
 import datetime
 import websockets
+from frozendict import frozendict
 import pickle
 import ujson as json
 import multiprocessing
@@ -18,7 +19,7 @@ from typing import Union, List, Tuple, Dict, Optional
 from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole, ObjType
 from ..embed_cache.utils import get_shm_name_data, create_shm
-from ..multimodal_params import MultimodalParams
+from ..multimodal_params import MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus
@@ -107,11 +108,14 @@ class HttpServerManager:
         return
 
     # connect cache server, calculate md5, alloc resource, return uuid
-    async def _alloc_resource(self, data, num):
-        md5sum = hashlib.md5(data).hexdigest()
+    async def _alloc_resource(self, img: ImageItem):
+        data = img.read()
+        # must after init_imageItem_extral_params
+        num_tokens = self.tokenizer.get_image_token_length(img)
+        md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
         wait_time = 1
         while True:
-            record = self.cache_client.root.alloc(md5sum, num)
+            record = self.cache_client.root.alloc(md5sum, num_tokens)
             # hit or new
             if record:
                 uid = record["id"]
@@ -124,11 +128,12 @@ class HttpServerManager:
                 await asyncio.sleep(wait_time)
                 wait_time = min(wait_time + 2, 9)
 
-    async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams):
+    async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             for img in multimodal_params.images:
-                record = await self._alloc_resource(img.read(), self.tokenizer.get_image_token_length(img))
+                self.tokenizer.init_imageItem_extral_params(img, multimodal_params, sampling_params)
+                record = await self._alloc_resource(img)
                 img.uuid = record["id"]
                 img.token_id = record["token_id"]
                 img.token_num = record["token_num"]
@@ -147,10 +152,16 @@ class HttpServerManager:
                         img.token_num = None
         return
 
-    def tokens(self, prompt, kwargs=None):
+    def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
-        return len(prompt_ids)
+        image_tokens = 0
+        img_count = 0
+        for img in multimodal_params.images:
+            img_count += 1
+            self.tokenizer.init_imageItem_extral_params(img, multimodal_params, samping_params)
+            image_tokens += self.tokenizer.get_image_token_length(img)
+        return len(prompt_ids) + image_tokens + img_count
 
     async def loop_for_request(self):
         assert self.args.node_rank > 0
@@ -210,9 +221,9 @@ class HttpServerManager:
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)
 
         try:
-            old_multimodal_params = None
+            original_multimodal_params = None
             if self.nnodes > 1 and self.node_rank == 0 and self.args.dp == 1:
-                old_multimodal_params = copy.deepcopy(multimodal_params)
+                original_multimodal_params = copy.deepcopy(multimodal_params)
 
             if self.pd_mode.is_P_or_NORMAL():
                 multimodal_params.verify_and_preload()
@@ -221,9 +232,7 @@ class HttpServerManager:
             await self._log_req_header(request_headers, group_request_id)
             # 监控
 
-            prompt_ids = await self._encode(
-                prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
-            )
+            prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
             prompt_tokens = len(prompt_ids)
             # 监控
             if group_request_id > 0:
@@ -256,7 +265,7 @@ class HttpServerManager:
             self.req_id_to_out_inf[group_request_id] = req_status
 
             await self.transfer_to_next_module_or_node(
-                prompt, sampling_params, old_multimodal_params, req_status.group_req_objs
+                prompt, sampling_params, original_multimodal_params, req_status.group_req_objs
             )
 
             results_generator = self._wait_to_token_package(
@@ -276,6 +285,8 @@ class HttpServerManager:
 
         except Exception as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+            # error need to release multimodel resources.
+            await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
         return
@@ -294,15 +305,17 @@ class HttpServerManager:
         return
 
     async def _encode(
-        self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, add_special_tokens: bool
+        self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
     ):
         if isinstance(prompt, str):
             if self.enable_multimodal:
                 assert len(multimodal_params.images) <= self.args.cache_capacity, "too many images!"
-                await self._alloc_multimodal_resources(multimodal_params)
-                prompt_ids = self.tokenizer.encode(prompt, multimodal_params, add_special_tokens=add_special_tokens)
+                await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                prompt_ids = self.tokenizer.encode(
+                    prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
+                )
             else:
-                prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
+                prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens)
             return prompt_ids
 
         # 这里的校验对多模态不是很充分, to do
@@ -350,7 +363,7 @@ class HttpServerManager:
         self,
         prompt: str,
         sampling_params: SamplingParams,
-        multimodal_params: MultimodalParams,
+        original_multimodal_params: MultimodalParams,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
         # 多节点纯tp 运行模式下，保证请求能保持相同的顺序转发到其他节点和当前节点next module.
@@ -358,7 +371,7 @@ class HttpServerManager:
             async with self.transfer_lock:
                 for sender in self.multinode_req_manager:
                     sender.send_pyobj(
-                        (prompt, sampling_params, multimodal_params),
+                        (prompt, sampling_params, original_multimodal_params),
                         protocol=pickle.HIGHEST_PROTOCOL,
                     )
                 await self.transfer_to_next_module(group_req_objs)

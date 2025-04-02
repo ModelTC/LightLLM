@@ -6,6 +6,7 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.models.llava.layer_weights.pre_and_post_layer_weight import LlavaPreAndPostLayerWeight
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
+from lightllm.server.core.objs import SamplingParams
 from lightllm.common.build_utils import repair_config
 from transformers import AutoConfig
 
@@ -32,6 +33,11 @@ class LlavaTokenizer:
         # (image_size // patch_size) ** 2: (336 // 14) ** 2 = 576
         self.image_length = (image_size // patch_size) ** 2
         self.skip_start = model_cfg.get("skip_start", True)
+
+    def init_imageItem_extral_params(
+        self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams
+    ):
+        return
 
     def get_image_token_length(self, img: ImageItem):
         return self.image_length

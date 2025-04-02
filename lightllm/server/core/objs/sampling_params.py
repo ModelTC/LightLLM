@@ -249,6 +249,8 @@ class SamplingParams(ctypes.Structure):
         ("top_p", ctypes.c_float),
         ("top_k", ctypes.c_int),
         ("ignore_eos", ctypes.c_bool),
+        # the max number of image patches to be used in the internvl model, for the test
+        ("image_max_patch_num", ctypes.c_int),
         ("max_new_tokens", ctypes.c_int),
         ("min_new_tokens", ctypes.c_int),
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
@@ -294,6 +296,7 @@ class SamplingParams(ctypes.Structure):
         self.top_p = kwargs.get("top_p", SamplingParams._top_p)
         self.top_k = kwargs.get("top_k", SamplingParams._top_k)
         self.ignore_eos = kwargs.get("ignore_eos", False)
+        self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
         self.max_new_tokens = kwargs.get("max_new_tokens", 16)
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
@@ -424,6 +427,7 @@ class SamplingParams(ctypes.Structure):
             "top_p": self.top_p,
             "top_k": self.top_k,
             "ignore_eos": self.ignore_eos,
+            "image_max_patch_num": self.image_max_patch_num,
             "max_new_tokens": self.max_new_tokens,
             "min_new_tokens": self.min_new_tokens,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),

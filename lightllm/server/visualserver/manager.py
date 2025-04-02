@@ -10,7 +10,7 @@ from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-
+from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from .model_infer.model_rpc import start_model_process, VisualModelRpcClient
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
@@ -80,16 +80,16 @@ class VisualManager:
         await asyncio.gather(*init_model_ret)
         return
 
-    async def infer_imgs(self, uuids):
-        if len(uuids) == 0:
+    async def infer_imgs(self, images: List[ImageItem]):
+        if len(images) == 0:
             return
 
         tasks = []
         for vit_dp_rank in range(self.vit_dp):
-            assigned_uuids = [uuids[i] for i in range(vit_dp_rank, len(uuids), self.vit_dp)]
-            if assigned_uuids:
+            assigned_images = [images[i] for i in range(vit_dp_rank, len(images), self.vit_dp)]
+            if assigned_images:
                 for vit_tp_rank in range(self.vit_tp):
-                    task = asyncio.create_task(self.model_rpcs[vit_dp_rank][vit_tp_rank].encode(assigned_uuids))
+                    task = asyncio.create_task(self.model_rpcs[vit_dp_rank][vit_tp_rank].encode(assigned_images))
                     tasks.append(task)
 
         await asyncio.gather(*tasks)
@@ -101,7 +101,7 @@ class VisualManager:
                 await asyncio.sleep(0.01)  # 10ms
             else:
                 processing_group_reqs = []
-                uuids_need_infer = []
+                images_need_infer = []
                 while len(self.waiting_reqs) > 0:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
@@ -118,26 +118,26 @@ class VisualManager:
 
                     for img in multimodal_params.images:
                         if not self.cache_client.root.get_item_embed(img.uuid):
-                            uuids_need_infer.append(img.uuid)
+                            images_need_infer.append(img)
 
-                        if len(uuids_need_infer) == self.infer_batch_size:
-                            await self.infer_imgs(uuids_need_infer)
-                            uuids_need_infer = []
+                        if len(images_need_infer) == self.infer_batch_size:
+                            await self.infer_imgs(images_need_infer)
+                            images_need_infer = []
                             for _group_req_indexes in processing_group_reqs:
                                 self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                             processing_group_reqs = []
 
-                    if len(uuids_need_infer) == 0:
+                    if len(images_need_infer) == 0:
                         self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
-                if len(uuids_need_infer) > 0:
-                    await self.infer_imgs(uuids_need_infer)
+                if len(images_need_infer) > 0:
+                    await self.infer_imgs(images_need_infer)
                     for _group_req_indexes in processing_group_reqs:
                         self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     processing_group_reqs = []
-                    uuids_need_infer = []
+                    images_need_infer = []
 
     async def loop_for_netio_req(self):
         while True:

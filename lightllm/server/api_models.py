@@ -5,10 +5,24 @@ from typing import Dict, List, Optional, Union, Literal
 import uuid
 
 
+class ImageURL(BaseModel):
+    url: str
+
+
+class MessageContent(BaseModel):
+    type: str
+    text: Optional[str] = None
+    image_url: Optional[ImageURL] = None
+
+
+class Message(BaseModel):
+    role: str
+    content: Union[str, List[MessageContent]]
+
+
 class ChatCompletionRequest(BaseModel):
-    # The openai api native parameters
     model: str
-    messages: List[Dict[str, str]]
+    messages: List[Message]
     function_call: Optional[str] = "none"
     temperature: Optional[float] = 1
     top_p: Optional[float] = 1.0

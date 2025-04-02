@@ -6,6 +6,7 @@ from PIL import Image
 from typing import List, Union
 from safetensors import safe_open
 from io import BytesIO
+from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.utils.log_utils import init_logger
 
@@ -123,21 +124,21 @@ class LlavaVisionModel:
         x = x.view(B, L, -1)
         return x
 
-    def encode(self, image_uuids: List):
+    def encode(self, images: List[ImageItem]):
         img_tensors = []
         uuids = []
         valid_id = 0
         valid_ids = []
 
-        for i, item in enumerate(image_uuids):
-            if isinstance(item, int):
-                uuids.append(item)
-                image_data = read_shm(get_shm_name_data(item))
+        for i, img in enumerate(images):
+            if isinstance(img, ImageItem):
+                uuids.append(img.uuid)
+                image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data)).convert("RGB")
                 t = self.image_processor.preprocess(image_data, return_tensors="pt")["pixel_values"]
                 img_tensors.append(t)
             else:
-                raise Exception("Unsupport input types: {} for {}".format(type(item), item))
+                raise Exception("Unsupport input types: {} for {}".format(type(img), img))
 
             cur_num = img_tensors[-1].shape[0]
             valid_ids.append([valid_id, valid_id + cur_num])

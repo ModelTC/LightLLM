@@ -21,6 +21,7 @@ class ImageItem:
         self.image_h = 0
 
         self._preload_data = None
+        self.extra_params = {}
 
     def preload(self):
         try:

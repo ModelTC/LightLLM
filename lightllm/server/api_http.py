@@ -20,7 +20,10 @@ import asyncio
 import collections
 import time
 import uvloop
+import requests
+import base64
 import os
+from io import BytesIO
 import pickle
 from .build_prompt import build_prompt, init_tokenizer
 
@@ -28,6 +31,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import ujson as json
 from http import HTTPStatus
 import uuid
+from PIL import Image
 import multiprocessing as mp
 from typing import AsyncGenerator, Union
 from typing import Callable
@@ -40,6 +44,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score, lightllm_pd_generate_stream
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.image_utils import image2base64
 
 from .api_models import (
     ChatCompletionRequest,
@@ -231,6 +236,37 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
 
     created_time = int(time.time())
+
+    multimodal_params_dict = {"images": []}
+    for message in request.messages:
+        if isinstance(message.content, list):
+            texts = []
+            for content in message.content:
+                if content.type == "text" and content.text:
+                    texts.append(content.text)
+                elif content.type == "image_url" and content.image_url is not None:
+                    img = content.image_url.url
+                    if img.startswith("http://") or img.startswith("https://"):
+                        response = requests.get(img, stream=True, timeout=2)
+                        data = image2base64(response.raw)
+                    elif img.startswith("file://"):
+                        data = image2base64(img[7:])
+                    elif img.startswith("data:image"):
+                        # "data:image/jpeg;base64,{base64_image}"
+                        data_str = img.split(";", 1)[1]
+                        if data_str.startswith("base64,"):
+                            data = data_str[7:]
+                        else:
+                            raise ValueError("Unrecognized image input.")
+                    else:
+                        raise ValueError(
+                            "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
+                        )
+
+                    multimodal_params_dict["images"].append({"type": "base64", "data": data})
+
+            message.content = "\n".join(texts)
+
     prompt = await build_prompt(request)
     sampling_params_dict = {
         "do_sample": request.do_sample,
@@ -250,7 +286,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
     sampling_params.verify()
-    multimodal_params = MultimodalParams(images=[])
+    multimodal_params = MultimodalParams(**multimodal_params_dict)
 
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
@@ -328,8 +364,23 @@ async def tokens(request: Request):
     try:
         request_dict = await request.json()
         prompt = request_dict.pop("text")
-        parameters = request_dict.pop("parameters", {})
-        return JSONResponse({"ntokens": g_objs.httpserver_manager.tokens(prompt, parameters)}, status_code=200)
+        sample_params_dict = request_dict.pop("parameters", {})
+
+        sampling_params = SamplingParams()
+        sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sample_params_dict)
+        sampling_params.verify()
+
+        multimodal_params_dict = request_dict.get("multimodal_params", {})
+        multimodal_params = MultimodalParams(**multimodal_params_dict)
+        multimodal_params.verify_and_preload()
+        return JSONResponse(
+            {
+                "ntokens": g_objs.httpserver_manager.tokens(
+                    prompt, multimodal_params, sampling_params, sample_params_dict
+                )
+            },
+            status_code=200,
+        )
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
 

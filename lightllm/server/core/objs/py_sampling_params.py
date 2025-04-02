@@ -37,6 +37,7 @@ class SamplingParams:
         top_p: float = None,
         top_k: int = None,  # -1 is for all
         ignore_eos: bool = False,
+        image_max_patch_num: int = -1,
         max_new_tokens: int = 16,
         min_new_tokens: int = 1,
         stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None,  # 停止句子条件
@@ -75,6 +76,7 @@ class SamplingParams:
         self.top_p = top_p if top_p is not None else SamplingParams._top_p
         self.top_k = top_k if top_k is not None else SamplingParams._top_k
         self.ignore_eos = ignore_eos
+        self.image_max_patch_num = image_max_patch_num
         self.max_new_tokens = max_new_tokens
         self.min_new_tokens = min_new_tokens
         self.stop_sequences = stop_sequences if stop_sequences is not None else SamplingParams._stop_sequences
@@ -254,6 +256,7 @@ class SamplingParams:
         ret["temperature"] = self.temperature
         ret["top_p"] = self.top_p
         ret["top_k"] = self.top_k
+        ret["image_max_patch_num"] = self.image_max_patch_num
         ret["min_new_tokens"] = self.min_new_tokens
         ret["ignore_eos"] = self.ignore_eos
         ret["max_new_tokens"] = self.max_new_tokens
