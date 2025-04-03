@@ -192,6 +192,7 @@ try:
             None,
             None,
             None,
+            None,
             softmax_scale,
             causal=False,
             window_size=(-1, -1),
