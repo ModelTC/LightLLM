@@ -184,6 +184,7 @@ async def tgi_generate_stream_impl(request: Request, httpserver_manager: HttpSer
                     ret["details"] = {
                         "generated_tokens": len(final_output),
                         "finish_reason": finish_status.get_finish_reason(),
+                        "prompt_tokens": metadata.get("prompt_tokens", 0),
                     }
 
             yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")
