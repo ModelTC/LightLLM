@@ -68,7 +68,10 @@ class LlamaTpPartModel(TpPartBaseModel):
         """
         模型特殊的一些初始化
         """
-        if self.config.get("use_rope_yarn", False):
+        if self.config.get("use_rope_yarn", False) or (
+            self.config.get("rope_scaling", None) is not None
+            and self.config.get("rope_scaling", {}).get("type", "base") == "yarn"
+        ):
             self._init_to_get_yarn_rotary()
         elif self.config.get("use_dynamic_ntk", False) or (
             self.config.get("rope_scaling", None) is not None
@@ -215,7 +218,8 @@ class LlamaTpPartModel(TpPartBaseModel):
             scale = 1.0
         else:
             scale = self.config.get("rope_scaling", {}).get("factor", 1.0)
-        original_max_position_embeddings = self.config.get("original_max_position_embeddings", 2048)
+        rope_config = self.config.get("rope_scaling", {})
+        original_max_position_embeddings = rope_config.get("original_max_position_embeddings", 2048)
         extrapolation_factor = 1.0
         attn_factor = 1.0
         beta_fast = 32.0
