@@ -95,6 +95,10 @@ def normal_or_p_d_start(args):
     if args.use_dynamic_prompt_cache:
         assert args.token_healing_mode is False
 
+    # chuncked prefill 需要和 dynamic_prompt_cache 一起使能
+    if not args.disable_chunked_prefill:
+        assert args.use_dynamic_prompt_cache is True
+
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
