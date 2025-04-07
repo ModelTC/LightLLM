@@ -175,7 +175,6 @@ try:
             v,
             None,
             None,  # k_new, v_new
-            None,  # qv
             o,  # out
             None,
             None,
@@ -192,9 +191,8 @@ try:
             None,
             None,
             None,
-            None,
             softmax_scale,
-            causal=False,
+            False,  # causal
             window_size=(-1, -1),
             softcap=0.0,
             num_splits=1,
