@@ -44,7 +44,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score, lightllm_pd_generate_stream
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.image_utils import image2base64
+from lightllm.utils.image_utils import image2base64, fetch_image
 
 from .api_models import (
     ChatCompletionRequest,
@@ -247,8 +247,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 elif content.type == "image_url" and content.image_url is not None:
                     img = content.image_url.url
                     if img.startswith("http://") or img.startswith("https://"):
-                        response = requests.get(img, stream=True, timeout=2)
-                        data = image2base64(response.raw)
+                        img_data = await fetch_image(img, timeout=5)
+                        data = image2base64(img_data)
                     elif img.startswith("file://"):
                         data = image2base64(img[7:])
                     elif img.startswith("data:image"):
@@ -372,7 +372,7 @@ async def tokens(request: Request):
 
         multimodal_params_dict = request_dict.get("multimodal_params", {})
         multimodal_params = MultimodalParams(**multimodal_params_dict)
-        multimodal_params.verify_and_preload()
+        await multimodal_params.verify_and_preload()
         return JSONResponse(
             {
                 "ntokens": g_objs.httpserver_manager.tokens(

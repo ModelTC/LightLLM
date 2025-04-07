@@ -87,3 +87,4 @@ gunicorn==23.0.0
 vllm==0.7.2
 flashinfer-python==0.2.2
 sgl-kernel
+httpx==0.28.1

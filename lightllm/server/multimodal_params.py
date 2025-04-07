@@ -4,6 +4,7 @@ import os
 import requests
 from io import BytesIO
 from PIL import Image
+from lightllm.utils.image_utils import fetch_image
 import base64
 
 
@@ -23,14 +24,11 @@ class ImageItem:
         self._preload_data = None
         self.extra_params = {}
 
-    def preload(self):
+    async def preload(self):
         try:
             if self._type == "url":
-                timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
-                # 这个地方获取数据有问题，应该修改为异步协程方式获取，否则会阻塞原有的线程
-                # to do
-                ret = requests.get(self._data, timeout=timeout)
-                img_data = ret.content
+                timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
+                img_data = await fetch_image(self._data, timeout=timeout)
             elif self._type == "base64":
                 img_data = base64.b64decode(self._data)
             elif self._type == "image_size":
@@ -83,9 +81,9 @@ class MultimodalParams:
         self.images = [ImageItem(**i) for i in images]
         return
 
-    def verify_and_preload(self):
+    async def verify_and_preload(self):
         for image in self.images:
-            image.preload()
+            await image.preload()
         return
 
     def to_dict(self):
