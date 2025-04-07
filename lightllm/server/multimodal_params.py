@@ -33,6 +33,12 @@ class ImageItem:
                 img_data = ret.content
             elif self._type == "base64":
                 img_data = base64.b64decode(self._data)
+            elif self._type == "image_size":
+                # image_size 代表直接传入图片的 width，height，主要是用于一些场景
+                # 的 token 计数判断, 所以只需要图片长宽信息，不需要具体图片的内容信息
+                self.image_w = self._data[0]
+                self.image_h = self._data[1]
+                return
             else:
                 raise ValueError(f"cannot read image which type is {self._type}!")
 
