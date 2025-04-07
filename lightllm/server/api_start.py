@@ -11,6 +11,7 @@ from .embed_cache.manager import start_cache_manager
 from .visualserver.manager import start_visual_process
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
+from lightllm.utils.envs_utils import get_lightllm_gunicorn_time_out_seconds
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
@@ -250,6 +251,8 @@ def normal_or_p_d_start(args):
         "--error-logfile",
         "-",
         "lightllm.server.api_http:app",
+        "--timeout",
+        f"{get_lightllm_gunicorn_time_out_seconds()}",
     ]
 
     # 启动子进程
@@ -307,6 +310,8 @@ def pd_master_start(args):
         "-",
         "--preload",
         "lightllm.server.api_http:app",
+        "--timeout",
+        f"{get_lightllm_gunicorn_time_out_seconds()}",
     ]
 
     http_server_process = subprocess.Popen(command)
