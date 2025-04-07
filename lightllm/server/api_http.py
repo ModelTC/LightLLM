@@ -247,23 +247,19 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 elif content.type == "image_url" and content.image_url is not None:
                     img = content.image_url.url
                     if img.startswith("http://") or img.startswith("https://"):
-                        img_data = await fetch_image(img, timeout=5)
-                        data = image2base64(img_data)
-                    elif img.startswith("file://"):
-                        data = image2base64(img[7:])
+                        multimodal_params_dict["images"].append({"type": "url", "data": img})
                     elif img.startswith("data:image"):
                         # "data:image/jpeg;base64,{base64_image}"
                         data_str = img.split(";", 1)[1]
                         if data_str.startswith("base64,"):
                             data = data_str[7:]
+                            multimodal_params_dict["images"].append({"type": "base64", "data": data})
                         else:
                             raise ValueError("Unrecognized image input.")
                     else:
                         raise ValueError(
                             "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
                         )
-
-                    multimodal_params_dict["images"].append({"type": "base64", "data": data})
 
             message.content = "\n".join(texts)
 
