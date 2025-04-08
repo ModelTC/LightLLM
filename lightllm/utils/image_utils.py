@@ -13,8 +13,8 @@ def image2base64(img_str: str):
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
-async def fetch_image(url, timeout):
-    async with httpx.AsyncClient() as client:
+async def fetch_image(url, timeout, proxy=None):
+    async with httpx.AsyncClient(proxy=proxy) as client:
         async with client.stream("GET", url, timeout=timeout) as response:
             response.raise_for_status()
             ans_bytes = []

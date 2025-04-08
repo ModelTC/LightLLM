@@ -28,7 +28,8 @@ class ImageItem:
         try:
             if self._type == "url":
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
-                img_data = await fetch_image(self._data, timeout=timeout)
+                proxy = os.getenv("REQUEST_PROXY", None)
+                img_data = await fetch_image(self._data, timeout=timeout, proxy=proxy)
             elif self._type == "base64":
                 img_data = base64.b64decode(self._data)
             elif self._type == "image_size":
