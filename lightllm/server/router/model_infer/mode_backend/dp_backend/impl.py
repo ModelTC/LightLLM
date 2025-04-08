@@ -31,7 +31,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         # nan 值，避免后续构建的fake请求在计算的过程中出现计算错误。
         from .pre_process import padded_prepare_prefill_inputs
 
-        kwargs, run_reqs, padded_req_num = padded_prepare_prefill_inputs([], 1, is_multimodal=False)
+        kwargs, run_reqs, padded_req_num = padded_prepare_prefill_inputs([], 1, is_multimodal=self.is_multimodal)
         self.model.forward(**kwargs)
         assert len(run_reqs) == 0 and padded_req_num == 1
         return
