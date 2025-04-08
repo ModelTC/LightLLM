@@ -368,7 +368,7 @@ async def tokens(request: Request):
 
         multimodal_params_dict = request_dict.get("multimodal_params", {})
         multimodal_params = MultimodalParams(**multimodal_params_dict)
-        await multimodal_params.verify_and_preload()
+        await multimodal_params.verify_and_preload(request)
         return JSONResponse(
             {
                 "ntokens": g_objs.httpserver_manager.tokens(

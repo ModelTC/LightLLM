@@ -228,7 +228,7 @@ class HttpServerManager:
                 original_multimodal_params = copy.deepcopy(multimodal_params)
 
             if self.pd_mode.is_P_or_NORMAL():
-                await multimodal_params.verify_and_preload()
+                await multimodal_params.verify_and_preload(request)
 
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
