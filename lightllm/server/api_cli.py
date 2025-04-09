@@ -193,6 +193,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_multimodal", action="store_true", help="Whether or not to allow to load additional multimodal models."
     )
+    parser.add_argument(
+        "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
+    )
     parser.add_argument("--enable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")
     parser.add_argument("--enable_custom_allgather", action="store_true", help="Whether to enable cutom allgather.")
     parser.add_argument(

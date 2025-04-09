@@ -1,6 +1,11 @@
 import os
-from functools import lru_cache
+import time
+import shutil
 import subprocess
+from functools import lru_cache
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 @lru_cache(maxsize=None)
@@ -99,3 +104,110 @@ def has_nvlink():
     except subprocess.CalledProcessError:
         # If there's an error (e.g., nvidia-smi is not installed or another issue), assume no NVLink
         return False
+
+
+def is_mps_running(verbose=False):
+    result = subprocess.run(
+        "ps -ef | grep '[n]vidia-cuda-mps-control'",
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def stop_mps():
+    if is_mps_running():
+        result = subprocess.run("echo quit | nvidia-cuda-mps-control", shell=True)
+        logger.info("Stopping MPS...")
+        if result.returncode == 0:
+            logger.info("MPS stopped successfully.")
+        else:
+            logger.warning("Failed to stop MPS.")
+    else:
+        logger.info("MPS is not running, no need to stop.")
+
+
+def enable_mps():
+    if is_mps_running():
+        logger.info("MPS is already running, no need to start.")
+        return
+
+    ret = os.system("nvidia-cuda-mps-control -d")
+
+    time.sleep(10)
+    if ret != 0:
+        logger.warning("Failed to start MPS.")
+        return
+    if is_mps_running():
+        logger.info("MPS started successfully.")
+    return
+
+
+def get_gpu_compute_mode(gpu_index=0):
+    try:
+        if not shutil.which("nvidia-smi"):
+            logger.warning("nvidia-smi not found in PATH.")
+            return None
+
+        cmd = ["nvidia-smi", "-i", str(gpu_index), "--query-gpu=compute_mode", "--format=csv,noheader"]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        if result.returncode != 0:
+            logger.warning(f"Failed to query compute mode: {result.stderr.strip()}")
+            return None
+
+        mode = result.stdout.strip()
+        return mode
+
+    except Exception as e:
+        logger.warning(f"Exception occurred while checking GPU compute mode: {e}")
+        return None
+
+
+def set_gpu_exclusive_mode(gpu_index=0):
+    logger.info(f"Setting GPU {gpu_index} to EXCLUSIVE_PROCESS mode...")
+    result = subprocess.run(
+        ["nvidia-smi", "-i", str(gpu_index), "-c", "EXCLUSIVE_PROCESS"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode == 0:
+        logger.info(f"GPU {gpu_index} set to EXCLUSIVE_PROCESS mode.")
+        return True
+    else:
+        logger.warning(f"Failed to set EXCLUSIVE_PROCESS mode: {result.stderr.strip()}")
+        return False
+
+
+def set_gpu_default_mode(gpu_index=0):
+    logger.info(f"Setting GPU {gpu_index} to DEFAULT mode...")
+    result = subprocess.run(
+        ["nvidia-smi", "-i", str(gpu_index), "-c", "DEFAULT"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    if result.returncode == 0:
+        logger.info(f"GPU {gpu_index} set to DEFAULT mode.")
+        return True
+    else:
+        logger.warning(f"Failed to set DEFAULT mode: {result.stderr.strip()}")
+        return False
+
+
+def set_sm_limit(percent: int, gpu_index=0):
+    """
+    Sets CUDA_MPS_ACTIVE_THREAD_PERCENTAGE to the given value if the GPU is in EXCLUSIVE_PROCESS mode.
+    """
+    if not (1 <= percent <= 100):
+        logger.error("SM usage percentage must be between 1 and 100.")
+        return False
+
+    mode = get_gpu_compute_mode(gpu_index)
+    if mode != "Exclusive_Process":
+        logger.warning(f"Cannot set SM limit. GPU {gpu_index} is in '{mode}' mode, not 'Exclusive_Process'.")
+        return False
+
+    os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = str(percent)
+    logger.info(f"Set CUDA_MPS_ACTIVE_THREAD_PERCENTAGE to {percent}% for GPU {gpu_index}.")
+    return True

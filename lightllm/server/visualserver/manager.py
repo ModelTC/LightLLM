@@ -55,7 +55,10 @@ class VisualManager:
         for dp_rank_id in range(self.vit_dp):
             tp_ports_each_dp = self.visual_model_rpc_ports[dp_rank_id]
             for tp_rank_id in range(self.vit_tp):
-                rpc_model = await start_model_process(port=tp_ports_each_dp[tp_rank_id], vit_tp=self.vit_tp)
+                device_id = self.args.visual_gpu_ids[dp_rank_id * self.vit_tp + tp_rank_id]
+                rpc_model = await start_model_process(
+                    port=tp_ports_each_dp[tp_rank_id], vit_tp=self.vit_tp, device_id=device_id
+                )
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
@@ -159,7 +162,6 @@ def start_visual_process(args, router_port, visual_port, cache_port, model_rpc_p
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     start_parent_check_thread()
-
     try:
         visualserver = VisualManager(args, router_port, visual_port, cache_port, model_rpc_ports)
         asyncio.run(visualserver.wait_to_model_ready())

@@ -41,6 +41,8 @@ class SubmoduleManager:
         return
 
     def terminate_all_processes(self):
+        from lightllm.utils.envs_utils import get_env_start_args
+
         def kill_recursive(proc):
             try:
                 parent = psutil.Process(proc.pid)
@@ -57,6 +59,16 @@ class SubmoduleManager:
             if proc.is_alive():
                 kill_recursive(proc)
                 proc.join()
+
+        # recover the gpu compute mode
+        is_enable_mps = get_env_start_args().enable_mps
+        world_size = get_env_start_args().tp
+        if is_enable_mps:
+            from lightllm.utils.device_utils import stop_mps, set_gpu_default_mode
+
+            stop_mps()
+            for i in range(world_size):
+                set_gpu_default_mode(gpu_index=i)
         logger.info("All processes terminated gracefully.")
 
 
