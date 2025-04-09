@@ -460,7 +460,7 @@ class TpPartBaseModel:
                 infer_state.b_ready_cache_len = torch.zeros_like(
                     cur_batch.b_seq_len, dtype=cur_batch.b_seq_len.dtype, device=cur_batch.b_seq_len.device
                 )
-            infer_state.multimodal_params = None
+            infer_state.multimodal_params = cur_batch.multimodal_params
             infer_state.microbatch_index = batch_index
 
             infer_state.mem_manager = self.mem_manager

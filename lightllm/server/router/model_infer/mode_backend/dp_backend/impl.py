@@ -92,7 +92,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         from .pre_process import padded_prepare_decode_inputs
 
         kwargs, run_reqs, padded_req_num = padded_prepare_decode_inputs(
-            decode_reqs, max_decode_num, is_multimodal=False
+            decode_reqs, max_decode_num, is_multimodal=self.is_multimodal
         )
         logits = self.model.forward(**kwargs)
 
@@ -118,7 +118,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             micro_batch1,
             run_reqs1,
             padded_req_num1,
-        ) = padded_overlap_prepare_decode_inputs(decode_reqs, max_decode_num, is_multimodal=False)
+        ) = padded_overlap_prepare_decode_inputs(decode_reqs, max_decode_num, is_multimodal=self.is_multimodal)
         logits, logits1 = self.model.microbatch_overlap_decode(micro_batch, micro_batch1)
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         req_num, req_num1 = len(run_reqs), len(run_reqs1)
@@ -147,7 +147,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             micro_batch1,
             run_reqs1,
             padded_req_num1,
-        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs, max_prefill_num, is_multimodal=False)
+        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs, max_prefill_num, is_multimodal=self.is_multimodal)
         logits, logits1 = self.model.microbatch_overlap_prefill(micro_batch, micro_batch1)
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         req_num, req_num1 = len(run_reqs), len(run_reqs1)

@@ -336,6 +336,7 @@ def _padded_prepare_prefill_micro_batch(req_objs: List[InferReq], is_multimodal=
         b_start_loc=nopad_b_start_loc,
         b_seq_len=nopad_b_seq_len,
         b_ready_cache_len=b_ready_cache_len,
+        multimodal_params=batch_multimodal_params,
     )
 
     return micro_batch, run_reqs, padded_req_num
