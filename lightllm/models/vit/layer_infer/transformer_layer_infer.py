@@ -12,6 +12,7 @@ from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attenti
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.models.vit.triton_kernel.gelu_vit import gelu_fwd
 from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
+from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
 class ViTTransformerLayerInfer:
@@ -60,7 +61,9 @@ class ViTTransformerLayerInfer:
 
     def _att_norm(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
         if layer_weight.norm_type == "rms_norm":
-            b = rms_norm(input, weight=layer_weight.att_norm_weight_.weight, eps=self.eps_)
+            b = rms_norm(
+                input, weight=layer_weight.att_norm_weight_.weight, eps=self.eps_, use_custom_tensor_mananger=True
+            )
         else:
             b = torch.nn.functional.layer_norm(
                 input,
@@ -73,7 +76,9 @@ class ViTTransformerLayerInfer:
 
     def _ffn_norm(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
         if layer_weight.norm_type == "rms_norm":
-            return rms_norm(input, weight=layer_weight.ffn_norm_weight_.weight, eps=self.eps_)
+            return rms_norm(
+                input, weight=layer_weight.ffn_norm_weight_.weight, eps=self.eps_, use_custom_tensor_mananger=True
+            )
         else:
             return torch.nn.functional.layer_norm(
                 input,
@@ -84,20 +89,28 @@ class ViTTransformerLayerInfer:
             )
 
     def _qk_norm(self, q, k, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
-        q_norm = self.tp_norm(q, layer_weight.q_norm_weight_.weight)
-        k_norm = self.tp_norm(k, layer_weight.k_norm_weight_.weight)
+        if self.tp_world_size_ > 1:
+            q_norm = self.tp_norm(q, layer_weight.q_norm_weight_.weight)
+            k_norm = self.tp_norm(k, layer_weight.k_norm_weight_.weight)
+        else:
+            q_norm = rms_norm(
+                q, weight=layer_weight.q_norm_weight_.weight, eps=self.eps_, use_custom_tensor_mananger=True
+            )
+            k_norm = rms_norm(
+                k, weight=layer_weight.k_norm_weight_.weight, eps=self.eps_, use_custom_tensor_mananger=True
+            )
         return q_norm, k_norm
 
     def _get_qkv(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
         batch_size = input.shape[0]
         seq_len = input.shape[1]
-        qkv = layer_weight.qkv_proj.mm(input.view(-1, self.embed_dim_), use_custom_tensor_mananger=False)
+        qkv = layer_weight.qkv_proj.mm(input.view(-1, self.embed_dim_), use_custom_tensor_mananger=True)
         qkv = qkv.view(batch_size, seq_len, 3, -1, self.head_dim_)
         q, k, v = qkv.unbind(2)
         return q, k, v
 
     def _context_attention_kernel(self, q, k, v) -> torch.Tensor:
-        out = torch.empty_like(q)
+        out = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
         batch_size = q.shape[0]
         seq_len = q.shape[1]
         flash_attention_fwd(q, k, v, out)
@@ -107,30 +120,33 @@ class ViTTransformerLayerInfer:
         batch_size = input.shape[0]
         seq_len = input.shape[1]
         o_tensor = layer_weight.o_proj.mm(
-            input.view(-1, self.tp_padding_head_num * self.head_dim_), use_custom_tensor_mananger=False
+            input.view(-1, self.tp_padding_head_num * self.head_dim_), use_custom_tensor_mananger=True
         )
         if layer_weight.use_ls:
-            o_tensor *= layer_weight.ls1
+            o_tensor.mul_(layer_weight.ls1)
         return o_tensor.reshape((batch_size, seq_len, -1))
 
     def _ffn(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
-        fc1 = layer_weight.ffn_1_proj_.mm(input.view(-1, self.embed_dim_), use_custom_tensor_mananger=False)
-        # ffn1_out = torch.nn.functional.gelu(fc1)
-        ffn1_out = gelu_fwd(fc1)
+        fc1 = layer_weight.ffn_1_proj_.mm(input.view(-1, self.embed_dim_), use_custom_tensor_mananger=True)
         input_shape = input.shape
         input = None
-        ffn2_out = layer_weight.ffn_2_proj_.mm(ffn1_out, use_custom_tensor_mananger=False)
-        if layer_weight.use_ls:
-            ffn2_out *= layer_weight.ls2
+        ffn1_out = gelu_fwd(fc1, use_custom_tensor_mananger=True)
+        ffn2_out = layer_weight.ffn_2_proj_.mm(ffn1_out, use_custom_tensor_mananger=True)
         ffn1_out = None
+        if layer_weight.use_ls:
+            ffn2_out.mul_(layer_weight.ls2)
         return ffn2_out.reshape(input_shape)
 
     def _context_attention(self, input_embding, layer_weight):
         input1 = self._att_norm(input_embding, layer_weight)
         q, k, v = self._get_qkv(input1, layer_weight)
+        input1 = None
         if layer_weight.qk_norm:
             q, k = self._qk_norm(q, k, layer_weight)
         o = self._context_attention_kernel(q, k, v)
+        q = None
+        k = None
+        v = None
         o = self._get_o(o, layer_weight)
         if self.tp_world_size_ > 1:
             dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)

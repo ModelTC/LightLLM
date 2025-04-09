@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
 @triton.jit
@@ -21,8 +22,14 @@ def gelu_kernel(output_ptr, input_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     tl.store(output_ptr + offsets, output, mask=mask)
 
 
-def gelu_fwd(input):
-    output = torch.empty_like(input)
+def gelu_fwd(input, use_custom_tensor_mananger=False):
+    if use_custom_tensor_mananger:
+        shape = input.shape
+        dtype = input.dtype
+        device = input.device
+        output = g_cache_manager.alloc_tensor(shape, dtype, device=device)
+    else:
+        output = torch.empty_like(input)
     n_elements = input.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
     gelu_kernel[grid](output, input, n_elements, BLOCK_SIZE=1024)

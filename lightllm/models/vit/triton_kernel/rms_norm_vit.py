@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from torch import Tensor
+from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
 @triton.jit
@@ -32,20 +33,26 @@ def rms_norm_kernel(
     tl.store(out_ptr + offsets, out, mask=offsets < N_COLS)
 
 
-def rms_norm(hidden_states: Tensor, weight: Tensor, eps: float = 1e-5):
+def rms_norm(hidden_states: Tensor, weight: Tensor, eps: float = 1e-5, use_custom_tensor_mananger: bool = False):
     """Rms norm."""
     feat_size = weight.shape[0]
     seq_len = hidden_states.numel() // hidden_states.size(-1)
     input_stride = hidden_states.stride(-2)
 
     BLOCK_N = triton.next_power_of_2(feat_size)
-    out = torch.empty_like(hidden_states)
+    if use_custom_tensor_mananger:
+        shape = hidden_states.shape
+        dtype = hidden_states.dtype
+        device = hidden_states.device
+        output = g_cache_manager.alloc_tensor(shape, dtype, device=device)
+    else:
+        output = torch.empty_like(hidden_states)
 
     grid = (seq_len,)
     rms_norm_kernel[grid](
         hidden_states,
         weight,
-        out,
+        output,
         input_row_stride=input_stride,
         eps=eps,
         N_COLS=feat_size,
@@ -53,5 +60,4 @@ def rms_norm(hidden_states: Tensor, weight: Tensor, eps: float = 1e-5):
         num_warps=4,
         num_stages=3,
     )
-
-    return out
+    return output
