@@ -5,6 +5,45 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_con
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelInput
 
+def prepare_remote_prefill_inputs(req_objs: List[InferReq]):
+    run_reqs = []
+    start_loc = 0
+    input_ids = []
+    nopad_b_req_idx = []
+    nopad_b_start_loc = []
+    nopad_b_seq_len = []
+
+    for req in req_objs:
+        run_reqs.append(req)
+        nopad_b_req_idx.append(req.req_idx)
+        nopad_b_start_loc.append(start_loc)
+
+        input_token_ids = req.get_input_token_ids()
+        seq_len = len(input_token_ids)
+        input_token_len = seq_len - req.cur_kv_len
+        input_id = input_token_ids[req.cur_kv_len :]
+        nopad_b_seq_len.append(seq_len)
+        input_ids.append(input_id)
+        start_loc += input_token_len
+
+    nopad_b_start_loc.append(start_loc) # last request
+
+    input_ids = np.concatenate(input_ids, dtype=np.int64)
+    g_infer_state_lock.acquire() # I don't think it's needed
+    if g_infer_context.radix_cache is not None:
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
+    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(input_ids.shape[0]).cuda()
+    g_infer_state_lock.release()
+    kwargs = {
+        "batch_size": len(run_reqs),
+        "input_ids": input_ids,
+        "mem_indexes": mem_indexes,
+        "b_req_idx": nopad_b_req_idx,
+        "b_start_loc": nopad_b_start_loc,
+        "b_seq_len": nopad_b_seq_len,
+    }
+    return kwargs, run_reqs
+
 
 def prepare_prefill_inputs(
     req_objs: List[InferReq], is_chuncked_mode: bool, is_multimodal: bool = False

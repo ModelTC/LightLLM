@@ -5,6 +5,7 @@ import ujson as json
 import socket
 import httpx
 import base64
+import zmq
 from typing import Dict, Optional
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
@@ -33,6 +34,7 @@ async def pd_handle_loop(manager: HttpServerManager):
         manager.host_ip = manager.args.host
 
     asyncio.create_task(timer_log(manager))
+    asyncio.create_task(pd_handle_loop_from_d(manager))
 
     id_to_handle_task: Dict[int, asyncio.Task] = {}
 
@@ -92,7 +94,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 logger.info(f"Sent registration JSON: {regist_json}")
 
                 # 转发任务
-                forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
+                if manager.pd_mode == NodeRole.D:
+                    forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
 
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
                 while True:
@@ -182,3 +185,37 @@ async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket):
         handle_list = await forwarding_queue.wait_to_get_all_data()
         if handle_list:
             await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list)))
+
+
+async def pd_handle_loop_from_d(manager: HttpServerManager):
+    if manager.pd_mode != NodeRole.P:
+        return
+
+    context = zmq.asyncio.Context(2)
+    manager.recv_from_d = context.socket(zmq.PULL)
+    manager.recv_from_d.bind(f"tcp://*:{manager.args.pd_remote_prefill_port}")
+
+    while True:
+        try:
+            (
+                prompt,
+                sampling_params,
+                multimodal_params,
+            ) = await manager.recv_from_d.recv_pyobj()
+
+            # 触发推理的task
+            async def pd_process_generate(
+                manager: "HttpServerManager", prompt, sampling_params, multimodal_params
+            ):
+                try:
+                    async for _, _, _, _ in manager.generate(
+                        prompt, sampling_params, multimodal_params, None
+                    ):
+                        pass
+                except BaseException as e:
+                    logger.error(str(e))
+
+            asyncio.create_task(pd_process_generate(manager, prompt, sampling_params, multimodal_params))
+
+        except Exception as e:
+            logger.exception(f"pd loop generate error: {str(e)}")

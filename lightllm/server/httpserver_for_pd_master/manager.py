@@ -1,13 +1,8 @@
 import sys
-import zmq
-import zmq.asyncio
 import asyncio
 import uvloop
-import rpyc
 import time
-import hashlib
 import datetime
-import aiohttp
 import ujson as json
 import pickle
 
@@ -78,15 +73,6 @@ class HttpServerManagerForPDMaster:
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} removed")
         return
 
-    async def update_req_status(self, upkv_status: UpKVStatus):
-        try:
-            group_request_id = convert_sub_id_to_group_id(upkv_status.group_request_id)
-            up_status_event = self.req_id_to_out_inf[group_request_id].up_status_event
-            up_status_event.upkv_status = upkv_status
-            up_status_event.set()
-        except:
-            pass
-        return
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
@@ -192,55 +178,18 @@ class HttpServerManagerForPDMaster:
         up_status_event = req_status.up_status_event
 
         d_start_args = d_node.start_args
-        decode_node_dict = {
+        prefill_node_dict = {
             "node_id": d_start_args["pd_node_id"],
             "ip": d_start_args["host"],
-            "rpyc_port": d_start_args["pd_decode_rpyc_port"],
+            "rpyc_port": d_start_args["pd_prefill_rpyc_port"],
             "max_new_tokens": sampling_params.max_new_tokens - 1,
             "pd_master_node_id": self.args.pd_node_id,
         }
 
-        old_max_new_tokens = sampling_params.max_new_tokens
-        sampling_params.max_new_tokens = 1
-        sampling_params.move_kv_to_decode_node.initialize(decode_node_dict if old_max_new_tokens != 1 else None)
+        sampling_params.move_kv_to_decode_node.initialize(prefill_node_dict)
         sampling_params.suggested_dp_index = -1
 
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
-
-        while True:
-            await req_status.wait_to_ready()
-            if await request.is_disconnected():
-                raise Exception(f"req_id {group_request_id} disconnected")
-
-            if await req_status.can_read(self.req_id_to_out_inf):
-                token_list = await req_status.pop_all_tokens()
-                for sub_req_id, request_output, metadata, finish_status in token_list:
-                    if old_max_new_tokens != 1:
-                        finish_status = FinishStatus(FinishStatus.NO_FINISH)
-                    else:
-                        finish_status = FinishStatus(FinishStatus.FINISHED_LENGTH)
-                    # 得到 p 节点返回的 prompt_ids 信息
-                    if metadata.get("prompt_ids", None) is not None:
-                        prompt_ids = metadata.get("prompt_ids")
-                        prompt_ids.append(metadata.get("id"))
-                    yield sub_req_id, request_output, metadata, finish_status
-                break
-
-        # 如果只需要一个输出 token，prefill 完就直接结束掉吧
-        if old_max_new_tokens == 1:
-            return
-
-        try:
-            await asyncio.wait_for(up_status_event.wait(), timeout=60)
-        except asyncio.TimeoutError:
-            logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
-            raise ServerBusyError()
-
-        sampling_params.move_kv_to_decode_node.initialize(None)
-        sampling_params.max_new_tokens = old_max_new_tokens - 1
-        sampling_params.suggested_dp_index = up_status_event.upkv_status.dp_index
-
-        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, multimodal_params))))
+        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         while True:
             await req_status.wait_to_ready()
@@ -250,8 +199,6 @@ class HttpServerManagerForPDMaster:
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     yield sub_req_id, request_output, metadata, finish_status
-
-        return
 
     async def _wait_to_token_package(
         self,
