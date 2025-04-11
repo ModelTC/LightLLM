@@ -71,6 +71,20 @@ class PDDecodeInferRpcServer(rpyc.Service):
     def _alloc_to_frozen_some_tokens(self, move_task: KVMoveTask):
         is_ok = self.judge_token_is_ok(len(move_task.input_tokens), move_task.decode_node.max_new_tokens)
         if not is_ok:
+            if self.is_master_in_dp:
+                logger.info(f"req_id: {move_task.to_decode_log_info()}  alloc token failed")
+                shared_token_load = self.backend.shared_token_load
+                dp_rank = self.dp_rank_in_node
+                frozen_token_num = shared_token_load.get_frozened_token_count(dp_rank)
+                estimated_peak_token_num = shared_token_load.get_estimated_peak_token_count(dp_rank)
+                logger.debug(
+                    f"radix refed token num {self.backend.radix_cache.get_refed_tokens_num()}\n"
+                    f"radix hold token num {self.backend.radix_cache.get_tree_total_tokens_num()}\n"
+                    f"mem manager can alloc token num {self.backend.model.mem_manager.can_use_mem_size}\n"
+                    f"mem manager total size {self.backend.model.mem_manager.size}"
+                    f"frozened token num {frozen_token_num}\n"
+                    f"estimated peak token num {estimated_peak_token_num}\n"
+                )
             return None
 
         key = torch.tensor(move_task.input_tokens, dtype=torch.int64, device="cpu")

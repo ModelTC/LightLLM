@@ -15,8 +15,10 @@ class TaskQueue:
     def size(self):
         return len(self.datas)
 
-    def put(self, obj):
+    def put(self, obj, error_handle_func=None):
         if self.has_error:
+            if error_handle_func is not None:
+                error_handle_func(obj)
             raise Exception("has error")
 
         with self.lock:

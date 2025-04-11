@@ -2,25 +2,94 @@ import torch
 import time
 import sys
 import inspect
+import threading
 import torch.multiprocessing as mp
-from typing import List, Dict
+from torch.distributed import TCPStore
+from datetime import timedelta
+from typing import List, Dict, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import KVMoveTask
+from lightllm.server.pd_io_struct import KVMoveTask, PDTransJoinInfo, PDTransLeaveInfo, KVMoveTaskGroup
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.distributed.pynccl import StatelessP2PProcessGroup, PyNcclCommunicator
 
 
 logger = init_logger(__name__)
 
-# device_index 是用来指示，当前传输进程使用的用于数据传输的显卡id
-# 当模型是多卡推理的时候，需要传输的 kv 需要先移动到 device_index
-# 指定的显卡上，然后再进行传输，因为torch nccl 限制了只能操作一张显卡上的数据
+
+def _handle_kvmove_task(
+    move_tasks: List[KVMoveTask],
+    task_out_queue: mp.Queue,
+    mem_managers: List[MemoryManager],
+    connect_id_to_comm: Dict[str, PyNcclCommunicator],
+    connect_id: str,
+    dp_size_in_node: int,
+):
+    total_move_kv_len = sum([task.move_kv_len for task in move_tasks])
+    try:
+        device_index = connect_id_to_comm[connect_id].device.index
+        start = time.time()
+        if total_move_kv_len != 0:
+            logger.info(f"trans start: {move_tasks[0].to_prefill_log_info()}")
+            cur_mem = mem_managers[device_index]
+            if kv_trans_use_p2p():
+                cur_mem.send_to_decode_node_p2p(
+                    move_tasks, mem_managers, dp_size_in_node, connect_id_to_comm[connect_id]
+                )
+            else:
+                cur_mem.send_to_decode_node(move_tasks, mem_managers, dp_size_in_node, connect_id_to_comm[connect_id])
+            logger.info(f"trans finished: {move_tasks[0].to_prefill_log_info()} move len: {total_move_kv_len}")
+        torch.cuda.synchronize()
+        logger.info(
+            f"trans cost time: {(time.time() - start)},"
+            f"move_total_kv_len: {total_move_kv_len}, {move_tasks[0].to_prefill_log_info()}"
+        )
+        task_out_queue.put("ok")
+    except BaseException as e:
+        logger.exception(str(e))
+        task_out_queue.put("fail")
+
+
+def _handle_decode_join(
+    node_info: PDTransJoinInfo,
+    task_out_queue: mp.Queue,
+    connect_id_to_comm: Dict[str, PyNcclCommunicator],
+    store: TCPStore,
+):
+    try:
+        logger.info(f"connect start {node_info}")
+        src_id = node_info.prefill_id
+        dest_id = node_info.connect_id
+        logger.info(f"connect src_id {src_id} dest_id {dest_id}")
+        result_list = []
+
+        def async_connect():
+            torch.cuda.set_device(node_info.prefill_device_id)
+            group = StatelessP2PProcessGroup.create(src_id=src_id, dest_id=dest_id, is_server=True, store=store)
+            comm = PyNcclCommunicator(group, node_info.prefill_device_id)
+            result_list.append(comm)
+            return
+
+        connect_task = threading.Thread(target=async_connect, daemon=True)
+        connect_task.start()
+        connect_task.join(timeout=36)
+        if connect_task.is_alive():
+            raise Exception(f"{node_info} connect time out")
+
+        connect_id_to_comm[node_info.connect_id] = result_list[0]
+        logger.info(f"{node_info} kv trans connected!")
+        task_out_queue.put("nccl_ok")
+    except Exception as e:
+        task_out_queue.put("nccl_fail")
+        logger.warning(f"error while connect to decode node: {e} node_info {node_info}")
+
+
 def _init_env(
     args,
-    device_index: int,
-    nccl_ip,
-    nccl_port,
+    store_ip,
+    store_port,
+    device_id,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
     mem_queues: List[mp.Queue],
@@ -33,67 +102,54 @@ def _init_env(
     os.environ["NCCL_SOCKET_NTHREADS"] = "1"
     torch.backends.cudnn.enabled = False
 
-    dp_size_in_node = max(1, args.dp // args.nnodes)
-    node_world_size = args.tp // args.nnodes
-
     try:
-        # 注册graceful 退出的处理
+        torch.cuda.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
-        torch.cuda.set_device(device_index)
-
+        master_store = TCPStore(
+            host_name=store_ip, port=store_port, is_master=True, use_libuv=True, timeout=timedelta(seconds=30)
+        )
+        dp_size_in_node = max(1, args.dp // args.nnodes)
         task_out_queue.put("proc_start")
         mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
-        assert len(mem_managers) == node_world_size
         task_out_queue.put("get_mem_managers_ok")
-        import torch.distributed as dist
-        from datetime import timedelta
+        connect_id_to_comm: Dict[str, PyNcclCommunicator] = {}
 
-        dist.init_process_group(
-            "nccl", init_method=f"tcp://{nccl_ip}:{nccl_port}", rank=0, world_size=2, timeout=timedelta(seconds=60)
-        )
-        task_out_queue.put("nccl_ok")
         while True:
-            move_tasks: List[KVMoveTask] = task_in_queue.get()
-            total_move_kv_len = sum([task.move_kv_len for task in move_tasks])
-            try:
-                start = time.time()
-                if total_move_kv_len != 0:
-                    logger.info(f"trans start: {move_tasks[0].to_prefill_log_info()}")
-                    cur_mem = mem_managers[device_index]
-                    if kv_trans_use_p2p():
-                        cur_mem.send_to_decode_node_p2p(move_tasks, mem_managers, dp_size_in_node)
-                    else:
-                        cur_mem.send_to_decode_node(move_tasks, mem_managers, dp_size_in_node)
-                    logger.info(f"trans finished: {move_tasks[0].to_prefill_log_info()} move len: {total_move_kv_len}")
-                torch.cuda.synchronize()
-                logger.info(
-                    f"trans cost time: {(time.time() - start)},"
-                    f"move_total_kv_len: {total_move_kv_len}, {move_tasks[0].to_prefill_log_info()}"
+            task: Union[KVMoveTaskGroup, PDTransJoinInfo, PDTransLeaveInfo] = task_in_queue.get()
+            if isinstance(task, KVMoveTaskGroup):
+                _handle_kvmove_task(
+                    task.tasks, task_out_queue, mem_managers, connect_id_to_comm, task.connect_id, dp_size_in_node
                 )
-                task_out_queue.put("ok")
-            except BaseException as e:
-                logger.exception(str(e))
-                task_out_queue.put("fail")
-                raise e
-    except BaseException as e:
-        logger.exception(str(e))
-        sys.exit(-1)
-    return
+            elif isinstance(task, PDTransJoinInfo):
+                _handle_decode_join(task, task_out_queue, connect_id_to_comm, master_store)
+            elif isinstance(task, PDTransLeaveInfo):
+                if task.connect_id in connect_id_to_comm:
+                    connect_id_to_comm[task.connect_id].destroy()
+                    connect_id_to_comm.pop(task.connect_id, None)
+                    logger.info(f"destory {task} nccl communicator.")
+                else:
+                    logger.error(f"connect id {task.connect_id} dont exist in connect_id_to_comm")
+            else:
+                logger.warning(f"unexpected task type: {task}")
+
+    except Exception as e:
+        logger.error(f"Fatal error happened in kv trans process: {e}")
+        pass
 
 
 def start_prefill_trans_process(
     args,
-    device_index: int,
-    nccl_ip,
-    nccl_port,
+    store_ip,
+    store_port,
+    device_id,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
     mem_queues: List[mp.Queue],
 ):
     proc = mp.Process(
-        target=_init_env, args=(args, device_index, nccl_ip, nccl_port, task_in_queue, task_out_queue, mem_queues)
+        target=_init_env, args=(args, store_ip, store_port, device_id, task_in_queue, task_out_queue, mem_queues)
     )
     proc.start()
     assert proc.is_alive()
-    logger.info(f"trans kv process start, nccl_ip: {nccl_ip}, nccl_port: {nccl_port}")
+    logger.info(f"prefill trans kv process for device: {device_id} started!")
     return proc

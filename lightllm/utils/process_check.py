@@ -42,5 +42,5 @@ def start_parent_check_thread():
     """
     检测父进程是否健康，如果出现问题，清理退出所有进程
     """
-    thread = threading.Thread(target=check_parent_alive)
+    thread = threading.Thread(target=check_parent_alive, daemon=True)
     thread.start()

@@ -10,6 +10,7 @@ from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_tota
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
+from lightllm.distributed.pynccl import PyNcclCommunicator
 
 
 logger = init_logger(__name__)
@@ -91,7 +92,11 @@ class MemoryManager:
         return
 
     def send_to_decode_node(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+        self,
+        move_tasks: List[KVMoveTask],
+        mem_managers: List["MemoryManager"],
+        dp_size_in_node: int,
+        nccl_comm: PyNcclCommunicator,
     ):
         assert dp_size_in_node == 1
 
@@ -108,14 +113,14 @@ class MemoryManager:
             for layer_index in range(mem.layer_num):
                 move_buffer = mem._get_kv_move_data(move_token_indexes, layer_index)
                 if i == cur_device_index:
-                    dist.send(move_buffer, dst=1)
+                    nccl_comm.send(move_buffer, dst=1)
                 else:
                     move_size = move_buffer.numel()
                     new_move_buffer = cur_mem.kv_move_buffer.view(-1)[0:move_size].view(move_buffer.shape)
                     from torch.cuda import comm
 
                     comm.broadcast(move_buffer, out=[new_move_buffer])
-                    dist.send(new_move_buffer, dst=1)
+                    nccl_comm.send(new_move_buffer, dst=1)
         return
 
     def _get_kv_move_data(self, token_indexes: List[int], layer_index: int):
@@ -127,7 +132,11 @@ class MemoryManager:
         return move_buffer
 
     def receive_from_prefill_node(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+        self,
+        move_tasks: List[KVMoveTask],
+        mem_managers: List["MemoryManager"],
+        dp_size_in_node: int,
+        nccl_comm: PyNcclCommunicator,
     ):
         assert dp_size_in_node == 1
 
@@ -144,7 +153,7 @@ class MemoryManager:
         recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(1, token_num, 2 * self.head_num, self.head_dim)
         for i, mem in enumerate(mem_managers):
             for layer_index in range(mem.layer_num):
-                dist.recv(recive_buffer, src=0)
+                nccl_comm.recv(recive_buffer, src=0)
                 if i == cur_device_index:
                     mem._write_kv_move_data(move_token_indexes, recive_buffer, layer_index)
                 else:
@@ -160,7 +169,11 @@ class MemoryManager:
         return
 
     def send_to_decode_node_p2p(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+        self,
+        move_tasks: List[KVMoveTask],
+        mem_managers: List["MemoryManager"],
+        dp_size_in_node: int,
+        nccl_comm: PyNcclCommunicator,
     ):
         """
         使用 p2p triton kernel 进行数据复制和传输的实现方式。
@@ -178,7 +191,7 @@ class MemoryManager:
         for i, mem in enumerate(mem_managers):
             for layer_index in range(mem.layer_num):
                 move_buffer = mem._get_kv_move_data_p2p(move_token_indexes, layer_index, self.kv_move_buffer)
-                dist.send(move_buffer, dst=1)
+                nccl_comm.send(move_buffer, dst=1)
         return
 
     def _get_kv_move_data_p2p(self, token_indexes: torch.Tensor, layer_index: int, kv_move_buffer: torch.Tensor):
@@ -191,7 +204,11 @@ class MemoryManager:
         return move_buffer
 
     def receive_from_prefill_node_p2p(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+        self,
+        move_tasks: List[KVMoveTask],
+        mem_managers: List["MemoryManager"],
+        dp_size_in_node: int,
+        nccl_comm: PyNcclCommunicator,
     ):
         assert dp_size_in_node == 1
 
@@ -209,7 +226,7 @@ class MemoryManager:
         recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(token_num, 2 * self.head_num, self.head_dim)
         for i, mem in enumerate(mem_managers):
             for layer_index in range(mem.layer_num):
-                dist.recv(recive_buffer, src=0)
+                nccl_comm.recv(recive_buffer, src=0)
                 mem._write_kv_move_data_p2p(move_token_indexes, recive_buffer, layer_index)
         return
 

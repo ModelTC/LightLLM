@@ -76,6 +76,28 @@ class DecodeNodeInfo:
 
 
 @dataclass
+class PDTransJoinInfo:
+    decode_id: int
+    decode_device_id: int
+    prefill_id: int
+    prefill_device_id: int
+    pd_prefill_nccl_ip: str
+    pd_prefill_nccl_port: int
+    # 用于标识一次唯一的连接，prefill_id 和 decode_id 相同时，可能因为网络原因重连，为了更好的区分
+    # 一次连接，使用一个 uuid 为其标识
+    connect_id: str
+
+
+@dataclass
+class PDTransLeaveInfo:
+    decode_id: int
+    prefill_id: int
+    # 用于标识一次唯一的连接，prefill_id 和 decode_id 相同时，可能因为网络原因重连，为了更好的区分
+    # 一次连接，使用一个 uuid 为其标识
+    connect_id: str
+
+
+@dataclass
 class KVMoveTask:
     group_request_id: int
     input_tokens: List[int]  # 代表输入的token_id 序列
@@ -90,6 +112,8 @@ class KVMoveTask:
     prefill_dp_index: int
     decode_dp_index: int
     mark_start_time: float = None
+    # 标记任务使用某个连接id进行传输
+    connect_id: str = None
 
     def __post_init__(self):
         if len(self.input_tokens) <= 0:
@@ -102,14 +126,14 @@ class KVMoveTask:
         d_i = self.prefill_dp_index
         id = self.group_request_id
         log = f"id: {id} in_len:{len(self.input_tokens)} v_len: {v_len} move_len: {self.move_kv_len} dp_index:{d_i}"
-        return log
+        return log + f" connect_id: {self.connect_id}"
 
     def to_decode_log_info(self):
         v_len = None if self.decode_token_indexes is None else len(self.decode_token_indexes)
         d_i = self.decode_dp_index
         id = self.group_request_id
         log = f"id: {id} in_len:{len(self.input_tokens)} v_len: {v_len} move_len: {self.move_kv_len} dp_index:{d_i}"
-        return log
+        return log + f" connect_id: {self.connect_id}"
 
     def id(self):
         return self.group_request_id
@@ -119,3 +143,9 @@ class KVMoveTask:
             return time.time() - self.mark_start_time
         else:
             return 100000000000
+
+
+@dataclass
+class KVMoveTaskGroup:
+    tasks: List[KVMoveTask]
+    connect_id: str

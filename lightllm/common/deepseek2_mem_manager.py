@@ -7,6 +7,7 @@ from typing import List, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_d_node, kv_trans_v2_for_p_node
+from lightllm.distributed.pynccl import PyNcclCommunicator
 
 logger = init_logger(__name__)
 
@@ -35,7 +36,11 @@ class Deepseek2MemoryManager(MemoryManager):
         return
 
     def send_to_decode_node(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["Deepseek2MemoryManager"], dp_size_in_node: int
+        self,
+        move_tasks: List[KVMoveTask],
+        mem_managers: List["Deepseek2MemoryManager"],
+        dp_size_in_node: int,
+        nccl_comm: PyNcclCommunicator,
     ):
         assert dp_size_in_node == 1
 
@@ -49,7 +54,7 @@ class Deepseek2MemoryManager(MemoryManager):
         cur_mem = mem_managers[cur_device_index]
         for layer_index in range(cur_mem.layer_num):
             move_buffer = cur_mem._get_kv_move_data(move_token_indexes, layer_index)
-            dist.send(move_buffer, dst=1)
+            nccl_comm.send(move_buffer, dst=1)
         return
 
     def _get_kv_move_data(self, token_indexes: List[int], layer_index: int):
@@ -61,7 +66,11 @@ class Deepseek2MemoryManager(MemoryManager):
         return move_buffer
 
     def receive_from_prefill_node(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+        self,
+        move_tasks: List[KVMoveTask],
+        mem_managers: List["MemoryManager"],
+        dp_size_in_node: int,
+        nccl_comm: PyNcclCommunicator,
     ):
         assert dp_size_in_node == 1
 
@@ -76,7 +85,7 @@ class Deepseek2MemoryManager(MemoryManager):
         move_size = self.kv_buffer.numel() // self.layer_num // self.size * token_num
         recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(1, token_num, self.head_num, self.head_dim)
         for layer_index in range(self.layer_num):
-            dist.recv(recive_buffer, src=0)
+            nccl_comm.recv(recive_buffer, src=0)
             for i, mem in enumerate(mem_managers):
                 if i == cur_device_index:
                     mem._write_kv_move_data(move_token_indexes, recive_buffer, layer_index)
@@ -93,7 +102,11 @@ class Deepseek2MemoryManager(MemoryManager):
         return
 
     def send_to_decode_node_p2p(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+        self,
+        move_tasks: List[KVMoveTask],
+        mem_managers: List["MemoryManager"],
+        dp_size_in_node: int,
+        nccl_comm: PyNcclCommunicator,
     ):
         """
         使用 p2p triton kernel 进行数据复制和传输的实现方式。
@@ -120,7 +133,7 @@ class Deepseek2MemoryManager(MemoryManager):
             move_buffer = self._get_kv_move_data_p2p(
                 move_token_indexes, token_dp_indexes, layer_index, self.kv_move_buffer, dp_size_in_node
             )
-            dist.send(move_buffer, dst=1)
+            nccl_comm.send(move_buffer, dst=1)
         return
 
     def _get_kv_move_data_p2p(
@@ -145,7 +158,11 @@ class Deepseek2MemoryManager(MemoryManager):
         return move_buffer
 
     def receive_from_prefill_node_p2p(
-        self, move_tasks: List[KVMoveTask], mem_managers: List["MemoryManager"], dp_size_in_node: int
+        self,
+        move_tasks: List[KVMoveTask],
+        mem_managers: List["MemoryManager"],
+        dp_size_in_node: int,
+        nccl_comm: PyNcclCommunicator,
     ):
         if not hasattr(self, "mem_ptrs_dict"):
             self.mem_ptrs_dict = {}
@@ -170,7 +187,7 @@ class Deepseek2MemoryManager(MemoryManager):
         move_size = self.kv_buffer.numel() // self.layer_num // self.size * token_num
         recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(token_num, self.head_num, self.head_dim)
         for layer_index in range(self.layer_num):
-            dist.recv(recive_buffer, src=0)
+            nccl_comm.recv(recive_buffer, src=0)
             self._write_kv_move_data_p2p(
                 move_token_indexes, token_dp_indexes, recive_buffer, layer_index, dp_size_in_node
             )
