@@ -36,6 +36,11 @@ from lightllm.models.internvl.model import (
 from lightllm.models.internvl.model import InternVLInternlm2TpPartModel
 from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel
 from lightllm.models.qwen2_reward.model import Qwen2RewardTpPartModel
+from lightllm.models.tarsier2.model import (
+    Tarsier2Qwen2TpPartModel,
+    Tarsier2Qwen2VLTpPartModel,
+    Tarsier2LlamaTpPartModel,
+)
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.log_utils import init_logger
@@ -174,6 +179,15 @@ class ModeBackend:
                 self.model = MixtralTpPartModel(model_kvargs)
             elif self.model_type == "minicpm" or model_cfg["architectures"][0] == "MiniCPMForCausalLM":
                 self.model = MiniCPMTpPartModel(model_kvargs)
+            elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
+                llm_model_type = model_cfg.get("text_config").get("model_type")
+                if llm_model_type == "qwen2":
+                    self.model = Tarsier2Qwen2TpPartModel(model_kvargs)
+                elif llm_model_type == "qwen2_vl":
+                    self.model = Tarsier2Qwen2VLTpPartModel(model_kvargs)
+                elif llm_model_type == "llama":
+                    self.model = Tarsier2LlamaTpPartModel(model_kvargs)
+                self.is_multimodal = True
             elif self.model_type == "llava":
                 self.model = LlavaTpPartModel(model_kvargs)
                 self.is_multimodal = True

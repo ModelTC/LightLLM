@@ -22,6 +22,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from transformers.convert_slow_tokenizer import convert_slow_tokenizer
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.log_utils import init_logger
+from ..models.tarsier2.model import Tarsier2Tokenizer
 
 logger = init_logger(__name__)
 from ..models.llava.model import LlavaTokenizer
@@ -75,7 +76,12 @@ def get_tokenizer(
 
     model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
     model_type = model_cfg.get("model_type", "")
-    if model_type == "llava" or model_type == "internlmxcomposer2":
+    if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
+        from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor
+
+        image_processor = Qwen2VLImageProcessor.from_pretrained(tokenizer_name)
+        tokenizer = Tarsier2Tokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
+    elif model_type == "llava" or model_type == "internlmxcomposer2":
         tokenizer = LlavaTokenizer(tokenizer, model_cfg)
     elif model_type == "qwen" and "visual" in model_cfg:
         tokenizer = QWenVLTokenizer(tokenizer, model_cfg)

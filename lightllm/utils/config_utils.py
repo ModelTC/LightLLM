@@ -19,7 +19,10 @@ def get_eos_token_ids(model_path: str):
         eos_token_id = config_json["eos_token_id"]
     except:
         # for some multimode model.
-        eos_token_id = config_json["llm_config"]["eos_token_id"]
+        try:
+            eos_token_id = config_json["llm_config"]["eos_token_id"]
+        except:
+            eos_token_id = config_json["text_config"]["eos_token_id"]
 
     if isinstance(eos_token_id, int):
         return [eos_token_id]
