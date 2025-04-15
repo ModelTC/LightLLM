@@ -12,16 +12,15 @@ from transformers.tokenization_utils_base import PaddingStrategy, PreTokenizedIn
 from typing import List, Optional, Union
 from transformers.utils import TensorType, logging
 from lightllm.common.build_utils import repair_config
+from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
+from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
-# from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor
 import torch
 from PIL import Image
 from .vision_process import smart_resize
 from lightllm.models.qwen2.layer_weights import transformer_layer_weight, pre_and_post_layer_weight
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 import os
-
-# from lightllm.models.qwen2_vl.layer_weight.pre_and_post_layer_weight import Qwen2VLPreAndPostLayerWeight
 
 # Warp of the origal tokenizer
 class QWen2VLTokenizer:
@@ -89,10 +88,10 @@ class QWen2VLTokenizer:
 
 class Qwen2VLTpPartModel(Qwen2TpPartModel):
 
-    # weight class
-    # pre_and_post_weight_class = Qwen2VLPreAndPostLayerWeight
-    # infer class
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
+    transformer_layer_infer_class = Qwen2VLTransformerLayerInfer
+
+    infer_state_class = Qwen2VLInferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)
