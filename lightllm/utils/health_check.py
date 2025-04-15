@@ -1,13 +1,16 @@
 import os
+import time
 import asyncio
 import numpy as np
 from dataclasses import dataclass
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from fastapi import Request
 from lightllm.server.req_id_generator import ReqIDGenerator
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -24,6 +27,7 @@ class HealthObj:
     _failure_threshold: int = int(os.getenv("HEALTH_FAILURE_THRESHOLD", 3))
     timeout: int = int(os.getenv("HEALTH_TIMEOUT", 100))
     dynamic_timeout: int = int(os.getenv("HEALTH_TIMEOUT", 100))
+    latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
 
     def begin_check(self):
         self._is_health_checking = True
@@ -48,6 +52,11 @@ class HealthObj:
     def is_checking(self):
         return self._is_health_checking
 
+    def has_latest_inference(self):
+        last_timemark = self.latest_success_infer_time_mark.get_value()
+        time_diff = time.time() - last_timemark
+        return time_diff < self.timeout
+
 
 health_obj = HealthObj()
 
@@ -55,6 +64,10 @@ health_obj = HealthObj()
 async def health_check(args, httpserver_manager: HttpServerManager, request: Request):
     if health_obj.is_checking():
         return health_obj.is_health()
+
+    if health_obj.is_health() and health_obj.has_latest_inference():
+        return health_obj.is_health()
+
     health_obj.begin_check()
     try:
         request_dict = {"inputs": "你好！", "parameters": {"do_sample": True, "temperature": 0.8, "max_new_tokens": 2}}

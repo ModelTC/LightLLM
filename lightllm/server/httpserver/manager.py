@@ -27,12 +27,14 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from fastapi import Request
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
+from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.config_utils import get_vocab_size
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -107,6 +109,10 @@ class HttpServerManager:
         # 有的模型的vocab size 读取tokenizer和config.json中不一致
         self.vocab_size = max(get_vocab_size(args.model_dir), self.tokenizer.vocab_size)
 
+        # The timemark of the latest inference(prefill/decode) which is used to check the health status of the system.
+        # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.
+        self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
+        self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
 
     # connect cache server, calculate md5, alloc resource, return uuid
@@ -490,6 +496,9 @@ class HttpServerManager:
                         self.first_time_costs.add(first_token_cost_ms)
 
                     out_token_counter += 1
+
+                    # update inference timemark
+                    self.latest_success_infer_time_mark.set_value(int(time.time()))
 
                     yield sub_req_id, out_str, metadata, finish_status
                     # 如果有子请求完成，就更新计数
