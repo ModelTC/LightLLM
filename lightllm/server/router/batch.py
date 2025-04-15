@@ -30,6 +30,16 @@ class Batch:
 
         return new_batch_decode_need_tokens
 
+    def get_req_list_for_dp(self, dp_index: int):
+        if self.dp_size_in_node == 1:
+            return self.reqs
+
+        req_list = []
+        for req in self.reqs:
+            if req.sample_params.suggested_dp_index == dp_index:
+                req_list.append(req)
+        return req_list
+
     def filter_out_finished_req(self, shm_req_manager: ShmReqManager):
         unfinished_req_ids = []
         for req in self.reqs:

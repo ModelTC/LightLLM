@@ -19,10 +19,15 @@ class DpQueue:
         self.inner_queues: List[BaseQueue] = [
             base_queue_class(args, router, dp_index, dp_size_in_node) for dp_index in range(self.dp_size_in_node)
         ]
+
         return
 
-    def get_paused_req_num(self):
-        return sum(queue.get_paused_req_num() for queue in self.inner_queues)
+    def get_dp_queue(self, dp_index: int):
+        assert dp_index < self.dp_size_in_node, "dp index out of range"
+        return self.inner_queues[dp_index]
+
+    def get_paused_req_num(self, dp_index: int = 0):
+        return self.inner_queues[dp_index].get_paused_req_num()
 
     def get_wait_req_num(self):
         return sum(queue.get_wait_req_num() for queue in self.inner_queues)
