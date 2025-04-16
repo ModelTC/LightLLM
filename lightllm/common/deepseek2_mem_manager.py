@@ -33,6 +33,7 @@ class Deepseek2MemoryManager(MemoryManager):
             (1, max_req_total_len + 8, self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
         )
         self.kv_move_buf_indexes = torch.arange(0, max_req_total_len + 8, dtype=torch.int64, device="cuda")
+        self.token_dim_size = self.kv_move_buffer.shape[-1] * self.kv_move_buffer.shape[-2]
         return
 
     def send_to_decode_node(
@@ -58,7 +59,7 @@ class Deepseek2MemoryManager(MemoryManager):
         return
 
     def _get_kv_move_data(self, token_indexes: List[int], layer_index: int):
-        move_size = self.kv_buffer.numel() // self.layer_num // self.size * len(token_indexes)
+        move_size = self.token_dim_size * len(token_indexes)
         move_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(
             1, len(token_indexes), self.head_num, self.head_dim
         )
@@ -82,7 +83,7 @@ class Deepseek2MemoryManager(MemoryManager):
 
         cur_device_index = self.kv_buffer.get_device()
         token_num = len(move_token_indexes)
-        move_size = self.kv_buffer.numel() // self.layer_num // self.size * token_num
+        move_size = self.token_dim_size * token_num
         recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(1, token_num, self.head_num, self.head_dim)
         for layer_index in range(self.layer_num):
             nccl_comm.recv(recive_buffer, src=0)
@@ -145,7 +146,7 @@ class Deepseek2MemoryManager(MemoryManager):
         dp_size_in_node: int,
     ):
         move_token_num = len(token_indexes)
-        move_size = self.kv_buffer.numel() // self.layer_num // self.size * move_token_num
+        move_size = self.token_dim_size * move_token_num
         move_buffer = kv_move_buffer.view(-1)[0:move_size].view(move_token_num, self.head_num, self.head_dim)
         kv_trans_v2_for_p_node(
             input_mems=self.mem_ptrs_dict[layer_index],
@@ -184,7 +185,7 @@ class Deepseek2MemoryManager(MemoryManager):
         token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device="cuda")
 
         token_num = len(move_token_indexes)
-        move_size = self.kv_buffer.numel() // self.layer_num // self.size * token_num
+        move_size = self.token_dim_size * token_num
         recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(token_num, self.head_num, self.head_dim)
         for layer_index in range(self.layer_num):
             nccl_comm.recv(recive_buffer, src=0)
