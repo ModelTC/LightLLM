@@ -10,7 +10,10 @@ logger = init_logger(__name__)
 
 
 def set_unique_server_name(args):
-    os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.nccl_port) + "_" + str(args.node_rank)
+    if args.run_mode == "pd_master":
+        os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.port) + "_pd_master"
+    else:
+        os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.nccl_port) + "_" + str(args.node_rank)
     return
 
 

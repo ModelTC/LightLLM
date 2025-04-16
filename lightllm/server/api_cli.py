@@ -7,9 +7,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run_mode",
         type=str,
-        choices=["normal", "prefill", "decode", "pd_master"],
+        choices=["normal", "prefill", "decode", "pd_master", "config_server"],
         default="normal",
-        help="set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode",
+        help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
+                config_server is for pd split mode used to register pd_master node, and get pd_master node list,
+                specifically designed for large-scale, high-concurrency scenarios where `pd_master` encounters
+                significant CPU bottlenecks.""",
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -39,7 +42,18 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=42000,
         help="p d mode, decode node used for kv move manager rpyc server port",
     )
-
+    parser.add_argument(
+        "--config_server_host",
+        type=str,
+        default=None,
+        help="The host address for the config server in config_server mode.",
+    )
+    parser.add_argument(
+        "--config_server_port",
+        type=int,
+        default=None,
+        help="The port number for the config server in config_server mode.",
+    )
     parser.add_argument(
         "--model_name",
         type=str,

@@ -5,11 +5,12 @@ import threading
 import websockets
 import inspect
 
-from typing import List
+from typing import Dict
 from dataclasses import asdict
 from lightllm.server.pd_io_struct import UpKVStatus
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.server.pd_io_struct import PD_Master_Obj
 import torch.multiprocessing as mp
 
 logger = init_logger(__name__)
@@ -24,12 +25,58 @@ class UpStatusManager:
         self.daemon_thread.start()
 
     def thread_loop(self):
-        asyncio.run(self.loop())
+        asyncio.run(self.task_loop())
 
-    async def loop(self):
+    async def task_loop(self):
+
+        self.id_to_handle_task: Dict[int, asyncio.Task] = {}
+        self.id_to_handle_queue: Dict[int, asyncio.Queue] = {}
+
+        asyncio.create_task(self.dispatch_task_loop())
+
         while True:
             try:
-                uri = f"ws://{self.args.pd_master_ip}:{self.args.pd_master_port}/kv_move_status"
+                from lightllm.server.httpserver.pd_loop import _get_pd_master_objs
+
+                id_to_pd_master_obj = await _get_pd_master_objs(self.args)
+                logger.info(f"get pd_master_objs {id_to_pd_master_obj}")
+
+                if id_to_pd_master_obj is not None:
+                    for node_id, pd_master_obj in self.id_to_handle_task.items():
+                        if node_id not in id_to_pd_master_obj:
+                            self.id_to_handle_task[node_id].cancel()
+                            self.id_to_handle_task.pop(node_id, None)
+                            self.id_to_handle_queue.pop(node_id, None)
+                            logger.info(f"up_kv_status_task {pd_master_obj} cancelled")
+
+                    for node_id, pd_master_obj in id_to_pd_master_obj.items():
+                        if node_id not in self.id_to_handle_task:
+                            self.id_to_handle_queue[node_id] = asyncio.Queue()
+                            self.id_to_handle_task[node_id] = asyncio.create_task(self.up_kv_status_task(pd_master_obj))
+
+                await asyncio.sleep(30)
+
+            except Exception as e:
+                logger.exception(str(e))
+                await asyncio.sleep(10)
+
+    async def dispatch_task_loop(self):
+        while True:
+            try:
+                loop = asyncio.get_event_loop()
+                upkv_status: UpKVStatus = await loop.run_in_executor(None, self.task_queue.get)
+                if upkv_status.pd_master_node_id in self.id_to_handle_queue:
+                    await self.id_to_handle_queue[upkv_status.pd_master_node_id].put(upkv_status)
+                else:
+                    logger.warning(f"upstatus {upkv_status} no connection to pd_master, drop it")
+            except BaseException as e:
+                logger.exception(str(e))
+                await asyncio.sleep(10)
+
+    async def up_kv_status_task(self, pd_master_obj: PD_Master_Obj):
+        while True:
+            try:
+                uri = f"ws://{pd_master_obj.host_ip_port}/kv_move_status"
                 async with websockets.connect(uri) as websocket:
                     import socket
 
@@ -38,18 +85,22 @@ class UpStatusManager:
 
                     while True:
                         try:
-                            loop = asyncio.get_event_loop()
-                            upkv_status: UpKVStatus = await loop.run_in_executor(None, self.task_queue.get)
-                            await websocket.send(json.dumps(asdict(upkv_status)))
-                            logger.info(f"up status: {upkv_status}")
-                            # self.task_out_queue.put("ok")
+                            if pd_master_obj.node_id in self.id_to_handle_queue:
+                                task_queue = self.id_to_handle_queue[pd_master_obj.node_id]
+                                upkv_status: UpKVStatus = await task_queue.get()
+                                await websocket.send(json.dumps(asdict(upkv_status)))
+                                logger.info(f"up status: {upkv_status}")
+                            else:
+                                await asyncio.sleep(3)
                         except BaseException as e:
                             logger.error(str(e))
-                            # self.task_out_queue.put("fail")
                             raise e
+            except asyncio.CancelledError:
+                logger.info(f"up_kv_status_task {pd_master_obj} cancelled")
+                return
 
             except Exception as e:
-                logger.error(f"connetion to pd_master has error: {str(e)}")
+                logger.error(f"connetion to pd_master {pd_master_obj} has error: {str(e)}")
                 logger.exception(str(e))
                 await asyncio.sleep(10)
                 logger.info("reconnection to pd_master")
@@ -60,7 +111,7 @@ def _init_env(args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
     up_kv_manager = UpStatusManager(args, task_in_queue, task_out_queue)
     logger.info(f"up kv manager {str(up_kv_manager)} start ok")
     while True:
-        time.sleep(10)
+        time.sleep(666)
     return
 
 

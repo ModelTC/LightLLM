@@ -15,6 +15,8 @@ class StartArgs:
     )
     pd_master_ip: str = field(default="127.0.0.1")
     pd_master_port: int = field(default=1212)
+    config_server_host: str = field(default=None)
+    config_server_port: int = field(default=None)
     pd_decode_rpyc_port: int = field(default=42000)
     model_name: str = field(default="default_model_name")
     model_dir: Optional[str] = field(default=None)

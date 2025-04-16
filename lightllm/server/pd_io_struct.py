@@ -49,10 +49,21 @@ class PD_Client_Obj:
 
 
 @dataclass
+class PD_Master_Obj:
+    node_id: int
+    host_ip_port: str
+
+    def to_log_str(self):
+        return f"PD_MASTER host_ip_port: {self.host_ip_port} node_id: {self.node_id}"
+
+
+@dataclass
 class UpKVStatus:
     type: str = "kv_move_status"
     group_request_id: int = None
     dp_index: int = None
+    #  The identifier of the pd_master node handling the request.
+    pd_master_node_id: int = None
 
     def __post_init__(self):
         if self.type != "kv_move_status":
@@ -64,6 +75,11 @@ class UpKVStatus:
             error_info = "group_request_id only can be int"
             logger.error(error_info)
             raise ValueError(error_info)
+
+        if not isinstance(self.pd_master_node_id, int):
+            error_info = "pd_master_node_id only can be int"
+            logger.error(error_info)
+            raise ValueError(error_info)
         return
 
 
@@ -73,6 +89,7 @@ class DecodeNodeInfo:
     ip: str
     rpyc_port: str
     max_new_tokens: int
+    pd_master_node_id: int
 
 
 @dataclass

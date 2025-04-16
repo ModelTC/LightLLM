@@ -284,6 +284,14 @@ def pd_master_start(args):
     if args.run_mode != "pd_master":
         return
 
+    # when use config_server to support multi pd_master node, we
+    # need generate unique node id for each pd_master node.
+    # otherwise, we use the 0 for single pd_master node.
+    if args.config_server_host and args.config_server_port:
+        args.pd_node_id = uuid.uuid4().int
+    else:
+        args.pd_node_id = 0
+
     logger.info(f"use tgi api: {args.use_tgi_api}")
     logger.info(f"all start args:{args}")
 
@@ -328,5 +336,39 @@ def pd_master_start(args):
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
 
+    setup_signal_handlers(http_server_process, process_manager)
+    http_server_process.wait()
+
+
+def config_server_start(args):
+    set_unique_server_name(args)
+    if args.run_mode != "config_server":
+        return
+
+    logger.info(f"all start args:{args}")
+
+    set_env_start_args(args)
+
+    command = [
+        "gunicorn",
+        "--workers",
+        "1",
+        "--worker-class",
+        "uvicorn.workers.UvicornWorker",
+        "--bind",
+        f"{args.config_server_host}:{args.config_server_port}",
+        "--log-level",
+        "info",
+        "--access-logfile",
+        "-",
+        "--error-logfile",
+        "-",
+        "--preload",
+        "lightllm.server.config_server.api_http:app",
+        "--timeout",
+        f"{get_lightllm_gunicorn_time_out_seconds()}",
+    ]
+
+    http_server_process = subprocess.Popen(command)
     setup_signal_handlers(http_server_process, process_manager)
     http_server_process.wait()

@@ -183,6 +183,7 @@ class HttpServerManagerForPDMaster:
             "ip": d_start_args["host"],
             "rpyc_port": d_start_args["pd_decode_rpyc_port"],
             "max_new_tokens": sampling_params.max_new_tokens - 1,
+            "pd_master_node_id": self.args.pd_node_id,
         }
 
         old_max_new_tokens = sampling_params.max_new_tokens
@@ -339,6 +340,13 @@ class HttpServerManagerForPDMaster:
     async def handle_loop(self):
         self.infos_queues = AsyncQueue()
         asyncio.create_task(self.timer_log())
+
+        use_config_server = self.args.config_server_host and self.args.config_server_port
+
+        if use_config_server:
+            from lightllm.server.httpserver_for_pd_master.register_loop import register_loop
+
+            asyncio.create_task(register_loop(self))
 
         while True:
             objs = await self.infos_queues.wait_to_get_all_data()

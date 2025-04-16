@@ -60,8 +60,8 @@ class Req(ctypes.Structure):
     _fields_ = [
         ("index_in_shm_mem", ctypes.c_int),
         ("ref_count", ctypes.c_int),  # 个人不要操作这个计数  # 个人不要操作这个引用计数
-        ("request_id", ctypes.c_int),  # 引用计数
-        ("group_req_id", ctypes.c_int),
+        ("request_id", ctypes.c_int64),  # 引用计数
+        ("group_req_id", ctypes.c_int64),
         ("input_len", ctypes.c_int),
         ("alloc_shm_numpy_len", ctypes.c_int),
         ("shm_infer_released", ctypes.c_bool),  # 推理进程用于标记请求对象已经被推理进程释放，router进程得到信息后亦可释放shm req对象

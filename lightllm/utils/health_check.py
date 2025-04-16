@@ -10,13 +10,12 @@ from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from fastapi import Request
 from lightllm.server.req_id_generator import ReqIDGenerator
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 
 logger = init_logger(__name__)
 
 
 _g_health_req_id_gen = ReqIDGenerator()
-_g_health_req_id_gen.generate_id()
 
 
 @dataclass
@@ -78,7 +77,13 @@ async def health_check(args, httpserver_manager: HttpServerManager, request: Req
         sampling_params = SamplingParams()
         sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
         sampling_params.verify()
-        sampling_params.group_request_id = -_g_health_req_id_gen.generate_id()  # health monitor 的 id 是负的
+
+        if get_env_start_args().run_mode == "pd_master":
+            # Since the id assigned by pd master needs to be passed to prefill and decode nodes for inference,
+            # a normal request id is required instead of a negative id.
+            sampling_params.group_request_id = _g_health_req_id_gen.generate_id()
+        else:
+            sampling_params.group_request_id = -_g_health_req_id_gen.generate_id()  # health monitor 的 id 是负的
         multimodal_params_dict = request_dict.get("multimodal_params", {})
         multimodal_params = MultimodalParams(**multimodal_params_dict)
         results_generator = httpserver_manager.generate(

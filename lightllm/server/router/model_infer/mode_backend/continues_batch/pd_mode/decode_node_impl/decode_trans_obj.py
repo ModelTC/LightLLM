@@ -160,7 +160,11 @@ class KVTransConnectObj:
                         f"{func_name} put kv to radix cache ok, req_id: {task.id()} cost_time {task.get_cost_time()} s"
                     )
                     self.manager.up_status_in_queue.put(
-                        UpKVStatus(group_request_id=task.group_request_id, dp_index=task.decode_dp_index)
+                        UpKVStatus(
+                            group_request_id=task.group_request_id,
+                            dp_index=task.decode_dp_index,
+                            pd_master_node_id=task.decode_node.pd_master_node_id,
+                        )
                     )
                     logger.info(f"{func_name} up kv status req_id: {task.id()} finished")
                 move_tasks.clear()
