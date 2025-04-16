@@ -59,3 +59,12 @@ def get_deepep_num_max_dispatch_tokens_per_rank():
 
 def get_lightllm_gunicorn_time_out_seconds():
     return int(os.getenv("LIGHTLMM_GUNICORN_TIME_OUT", 180))
+
+
+@lru_cache(maxsize=None)
+def get_lightllm_websocket_max_message_size():
+    """
+    Get the maximum size of the WebSocket message.
+    :return: Maximum size in bytes.
+    """
+    return int(os.getenv("LIGHTLLM_WEBSOCKET_MAX_SIZE", 16 * 1024 * 1024))

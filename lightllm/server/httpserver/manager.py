@@ -324,7 +324,7 @@ class HttpServerManager:
 
         # 这里的校验对多模态不是很充分, to do
         if all(isinstance(e, int) for e in prompt):
-            if not self.enable_multimodal:
+            if not self.enable_multimodal and not self.pd_mode.is_D():
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:

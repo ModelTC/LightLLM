@@ -63,7 +63,7 @@ toolz==0.12.0
 torch==2.5.1
 torchvision==0.20.1
 tqdm==4.65.0
-transformers==4.50.1
+transformers==4.51.2
 tokenizers==0.21.0
 huggingface-hub==0.26.5
 triton==3.1.0

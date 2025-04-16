@@ -51,6 +51,7 @@ class DPChunkedForPrefillNode(ChunckedPrefillForPrefillNode):
         if ok_finished_reqs:
             self.prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(ok_finished_reqs)
             self._filter_reqs(ok_finished_reqs)
+            ok_finished_reqs.clear()
 
         # 进行 chuncked prefill
         current_dp_prefill_num = len(prefill_reqs)
@@ -72,7 +73,7 @@ class DPChunkedForPrefillNode(ChunckedPrefillForPrefillNode):
         )
 
         kwargs, run_reqs, padded_req_num = padded_prepare_prefill_inputs(
-            prefill_reqs, max_prefill_num, is_multimodal=False
+            prefill_reqs, max_prefill_num, is_multimodal=self.is_multimodal
         )
         logits = self.model.forward(**kwargs)
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
@@ -97,7 +98,7 @@ class DPChunkedForPrefillNode(ChunckedPrefillForPrefillNode):
             micro_batch1,
             run_reqs1,
             padded_req_num1,
-        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs, max_prefill_num, is_multimodal=False)
+        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs, max_prefill_num, is_multimodal=self.is_multimodal)
         logits, logits1 = self.model.microbatch_overlap_prefill(micro_batch, micro_batch1)
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         req_num, req_num1 = len(run_reqs), len(run_reqs1)

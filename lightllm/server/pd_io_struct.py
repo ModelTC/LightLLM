@@ -16,6 +16,15 @@ class NodeRole(enum.Enum):
     NORMAL = "normal"
     PD_MASTER = "pd_master"
 
+    def is_D(self):
+        return self == NodeRole.D
+
+    def is_P(self):
+        return self == NodeRole.P
+
+    def is_normal(self):
+        return self == NodeRole.NORMAL
+
     def is_P_or_NORMAL(self):
         return (self == NodeRole.P) or (self == NodeRole.NORMAL)
 

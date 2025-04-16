@@ -44,7 +44,7 @@ class DeTokenizationManager:
         self.req_id_to_out: Dict[int, DecodeReq] = {}
         self.eos_id = eos_id
         self._init_get_token_id_to_token_str()
-        self.is_decode_mode = self.args.run_mode == "decode"
+        self.is_pd_decode_mode = self.args.run_mode == "decode"
         self.shm_req_manager = ShmReqManager()
 
     def _init_get_token_id_to_token_str(self):
@@ -71,8 +71,8 @@ class DeTokenizationManager:
                         )
 
                         # p d 分离模式，decode节点的解码需要做一些特殊的修复。
-                        decode_req = DecodeReq(req)
-                        if self.is_decode_mode:
+                        decode_req = DecodeReq(req, self.is_pd_decode_mode)
+                        if self.is_pd_decode_mode:
                             decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
                         # token_healing mode 的特殊初始化
                         if self.args.token_healing_mode:
@@ -119,31 +119,25 @@ class DeTokenizationManager:
                 count_output_tokens = len(decode_req.output_ids)
 
                 exist_decode = True
-                out_text = decode_token(
+                new_text = decode_token(
                     self.tokenizer,
                     decode_req,
                     int(new_token_id),
                     self.eos_id,
                 )
-                if out_text.endswith("\ufffd"):
-                    new_text = ""
-                else:
-                    new_text = out_text[len(decode_req.output_str) :]
-                    decode_req.output_str = out_text
 
-                    # 对应 token_healing 的特殊处理
-                    if self.args.token_healing_mode:
-                        if new_text.startswith(decode_req.prefix_str):
-                            new_text = new_text[len(decode_req.prefix_str) :]
-                            decode_req.prefix_str = ""
-                        elif decode_req.prefix_str.startswith(new_text):
-                            decode_req.prefix_str = decode_req.prefix_str[len(new_text) :]
-                            new_text = ""
-                        else:
-                            logger.error(
-                                f"error token healing state, prefix_str {decode_req.prefix_str} new_text {new_text}"
-                            )
-
+                # 对应 token_healing 的特殊处理
+                if self.args.token_healing_mode:
+                    if new_text.startswith(decode_req.prefix_str):
+                        new_text = new_text[len(decode_req.prefix_str) :]
+                        decode_req.prefix_str = ""
+                    elif decode_req.prefix_str.startswith(new_text):
+                        decode_req.prefix_str = decode_req.prefix_str[len(new_text) :]
+                        new_text = ""
+                    else:
+                        logger.error(
+                            f"error token healing state, prefix_str {decode_req.prefix_str} new_text {new_text}"
+                        )
                 decode_req.req.out_tokens_queue.push(new_text, src_index, special, count_output_tokens)
 
             if decode_req.need_detoken():

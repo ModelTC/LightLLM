@@ -10,6 +10,7 @@ from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Master_Obj
 
@@ -70,7 +71,9 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
         forwarding_tokens_task = None
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
-            async with websockets.connect(uri, max_queue=(2048 * 1024, 2048 * 1023)) as websocket:
+            async with websockets.connect(
+                uri, max_size=get_lightllm_websocket_max_message_size(), max_queue=(2048 * 1024, 2048 * 1023)  # 关键修改
+            ) as websocket:
 
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)

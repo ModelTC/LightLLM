@@ -43,7 +43,7 @@ from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score, lightllm_pd_generate_stream
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
 from lightllm.utils.image_utils import image2base64, fetch_image
 
 from .api_models import (
@@ -392,6 +392,7 @@ async def metrics() -> Response:
 @app.websocket("/pd_register")
 async def register_and_keep_alive(websocket: WebSocket):
     await websocket.accept()
+    websocket._receive_bytes_max_size = get_lightllm_websocket_max_message_size()
     client_ip, client_port = websocket.client
     logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
     regist_json = json.loads(await websocket.receive_text())

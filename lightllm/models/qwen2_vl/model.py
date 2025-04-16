@@ -81,9 +81,10 @@ class QWen2VLTokenizer:
         return input_ids
 
     def __getattr__(self, name):
-        if name != "encode":
-            return getattr(self.tokenizer, name)
-        return self.encode
+        obj_dict = object.__getattribute__(self, "__dict__")
+        if name in obj_dict:
+            return obj_dict[name]
+        return getattr(self.tokenizer, name)
 
 
 class Qwen2VLTpPartModel(Qwen2TpPartModel):

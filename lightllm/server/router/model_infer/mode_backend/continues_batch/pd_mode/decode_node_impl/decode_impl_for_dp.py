@@ -38,7 +38,7 @@ class DPForDecodeNode(ContinuesBatchBackendForDecodeNode):
         # nan 值，避免后续构建的fake请求在计算的过程中出现计算错误。
         from lightllm.server.router.model_infer.mode_backend.dp_backend.pre_process import padded_prepare_prefill_inputs
 
-        kwargs, run_reqs, padded_req_num = padded_prepare_prefill_inputs([], 1, is_multimodal=False)
+        kwargs, run_reqs, padded_req_num = padded_prepare_prefill_inputs([], 1, is_multimodal=self.is_multimodal)
         self.model.forward(**kwargs)
         assert len(run_reqs) == 0 and padded_req_num == 1
 
@@ -72,7 +72,7 @@ class DPForDecodeNode(ContinuesBatchBackendForDecodeNode):
         from lightllm.server.router.model_infer.mode_backend.dp_backend.pre_process import padded_prepare_decode_inputs
 
         kwargs, run_reqs, padded_req_num = padded_prepare_decode_inputs(
-            decode_reqs, max_decode_num, is_multimodal=False
+            decode_reqs, max_decode_num, is_multimodal=self.is_multimodal
         )
         logits = self.model.forward(**kwargs)
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
@@ -98,7 +98,7 @@ class DPForDecodeNode(ContinuesBatchBackendForDecodeNode):
             micro_batch1,
             run_reqs1,
             padded_req_num1,
-        ) = padded_overlap_prepare_decode_inputs(decode_reqs, max_decode_num, is_multimodal=False)
+        ) = padded_overlap_prepare_decode_inputs(decode_reqs, max_decode_num, is_multimodal=self.is_multimodal)
 
         logits, logits1 = self.model.microbatch_overlap_decode(micro_batch, micro_batch1)
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
