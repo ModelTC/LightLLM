@@ -114,6 +114,7 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
                 req_obj.init_all()
                 req_obj.set_next_gen_token_id(0, 0.0)
                 req_obj.cur_output_len += 1
+                req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
 
                 if self.is_master_in_dp:
                     req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
