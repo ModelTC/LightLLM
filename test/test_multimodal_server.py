@@ -27,14 +27,14 @@ def image_to_base64(image):
 
 
 question = "Describe this picture to me."
-question = "<|im_start|>system\nYou are an AI assistant whose name is SenseChat-Vision(日日新多模态). \
-            <|im_end|><|im_start|>user\n<img></img>\n{question}<|im_end|>\n<|im_start|>assistant\n"
+question = f"user\nYou are an AI assistant whose name is goodAI. \
+            <start_of_image>{question}\n"
 
-url = "http://localhost:8888/generate"
+url = "http://localhost:9999/generate"
 headers = {"Content-Type": "application/json"}
 
 for i in range(1):
-    b64 = image_to_base64("test.jpg")
+    b64 = image_to_base64("test/test.jpg")
     dct = {"type": "base64", "data": b64}
     data = {
         "inputs": question,

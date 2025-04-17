@@ -76,6 +76,8 @@ VLM
     -  :code:`--enable_multimodal`
   * - `Llava-13b <https://huggingface.co/liuhaotian/llava-v1.5-13b>`_
     -  :code:`--enable_multimodal`
+  * - `Google Gemma3 <https://huggingface.co/google/gemma-3-12b-it>`_
+    -  :code:`--enable_multimodal`
 
 
 Reward Model

@@ -36,6 +36,7 @@ from lightllm.models.internvl.model import (
 from lightllm.models.internvl.model import InternVLInternlm2TpPartModel
 from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel
 from lightllm.models.qwen2_reward.model import Qwen2RewardTpPartModel
+from lightllm.models.gemma3.model import Gemma3TpPartModel
 from lightllm.models.tarsier2.model import (
     Tarsier2Qwen2TpPartModel,
     Tarsier2Qwen2VLTpPartModel,
@@ -219,6 +220,9 @@ class ModeBackend:
                     self.model = InternVLQwen2TpPartModel(model_kvargs)
                 elif llm_model_type == "deepseek_v3":
                     self.model = InternVLDeepSeek2TpPartModel(model_kvargs)
+                self.is_multimodal = True
+            elif self.model_type == "gemma3":
+                self.model = Gemma3TpPartModel(model_kvargs)
                 self.is_multimodal = True
             else:
                 raise Exception(f"can not support {self.model_type} now")
