@@ -35,6 +35,7 @@ def rms_norm_kernel(
 
 def rms_norm(hidden_states: Tensor, weight: Tensor, eps: float = 1e-5, use_custom_tensor_mananger: bool = False):
     """Rms norm."""
+    assert len(hidden_states.shape) == 2
     feat_size = weight.shape[0]
     seq_len = hidden_states.numel() // hidden_states.size(-1)
     input_stride = hidden_states.stride(-2)

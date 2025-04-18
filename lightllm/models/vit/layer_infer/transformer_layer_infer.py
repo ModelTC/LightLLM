@@ -89,16 +89,8 @@ class ViTTransformerLayerInfer:
             )
 
     def _qk_norm(self, q, k, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
-        if self.tp_world_size_ > 1:
-            q_norm = self.tp_norm(q, layer_weight.q_norm_weight_.weight)
-            k_norm = self.tp_norm(k, layer_weight.k_norm_weight_.weight)
-        else:
-            q_norm = rms_norm(
-                q, weight=layer_weight.q_norm_weight_.weight, eps=self.eps_, use_custom_tensor_mananger=True
-            )
-            k_norm = rms_norm(
-                k, weight=layer_weight.k_norm_weight_.weight, eps=self.eps_, use_custom_tensor_mananger=True
-            )
+        q_norm = self.tp_norm(q, layer_weight.q_norm_weight_.weight)
+        k_norm = self.tp_norm(k, layer_weight.k_norm_weight_.weight)
         return q_norm, k_norm
 
     def _get_qkv(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
