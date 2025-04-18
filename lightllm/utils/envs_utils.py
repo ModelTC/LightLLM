@@ -62,6 +62,10 @@ def get_lightllm_gunicorn_time_out_seconds():
     return int(os.getenv("LIGHTLMM_GUNICORN_TIME_OUT", 180))
 
 
+def get_lightllm_gunicorn_keep_alive():
+    return int(os.getenv("LIGHTLMM_GUNICORN_KEEP_ALIVE", 10))
+
+
 @lru_cache(maxsize=None)
 def get_lightllm_websocket_max_message_size():
     """
