@@ -9,6 +9,10 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.common.basemodel.microbatch_overlap_objs import DecodeMicroBatch, PrefillMicroBatch
 from torch.profiler import profile, record_function, ProfilerActivity
+from lightllm.utils.log_utils import init_logger
+import torch.cuda as cuda
+
+logger = init_logger(__name__)
 
 
 def test_model_inference(args, model_class):
@@ -65,7 +69,6 @@ def overlap_prefill(
     total_token_num,
     b_ready_cache_len,
 ):
-
     _0_batch_size = batch_size // 2
     _0_total_token_num = total_token_num // 2
     _0_max_len_in_batch = max_len_in_batch
@@ -116,7 +119,6 @@ def overlap_prefill(
 def overlap_decode(
     model_part, batch_size, max_len_in_batch, input_ids, mem_indexes, b_req_idx, b_start_loc, b_seq_len, total_token_num
 ):
-
     _0_batch_size = batch_size // 2
     _0_total_token_num = total_token_num // 2
     _0_max_len_in_batch = max_len_in_batch
@@ -178,12 +180,17 @@ def decode(
 
 
 def torch_profile(fn, log_dir=None):
+    torch.cuda.synchronize()
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=1),
         record_shapes=False,
+        profile_memory=False,
         on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir),
     ) as prof:
-        fn()
+        for _ in range(3):
+            fn()
+            prof.step()
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
 
