@@ -44,7 +44,6 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score, lightllm_pd_generate_stream
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
-from lightllm.utils.image_utils import image2base64, fetch_image
 
 from .api_models import (
     ChatCompletionRequest,

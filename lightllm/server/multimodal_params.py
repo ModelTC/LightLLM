@@ -1,12 +1,68 @@
 """Multimodal parameters for text generation."""
-from typing import List
 import os
-import requests
+import librosa
+import base64
+from typing import List
 from io import BytesIO
 from PIL import Image
-from lightllm.utils.image_utils import fetch_image
-import base64
 from fastapi import Request
+from lightllm.utils.multimodal_utils import fetch_resource
+from lightllm.utils.log_utils import init_logger
+from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
+
+logger = init_logger(__name__)
+
+
+class AudioItem:
+    def __init__(self, **kwargs):
+        self._type = kwargs["type"]
+        self._data = kwargs["data"]
+        # the unique id for the image
+        self.uuid = None
+        # the start audio token id
+        self.token_id = None
+        # the audio token num
+        self.token_num = None
+        # the audio length
+        self.audio_length = None
+
+        self._preload_data = None
+        self.extra_params = {}
+
+    async def preload(self, request: Request):
+        try:
+            if self._type == "url":
+                timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
+                proxy = os.getenv("REQUEST_PROXY", None)
+                audio_data = await fetch_resource(self._data, request, timeout=timeout, proxy=proxy)
+            elif self._type == "base64":
+                audio_data = base64.b64decode(self._data)
+            else:
+                raise ValueError(f"cannot read audio which type is {self._type}!")
+
+            # check if valid audio bytes
+            audio_values, _ = librosa.load(BytesIO(audio_data), sr=16000)
+
+            self.audio_length = max(audio_values.shape[0], MIN_AUDIO_LEN)  # 如果音频过短，会被pad到480的长度
+            self._preload_data = audio_data
+            return
+
+        except Exception as e:
+            raise ValueError(f"Failed to read image type={self._type}, data[:100]={self._data[:100]}: {e}!")
+
+    def read(self):
+        assert self._preload_data is not None
+        ans = self._preload_data
+        self._preload_data = None
+        self._data = None
+        return ans
+
+    def to_dict(self):
+        ret = {}
+        ret["uuid"] = self.uuid
+        ret["token_id"] = self.token_id
+        ret["token_num"] = self.token_num
+        return ret
 
 
 class ImageItem:
@@ -30,7 +86,7 @@ class ImageItem:
             if self._type == "url":
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
                 proxy = os.getenv("REQUEST_PROXY", None)
-                img_data = await fetch_image(self._data, request, timeout=timeout, proxy=proxy)
+                img_data = await fetch_resource(self._data, request, timeout=timeout, proxy=proxy)
             elif self._type == "base64":
                 img_data = base64.b64decode(self._data)
             elif self._type == "image_size":
@@ -79,18 +135,23 @@ class MultimodalParams:
     def __init__(
         self,
         images: List[dict] = [],
+        audios: List[dict] = [],
     ) -> None:
         self.images = [ImageItem(**i) for i in images]
+        self.audios = [AudioItem(**a) for a in audios]
         return
 
     async def verify_and_preload(self, request: Request):
         for image in self.images:
             await image.preload(request)
+        for audio in self.audios:
+            await audio.preload(request)
         return
 
     def to_dict(self):
         ret = {}
         ret["images"] = [i.to_dict() for i in self.images]
+        ret["audios"] = [a.to_dict() for a in self.audios]
         return ret
 
     def to_origin_dict(self):

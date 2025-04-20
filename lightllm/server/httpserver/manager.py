@@ -11,19 +11,18 @@ import datetime
 import pickle
 from frozendict import frozendict
 
-
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
+from fastapi import Request
 from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole
 from ..embed_cache.utils import get_shm_name_data, create_shm
-from ..multimodal_params import MultimodalParams, ImageItem
+from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.io_objs import GroupReqObjs
-from fastapi import Request
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
@@ -112,11 +111,18 @@ class HttpServerManager:
         return
 
     # connect cache server, calculate md5, alloc resource, return uuid
-    async def _alloc_resource(self, img: ImageItem):
-        data = img.read()
-        # must after init_imageItem_extral_params
-        num_tokens = self.tokenizer.get_image_token_length(img)
-        md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
+    async def _alloc_resource(self, item: Union[ImageItem, AudioItem]):
+        if isinstance(item, ImageItem):
+            data = item.read()
+            # must after init_imageitem_extral_params
+            num_tokens = self.tokenizer.get_image_token_length(item)
+        elif isinstance(item, AudioItem):
+            data = item.read()
+            num_tokens = self.tokenizer.get_audio_token_length(item)
+        else:
+            raise ValueError(f"unexpected item type {type(item)}")
+
+        md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(item.extra_params)))
         wait_time = 1
         while True:
             record = self.cache_client.root.alloc(md5sum, num_tokens)
@@ -136,11 +142,17 @@ class HttpServerManager:
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             for img in multimodal_params.images:
-                self.tokenizer.init_imageItem_extral_params(img, multimodal_params, sampling_params)
+                self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
                 record = await self._alloc_resource(img)
                 img.uuid = record["id"]
                 img.token_id = record["token_id"]
                 img.token_num = record["token_num"]
+            for audio in multimodal_params.audios:
+                self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
+                record = await self._alloc_resource(audio)
+                audio.uuid = record["id"]
+                audio.token_id = record["token_id"]
+                audio.token_num = record["token_num"]
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
@@ -154,6 +166,13 @@ class HttpServerManager:
                         img.uuid = None
                         img.token_id = None
                         img.token_num = None
+                for audio in multimodal_params.audios:
+                    if audio.uuid is not None:
+                        self.cache_client.root.release(audio.uuid)
+                        # 将 uuid 等 赋值为 None, 防止因为abort等异常情况造成重复释放异常
+                        audio.uuid = None
+                        audio.token_id = None
+                        audio.token_num = None
         return
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
@@ -161,11 +180,17 @@ class HttpServerManager:
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
         img_count = 0
+        audio_tokens = 0
+        audio_count = 0
         for img in multimodal_params.images:
             img_count += 1
-            self.tokenizer.init_imageItem_extral_params(img, multimodal_params, samping_params)
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
             image_tokens += self.tokenizer.get_image_token_length(img)
-        return len(prompt_ids) + image_tokens + img_count
+        for audio in multimodal_params.audios:
+            audio_count += 1
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
+            audio_tokens += self.tokenizer.get_audio_token_length(audio)
+        return len(prompt_ids) + image_tokens + img_count + audio_tokens + audio_count
 
     async def loop_for_request(self):
         assert self.args.node_rank > 0
@@ -313,7 +338,11 @@ class HttpServerManager:
     ):
         if isinstance(prompt, str):
             if self.enable_multimodal:
-                assert len(multimodal_params.images) <= self.args.cache_capacity, "too many images!"
+                assert (
+                    len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
+                ), "too many multimodal items!"
+                if multimodal_params.audios:
+                    assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens

@@ -1,6 +1,7 @@
 import json
 import os
 
+from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
@@ -11,22 +12,27 @@ from lightllm.models.tarsier2.layer_weights.pre_and_post_layer_weight import (
     Tarsier2Qwen2PreAndPostLayerWeight,
     Tarsier2LlamaPreAndPostLayerWeight,
 )
-from lightllm.server.multimodal_params import MultimodalParams, ImageItem
+from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
 
 
-class Tarsier2Tokenizer:
+class Tarsier2Tokenizer(BaseMultiModalTokenizer):
     def __init__(self, tokenizer=None, image_processor=None, **kwargs):
-        self.tokenizer = tokenizer
+        super().__init__(tokenizer)
         self.image_processor = image_processor
         self.image_start_id = kwargs["model_cfg"]["text_config"]["vision_start_token_id"]
         self.image_end_id = kwargs["model_cfg"]["text_config"]["vision_end_token_id"]
         self.image_token_id = kwargs["model_cfg"]["text_config"]["image_token_id"]
 
-    def init_imageItem_extral_params(
+    def init_imageitem_extral_params(
         self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams
     ):
         return
+
+    def init_audioitem_extral_params(
+        self, audio: AudioItem, multi_params: MultimodalParams, sampling_params: SamplingParams
+    ):
+        raise NotImplementedError
 
     def get_image_token_length(self, img: ImageItem):
         width = img.image_w
@@ -40,6 +46,9 @@ class Tarsier2Tokenizer:
         self.token_num = (grid_t * grid_h * grid_w) // merge_length
         self.image_length = self.token_num
         return self.image_length
+
+    def get_audio_token_length(self, audio: AudioItem):
+        raise NotImplementedError
 
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
 
@@ -71,13 +80,6 @@ class Tarsier2Tokenizer:
                 break
         input_ids.extend(origin_ids[start_idx:])
         return input_ids
-
-    def __getattr__(self, name):
-        if name != "encode":
-            return getattr(self.tokenizer, name)
-        return self.encode
-
-    pass
 
 
 class Tarsier2Qwen2TpPartModel(Qwen2TpPartModel):

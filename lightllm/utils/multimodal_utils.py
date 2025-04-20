@@ -1,7 +1,6 @@
 import time
 import base64
 import httpx
-import logging
 from PIL import Image
 from io import BytesIO
 from fastapi import Request
@@ -19,8 +18,8 @@ def image2base64(img_str: str):
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
-async def fetch_image(url, request: Request, timeout, proxy=None):
-    logger.info(f"Begin to download image from url: {url}")
+async def fetch_resource(url, request: Request, timeout, proxy=None):
+    logger.info(f"Begin to download resource from url: {url}")
     start_time = time.time()
     async with httpx.AsyncClient(proxy=proxy) as client:
         async with client.stream("GET", url, timeout=timeout) as response:
@@ -33,10 +32,10 @@ async def fetch_image(url, request: Request, timeout, proxy=None):
                 ans_bytes.append(chunk)
                 # 接收的数据不能大于128M
                 if len(ans_bytes) > 128:
-                    raise Exception(f"url {url} Image data is too big")
+                    raise Exception(f"url {url} recv data is too big")
 
             content = b"".join(ans_bytes)
     end_time = time.time()
     cost_time = end_time - start_time
-    logger.info(f"Download url {url} image cost time: {cost_time} seconds")
+    logger.info(f"Download url {url} resource cost time: {cost_time} seconds")
     return content

@@ -24,14 +24,14 @@ class VisualManager:
     def __init__(
         self,
         args,
-        router_port,
+        next_module_port,
         visual_port,
         cache_port,
         visual_model_rpc_ports,
     ):
         context = zmq.asyncio.Context(2)
-        self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
+        self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
+        self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
 
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
@@ -114,7 +114,7 @@ class VisualManager:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
                         # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
                         # 需要一些一致的流程来保证不出现异步问题。
-                        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                         continue
 
                     multimodal_params = group_req_indexes.multimodal_params
@@ -127,18 +127,20 @@ class VisualManager:
                             await self.infer_imgs(images_need_infer)
                             images_need_infer = []
                             for _group_req_indexes in processing_group_reqs:
-                                self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                                self.send_to_next_module.send_pyobj(
+                                    _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
+                                )
                             processing_group_reqs = []
 
                     if len(images_need_infer) == 0:
-                        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
                 if len(images_need_infer) > 0:
                     await self.infer_imgs(images_need_infer)
                     for _group_req_indexes in processing_group_reqs:
-                        self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     processing_group_reqs = []
                     images_need_infer = []
 
@@ -158,12 +160,12 @@ class VisualManager:
         return
 
 
-def start_visual_process(args, router_port, visual_port, cache_port, model_rpc_ports, pipe_writer):
+def start_visual_process(args, next_module_port, visual_port, cache_port, model_rpc_ports, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     start_parent_check_thread()
     try:
-        visualserver = VisualManager(args, router_port, visual_port, cache_port, model_rpc_ports)
+        visualserver = VisualManager(args, next_module_port, visual_port, cache_port, model_rpc_ports)
         asyncio.run(visualserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))

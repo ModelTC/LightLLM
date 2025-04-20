@@ -3,6 +3,7 @@ import re
 import json
 import numpy as np
 import torch
+from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.mem_utils import select_mem_manager_class
 from lightllm.models.gemma3.infer_struct import Gemma3InferStateInfo
 from lightllm.models.gemma3.layer_infer.post_layer_infer import Gemma3PostLayerInfer
@@ -13,7 +14,7 @@ from lightllm.models.gemma3.layer_weights.transformer_layer_weight import Gemma3
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.models.llava.layer_weights.pre_and_post_layer_weight import LlavaPreAndPostLayerWeight
-from lightllm.server.multimodal_params import MultimodalParams, ImageItem
+from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
 from lightllm.common.build_utils import repair_config
 from transformers import AutoConfig
@@ -22,9 +23,9 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 # Warp of the origal tokenizer
-class Gemma3Tokenizer:
+class Gemma3Tokenizer(BaseMultiModalTokenizer):
     def __init__(self, tokenizer, model_cfg):
-        self.tokenizer = tokenizer
+        super().__init__(tokenizer)
         self.image_token = model_cfg.get("image_token", "<start_of_image>")
         self.boi_token = "<start_of_image>"
         self.eoi_token = "<end_of_image>"
@@ -35,13 +36,21 @@ class Gemma3Tokenizer:
 
         self.image_length = self.mm_tokens_per_image
 
-    def init_imageItem_extral_params(
+    def init_imageitem_extral_params(
         self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams
     ):
         return
 
+    def init_audioitem_extral_params(
+        self, audio: AudioItem, multi_params: MultimodalParams, sampling_params: SamplingParams
+    ):
+        raise NotImplementedError
+
     def get_image_token_length(self, img: ImageItem):
         return self.image_length
+
+    def get_audio_token_length(self, audio: AudioItem):
+        raise NotImplementedError
 
     # only change the impl of the encode func:
     def encode(self, prompt, multimodal_params: MultimodalParams = None, add_special_tokens=False):
@@ -66,11 +75,6 @@ class Gemma3Tokenizer:
             image_cnt = len(multimodal_params.images)
             assert image_cnt == image_id, "invalid image tag num: {} vs {}!".format(image_cnt, image_id)
         return input_ids
-
-    def __getattr__(self, name):
-        if name != "encode":
-            return getattr(self.tokenizer, name)
-        return self.encode
 
 
 class Gemma3TpPartModel(LlamaTpPartModel):

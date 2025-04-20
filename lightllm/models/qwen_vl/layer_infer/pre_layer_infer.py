@@ -43,7 +43,7 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         dtype = layer_weight.wte_weight_.dtype
         hidden_size = layer_weight.wte_weight_.shape[1]
         for batch_id, p in enumerate(infer_state.multimodal_params):
-            for img in p["images"]:
+            for img in p["images"] + p["audios"]:
                 # skip the same image
                 if img["token_id"] in img_start_token_ids:
                     continue

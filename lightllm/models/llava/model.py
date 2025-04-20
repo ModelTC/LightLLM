@@ -2,19 +2,20 @@ import os
 import re
 import json
 import numpy as np
+from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.models.llava.layer_weights.pre_and_post_layer_weight import LlavaPreAndPostLayerWeight
-from lightllm.server.multimodal_params import MultimodalParams, ImageItem
+from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
 from lightllm.common.build_utils import repair_config
 from transformers import AutoConfig
 
 
 # Warp of the origal tokenizer
-class LlavaTokenizer:
+class LlavaTokenizer(BaseMultiModalTokenizer):
     def __init__(self, tokenizer, model_cfg):
-        self.tokenizer = tokenizer
+        super().__init__(tokenizer)
         self.image_token = model_cfg.get("image_token", "<image>")
         # for llava-v1.5-7b-hf model
         if "text_config" in model_cfg:
@@ -34,13 +35,21 @@ class LlavaTokenizer:
         self.image_length = (image_size // patch_size) ** 2
         self.skip_start = model_cfg.get("skip_start", True)
 
-    def init_imageItem_extral_params(
+    def init_imageitem_extral_params(
         self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams
     ):
         return
 
+    def init_audioitem_extral_params(
+        self, audio: AudioItem, multi_params: MultimodalParams, sampling_params: SamplingParams
+    ):
+        raise NotImplementedError
+
     def get_image_token_length(self, img: ImageItem):
         return self.image_length
+
+    def get_audio_token_length(self, audio: AudioItem):
+        raise NotImplementedError
 
     # only change the impl of the encode func:
     def encode(self, prompt, multimodal_params: MultimodalParams = None):
@@ -66,11 +75,6 @@ class LlavaTokenizer:
             image_cnt = len(multimodal_params.images)
             assert image_cnt == image_id, "invalid image tag num: {} vs {}!".format(image_cnt, image_id)
         return input_ids
-
-    def __getattr__(self, name):
-        if name != "encode":
-            return getattr(self.tokenizer, name)
-        return self.encode
 
 
 class LlavaTpPartModel(LlamaTpPartModel):

@@ -9,6 +9,7 @@ from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from .visualserver.manager import start_visual_process
+from .audioserver.manager import start_audio_process
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
 from lightllm.utils.envs_utils import get_lightllm_gunicorn_time_out_seconds, get_lightllm_gunicorn_keep_alive
@@ -173,11 +174,19 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=6 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=7 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
-    router_port, detokenization_port, detokenization_pub_port, visual_port, cache_port, metric_port = can_use_ports[0:6]
-    can_use_ports = can_use_ports[6:]
+    (
+        router_port,
+        detokenization_port,
+        detokenization_pub_port,
+        visual_port,
+        audio_port,
+        cache_port,
+        metric_port,
+    ) = can_use_ports[0:7]
+    can_use_ports = can_use_ports[7:]
 
     visual_model_tp_ports = []
     for _ in range(args.visual_dp):
@@ -190,6 +199,7 @@ def normal_or_p_d_start(args):
     args.detokenization_port = detokenization_port
     args.detokenization_pub_port = detokenization_pub_port
     args.visual_port = visual_port
+    args.audio_port = audio_port
     args.cache_port = cache_port
     args.metric_port = metric_port
 
@@ -218,14 +228,33 @@ def normal_or_p_d_start(args):
             ],
             start_args=[(cache_port, args)],
         )
-        process_manager.start_submodule_processes(
-            start_funcs=[
-                start_visual_process,
-            ],
-            start_args=[
-                (args, router_port, visual_port, cache_port, visual_model_tp_ports),
-            ],
-        )
+        if args.enable_multimodal_audio:
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args, audio_port, visual_port, cache_port, visual_model_tp_ports),
+                ],
+            )
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_audio_process,
+                ],
+                start_args=[
+                    (args, router_port, audio_port, cache_port),
+                ],
+            )
+
+        else:
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args, router_port, visual_port, cache_port, visual_model_tp_ports),
+                ],
+            )
 
     process_manager.start_submodule_processes(
         start_funcs=[
