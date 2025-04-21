@@ -259,7 +259,7 @@ def main():
     seed_all(args.seed)
     url = args.url
     tokenizer = get_tokenizer(args.tokenizer_path)
-    # qps发送模式发送请求的数量不固定，这里暂定为reqs_num的10倍
+    # qps发送模式发送请求的数量不固定，这里暂定为input_num的10倍
     prompts, input_lens, max_new_tokens = gen_random_data(
         args.input_len, args.output_len, 10 * args.input_num, tokenizer
     )
@@ -309,19 +309,21 @@ def main():
     )
     print(f"Total QPS: {valid_num / (end_time - start_time)}")
     print(f"Sender QPS: {sent_reqs / (end_time - start_time)}")
-    print(f"Avg Input Length: {sum(input_lens) / len(input_lens)}")
+    print(f"Avg Input Length: {sum(input_lens[:valid_num]) / len(input_lens[:valid_num])}")
     print(f"Avg Output Length: {sum(final_output_lens) / len(final_output_lens)}")
-    print(f"Total Throughput: {(sum(input_lens) + sum(final_output_lens)) / (end_time - start_time)} token/s")
-    print(f"Input Throughput: {sum(input_lens) / (end_time - start_time)} token/s")
+    print(
+        f"Total Throughput: {(sum(input_lens[:valid_num]) + sum(final_output_lens)) / (end_time - start_time)} token/s"
+    )
+    print(f"Input Throughput: {sum(input_lens[:valid_num]) / (end_time - start_time)} token/s")
     print(f"Output Throughput: {sum(final_output_lens) / (end_time - start_time)} token/s")
     print("-" * 10)
     dump_dict["request_num"] = valid_num
     dump_dict["Total QPS"] = valid_num / (end_time - start_time)
     dump_dict["Sender QPS"] = sent_reqs / (end_time - start_time)
-    dump_dict["Avg Input Length"] = sum(input_lens) / len(input_lens)
+    dump_dict["Avg Input Length"] = sum(input_lens[:valid_num]) / len(input_lens[:valid_num])
     dump_dict["Avg Output Length"] = sum(final_output_lens) / len(final_output_lens)
-    dump_dict["Total Throughput"] = (sum(input_lens) + sum(final_output_lens)) / (end_time - start_time)
-    dump_dict["Input Throughput"] = sum(input_lens) / (end_time - start_time)
+    dump_dict["Total Throughput"] = (sum(input_lens[:valid_num]) + sum(final_output_lens)) / (end_time - start_time)
+    dump_dict["Input Throughput"] = sum(input_lens[:valid_num]) / (end_time - start_time)
     dump_dict["Output Throughput"] = sum(final_output_lens) / (end_time - start_time)
 
     values = np.percentile(request_time, percentiles)
