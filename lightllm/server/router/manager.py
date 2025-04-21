@@ -106,12 +106,16 @@ class RouterManager:
         self.mem_queues: List[torch.multiprocessing.Queue] = [
             torch.multiprocessing.Queue() for _ in range(self.node_world_size)
         ]
+        self.result_queues: List[mp.Queue] = [
+            mp.Queue() for _ in range(self.world_size)
+        ]
         self.rpc_event = multiprocessing.Event()
         self.rpc_finished_event = multiprocessing.Event()
 
         assert (self.world_size % self.nnodes) == 0
         node_world_size = self.world_size // self.nnodes
         for rank_id in range(self.node_rank * node_world_size, (self.node_rank + 1) * node_world_size):
+
             rpc_model = await start_model_process(
                 args=self.args,
                 rank=rank_id,
@@ -120,7 +124,8 @@ class RouterManager:
                 rpc_event=self.rpc_event,
                 rpc_finished_event=self.rpc_finished_event,
                 info_queue=self.info_queue,
-                mem_queue=self.mem_queues[(rank_id % node_world_size)],
+                result_queue=self.result_queues[rank_id],
+                mem_queue=self.mem_queues[rank_id],
                 router_lock=self.router_lock,
             )
             self.model_rpc_servers.append(rpc_model)
@@ -180,19 +185,41 @@ class RouterManager:
 
         if self.args.run_mode == "prefill":
             # 启动 prefill kv move 管理进程
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.prefill_node_impl import (
-                start_prefill_kv_move_manager_process,
-            )
+            # from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.prefill_node_impl import (
+            #     start_prefill_kv_move_manager_process,
+            # )
 
-            start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+            # start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+
+            from lightllm.server.router.model_infer.mode_backend.pd_disaggregation.pd_remote_prefill import (
+                start_pd_remote_prefill_server_process
+            )
+            start_pd_remote_prefill_server_process(
+                self.args.pd_node_id,
+                http_server_port=self.args.pd_remote_prefill_http_port,
+                server_port=self.args.pd_remote_prefill_port,
+                from_backend_queue=self.info_queue,
+                to_backend_queues=self.result_queues,
+                agent_meta_queues=self.mem_queues
+            )
 
         if self.args.run_mode == "decode":
             # 启动 decode kv move 管理进程
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.decode_node_impl import (
-                start_decode_kv_move_manager_process,
-            )
+            # from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.decode_node_impl import (
+            #     start_decode_kv_move_manager_process,
+            # )
 
-            start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+            # start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+
+            from lightllm.server.router.model_infer.mode_backend.pd_disaggregation.pd_remote_prefill import (
+                start_pd_remote_prefill_client_process
+            )
+            start_pd_remote_prefill_client_process(
+                self.args.pd_node_id,
+                from_backend_queue=self.info_queue,
+                to_backend_queues=self.result_queues,
+                agent_meta_queues=self.mem_queues,
+            )
 
         return
 
