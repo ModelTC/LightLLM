@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any
 from lightllm.common.req_manager import ReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
-from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
+from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager, PDChunkedPrefillReq
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
@@ -124,7 +124,7 @@ class InferenceContext:
         https://arxiv.org/abs/2403.01241
         """
         prompt_cache_token_id = list(self.radix_cache.root_node.children.values())[0].token_id_key
-        print(f"prompt_cache_token_id : {prompt_cache_token_id}")
+        # print(f"prompt_cache_token_id : {prompt_cache_token_id}")
         index = range(len(prompt_cache_token_id))
         prompt_cache_kv_buffer = self.radix_cache.mem_manager.get_index_kv_buffer(index)
         torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
@@ -302,6 +302,7 @@ class InferReq:
         self.filter_mark = False
         self.need_out_token_id_statistics = True
         self.out_token_id_count: Dict[int, int] = None
+        self.in_prefill_or_transfer = False
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量

@@ -8,6 +8,7 @@ from .shm_array import ShmArray
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.dist_utils import get_dp_world_size
 from typing import List, Any, Union
 
 
@@ -112,6 +113,7 @@ class Req(ctypes.Structure):
             f"shm_cur_kv_len:{self.shm_cur_kv_len},"
             f"shm_cur_output_len:{self.shm_cur_output_len},"
             f"finish_status:{self.finish_status.is_finished()}"
+            f"group_id: {self.group_req_id}"
         )
 
     def init(
@@ -336,3 +338,43 @@ class TokenHealingReq(ChunkedPrefillReq):
         # 错误问题。
         self.sample_params.max_new_tokens = self.sample_params.max_new_tokens + self.prefix_token_ids.size + 6
         return
+
+
+class PDChunkedPrefillReq(ChunkedPrefillReq):
+    _pack_ = 4
+    _MAX_TP_SIZE = 128
+
+    def post_init(self):
+        super().post_init()
+        self.create_pd_req_state_shm_array()
+
+    def create_pd_req_state_shm_array(self):
+        service_uni_name = get_unique_server_name()
+        name = f"{service_uni_name}_shm_pd_req_state_{self.index_in_shm_mem}"
+        # self.dp_world_size = PDChunkedPrefillReq._MAX_TP_SIZE # get_dp_world_size()
+        self.pd_req_state_shm = ShmArray(name, (PDChunkedPrefillReq._MAX_TP_SIZE + 1,), dtype=np.int8)
+        self.pd_req_state_shm.create_shm()
+        self.pd_req_state_shm.arr.fill(0)
+        return
+
+    def link_pd_req_state_shm_array(self):
+        service_uni_name = get_unique_server_name()
+        # self.dp_world_size = PDChunkedPrefillReq._MAX_TP_SIZE #get_dp_world_size()
+        name = f"{service_uni_name}_shm_pd_req_state_{self.index_in_shm_mem}"
+        self.pd_req_state_shm = ShmArray(name, (PDChunkedPrefillReq._MAX_TP_SIZE + 1,), dtype=np.int8)
+        self.pd_req_state_shm.link_shm()
+        return
+
+    # called by each tp rank, no contention
+    def set_pd_req_rank_state(self, tp_id: int, state: int):
+        self.pd_req_state_shm.arr[tp_id] = state
+
+    # state: -1 for failed, 0 for in progress, 1 for success
+    # set by router
+    def set_pd_req_state(self, dp_world_size: int):
+        unique_state = np.unique(self.pd_req_state_shm.arr[:dp_world_size])
+        self.pd_req_state_shm.arr[dp_world_size] = unique_state[0]
+
+    # read by all rank
+    def get_pd_req_state(self, dp_world_size: int):
+        return self.pd_req_state_shm.arr[dp_world_size]
