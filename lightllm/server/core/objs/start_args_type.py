@@ -39,7 +39,7 @@ class StartArgs:
     router_max_new_token_len: int = field(default=1024)
     router_max_wait_tokens: int = field(default=6)
     disable_aggressive_schedule: bool = field(default=False)
-    use_dynamic_prompt_cache: bool = field(default=False)
+    disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=8192)
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)

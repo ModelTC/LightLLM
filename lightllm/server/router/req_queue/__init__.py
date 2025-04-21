@@ -10,9 +10,9 @@ def _get_req_queue_class(args, router, dp_size_in_node: int):
     if args.diverse_mode:
         return BeamContinuesBatchQueue
     if args.token_healing_mode:
-        return ContinuesBatchQueue
+        return ChunkedPrefillQueue
     if args.output_constraint_mode != "none":
-        return ContinuesBatchQueue
+        return ChunkedPrefillQueue
     if args.first_token_constraint_mode:
         return ChunkedPrefillQueue
     if args.run_mode == "decode":

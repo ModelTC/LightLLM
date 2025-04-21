@@ -163,7 +163,7 @@ class RouterManager:
             "is_token_healing": self.args.token_healing_mode,
             "return_all_prompt_logprobs": self.args.return_all_prompt_logprobs,
             "use_reward_model": self.args.use_reward_model,
-            "use_dynamic_prompt_cache": self.args.use_dynamic_prompt_cache,
+            "disable_dynamic_prompt_cache": self.args.disable_dynamic_prompt_cache,
             "data_type": self.args.data_type,
             "eos_id": self.eos_id,
             "diverse_mode": self.args.diverse_mode,
@@ -182,7 +182,7 @@ class RouterManager:
         if self.max_total_token_num is None:
             self.max_total_token_num = await self.model_rpc_client.get_max_total_token_num()
             self.args.max_total_token_num = self.max_total_token_num
-        if self.args.use_dynamic_prompt_cache:
+        if not self.args.disable_dynamic_prompt_cache:
             self.radix_cache_client = RadixCacheReadOnlyClient(
                 get_unique_server_name(),
                 self.max_total_token_num,
@@ -425,7 +425,7 @@ class RouterManager:
         )
 
     def get_used_tokens(self, dp_index):
-        if self.args.use_dynamic_prompt_cache:
+        if not self.args.disable_dynamic_prompt_cache:
             return (
                 self.max_total_token_num
                 - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)

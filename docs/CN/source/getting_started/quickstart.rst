@@ -113,7 +113,6 @@
     $ --tokenizer_mode fast \
     $ --pd_master_ip /your/host/ip \
     $ --pd_master_port 60011 \
-    $ --use_dynamic_prompt_cache \
     $ --max_req_total_len 16000 \
     $ --running_max_req_size 128 \
     $ --disable_cudagraph
@@ -133,8 +132,7 @@
     $ --graph_max_batch_size 16 \
     $ --tokenizer_mode fast \
     $ --pd_master_ip /your/host/ip \
-    $ --pd_master_port 60011 \
-    $ --use_dynamic_prompt_cache 
+    $ --pd_master_port 60011
 
 .. note::
     prefill和decoding阶段的tp大小保持一致, 目前可以支持 prefill 和 decode 节点的数量是变化的，同时prefill 和 decode可以跨机部署。
@@ -215,7 +213,6 @@ $ --config_server_port 60088 \
     $ --nccl_port 2732 \
     $ --max_total_token_num 400000 \
     $ --tokenizer_mode fast \
-    $ --use_dynamic_prompt_cache \
     $ --max_req_total_len 16000 \
     $ --running_max_req_size 128 \
     $ --disable_cudagraph \
@@ -236,7 +233,6 @@ $ --config_server_port 60088 \
     $ --graph_max_len_in_batch 2048 \
     $ --graph_max_batch_size 16 \
     $ --tokenizer_mode fast \
-    $ --use_dynamic_prompt_cache \
     $ --config_server_host <config_server_host> \
     $ --config_server_port <config_server_port>
 

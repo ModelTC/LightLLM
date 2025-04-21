@@ -64,7 +64,6 @@ MOE_MODE=EP KV_TRANS_USE_P2P=1 LOADWORKER=18 python -m lightllm.server.api_serve
 --enable_flashinfer_prefill \
 --enable_flashinfer_decode  \
 --enable_prefill_microbatch_overlap \
---use_dynamic_prompt_cache \
 --disable_cudagraph \
 --pd_master_ip <pd_master_ip> \
 --pd_master_port 60011
@@ -83,7 +82,6 @@ MOE_MODE=EP KV_TRANS_USE_P2P=1 LOADWORKER=18 python -m lightllm.server.api_serve
 --enable_flashinfer_prefill \
 --enable_flashinfer_decode  \
 --enable_prefill_microbatch_overlap \
---use_dynamic_prompt_cache \
 --pd_master_ip <pd_master_ip> \
 --pd_master_port 60011
 

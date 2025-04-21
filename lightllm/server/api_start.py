@@ -95,18 +95,17 @@ def normal_or_p_d_start(args):
     assert [
         args.disable_chunked_prefill,
         args.diverse_mode,
-        args.token_healing_mode,
         args.use_reward_model,
         args.return_all_prompt_logprobs,
-        args.output_constraint_mode != "none",
     ].count(True) <= 1
-    # 部分模式目前还无法与dynamic_prompt_cache一起跑，to do。
-    if args.use_dynamic_prompt_cache:
-        assert args.token_healing_mode is False
 
     # chuncked prefill 需要和 dynamic_prompt_cache 一起使能
     if not args.disable_chunked_prefill:
-        assert args.use_dynamic_prompt_cache is True
+        assert args.disable_dynamic_prompt_cache is False
+    if args.output_constraint_mode != "none":
+        assert args.disable_dynamic_prompt_cache is False
+    if args.token_healing_mode:
+        assert args.disable_dynamic_prompt_cache is False
 
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:

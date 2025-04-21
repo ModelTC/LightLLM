@@ -12,7 +12,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 KV_TRANS_USE_P2P=1 LOADWORKER=1 python -m lightllm.
 --tokenizer_mode fast \
 --pd_master_ip `hostname -i` \
 --pd_master_port 60011 \
---use_dynamic_prompt_cache \
 --max_req_total_len 16000 \
 --running_max_req_size 128 \
 --disable_cudagraph
@@ -29,8 +28,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 KV_TRANS_USE_P2P=1 LOADWORKER=10 python -m lightllm
 --graph_max_batch_size 16 \
 --tokenizer_mode fast \
 --pd_master_ip `hostname -i` \
---pd_master_port 60011 \
---use_dynamic_prompt_cache
+--pd_master_port 60011
 
 # pd start1
 python -m lightllm.server.api_server --model_dir /dev/shm/llama2-7b-chat --run_mode "pd_master" --host `hostname -i` --port 60011
@@ -46,7 +44,6 @@ CUDA_VISIBLE_DEVICES=0 KV_TRANS_USE_P2P=1 LOADWORKER=1 python -m lightllm.server
 --tokenizer_mode fast \
 --pd_master_ip `hostname -i` \
 --pd_master_port 60011 \
---use_dynamic_prompt_cache \
 --max_req_total_len 16000 \
 --running_max_req_size 128 \
 --disable_cudagraph
@@ -63,12 +60,11 @@ CUDA_VISIBLE_DEVICES=1 KV_TRANS_USE_P2P=1 LOADWORKER=10 python -m lightllm.serve
 --graph_max_batch_size 16 \
 --tokenizer_mode fast \
 --pd_master_ip `hostname -i` \
---pd_master_port 60011 \
---use_dynamic_prompt_cache
+--pd_master_port 60011
 
 
 # normal start
-LOADWORKER=8 python -m lightllm.server.api_server --port 8018 --model_dir /dev/shm/llama2-7b-chat --tp 2 --graph_max_batch_size 16 --use_dynamic_prompt_cache
+LOADWORKER=8 python -m lightllm.server.api_server --port 8018 --model_dir /dev/shm/llama2-7b-chat --tp 2 --graph_max_batch_size 16
 
 
 # 多 pd_master 节点部署实列
@@ -88,7 +84,6 @@ CUDA_VISIBLE_DEVICES=0 KV_TRANS_USE_P2P=1 LOADWORKER=1 python -m lightllm.server
 --nccl_port 2732 \
 --max_total_token_num 40000 \
 --tokenizer_mode fast \
---use_dynamic_prompt_cache \
 --max_req_total_len 16000 \
 --running_max_req_size 128 \
 --disable_cudagraph \
@@ -105,7 +100,6 @@ CUDA_VISIBLE_DEVICES=1 KV_TRANS_USE_P2P=1 LOADWORKER=10 python -m lightllm.serve
 --graph_max_len_in_batch 2048 \
 --graph_max_batch_size 16 \
 --tokenizer_mode fast \
---use_dynamic_prompt_cache \
 --config_server_host 10.120.114.74 \
 --config_server_port 60088
 

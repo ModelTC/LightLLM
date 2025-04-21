@@ -3,12 +3,12 @@ from .continues_batch.impl_for_return_all_prompt_logprobs import ReturnPromptLog
 from .continues_batch.impl_for_reward_model import RewardModelBackend
 from .chunked_prefill.impl import ChunkedPrefillBackend
 from .diverse_backend.impl import DiversehBackend
-from .continues_batch.impl_for_token_healing import TokenHealingBackend
-from .continues_batch.impl_for_outlines_constraint_mode import OutlinesConstraintBackend
+from .chunked_prefill.impl_for_token_healing import TokenHealingBackend
+from .chunked_prefill.impl_for_outlines_constraint_mode import OutlinesConstraintBackend
 from .chunked_prefill.impl_for_first_token_constraint_mode import FirstTokenConstraintBackend
 from .dp_backend.impl import DPChunkedPrefillBackend
 from .continues_batch.pd_mode.prefill_node_impl.prefill_impl import ChunckedPrefillForPrefillNode
 from .continues_batch.pd_mode.decode_node_impl.decode_impl import ContinuesBatchBackendForDecodeNode
-from .continues_batch.impl_for_xgrammar_mode import XgrammarBackend
+from .chunked_prefill.impl_for_xgrammar_mode import XgrammarBackend
 from .continues_batch.pd_mode.prefill_node_impl.prefill_impl_for_dp_chuncked import DPChunkedForPrefillNode
 from .continues_batch.pd_mode.decode_node_impl.decode_impl_for_dp import DPForDecodeNode

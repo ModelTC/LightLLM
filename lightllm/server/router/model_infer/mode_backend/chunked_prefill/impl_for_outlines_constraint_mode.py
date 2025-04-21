@@ -1,10 +1,9 @@
 import os
 import shutil
 import torch
-from .impl import ContinuesBatchBackend
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
+from .impl import ChunkedPrefillBackend
 from lightllm.server.core.objs import FinishStatus
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, InferSamplingParams
+from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.router.model_infer.mode_backend.generic_pre_process import (
     prepare_prefill_inputs,
     prepare_decode_inputs,
@@ -17,7 +16,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-class OutlinesConstraintBackend(ContinuesBatchBackend):
+class OutlinesConstraintBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
 
@@ -45,63 +44,23 @@ class OutlinesConstraintBackend(ContinuesBatchBackend):
         logger.info(f"eos_ids {self.tokenizer.eos_token_ids}")
         return
 
-    def prefill(self, reqs: List[Tuple]):
-
-        req_ids = self._init_reqs(reqs)
-
-        # import here, 当你不使用这个模式，缺少这些依赖也可以运行
-        from outlines.fsm.guide import RegexGuide
-
-        req_objs = self._trans_req_ids_to_req_objs(req_ids)
-        kwargs, run_reqs = prepare_prefill_inputs(req_objs, is_chuncked_mode=False, is_multimodal=self.is_multimodal)
-        run_reqs: List[InferReq] = run_reqs
-
-        logics = self.model.forward(**kwargs)
-
-        # 对于不能满足前缀匹配的logic位置，将其logics设置为一个较大负值，将其概率掩盖为 0
-        mask = torch.ones_like(logics, dtype=torch.bool)
-        for i, run_obj in enumerate(run_reqs):
-            run_obj: InferReq = run_obj
-            sample_params = run_obj.sampling_param
-            if sample_params.regular_constraint is not None:
-                sample_params.regex_guide = RegexGuide.from_regex(sample_params.regular_constraint, self.tokenizer)
-            self._mask_req_out_token(i, run_obj, mask)
-
-        logics[mask] = -1000000.0
-
-        next_token_ids, next_token_probs = sample(logics, run_reqs, self.eos_id)
-        next_token_ids = next_token_ids.detach().cpu().numpy()
-        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
-        self._post_handle(
-            run_reqs,
-            next_token_ids,
-            next_token_logprobs,
-            is_chuncked_mode=False,
-            do_filter_finished_reqs=False,
-            extra_post_req_handle_func=self._update_state_fsm,
-        )
-
-        return
-
     def decode(self):
         uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
             g_infer_context.infer_req_ids
         )
-        assert len(uninit_reqs) == 0
-        assert len(prefill_reqs) == 0
 
         if aborted_reqs:
             g_infer_context.filter_reqs(aborted_reqs)
 
+        # 先 decode
         if decode_reqs:
             kwargs, run_reqs = prepare_decode_inputs(decode_reqs)
-            run_reqs: List[InferReq] = run_reqs
-
             logits = self.model.forward(**kwargs)
+            self._overlap_req_init_and_filter(
+                uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
+            )
 
-            self._overlap_req_init_and_filter(uninit_reqs=[], ok_finished_reqs=ok_finished_reqs, clear_list=True)
-
+            self._init_guide_infos(run_reqs)
             all_has_no_constraint = all([not e.sampling_param.has_constraint_setting() for e in run_reqs])
             if not all_has_no_constraint:
                 mask = torch.ones_like(logits, dtype=torch.bool)
@@ -112,7 +71,6 @@ class OutlinesConstraintBackend(ContinuesBatchBackend):
             next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
             next_token_ids = next_token_ids.detach().cpu().numpy()
             next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
             self._post_handle(
                 run_reqs,
                 next_token_ids,
@@ -121,8 +79,42 @@ class OutlinesConstraintBackend(ContinuesBatchBackend):
                 do_filter_finished_reqs=False,
                 extra_post_req_handle_func=self._update_state_fsm,
             )
+            logits = None
 
-        self._overlap_req_init_and_filter(uninit_reqs=[], ok_finished_reqs=ok_finished_reqs, clear_list=True)
+        # 再 prefill
+        if len(decode_reqs) == 0 or (self.forward_step % self.max_wait_step == 0) or (self.need_prefill_count > 0):
+            if prefill_reqs:
+                self.need_prefill_count -= 1
+                kwargs, run_reqs = prepare_prefill_inputs(
+                    prefill_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
+                )
+                logits = self.model.forward(**kwargs)
+                self._overlap_req_init_and_filter(
+                    uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
+                )
+                # 对于不能满足前缀匹配的logic位置，将其logics设置为一个较大负值，将其概率掩盖为 0
+                self._init_guide_infos(run_reqs)
+                mask = torch.ones_like(logits, dtype=torch.bool)
+                for i, run_obj in enumerate(run_reqs):
+                    self._mask_req_out_token(i, run_obj, mask)
+
+                logits[mask] = -1000000.0
+
+                next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
+                next_token_ids = next_token_ids.detach().cpu().numpy()
+                next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+                self._post_handle(
+                    run_reqs,
+                    next_token_ids,
+                    next_token_logprobs,
+                    is_chuncked_mode=True,
+                    do_filter_finished_reqs=False,
+                    extra_post_req_handle_func=self._update_state_fsm,
+                )
+                logits = None
+
+        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
+        self.forward_step += 1
         return
 
     def _update_state_fsm(self, req_obj: InferReq, next_token_id, next_token_logprob):
@@ -138,13 +130,28 @@ class OutlinesConstraintBackend(ContinuesBatchBackend):
     def _mask_req_out_token(self, i, run_obj: InferReq, mask):
         from outlines.fsm.guide import RegexGuide
 
-        sample_params = run_obj.sampling_param
-        if sample_params.regular_constraint is not None:
-            regex_guide: RegexGuide = sample_params.regex_guide
-            ok_token_id_list = regex_guide.get_next_instruction(sample_params.fsm_current_state).tokens
-            mask[i, ok_token_id_list] = False
-        elif sample_params.allowed_token_ids is not None:
-            mask[i, sample_params.allowed_token_ids] = False
+        if run_obj.get_chuncked_input_token_len() == run_obj.get_cur_total_len():
+            # this run_obj is ready to gen next token.
+            sample_params = run_obj.sampling_param
+            if sample_params.regular_constraint is not None:
+                regex_guide: RegexGuide = sample_params.regex_guide
+                ok_token_id_list = regex_guide.get_next_instruction(sample_params.fsm_current_state).tokens
+                mask[i, ok_token_id_list] = False
+            elif sample_params.allowed_token_ids is not None:
+                mask[i, sample_params.allowed_token_ids] = False
+            else:
+                mask[i, :] = False
         else:
+            # no constraint
             mask[i, :] = False
         return
+
+    def _init_guide_infos(self, run_reqs: List[InferReq]):
+        from outlines.fsm.guide import RegexGuide
+
+        for i, run_obj in enumerate(run_reqs):
+            run_obj: InferReq = run_obj
+            sample_params = run_obj.sampling_param
+            if sample_params.regular_constraint is not None:
+                if not hasattr(sample_params, "regex_guide"):
+                    sample_params.regex_guide = RegexGuide.from_regex(sample_params.regular_constraint, self.tokenizer)

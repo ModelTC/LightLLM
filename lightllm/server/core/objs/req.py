@@ -272,29 +272,6 @@ class NormalReq(Req):
         return self.input_len + self.shm_cur_output_len
 
 
-class TokenHealingReq(NormalReq):
-    _pack_ = 4
-
-    def post_init(
-        self,
-    ):
-        for prefix_token_num in range(2, -1, -1):
-            if self.input_len > prefix_token_num:
-                self.input_len -= prefix_token_num
-                self.prefix_token_ids.set_token_ids(
-                    self.shm_prompt_ids.arr[self.input_len : (self.input_len + prefix_token_num)]
-                )
-                break
-
-        # 因为原始的输出token数量，会被中间的前缀补全占用decode次数，
-        # 所以默认多添加一些decode步数, token healing mode 下，由于
-        # 估计的生成token数据对应的生存周期可能会不准确,所以为了缓解调
-        # 度带来的显存估计问题，对于生成token的长度 + 6来缓解可能的估计
-        # 错误问题。
-        self.sample_params.max_new_tokens = self.sample_params.max_new_tokens + self.prefix_token_ids.size + 6
-        return
-
-
 class ChunkedPrefillReq(Req):
     _pack_ = 4
 
@@ -333,3 +310,26 @@ class ChunkedPrefillReq(Req):
     def get_first_router_need_tokens(self):
 
         return min(self.input_len + self.shm_cur_output_len, self.chunked_prefill_size)
+
+
+class TokenHealingReq(ChunkedPrefillReq):
+    _pack_ = 4
+
+    def post_init(
+        self,
+    ):
+        for prefix_token_num in range(2, -1, -1):
+            if self.input_len > prefix_token_num:
+                self.input_len -= prefix_token_num
+                self.prefix_token_ids.set_token_ids(
+                    self.shm_prompt_ids.arr[self.input_len : (self.input_len + prefix_token_num)]
+                )
+                break
+
+        # 因为原始的输出token数量，会被中间的前缀补全占用decode次数，
+        # 所以默认多添加一些decode步数, token healing mode 下，由于
+        # 估计的生成token数据对应的生存周期可能会不准确,所以为了缓解调
+        # 度带来的显存估计问题，对于生成token的长度 + 6来缓解可能的估计
+        # 错误问题。
+        self.sample_params.max_new_tokens = self.sample_params.max_new_tokens + self.prefix_token_ids.size + 6
+        return

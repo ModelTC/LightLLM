@@ -110,7 +110,6 @@ Open a new terminal and run the prefill service
     $ --tokenizer_mode fast \
     $ --pd_master_ip /your/host/ip \
     $ --pd_master_port 60011 \
-    $ --use_dynamic_prompt_cache \
     $ --max_req_total_len 16000 \
     $ --running_max_req_size 128 \
     $ --disable_cudagraph
@@ -130,8 +129,7 @@ Open a new terminal and run the decoding service
     $ --graph_max_batch_size 16 \
     $ --tokenizer_mode fast \
     $ --pd_master_ip /your/host/ip \
-    $ --pd_master_port 60011 \
-    $ --use_dynamic_prompt_cache 
+    $ --pd_master_port 60011
 
 .. note::
     The tp size for the prefill and decoding stages should remain consistent.

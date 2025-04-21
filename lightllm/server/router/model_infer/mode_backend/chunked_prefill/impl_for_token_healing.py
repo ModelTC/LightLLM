@@ -1,17 +1,19 @@
 import torch
-from .impl import ContinuesBatchBackend
+from .impl import ChunkedPrefillBackend
 from typing import List, Tuple
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, InferSamplingParams
+from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.router.model_infer.mode_backend.generic_pre_process import (
     prepare_prefill_inputs,
     prepare_decode_inputs,
 )
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.tokenizer import get_tokenizer
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
-class TokenHealingBackend(ContinuesBatchBackend):
+class TokenHealingBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
 
@@ -24,7 +26,8 @@ class TokenHealingBackend(ContinuesBatchBackend):
         )
         vob_dict = self.tokenizer.get_vocab()
         self.token_to_token_id = vob_dict
-        assert len(vob_dict) == self.model.vocab_size
+        if len(vob_dict) == self.model.vocab_size:
+            logger.warning(f"tokenizer error: {len(vob_dict)} != {self.model.vocab_size}")
         self.max_token_str_len = max([len(key) for key in vob_dict.keys()])
         self.logger.info(f"max vob token str len: {self.max_token_str_len}")
         self.pad_token_str = "\U0010FFFF" * self.max_token_str_len
@@ -37,59 +40,24 @@ class TokenHealingBackend(ContinuesBatchBackend):
         self.token_indexes = torch.tensor([e[1] for e in self.sorted_tokens], dtype=torch.int64, device="cuda")
         return
 
-    def prefill(self, reqs: List[Tuple]):
-        req_ids = self._init_reqs(reqs)
-        req_objs = self._trans_req_ids_to_req_objs(req_ids)
-        kwargs, run_reqs = prepare_prefill_inputs(req_objs, is_chuncked_mode=False, is_multimodal=self.is_multimodal)
-
-        logics = self.model.forward(**kwargs)
-
-        # 对于不能满足前缀匹配的logic位置，将其logics设置为一个较大负值，将其概率掩盖为 0
-        mask = torch.ones_like(logics, dtype=torch.bool)
-        for i, run_obj in enumerate(run_reqs):
-            assert not hasattr(run_obj, "prefix_str")
-            run_obj: InferReq = run_obj
-
-            prefix_token_str = "".join([self.token_id_to_token[e] for e in run_obj.prefix_token_ids])
-            run_obj.prefix_str = prefix_token_str
-            self._mask_not_prefix_token(i, run_obj, mask)
-
-        logics[mask] = -1000000.0
-
-        # 有prefix
-        self._topk_repair(run_reqs)
-        next_token_ids, next_token_probs = sample(logics, run_reqs, self.eos_id)
-        self._topk_recover(run_reqs)
-
-        next_token_ids = next_token_ids.detach().cpu().numpy()
-        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
-        self._post_handle(
-            run_reqs,
-            next_token_ids,
-            next_token_logprobs,
-            is_chuncked_mode=False,
-            do_filter_finished_reqs=False,
-            extra_post_req_handle_func=self._update_tokenhealing_req_prefix_str,
-        )
-        return
-
     def decode(self):
         uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
             g_infer_context.infer_req_ids
         )
-        assert len(uninit_reqs) == 0
-        assert len(prefill_reqs) == 0
 
         if aborted_reqs:
             g_infer_context.filter_reqs(aborted_reqs)
 
+        # 先 decode
         if decode_reqs:
             kwargs, run_reqs = prepare_decode_inputs(decode_reqs)
             logits = self.model.forward(**kwargs)
-            self._overlap_req_init_and_filter(uninit_reqs=[], ok_finished_reqs=ok_finished_reqs, clear_list=True)
+            self._overlap_req_init_and_filter(
+                uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
+            )
 
-            # 对 logits 添加 prefix 限制
+            self._init_prefix_infos(run_reqs=run_reqs)
+
             all_no_prefix = all([len(e.prefix_str) == 0 for e in run_reqs])
             if not all_no_prefix:
                 mask = torch.ones_like(logits, dtype=torch.bool)
@@ -97,12 +65,10 @@ class TokenHealingBackend(ContinuesBatchBackend):
                     self._mask_decode_not_prefix_token(i, run_obj, mask)
 
                 logits[mask] = -1000000.0
-            # self._topk_repair(run_reqs)
+
             next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-            # self._topk_recover(run_reqs)
             next_token_ids = next_token_ids.detach().cpu().numpy()
             next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
             self._post_handle(
                 run_reqs,
                 next_token_ids,
@@ -111,8 +77,46 @@ class TokenHealingBackend(ContinuesBatchBackend):
                 do_filter_finished_reqs=False,
                 extra_post_req_handle_func=self._update_tokenhealing_req_prefix_str,
             )
+            logits = None
 
-        self._overlap_req_init_and_filter(uninit_reqs=[], ok_finished_reqs=ok_finished_reqs, clear_list=True)
+        # 再 prefill
+        if len(decode_reqs) == 0 or (self.forward_step % self.max_wait_step == 0) or (self.need_prefill_count > 0):
+            if prefill_reqs:
+                self.need_prefill_count -= 1
+                kwargs, run_reqs = prepare_prefill_inputs(
+                    prefill_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
+                )
+                logits = self.model.forward(**kwargs)
+                self._overlap_req_init_and_filter(
+                    uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
+                )
+
+                # 对于不能满足前缀匹配的logic位置，将其logics设置为一个较大负值，将其概率掩盖为 0
+                self._init_prefix_infos(run_reqs=run_reqs)
+                mask = torch.ones_like(logits, dtype=torch.bool)
+                for i, run_obj in enumerate(run_reqs):
+                    self._mask_not_prefix_token(i, run_obj, mask)
+                logits[mask] = -1000000.0
+
+                # 有prefix
+                self._topk_repair(run_reqs)
+                next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
+                self._topk_recover(run_reqs)
+
+                next_token_ids = next_token_ids.detach().cpu().numpy()
+                next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+                self._post_handle(
+                    run_reqs,
+                    next_token_ids,
+                    next_token_logprobs,
+                    is_chuncked_mode=True,
+                    do_filter_finished_reqs=False,
+                    extra_post_req_handle_func=self._update_tokenhealing_req_prefix_str,
+                )
+                logits = None
+
+        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
+        self.forward_step += 1
         return
 
     def _update_tokenhealing_req_prefix_str(self, req_obj: InferReq, next_token_id, next_token_logprob):
@@ -178,4 +182,12 @@ class TokenHealingBackend(ContinuesBatchBackend):
     def _topk_recover(self, run_reqs: list[InferReq]):
         for req_obj in run_reqs:
             req_obj.sampling_param.shm_param.top_k = req_obj.origin_topk
+        return
+
+    def _init_prefix_infos(self, run_reqs: List[InferReq]):
+        for i, run_obj in enumerate(run_reqs):
+            if not hasattr(run_obj, "prefix_str"):
+                run_obj: InferReq = run_obj
+                prefix_token_str = "".join([self.token_id_to_token[e] for e in run_obj.prefix_token_ids])
+                run_obj.prefix_str = prefix_token_str
         return
