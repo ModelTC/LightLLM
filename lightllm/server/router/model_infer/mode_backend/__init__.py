@@ -14,3 +14,5 @@ from .continues_batch.pd_mode.decode_node_impl.decode_impl import DecodeNode
 from .continues_batch.pd_mode.decode_node_impl.decode_impl_for_dp import DPForDecodeNode
 from .continues_batch.pd_mode.prefill_node_impl.prefill_impl import ChunckedPrefillForPrefillNode
 from .continues_batch.pd_mode.prefill_node_impl.prefill_impl_for_dp import DPChunkedForPrefillNode
+from .pd_disaggregation.impl_for_pd_prefill import PDNIXLBackendForPrefillNode
+from .pd_disaggregation.impl_for_pd_decode import PDNIXLBackendForDecodeNode

@@ -35,6 +35,7 @@ class ShmReqManager:
 
         return ChunkedPrefillReq
 
+
     def get_max_req_num(self):
         args: StartArgs = get_env_start_args()
         return args.running_max_req_size

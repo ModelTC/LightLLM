@@ -177,11 +177,11 @@ class HttpServerManagerForPDMaster:
 
         up_status_event = req_status.up_status_event
 
-        d_start_args = d_node.start_args
+        p_start_args = p_node.start_args
         prefill_node_dict = {
-            "node_id": d_start_args["pd_node_id"],
-            "ip": d_start_args["host"],
-            "rpyc_port": d_start_args["pd_prefill_rpyc_port"],
+            "node_id": p_start_args["pd_node_id"],
+            "ip": p_start_args["host"],
+            "rpyc_port": p_start_args["pd_remote_prefill_port"],
             "max_new_tokens": sampling_params.max_new_tokens - 1,
             "pd_master_node_id": self.args.pd_node_id,
         }
@@ -268,11 +268,6 @@ class HttpServerManagerForPDMaster:
         try:
             req_status = self.req_id_to_out_inf[group_request_id]
             del self.req_id_to_out_inf[group_request_id]
-        except:
-            pass
-
-        try:
-            await req_status.p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 

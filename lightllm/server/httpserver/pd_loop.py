@@ -193,7 +193,7 @@ async def pd_handle_loop_from_d(manager: HttpServerManager):
 
     context = zmq.asyncio.Context(2)
     manager.recv_from_d = context.socket(zmq.PULL)
-    manager.recv_from_d.bind(f"tcp://*:{manager.args.pd_remote_prefill_port}")
+    manager.recv_from_d.bind(f"tcp://*:{manager.args.pd_remote_prefill_http_port}")
 
     while True:
         try:

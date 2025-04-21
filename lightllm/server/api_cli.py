@@ -55,6 +55,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="The port number for the config server in config_server mode.",
     )
     parser.add_argument(
+        "--pd_remote_prefill_http_port",
+        type=int,
+        default=42001,
+        help="p d mode, remote prefill node used for kv move manager rpyc server port",
+    )
+
+    parser.add_argument(
+        "--pd_remote_prefill_port",
+        type=int,
+        default=42002,
+        help="p d mode, remote prefill node used for kv move manager rpyc server port",
+    )
+
+    parser.add_argument(
         "--model_name",
         type=str,
         default="default_model_name",
