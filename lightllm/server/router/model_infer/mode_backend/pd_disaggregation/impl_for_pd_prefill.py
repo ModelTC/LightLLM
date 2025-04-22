@@ -46,6 +46,7 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
         assert len(uinit_reqs) == 0
         assert len(decode_reqs) == 0
 
+        self._prefill_abort_remote(aborted_reqs)
         self._filter_reqs(aborted_reqs)
 
         if ok_finished_reqs:
