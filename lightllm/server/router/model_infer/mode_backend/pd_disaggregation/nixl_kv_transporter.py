@@ -3,10 +3,11 @@ from collections import defaultdict
 from typing import Dict, List, Any
 from torch import Tensor
 from dataclasses import dataclass
+import threading
 
 from lightllm.utils.log_utils import init_logger
 
-from .pd_remote_prefill_obj import RemoteAgent, KVMoveRequest, PrefillRequest
+from .pd_remote_prefill_obj import RemoteAgent, KVMoveRequest, PrefillRequest, RemotePrefillStatus, ThreadSafeDict
 
 
 logger = init_logger(__name__)
@@ -43,8 +44,8 @@ class NixlKVTransporter:
         self.local_xfer_handles = None
 
         self.remote_agents = defaultdict(list)
-        self.inflight_transfers: Dict[str, Any] = {}
 
+        self.inflight_transfers: ThreadSafeDict = ThreadSafeDict()
 
     @property
     def agent_name(self) -> str:
@@ -112,23 +113,41 @@ class NixlKVTransporter:
 
             src_handle = self.local_xfer_handles
             dst_handle = remote_agent.kv_xfer_handles
+            notify_status = RemotePrefillStatus(group_req_id=group_reqeust_id, status=1)
             handle = self.nixl_agent.make_prepped_xfer("WRITE",
                                                        src_handle, src_token_descs,
                                                        dst_handle, dst_token_descs,
-                                                       str(group_reqeust_id).encode())
+                                                       notify_status.serialize())
 
             status = self.nixl_agent.transfer(handle)
             assert status != 'ERR'
 
-            self.inflight_transfers[group_reqeust_id] = handle
+            self.inflight_transfers[group_reqeust_id] = (handle, remote_agent, False)
 
             return handle
 
         return None
 
+
+    def send_abort_notify(self, remote_id: int, group_reqeust_id):
+        remote_agent: RemoteAgent = self.remote_agents[remote_id][self.tp_idx]
+        notify_status = RemotePrefillStatus(group_req_id=group_reqeust_id, status=-1)
+        self.nixl_agent.send_notif(remote_agent.name, notify_status.serialize())
+
+        if group_reqeust_id in self.inflight_transfers:
+            self.inflight_transfers[group_reqeust_id][2] = True
+
+
     def get_done_tranfers(self):
         done_req_ids = []
-        for req_id, handle in self.inflight_transfers.items():
+
+        for req_id, (handle, remote_agent, is_abort) in self.inflight_transfers.items():
+            if is_abort:
+                logger.warning(f"{req_id} Transfer aborted")
+                done_req_ids.append((req_id, -1))
+                continue
+
+            remote_agent: RemoteAgent
             xfer_state = self.nixl_agent.check_xfer_state(handle)
             if xfer_state == "DONE":
                 done_req_ids.append((req_id, 1))
@@ -137,9 +156,12 @@ class NixlKVTransporter:
             else:
                 logger.warning(f"{req_id} Transfer failed with state {xfer_state}")
                 done_req_ids.append((req_id, -1))
+                notify_failed_status = RemotePrefillStatus(group_req_id=req_id, status=-1)
+                self.nixl_agent.send_notif(remote_agent.name, notify_failed_status.serialize())
 
         for req_id, _ in done_req_ids:
-            self.nixl_agent.release_xfer_handle(self.inflight_transfers[req_id])
+            # release will abort inflight transfer
+            self.nixl_agent.release_xfer_handle(self.inflight_transfers[req_id][0])
             del self.inflight_transfers[req_id]
 
         return done_req_ids
