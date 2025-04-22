@@ -82,9 +82,13 @@ class NixlKVTransporter:
 
 
     def add_remote_agent(self, remote_agent: NixlMetadata):
-        for agent_metadata, num_tokens, agent_mem_desc in zip(remote_agent.agent_metadatas,
-                                                              remote_agent.num_tokens,
-                                                              remote_agent.agent_mem_descs):
+        for idx, (agent_metadata, num_tokens, agent_mem_desc) in enumerate(zip(remote_agent.agent_metadatas,
+                                                                             remote_agent.num_tokens,
+                                                                             remote_agent.agent_mem_descs)):
+            if self.tp_idx != idx:
+                self.remote_agents[remote_agent.id].append(None)
+                continue
+
             peer_name = self.nixl_agent.add_remote_agent(agent_metadata)
             mem_desc = self.nixl_agent.deserialize_descs(agent_mem_desc)
             logger.info("Added remote agent %s with mem desc %s", peer_name, mem_desc)
