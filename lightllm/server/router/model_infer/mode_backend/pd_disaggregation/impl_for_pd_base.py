@@ -2,6 +2,7 @@
 import time
 import torch.multiprocessing as mp
 from typing import Dict, List
+import queue
 import numpy as np
 
 
@@ -51,20 +52,32 @@ class PDNIXLBackendBase(ModeBackend):
 
     def _prefill_wait_loop(self):
         while True:
+            def handle_remote_prefill(req_status: RemotePrefillStatus):
+                group_req_id = req_status.group_req_id
+                status = req_status.status
+                if run_req := self.remote_prefilled_reqs.get(group_req_id, None):
+                    shm_req: PDChunkedPrefillReq = run_req.shm_req
+                    shm_req.set_pd_req_rank_state(self.rank_in_dp, status)
+                    self.remote_prefilled_reqs.pop(group_req_id)
+                    logger.info(f"remote prefill reqeust: {group_req_id} done with status: {status}")
+                else:
+                    logger.warning(f"remote prefill reqeust: {group_req_id} not found")
+
+            # from local
+            try:
+                req_status = self.from_remote_queue.get_nowait()
+                handle_remote_prefill(req_status)
+            except queue.Empty:
+                pass
+
+            # from remote
             notifies = self.nixl_agent.get_new_notifs()
             for agent_name, req_statuses in notifies.items():
                 for req_status in req_statuses:
                     prefill_status = RemotePrefillStatus.deserialize(req_status)
-                    group_req_id = prefill_status.group_req_id
-                    status = prefill_status.status
-                    if run_req := self.remote_prefilled_reqs.get(group_req_id, None):
-                        shm_req: PDChunkedPrefillReq = run_req.shm_req
-                        shm_req.set_pd_req_rank_state(self.rank_in_dp, status)
-                        self.remote_prefilled_reqs.pop(group_req_id)
-                        logger.info(f"remote prefill reqeust: {group_req_id} done with status: {status}")
-                    else:
-                        logger.warning(f"remote prefill reqeust: {group_req_id} not found")
-            time.sleep(0)
+                    handle_remote_prefill(prefill_status)
+
+            time.sleep(0.001)
 
 
     def _wait_transfer_loop(self):
@@ -81,7 +94,7 @@ class PDNIXLBackendBase(ModeBackend):
                 shm_req: PDChunkedPrefillReq = req.shm_req
                 shm_req.set_pd_req_rank_state(self.rank_in_dp, state)
                 del self.inflght_transfer_requests[req_id]
-            time.sleep(0)
+            time.sleep(0.001)
 
 
     def _handle_prefill_loop(self):
@@ -96,6 +109,7 @@ class PDNIXLBackendBase(ModeBackend):
                     agent_metadatas = request.agent_metadatas,
                     agent_mem_descs = request.agent_mem_descs
                 ))
+                self.to_remote_queue.put("OK")
 
             if request.type == RemoteRequstType.REMOTE_PREFILL:
                 request: PrefillRequest
