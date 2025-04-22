@@ -4,11 +4,11 @@ from io import BytesIO
 import multiprocessing.shared_memory as shm
 
 
-def tensor2bytes(t):
+def tensor2bytes(t: torch.Tensor):
     # t = t.cpu().numpy().tobytes()
     # return t
     buf = BytesIO()
-    torch.save(t, buf)
+    torch.save(t.detach().cpu(), buf)
     buf.seek(0)
     return buf.read()
 

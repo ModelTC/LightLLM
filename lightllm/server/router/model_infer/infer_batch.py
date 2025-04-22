@@ -395,14 +395,15 @@ class InferReqGroup:
             prefix_len = prev_req.shared_kv_node.node_prefix_total_len
         else:
             prefix_len = 0
-        pre_input_token_ids = prev_req.get_input_token_ids()
-        cache_token_id = req_manager.req_to_token_indexs[prev_req.req_idx][prefix_len : len(pre_input_token_ids)]
+        prefix_len = max(prefix_len, prev_req.cur_kv_len)
+        pre_input_len = prev_req.get_chuncked_input_token_len()
+        cache_token_id = req_manager.req_to_token_indexs[prev_req.req_idx][prefix_len:pre_input_len]
         # update the InferReq status and mem_manager status for cache sharing
         for req_id in self.req_ids_group[:]:
             if req_id == convert_sub_id_to_group_id(req_id):
                 continue
             req = g_infer_context.requests_mapping[req_id]
             req.finish_status.set_status(FinishStatus.NO_FINISH)
-            input_token_ids = req.get_input_token_ids()
-            req_manager.req_to_token_indexs[req.req_idx][prefix_len : len(input_token_ids)] = cache_token_id
-            assert len(input_token_ids) == len(pre_input_token_ids)
+            input_len = req.get_chuncked_input_token_len()
+            req_manager.req_to_token_indexs[req.req_idx][prefix_len:input_len] = cache_token_id
+            assert input_len == pre_input_len

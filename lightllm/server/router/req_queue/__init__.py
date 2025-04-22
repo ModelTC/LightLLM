@@ -1,14 +1,14 @@
 from .continues_batch.impl import ContinuesBatchQueue
-from .continues_batch.beam_impl import BeamContinuesBatchQueue
 from .continues_batch.impl_for_pd_decode import QueueForPDDecode
 from .chunked_prefill.impl_for_pd_prefill import QueueForPDChunkedPrefill
 from .chunked_prefill.impl import ChunkedPrefillQueue
+from .chunked_prefill.beam_impl import ChunkedBeamContinuesBatchQueue
 from .dp_base_queue import DpQueue
 
 
 def _get_req_queue_class(args, router, dp_size_in_node: int):
     if args.diverse_mode:
-        return BeamContinuesBatchQueue
+        return ChunkedBeamContinuesBatchQueue
     if args.token_healing_mode:
         return ChunkedPrefillQueue
     if args.output_constraint_mode != "none":

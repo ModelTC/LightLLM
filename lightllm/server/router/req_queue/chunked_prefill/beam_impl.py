@@ -4,7 +4,7 @@ from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 
 
-class BeamContinuesBatchQueue(BaseQueue):
+class ChunkedBeamContinuesBatchQueue(BaseQueue):
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
         return
@@ -46,8 +46,7 @@ class BeamContinuesBatchQueue(BaseQueue):
         # prefill token 计算
         for req in cur_handle_group_reqs:
             new_batch_first_router_need_tokens += req.shm_cur_output_len
-        new_batch_first_router_need_tokens += req.input_len
-
+        new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
         ok_token_num = (
             need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)
             < self.max_total_tokens

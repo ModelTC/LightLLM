@@ -65,7 +65,6 @@ torchvision==0.20.1
 tqdm==4.65.0
 transformers==4.51.2
 tokenizers==0.21.0
-huggingface-hub==0.26.5
 triton==3.1.0
 urllib3==1.26.16
 uvicorn==0.19.0

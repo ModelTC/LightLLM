@@ -91,21 +91,25 @@ def normal_or_p_d_start(args):
     if args.graph_max_len_in_batch == 0:
         args.graph_max_len_in_batch = args.max_req_total_len
 
-    # 这些模式不能同时设置。
-    assert [
-        args.disable_chunked_prefill,
-        args.diverse_mode,
-        args.use_reward_model,
-        args.return_all_prompt_logprobs,
-    ].count(True) <= 1
-
-    # chuncked prefill 需要和 dynamic_prompt_cache 一起使能
+    # mode setting check.
     if not args.disable_chunked_prefill:
         assert args.disable_dynamic_prompt_cache is False
+        assert args.disable_chunked_prefill is False
     if args.output_constraint_mode != "none":
         assert args.disable_dynamic_prompt_cache is False
+        assert args.disable_chunked_prefill is False
     if args.token_healing_mode:
         assert args.disable_dynamic_prompt_cache is False
+        assert args.disable_chunked_prefill is False
+    if args.diverse_mode:
+        assert args.disable_dynamic_prompt_cache is False
+        assert args.disable_chunked_prefill is False
+    if args.use_reward_model:
+        assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
+        assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
+    if args.return_all_prompt_logprobs:
+        assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
+        assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
 
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
