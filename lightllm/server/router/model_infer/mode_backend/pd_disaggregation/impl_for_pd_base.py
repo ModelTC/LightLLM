@@ -15,7 +15,9 @@ from .pd_remote_prefill_obj import (PrefillRequest,
                                     RemoteRequest,
                                     RemoteRequstType,
                                     ConnectRequest,
-                                    KVMoveRequest)
+                                    KVMoveRequest,
+                                    RemotePrefillStatus,
+                                    ThreadSafeDict)
 
 logger = init_logger(__name__)
 
@@ -32,11 +34,11 @@ class PDNIXLBackendBase(ModeBackend):
         self.nixl_meta_queue = nixl_meta_queue
 
         # for decode
-        self.remote_prefilled_reqs: Dict[int, InferReq] = {}
+        self.remote_prefilled_reqs: ThreadSafeDict = ThreadSafeDict()
 
         # for prefill
-        self.remote_prefill_requests: Dict[str, PrefillRequest] = {}
-        self.inflght_transfer_requests: Dict[str, InferReq] = {}
+        self.remote_prefill_requests: ThreadSafeDict = ThreadSafeDict()
+        self.inflght_transfer_requests: ThreadSafeDict = ThreadSafeDict()
 
 
     def init_custom(self):
@@ -50,14 +52,16 @@ class PDNIXLBackendBase(ModeBackend):
     def _prefill_wait_loop(self):
         while True:
             notifies = self.nixl_agent.get_new_notifs()
-            for agent_name, req_idxs in notifies.items():
-                for req_id in req_idxs:
-                    group_req_id = int(req_id.decode())
+            for agent_name, req_statuses in notifies.items():
+                for req_status in req_statuses:
+                    prefill_status = RemotePrefillStatus.deserialize(req_status)
+                    group_req_id = prefill_status.group_req_id
+                    status = prefill_status.status
                     if run_req := self.remote_prefilled_reqs.get(group_req_id, None):
                         shm_req: PDChunkedPrefillReq = run_req.shm_req
-                        shm_req.set_pd_req_rank_state(self.rank_in_dp, 1)
+                        shm_req.set_pd_req_rank_state(self.rank_in_dp, status)
                         self.remote_prefilled_reqs.pop(group_req_id)
-                        logger.info(f"remote prefill reqeust: {group_req_id} done")
+                        logger.info(f"remote prefill reqeust: {group_req_id} done with status: {status}")
                     else:
                         logger.warning(f"remote prefill reqeust: {group_req_id} not found")
             time.sleep(0)
@@ -123,7 +127,20 @@ class PDNIXLBackendBase(ModeBackend):
     def _decode_filter_reqs(self, prefill_reqs: List[InferReq],
                             aborted_reqs: List[InferReq], decode_reqs: List[InferReq]):
         new_prefill_reqs: List[InferReq] = []
+        new_aborted_reqs: List[InferReq] = []
         remote_prefill_reqs: List[InferReq] = []
+
+         # filter out aborted requests
+        for req in aborted_reqs:
+            if req.in_prefill_or_transfer:
+                shm_req: PDChunkedPrefillReq = req.shm_req
+                state = shm_req.get_pd_req_state(self.dp_world_size)
+                if state != 0:
+                    new_aborted_reqs.append(req)
+                    req.in_prefill_or_transfer = False
+                else:
+                    #TODO trigger remote abort
+                    remote_prefill_reqs.append(req)
 
         for req in prefill_reqs:
             if req.in_prefill_or_transfer:
@@ -145,7 +162,7 @@ class PDNIXLBackendBase(ModeBackend):
 
             new_prefill_reqs.append(req)
 
-        return new_prefill_reqs, aborted_reqs, decode_reqs, remote_prefill_reqs
+        return new_prefill_reqs, new_aborted_reqs, decode_reqs, remote_prefill_reqs
 
     def _prefill_filter_reqs(self, ok_finished_reqs: List[InferReq], aborted_reqs: List[InferReq]):
         new_ok_finished_reqs = []
@@ -170,7 +187,6 @@ class PDNIXLBackendBase(ModeBackend):
             new_ok_finished_reqs.append(req)
 
         return new_ok_finished_reqs, aborted_reqs, kv_transfer_reqs
-
 
     def _prepare_remote_prefill_inputs(self, req_objs: List[InferReq]):
         run_reqs = []
@@ -210,6 +226,16 @@ class PDNIXLBackendBase(ModeBackend):
             "b_seq_len": nopad_b_seq_len,
         }
         return kwargs, run_reqs
+
+    def _prefill_abort_remote(self, req_objs: List[InferReq]):
+        for req_obj in req_objs:
+            group_req_id = req_obj.shm_req.group_req_id
+            if group_req_id in self.remote_prefill_requests:
+                self.nixl_agent.send_abort_notify(
+                    self.remote_prefill_requests[group_req_id].decode_id,
+                    group_req_id)
+                del self.remote_prefill_requests[group_req_id]
+
 
     # def _get_classed_reqs(self, req_ids: List[int], no_decode: bool = False, prefill=True):
     #     uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = super()._get_classed_reqs(
