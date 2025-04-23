@@ -101,8 +101,9 @@ def mrope_triton(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch
     qo_sb, qo_sh, qo_sl, qo_sd = map(int, q_out.stride())
     ko_sb, ko_sh, ko_sl, ko_sd = map(int, k_out.stride())
 
-    token_dim = next(i for i, s in enumerate(cos.shape) if s == L)
-    axis_dim = next(i for i, s in enumerate(cos.shape) if s == 3)
+    assert len(cos.shape) == 4
+    token_dim = 2
+    axis_dim = 0
 
     s_token = int(cos.stride(token_dim))
     s_axis = int(cos.stride(axis_dim))
