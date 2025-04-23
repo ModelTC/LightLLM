@@ -31,6 +31,14 @@ class FlashInferStateExtraInfo:
         self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(get_current_device_id())
         self.max_seq_length = model.max_seq_length
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
+        self.kv_indices_buffer = [
+            torch.empty(model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32).to(
+                get_current_device_id()
+            ),
+            torch.empty(model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32).to(
+                get_current_device_id()
+            ),
+        ]
         if model.config["rope_scaling"] is not None:
             rope_scaling = model.config["rope_scaling"]
             mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)

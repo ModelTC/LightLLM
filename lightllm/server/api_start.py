@@ -142,7 +142,7 @@ def normal_or_p_d_start(args):
     else:
         # chunked 模式下
         if args.batch_max_tokens is None:
-            args.batch_max_tokens = min(args.max_req_total_len, 2 * args.chunked_prefill_size)
+            args.batch_max_tokens = min(args.max_req_total_len, 2 * args.chunked_prefill_size + 256)
 
         assert (
             args.batch_max_tokens >= args.chunked_prefill_size
