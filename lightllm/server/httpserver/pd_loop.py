@@ -95,7 +95,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 logger.info(f"Sent registration JSON: {regist_json}")
 
                 # 转发任务
-                if manager.pd_mode.is_D():
+                if manager.pd_mode != NodeRole.NP: # nixl prefill don't need up token to master
                     forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
 
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
