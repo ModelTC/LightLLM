@@ -192,7 +192,7 @@ class RouterManager:
             start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
         if self.args.run_mode == "nixl_prefill":
-            from lightllm.server.router.model_infer.mode_backend.pd_disaggregation.pd_remote_prefill import (
+            from lightllm.server.router.model_infer.mode_backend.pd_nixl.pd_remote_prefill import (
                 start_pd_remote_prefill_server_process
             )
             start_pd_remote_prefill_server_process(
@@ -213,7 +213,7 @@ class RouterManager:
             start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
         if self.args.run_mode == "nixl_decode":
-            from lightllm.server.router.model_infer.mode_backend.pd_disaggregation.pd_remote_prefill import (
+            from lightllm.server.router.model_infer.mode_backend.pd_nixl.pd_remote_prefill import (
                 start_pd_remote_prefill_client_process
             )
             start_pd_remote_prefill_client_process(
