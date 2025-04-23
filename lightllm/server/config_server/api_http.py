@@ -18,6 +18,10 @@ registered_pd_master_obj_lock = Lock()
 global_req_id = 0
 global_req_id_lock = Lock()
 
+# This is a global ID for multimodal embedding, starting from 100000000
+global_multimodal_embedding_id = 100000000
+global_multimodal_embedding_id_lock = Lock()
+
 
 @app.get("/liveness")
 @app.post("/liveness")
@@ -92,5 +96,19 @@ async def allocate_global_id_range():
         start_id = global_req_id
         global_req_id += range_size
         end_id = global_req_id
+
+    return {"start_id": start_id, "end_id": end_id}
+
+
+@app.get("/allocate_global_unique_multimodal_id_range")
+async def allocate_global_unique_multimodal_id_range():
+    global global_multimodal_embedding_id
+    range_size = 8000000
+    with global_multimodal_embedding_id_lock:
+        if global_multimodal_embedding_id + range_size > 2 ** 63 - 1:
+            global_multimodal_embedding_id = 100000000
+        start_id = global_multimodal_embedding_id
+        global_multimodal_embedding_id += range_size
+        end_id = global_multimodal_embedding_id
 
     return {"start_id": start_id, "end_id": end_id}

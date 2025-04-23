@@ -1,6 +1,7 @@
 import uuid
 import threading
 import dataclasses
+import requests
 from ..interface import CacheManager, CacheManagerFactory
 from typing import Union
 import torch
@@ -8,6 +9,9 @@ import time
 from collections import deque
 import multiprocessing.shared_memory as shm
 from ..utils import get_shm_name_data, get_shm_name_embed, free_shm
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclasses.dataclass
@@ -22,10 +26,11 @@ class Record(object):
     token_id: int
     token_num: int
 
+
 @CacheManagerFactory.register("naive")
 class InMemoryCache(CacheManager):
-
     def __init__(self, args) -> None:
+        self.args = args
         self._records = dict()
         self._md5_to_record = dict()
         self.capacity = max(1, args.cache_capacity)
@@ -34,12 +39,37 @@ class InMemoryCache(CacheManager):
         self.occupied = 0
         self.expired_secs = 60 * 60
         self.lock = threading.Lock()
+        self.token_id_range_start = 0
+        self.token_id_range_end = 0
+        self.use_config_server = self.args.config_server_host and self.args.config_server_port
 
-        from lightllm.server.tokenizer import get_tokenizer
-        tokenizer = get_tokenizer(
-            args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code
-        )
-        self.cur_token_id = tokenizer.vocab_size + 10000
+    def _check_and_set_new_id_range(self, alloced_token_num):
+        need_update_range = self.token_id_range_start + alloced_token_num >= self.token_id_range_end
+        if need_update_range:
+            if not self.use_config_server:
+                self.token_id_range_start = 100000000
+                self.token_id_range_end = 2 ** 63 - 1
+            else:
+                while True:
+                    try:
+                        config_server_ip_port = f"{self.args.config_server_host}:{self.args.config_server_port}"
+                        url = f"http://{config_server_ip_port}/allocate_global_unique_multimodal_id_range"
+                        response = requests.get(url)
+                        if response.status_code == 200:
+                            id_range = response.json()
+                            logger.info(f"get new multimodal id range {id_range}")
+                            self.token_id_range_start = id_range["start_id"]
+                            self.token_id_range_end = id_range["end_id"]
+                            assert (
+                                self.token_id_range_start + alloced_token_num < self.token_id_range_end
+                            ), f"get multimodal id range error {self.token_id_range_start} {self.token_id_range_end}"
+                            return
+                        else:
+                            raise RuntimeError(f"Failed to fetch ID range from config server: {response.status_code}")
+                    except BaseException as e:
+                        logger.exception(str(e))
+                        time.sleep(3)
+        return
 
     def _clear(self):
         deleted = 0
@@ -73,6 +103,7 @@ class InMemoryCache(CacheManager):
 
                 id = uuid.uuid1()
                 id = id.int
+                self._check_and_set_new_id_range(token_num)
                 record = Record(
                     id=id,
                     md5sum=md5sum,
@@ -81,10 +112,10 @@ class InMemoryCache(CacheManager):
                     embed=False,
                     createtime=t,
                     visittime=t,
-                    token_id=self.cur_token_id,
+                    token_id=self.token_id_range_start,
                     token_num=token_num,
                 )
-                self.cur_token_id += token_num
+                self.token_id_range_start += token_num
                 self._records[id] = record
                 self._md5_to_record[md5sum] = record
                 self.occupied += 1
@@ -95,11 +126,7 @@ class InMemoryCache(CacheManager):
                 record.visittime = t
                 record.ref += 1
 
-            return {
-                "id": record.id,
-                "token_id": record.token_id,
-                "token_num": record.token_num
-            }
+            return {"id": record.id, "token_id": record.token_id, "token_num": record.token_num}
 
     def release(self, id: int) -> None:
         with self.lock:
