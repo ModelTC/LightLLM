@@ -7,7 +7,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run_mode",
         type=str,
-        choices=["normal", "prefill", "decode", "pd_master", "config_server"],
+        choices=["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server"],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
@@ -58,14 +58,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--pd_remote_prefill_http_port",
         type=int,
         default=42001,
-        help="p d mode, remote prefill node used for kv move manager rpyc server port",
+        help="nixl pd mode, prefill node used for triggering prefill http port.",
     )
 
     parser.add_argument(
         "--pd_remote_prefill_port",
         type=int,
         default=42002,
-        help="p d mode, remote prefill node used for kv move manager rpyc server port",
+        help="nixl pd mode, prefill and decode used for meta exchange.",
     )
 
     parser.add_argument(

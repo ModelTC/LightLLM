@@ -13,23 +13,30 @@ logger = init_logger(__name__)
 class NodeRole(enum.Enum):
     P = "prefill"
     D = "decode"
+
+    NP = "nixl_prefill"
+    ND = "nixl_decode"
+
     NORMAL = "normal"
     PD_MASTER = "pd_master"
 
     def is_D(self):
-        return self == NodeRole.D
+        return self == NodeRole.D or self == NodeRole.ND
 
     def is_P(self):
-        return self == NodeRole.P
+        return self == NodeRole.P or self == NodeRole.NP
 
     def is_normal(self):
         return self == NodeRole.NORMAL
 
     def is_P_or_NORMAL(self):
-        return (self == NodeRole.P) or (self == NodeRole.NORMAL)
+        return self.is_P() or self.is_normal()
 
     def is_P_or_D(self):
-        return (self == NodeRole.P) or (self == NodeRole.D)
+        return self.is_P() or self.is_D()
+
+    def is_NP_or_ND(self):
+        return self == NodeRole.NP or self == NodeRole.ND
 
 
 class ObjType(enum.Enum):
@@ -47,8 +54,8 @@ class PD_Client_Obj:
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
 
     def __post_init__(self):
-        if self.mode not in ["prefill", "decode"]:
-            error_info = f"""mode must in ["prefill", "decode"], but get {self.mode}"""
+        if self.mode not in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+            error_info = f"""mode must in ["prefill", "decode", "nixl_prefill", "nixl_decode"], but get {self.mode}"""
             logger.error(error_info)
             raise ValueError(error_info)
         return

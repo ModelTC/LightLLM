@@ -9,7 +9,7 @@ import pickle
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict
 from lightllm.server.core.objs import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType
+from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType, NodeRole
 from lightllm.server.core.objs import SamplingParams
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
@@ -50,10 +50,11 @@ class HttpServerManagerForPDMaster:
         pd_client = PD_Client_Obj(**pd_info_json)
         pd_client.websocket = websocket
         self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
-        if pd_client.mode == "prefill":
+        client_pd_mode: NodeRole = NodeRole(pd_client.mode)
+        if client_pd_mode.is_P():
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.prefill_nodes.append(pd_client)
-        elif pd_client.mode == "decode":
+        elif client_pd_mode.is_D():
             self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.decode_nodes.append(pd_client)
         else:
@@ -73,6 +74,15 @@ class HttpServerManagerForPDMaster:
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} removed")
         return
 
+    async def update_req_status(self, upkv_status: UpKVStatus):
+        try:
+            group_request_id = convert_sub_id_to_group_id(upkv_status.group_request_id)
+            up_status_event = self.req_id_to_out_inf[group_request_id].up_status_event
+            up_status_event.upkv_status = upkv_status
+            up_status_event.set()
+        except:
+            pass
+        return
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
@@ -177,6 +187,82 @@ class HttpServerManagerForPDMaster:
 
         up_status_event = req_status.up_status_event
 
+        d_start_args = d_node.start_args
+        decode_node_dict = {
+            "node_id": d_start_args["pd_node_id"],
+            "ip": d_start_args["host"],
+            "rpyc_port": d_start_args["pd_decode_rpyc_port"],
+            "max_new_tokens": sampling_params.max_new_tokens - 1,
+            "pd_master_node_id": self.args.pd_node_id,
+        }
+
+        old_max_new_tokens = sampling_params.max_new_tokens
+        sampling_params.max_new_tokens = 1
+        sampling_params.move_kv_to_decode_node.initialize(decode_node_dict if old_max_new_tokens != 1 else None)
+        sampling_params.suggested_dp_index = -1
+
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+
+        while True:
+            await req_status.wait_to_ready()
+            if await request.is_disconnected():
+                raise Exception(f"req_id {group_request_id} disconnected")
+
+            if await req_status.can_read(self.req_id_to_out_inf):
+                token_list = await req_status.pop_all_tokens()
+                for sub_req_id, request_output, metadata, finish_status in token_list:
+                    if old_max_new_tokens != 1:
+                        finish_status = FinishStatus(FinishStatus.NO_FINISH)
+                    else:
+                        finish_status = FinishStatus(FinishStatus.FINISHED_LENGTH)
+                    # 得到 p 节点返回的 prompt_ids 信息
+                    if metadata.get("prompt_ids", None) is not None:
+                        prompt_ids = metadata.get("prompt_ids")
+                        prompt_ids.append(metadata.get("id"))
+                    yield sub_req_id, request_output, metadata, finish_status
+                break
+
+        # 如果只需要一个输出 token，prefill 完就直接结束掉吧
+        if old_max_new_tokens == 1:
+            return
+
+        try:
+            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning(f"group_request_id: {group_request_id} kv move time out err")
+            assert False, f"req_id {group_request_id} kv move time out, server is busy"
+
+        sampling_params.move_kv_to_decode_node.initialize(None)
+        sampling_params.max_new_tokens = old_max_new_tokens - 1
+        sampling_params.suggested_dp_index = up_status_event.upkv_status.dp_index
+
+        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, multimodal_params))))
+
+        while True:
+            await req_status.wait_to_ready()
+            if await request.is_disconnected():
+                raise Exception(f"req_id {group_request_id} disconnected")
+            if await req_status.can_read(self.req_id_to_out_inf):
+                token_list = await req_status.pop_all_tokens()
+                for sub_req_id, request_output, metadata, finish_status in token_list:
+                    yield sub_req_id, request_output, metadata, finish_status
+
+        return
+
+    async def fetch_stream_nixl(
+        self,
+        p_node: PD_Client_Obj,
+        d_node: PD_Client_Obj,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+    ):
+        group_request_id = sampling_params.group_request_id
+
+        req_status = ReqStatus(group_request_id, p_node, d_node)
+        self.req_id_to_out_inf[group_request_id] = req_status
+
         p_start_args = p_node.start_args
         prefill_node_dict = {
             "node_id": p_start_args["pd_node_id"],
@@ -216,7 +302,11 @@ class HttpServerManagerForPDMaster:
         unfinished_count = sampling_params.best_of
         is_first_token = True
 
-        async for sub_req_id, out_str, metadata, finish_status in self.fetch_stream(
+        client_mode: NodeRole = NodeRole(d_node.mode)
+
+        fetch_stream = self.fetch_stream_nixl if client_mode.is_NP_or_ND() else self.fetch_stream
+
+        async for sub_req_id, out_str, metadata, finish_status in fetch_stream(
             p_node, d_node, prompt, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
@@ -268,6 +358,11 @@ class HttpServerManagerForPDMaster:
         try:
             req_status = self.req_id_to_out_inf[group_request_id]
             del self.req_id_to_out_inf[group_request_id]
+        except:
+            pass
+
+        try:
+            await req_status.p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 

@@ -34,7 +34,8 @@ async def pd_handle_loop(manager: HttpServerManager):
         manager.host_ip = manager.args.host
 
     asyncio.create_task(timer_log(manager))
-    asyncio.create_task(pd_handle_loop_from_d(manager))
+    if manager.pd_mode.is_NP_or_ND():
+        asyncio.create_task(pd_handle_loop_from_d(manager))
 
     id_to_handle_task: Dict[int, asyncio.Task] = {}
 
@@ -94,7 +95,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 logger.info(f"Sent registration JSON: {regist_json}")
 
                 # 转发任务
-                if manager.pd_mode == NodeRole.D:
+                if manager.pd_mode.is_D():
                     forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
 
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
@@ -188,7 +189,7 @@ async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket):
 
 
 async def pd_handle_loop_from_d(manager: HttpServerManager):
-    if manager.pd_mode != NodeRole.P:
+    if manager.pd_mode != NodeRole.NP:
         return
 
     context = zmq.asyncio.Context(2)
