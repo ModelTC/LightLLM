@@ -85,8 +85,8 @@ class RouterManager:
             )
 
         self.metric_client = MetricClient(metric_port)
-        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
-        self.is_pd_decode_mode = self.args.run_mode == "decode"
+        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]
+        self.is_pd_decode_mode = self.args.run_mode in ["decode", "nixl_decode"]
         # p d 分离模式下，需要调度锁来同步调度端和推理端的一些数据操作
         # 主要是为了防止调度失误，造成 OOM 等错误
         self.router_lock = mp.Lock()
@@ -185,12 +185,13 @@ class RouterManager:
 
         if self.args.run_mode == "prefill":
             # 启动 prefill kv move 管理进程
-            # from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.prefill_node_impl import (
-            #     start_prefill_kv_move_manager_process,
-            # )
+            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.prefill_node_impl import (
+                start_prefill_kv_move_manager_process,
+            )
 
-            # start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+            start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
+        if self.args.run_mode == "nixl_prefill":
             from lightllm.server.router.model_infer.mode_backend.pd_disaggregation.pd_remote_prefill import (
                 start_pd_remote_prefill_server_process
             )
@@ -205,12 +206,13 @@ class RouterManager:
 
         if self.args.run_mode == "decode":
             # 启动 decode kv move 管理进程
-            # from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.decode_node_impl import (
-            #     start_decode_kv_move_manager_process,
-            # )
+            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.decode_node_impl import (
+                start_decode_kv_move_manager_process,
+            )
 
-            # start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+            start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
+        if self.args.run_mode == "nixl_decode":
             from lightllm.server.router.model_infer.mode_backend.pd_disaggregation.pd_remote_prefill import (
                 start_pd_remote_prefill_client_process
             )

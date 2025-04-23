@@ -101,7 +101,7 @@ class HttpServerManager:
         self.metric_client = MetricClient(metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
-        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL]
+        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL, NodeRole.NP, NodeRole.ND]
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -236,7 +236,7 @@ class HttpServerManager:
         # health 请求 request_id 为负数，直接返回
         if is_health_req:
             return sampling_params.group_request_id
-        if self.pd_mode == NodeRole.NORMAL:
+        if self.pd_mode.is_normal():
             if not self.is_multinode_tp:
                 group_request_id = self.id_gen.generate_id()
             else:
@@ -246,7 +246,7 @@ class HttpServerManager:
                     assert sampling_params.group_request_id != -1
                     group_request_id = sampling_params.group_request_id
             sampling_params.group_request_id = group_request_id
-        elif self.pd_mode == NodeRole.P or self.pd_mode == NodeRole.D:
+        elif self.pd_mode.is_P_or_D():
             assert sampling_params.group_request_id is not None, "p d mode, group_request_id must be setting"
             group_request_id = sampling_params.group_request_id
         else:
@@ -467,7 +467,7 @@ class HttpServerManager:
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
 
-        if self.pd_mode == NodeRole.P:
+        if self.pd_mode.is_P():
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
@@ -480,7 +480,7 @@ class HttpServerManager:
                 )
             return
 
-        if self.pd_mode == NodeRole.D:
+        if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了, 传输一个空的即可
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
@@ -488,7 +488,7 @@ class HttpServerManager:
             )
             return
 
-        if self.pd_mode == NodeRole.NORMAL:
+        if self.pd_mode.is_normal():
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
@@ -540,7 +540,7 @@ class HttpServerManager:
                     # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
                     metadata["prompt_tokens"] = prompt_tokens
                     # p 节点返回 prompt_ids 信息，防止 d 节点重新 encode
-                    if self.pd_mode == NodeRole.P and is_first_token:
+                    if self.pd_mode.is_P() and is_first_token:
                         metadata["prompt_ids"] = prompt_ids
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
