@@ -16,7 +16,7 @@ from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd, StopStrMatchedReqCmd
-from lightllm.server.core.objs import ShmReqManager, StartArgs
+from lightllm.server.core.objs import ShmReqManager, StartArgs, PDChunkedPrefillReq
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
@@ -417,6 +417,8 @@ class RouterManager:
             req._router_aborted = False
             # 作用同 _router_aborted 类似
             req._router_stop_str_matched = False
+            if isinstance(req, PDChunkedPrefillReq):
+                req.dp_world_size = self.world_size
             req_group.append(req)
 
             logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
