@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 
 
 class PDNIXLBackendBase(ModeBackend):
+    _THEAD_WAIT_INTERVAL = 0.001
     def __init__(self,
                  to_remote_queue: mp.Queue,
                  from_remote_queue: mp.Queue,
@@ -77,7 +78,7 @@ class PDNIXLBackendBase(ModeBackend):
                     prefill_status = RemotePrefillStatus.deserialize(req_status)
                     handle_remote_prefill(prefill_status)
 
-            time.sleep(0.001)
+            time.sleep(PDNIXLBackendBase._THEAD_WAIT_INTERVAL)
 
 
     def _wait_transfer_loop(self):
@@ -94,7 +95,7 @@ class PDNIXLBackendBase(ModeBackend):
                 shm_req: PDChunkedPrefillReq = req.shm_req
                 shm_req.set_pd_req_rank_state(self.rank_in_dp, state)
                 del self.inflght_transfer_requests[req_id]
-            time.sleep(0.001)
+            time.sleep(PDNIXLBackendBase._THEAD_WAIT_INTERVAL)
 
 
     def _handle_prefill_loop(self):
@@ -250,69 +251,3 @@ class PDNIXLBackendBase(ModeBackend):
                     group_req_id)
                 del self.remote_prefill_requests[group_req_id]
 
-
-    # def _get_classed_reqs(self, req_ids: List[int], no_decode: bool = False, prefill=True):
-    #     uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = super()._get_classed_reqs(
-    #         req_ids,
-    #         no_decode
-    #     )
-
-    #     progressing_reqs = []
-    #     new_ok_or_prefill_reqs = []
-
-    #     ok_or_prefill_reqs = ok_finished_reqs if prefill else prefill_reqs
-    #     success_reqs = progressing_reqs if prefill else decode_reqs
-
-    #     # filter remote prefill requests
-    #     for r in ok_or_prefill_reqs:
-    #         r: InferReq
-    #         if r.in_prefill_or_transfer:
-    #             shm_req: PDChunkedPrefillReq = r.shm_req
-    #             # state is updated by router
-    #             state = shm_req.get_pd_req_state()
-    #             if state == 1:
-    #                 success_reqs.append(r)
-    #                 r.in_prefill_or_transfer = False
-    #             elif state == -1:
-    #                 aborted_reqs.append(r)
-    #                 r.in_prefill_or_transfer = False
-    #             elif state == 0: # in progress
-    #                 progressing_reqs.append(r)
-    #             else:
-    #                 logger.warning(f"remote prefill request {r.req_id} unexpected state {state}")
-    #             continue
-
-    #         new_ok_or_prefill_reqs.append(r)
-
-    #     if prefill:
-    #         return uninit_reqs, aborted_reqs, new_ok_or_prefill_reqs, prefill_reqs, decode_reqs, progressing_reqs
-    #     else:
-    #         return uninit_reqs, aborted_reqs, ok_finished_reqs, new_ok_or_prefill_reqs, decode_reqs, progressing_reqs
-
-    # def _get_classed_reqs(self, req_ids: List[int], no_decode: bool = False):
-    #     uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = super()._get_classed_reqs(
-    #         req_ids,
-    #         no_decode
-    #     )
-    #     new_ok_finished = []
-    #     transfer_reqs = []
-    #     # filter remote prefill requests
-    #     for r in ok_finished_reqs:
-    #         r: InferReq
-    #         if r.kv_transfering:
-    #             shm_req: PDChunkedPrefillReq = r.shm_req
-    #             state = shm_req.get_pd_req_state() # state is updated by last post_handle, change is reflected here
-    #             if state == 1:
-    #                 new_ok_finished.append(r)
-    #                 r.kv_transfering = False
-    #             elif state == -1:
-    #                 aborted_reqs.append(r)
-    #                 r.kv_transfering = False
-    #             elif state == 0: # in progress
-    #                 transfer_reqs.append(r)
-    #             else:
-    #                 logger.warning(f"remote prefill request {r.req_id} unexpected state {state}")
-    #             continue
-    #         new_ok_finished.append(r)
-
-    #     return uninit_reqs, aborted_reqs, new_ok_finished, prefill_reqs, decode_reqs, transfer_reqs
