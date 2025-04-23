@@ -6,8 +6,10 @@ from typing import List, Optional, Tuple
 
 @dataclass
 class StartArgs:
-    run_mode: str = field(default="normal", metadata={"choices": ["normal", "prefill", "decode", "pd_master",
-                                                                  "nixl_prefill", "nixl_decode"]})
+    run_mode: str = field(
+        default="normal",
+        metadata={"choices": ["normal", "prefill", "decode", "pd_master", "nixl_prefill", "nixl_decode"]},
+    )
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
     zmq_mode: str = field(

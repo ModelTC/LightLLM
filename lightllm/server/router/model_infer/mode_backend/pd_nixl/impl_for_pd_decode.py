@@ -11,10 +11,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_pre_process import 
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.multimodal_params import MultimodalParams
 
-from .pd_remote_prefill_obj import (
-    RemotePrefillTask,
-    RemotePrefillServerInfo,
-    RemotePrefillRequest)
+from .pd_remote_prefill_obj import RemotePrefillTask, RemotePrefillServerInfo, RemotePrefillRequest
 
 from .impl_for_pd_base import PDNIXLBackendBase
 
@@ -22,12 +19,8 @@ logger = init_logger(__name__)
 
 
 class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
-    def __init__(self,
-                 prefill_task_queue: mp.Queue,
-                 prefill_done_queue: mp.Queue,
-                 nix_meta_queue: mp.Queue) -> None:
+    def __init__(self, prefill_task_queue: mp.Queue, prefill_done_queue: mp.Queue, nix_meta_queue: mp.Queue) -> None:
         super().__init__(prefill_task_queue, prefill_done_queue, nix_meta_queue)
-
 
     def init_custom(self):
         super().init_custom()
@@ -35,26 +28,24 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
         self.wait_prefill_thread.start()
         return
 
-
     def _build_remote_prefill_task(self, index: int, kwargs: Dict, req: InferReq):
         prefill_node = req.shm_req.sample_params.move_kv_to_decode_node.to_dict()
         prefill_node_info = RemotePrefillServerInfo(
-            perfill_server_id=prefill_node['node_id'],
-            prefill_server_ip=prefill_node['ip'],
-            prefill_server_port=prefill_node['rpyc_port'],
+            perfill_server_id=prefill_node["node_id"],
+            prefill_server_ip=prefill_node["ip"],
+            prefill_server_port=prefill_node["rpyc_port"],
         )
 
-        mem_indexes = kwargs.get('mem_indexes')
-        b_start_loc = kwargs.get('b_start_loc')
+        mem_indexes = kwargs.get("mem_indexes")
+        b_start_loc = kwargs.get("b_start_loc")
         prefill_request = RemotePrefillRequest(
-            prompt = req.shm_req.get_prompt_ids(),
+            prompt=req.shm_req.get_prompt_ids(),
             sampling_params=req.shm_req.sample_params,
             multimodal_params=MultimodalParams.from_dict(req.multimodal_params),
             local_cached_len=req.cur_kv_len,
-            token_ids=mem_indexes[b_start_loc[index]: b_start_loc[index+1]],
+            token_ids=mem_indexes[b_start_loc[index] : b_start_loc[index + 1]],
         )
         return RemotePrefillTask(server_info=prefill_node_info, prefill_request=prefill_request)
-
 
     def prefill(self, reqs: List[Tuple]):
         self._init_reqs(reqs, init_req_obj=False)
@@ -85,7 +76,7 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
                     run_req.remote_prefill_start = time.time()
                     self.to_remote_queue.put(self._build_remote_prefill_task(idx, kwargs, run_req))
 
-                shm_req.set_pd_req_rank_state(self.rank_in_dp, 0) # set in progress state
+                shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)  # set in progress state
                 run_req.in_prefill_or_transfer = True
                 self.remote_prefilled_reqs[shm_req.group_req_id] = run_req
 
@@ -103,7 +94,8 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
             next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
             self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=False, do_filter_finished_reqs=False)
+                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=False, do_filter_finished_reqs=False
+            )
 
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
 

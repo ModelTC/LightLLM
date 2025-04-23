@@ -17,12 +17,13 @@ from .pd_remote_prefill_obj import (
     RemotePrefillRequest,
     RemotePrefillServerInfo,
     RemotePrefillTask,
-    RemotePrefillStatus
+    RemotePrefillStatus,
 )
 from .nixl_kv_transporter import NixlMetadata
 
 
 logger = init_logger(__name__)
+
 
 class SockWithPoller:
     def __init__(self, sock: zmq.Socket):
@@ -41,19 +42,21 @@ class SockWithPoller:
     def send_pyobj(self, obj: Any):
         return self.sock.send_pyobj(obj)
 
+
 class PDRemotePrefillBase:
-    def __init__(self,
-                 id: int,
-                 from_backend_queue: mp.Queue,
-                 to_backend_queues: List[mp.Queue],
-                 agent_meta_queues: List[mp.Queue], # need send kv cache to this process and register with nixl
-                 ):
+    def __init__(
+        self,
+        id: int,
+        from_backend_queue: mp.Queue,
+        to_backend_queues: List[mp.Queue],
+        agent_meta_queues: List[mp.Queue],  # need send kv cache to this process and register with nixl
+    ):
         self.id = id
         self.tp_size = len(agent_meta_queues)
         self.agent_meta_queues = agent_meta_queues
         self.from_backend_queue = from_backend_queue
         self.to_backend_queues = to_backend_queues
-        self.local_agent_meta  = None
+        self.local_agent_meta = None
 
     def local_init(self):
         agent_metas = NixlMetadata(id=self.id, agent_metadatas=[], num_tokens=[], agent_mem_descs=[])
@@ -69,13 +72,15 @@ class PDRemotePrefillBase:
 
 
 class PDRemotePrefillServer(PDRemotePrefillBase):
-    def __init__(self,
-                 id: int,
-                 http_server_port: int,
-                 server_port: int,
-                 from_backend_queue: mp.Queue,
-                 to_backend_queues: List[mp.Queue],
-                 agent_meta_queues: List[mp.Queue]):
+    def __init__(
+        self,
+        id: int,
+        http_server_port: int,
+        server_port: int,
+        from_backend_queue: mp.Queue,
+        to_backend_queues: List[mp.Queue],
+        agent_meta_queues: List[mp.Queue],
+    ):
         super().__init__(id, from_backend_queue, to_backend_queues, agent_meta_queues)
         # map from client id to decode server info
         self.remote_decode_clients = {}
@@ -91,7 +96,6 @@ class PDRemotePrefillServer(PDRemotePrefillBase):
         self.send_to_httpserver.connect(f"tcp://{self.host_ip}:{http_server_port}")
 
         self.prefill_requests = {}
-
 
     def main_loop(self):
         self.local_init()
@@ -117,7 +121,6 @@ class PDRemotePrefillServer(PDRemotePrefillBase):
                     if not success:
                         logger.warning(f"Remote connect failed: {request}")
 
-
                 if request.type == RemoteRequstType.REMOTE_PREFILL:
                     request: PrefillRequest = request
                     self.trigger_prefill(request)
@@ -125,22 +128,21 @@ class PDRemotePrefillServer(PDRemotePrefillBase):
             except Exception as e:
                 logger.error(f"Error in remote prefill server loop: {e}", exc_info=e)
 
-
-
     def trigger_prefill(self, request: PrefillRequest):
-        self.send_to_httpserver.send_pyobj((request.data.prompt, request.data.sampling_params, request.data.multimodal_params))
+        self.send_to_httpserver.send_pyobj(
+            (request.data.prompt, request.data.sampling_params, request.data.multimodal_params)
+        )
         self.prefill_requests[request.data.sampling_params.group_request_id] = request
 
 
-
 class PDRemotePrefillClient(PDRemotePrefillBase):
-
-    def __init__(self,
-                 id: int,
-                 from_backend_queue: mp.Queue, # only tp0 will trigger prefill
-                 to_backend_queues: List[mp.Queue], # one to many done queue
-                 agent_meta_queues: List[mp.Queue]
-                 ):
+    def __init__(
+        self,
+        id: int,
+        from_backend_queue: mp.Queue,  # only tp0 will trigger prefill
+        to_backend_queues: List[mp.Queue],  # one to many done queue
+        agent_meta_queues: List[mp.Queue],
+    ):
         super().__init__(id, from_backend_queue, to_backend_queues, agent_meta_queues)
         # map from server id to prefill server info
 
@@ -157,12 +159,15 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
         return SockWithPoller(_socket)
 
     def _send_nixl_agent(self, socket: SockWithPoller):
-        socket.send_pyobj(ConnectRequest(
-            type=RemoteRequstType.REMOTE_CONNECT,
-            decode_id=self.id,
-            num_tokens=self.local_agent_meta.num_tokens,
-            agent_metadatas=self.local_agent_meta.agent_metadatas,
-            agent_mem_descs=self.local_agent_meta.agent_mem_descs))
+        socket.send_pyobj(
+            ConnectRequest(
+                type=RemoteRequstType.REMOTE_CONNECT,
+                decode_id=self.id,
+                num_tokens=self.local_agent_meta.num_tokens,
+                agent_metadatas=self.local_agent_meta.agent_metadatas,
+                agent_mem_descs=self.local_agent_meta.agent_mem_descs,
+            )
+        )
 
         success = socket.recv_pyobj(timeout=60)
         if success is None:
@@ -186,23 +191,24 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
             logger.warning("Remote Prefill Server Connect Failed")
             return False
 
-
     def main_loop(self):
         self.local_init()
         while True:
             try:
                 prefill_tasks: RemotePrefillTask = self.from_backend_queue.get()
                 # connect first
-                if(self.connect_to_prefill_server(prefill_tasks.server_info)):
+                if self.connect_to_prefill_server(prefill_tasks.server_info):
                     # do prefill
                     self.remote_prefill(prefill_tasks.server_info.perfill_server_id, prefill_tasks.prefill_request)
                 else:
                     # failed to connect a remote
                     for idx in self.to_backend_queues:
-                        self.to_backend_queues.put(RemotePrefillStatus(
-                            group_req_id=prefill_tasks.prefill_request.sampling_params.group_request_id,
-                            status=-1,
-                        ))
+                        self.to_backend_queues.put(
+                            RemotePrefillStatus(
+                                group_req_id=prefill_tasks.prefill_request.sampling_params.group_request_id,
+                                status=-1,
+                            )
+                        )
             except Exception as e:
                 logger.error(f"Remote prefill client loop error: {e}", exc_info=e)
 
@@ -222,8 +228,9 @@ def remote_prefill_server_loop(
     agent_meta_queues: List[mp.Queue],
 ):
     graceful_registry(inspect.currentframe().f_code.co_name)
-    server = PDRemotePrefillServer(id, http_server_port, server_port,
-                                   from_backend_queue, to_backend_queues, agent_meta_queues)
+    server = PDRemotePrefillServer(
+        id, http_server_port, server_port, from_backend_queue, to_backend_queues, agent_meta_queues
+    )
     server.main_loop()
 
 
@@ -237,9 +244,7 @@ def start_pd_remote_prefill_server_process(
 ):
     proc = mp.Process(
         target=remote_prefill_server_loop,
-        args=(
-            id, http_server_port, server_port,
-            from_backend_queue, to_backend_queues, agent_meta_queues)
+        args=(id, http_server_port, server_port, from_backend_queue, to_backend_queues, agent_meta_queues),
     )
     proc.start()
     assert proc.is_alive()
@@ -248,30 +253,25 @@ def start_pd_remote_prefill_server_process(
 
 
 def remote_prefill_client_loop(
-    id: int,
-    from_backend_queue: mp.Queue,
-    to_backend_queues: List[mp.Queue],
-    agent_meta_queues: List[mp.Queue]):
+    id: int, from_backend_queue: mp.Queue, to_backend_queues: List[mp.Queue], agent_meta_queues: List[mp.Queue]
+):
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     client = PDRemotePrefillClient(
-            id,
-            from_backend_queue,
-            to_backend_queues,
-            agent_meta_queues,
-        )
+        id,
+        from_backend_queue,
+        to_backend_queues,
+        agent_meta_queues,
+    )
     client.main_loop()
 
+
 def start_pd_remote_prefill_client_process(
-    id: int,
-    from_backend_queue: mp.Queue,
-    to_backend_queues: List[mp.Queue],
-    agent_meta_queues: List[mp.Queue]
+    id: int, from_backend_queue: mp.Queue, to_backend_queues: List[mp.Queue], agent_meta_queues: List[mp.Queue]
 ):
 
     proc = mp.Process(
-        target=remote_prefill_client_loop,
-        args=(id, from_backend_queue, to_backend_queues, agent_meta_queues)
+        target=remote_prefill_client_loop, args=(id, from_backend_queue, to_backend_queues, agent_meta_queues)
     )
     proc.start()
     assert proc.is_alive()

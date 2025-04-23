@@ -107,9 +107,7 @@ class RouterManager:
         self.mem_queues: List[torch.multiprocessing.Queue] = [
             torch.multiprocessing.Queue() for _ in range(self.node_world_size)
         ]
-        self.result_queues: List[mp.Queue] = [
-            mp.Queue() for _ in range(self.world_size)
-        ]
+        self.result_queues: List[mp.Queue] = [mp.Queue() for _ in range(self.world_size)]
         self.rpc_event = multiprocessing.Event()
         self.rpc_finished_event = multiprocessing.Event()
 
@@ -194,15 +192,16 @@ class RouterManager:
 
         if self.args.run_mode == "nixl_prefill":
             from lightllm.server.router.model_infer.mode_backend.pd_nixl.pd_remote_prefill import (
-                start_pd_remote_prefill_server_process
+                start_pd_remote_prefill_server_process,
             )
+
             start_pd_remote_prefill_server_process(
                 self.args.pd_node_id,
                 http_server_port=self.args.pd_remote_prefill_http_port,
                 server_port=self.args.pd_remote_prefill_port,
                 from_backend_queue=self.info_queue,
                 to_backend_queues=self.result_queues,
-                agent_meta_queues=self.mem_queues
+                agent_meta_queues=self.mem_queues,
             )
 
         if self.args.run_mode == "decode":
@@ -215,8 +214,9 @@ class RouterManager:
 
         if self.args.run_mode == "nixl_decode":
             from lightllm.server.router.model_infer.mode_backend.pd_nixl.pd_remote_prefill import (
-                start_pd_remote_prefill_client_process
+                start_pd_remote_prefill_client_process,
             )
+
             start_pd_remote_prefill_client_process(
                 self.args.pd_node_id,
                 from_backend_queue=self.info_queue,

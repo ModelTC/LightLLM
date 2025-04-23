@@ -374,7 +374,7 @@ class PDChunkedPrefillReq(ChunkedPrefillReq):
     # set by router
     def set_pd_req_state(self):
         assert self.dp_world_size > 0, "dp_world_size should be set before calling this"
-        unique_state = np.unique(self.pd_req_state_shm.arr[:self.dp_world_size])
+        unique_state = np.unique(self.pd_req_state_shm.arr[: self.dp_world_size])
         self.pd_req_state_shm.arr[self.dp_world_size] = unique_state[0]
 
     # read by all rank
