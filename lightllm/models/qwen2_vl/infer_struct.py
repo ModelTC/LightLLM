@@ -13,8 +13,11 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         if self.is_prefill:
             b_seq_len_numpy = self.b_seq_len.cpu().numpy()
             self.max_seq_len = b_seq_len_numpy.max()
+            b_ready_cache_len_numpy = self.b_ready_cache_len.cpu().numpy()
             position_ids = torch.from_numpy(
-                np.concatenate([np.arange(0, b_seq_len_numpy[i]) for i in range(len(b_seq_len_numpy))])
+                np.concatenate(
+                    [np.arange(b_ready_cache_len_numpy[i], b_seq_len_numpy[i]) for i in range(len(b_seq_len_numpy))]
+                )
             ).cuda()
             self.position_sin = model._sin_cached[:, position_ids, :].unsqueeze(1)
             self.position_cos = model._cos_cached[:, position_ids, :].unsqueeze(1)
