@@ -1,4 +1,3 @@
-
 from collections import defaultdict
 from typing import Dict, List, Any
 from torch import Tensor
@@ -15,10 +14,12 @@ logger = init_logger(__name__)
 try:
     from nixl._api import nixl_agent as NixlWrapper
     from nixl._api import nixlBind
+
     logger.info("Nixl is available")
 except ImportError:
     logger.warning("nixl is not installed, which is required for pd disagreggation!!!")
     NixlWrapper = None
+
 
 @dataclass
 class NixlMetadata:
@@ -26,6 +27,7 @@ class NixlMetadata:
     num_tokens: list[int]
     agent_metadatas: list[bytes]
     agent_mem_descs: list[bytes]
+
 
 class NixlKVTransporter:
     def __init__(self, node_id: int, tp_idx: int):
@@ -36,7 +38,7 @@ class NixlKVTransporter:
         self.num_layers = -1
         self.num_tokens = -1
         self.num_heads = -1
-        self.head_dims= -1
+        self.head_dims = -1
         self.token_len = -1
         self.layer_len = -1
 
@@ -62,13 +64,14 @@ class NixlKVTransporter:
     def get_new_notifs(self):
         return self.nixl_agent.get_new_notifs()
 
-
     def _create_xfer_handles(self, reg_desc: nixlBind.nixlRegDList, num_tokens: int, agent_name: str = ""):
         base_addr, _, device_id, _ = reg_desc[0]
         tokens_data = []
         for layer_id in range(self.num_layers):
             for token_id in range(num_tokens):
-                tokens_data.append((base_addr + layer_id * self.layer_len + token_id * self.token_len, self.token_len, device_id))
+                tokens_data.append(
+                    (base_addr + layer_id * self.layer_len + token_id * self.token_len, self.token_len, device_id)
+                )
         descs = self.nixl_agent.get_xfer_descs(tokens_data, "VRAM", True)
         return self.nixl_agent.prep_xfer_dlist(agent_name, descs, is_sorted=True)
 
@@ -80,11 +83,10 @@ class NixlKVTransporter:
         self.reg_desc = self.nixl_agent.register_memory(kv_buffer)
         self.local_xfer_handles = self._create_xfer_handles(self.reg_desc, self.num_tokens)
 
-
     def add_remote_agent(self, remote_agent: NixlMetadata):
-        for idx, (agent_metadata, num_tokens, agent_mem_desc) in enumerate(zip(remote_agent.agent_metadatas,
-                                                                             remote_agent.num_tokens,
-                                                                             remote_agent.agent_mem_descs)):
+        for idx, (agent_metadata, num_tokens, agent_mem_desc) in enumerate(
+            zip(remote_agent.agent_metadatas, remote_agent.num_tokens, remote_agent.agent_mem_descs)
+        ):
             if self.tp_idx != idx:
                 self.remote_agents[remote_agent.id].append(None)
                 continue
@@ -94,7 +96,10 @@ class NixlKVTransporter:
             logger.info("Added remote agent %s with mem desc %s", peer_name, mem_desc)
             kv_xfer_handles = self._create_xfer_handles(mem_desc, num_tokens, agent_name=peer_name)
             self.remote_agents[remote_agent.id].append(
-                RemoteAgent(name=peer_name, kv_mem_desc=mem_desc, num_tokens=num_tokens, kv_xfer_handles=kv_xfer_handles))
+                RemoteAgent(
+                    name=peer_name, kv_mem_desc=mem_desc, num_tokens=num_tokens, kv_xfer_handles=kv_xfer_handles
+                )
+            )
 
     def _get_token_desc_ids(self, token_ids: List[int]):
         descs_ids = []
@@ -108,7 +113,9 @@ class NixlKVTransporter:
         skip_kv_move_len = prefill_request.data.local_cached_len
         src_token_ids = request.token_ids[skip_kv_move_len:]
         dst_token_ids = prefill_request.data.token_ids
-        remote_agent: RemoteAgent = self.remote_agents[prefill_request.decode_id][self.tp_idx] #TODO one-one mapping now
+        remote_agent: RemoteAgent = self.remote_agents[prefill_request.decode_id][
+            self.tp_idx
+        ]  # TODO one-one mapping now
 
         if len(src_token_ids) > 0:
             assert len(src_token_ids) == len(dst_token_ids), f"{len(src_token_ids)} {len(dst_token_ids)}"
@@ -118,20 +125,18 @@ class NixlKVTransporter:
             src_handle = self.local_xfer_handles
             dst_handle = remote_agent.kv_xfer_handles
             notify_status = RemotePrefillStatus(group_req_id=group_reqeust_id, status=1)
-            handle = self.nixl_agent.make_prepped_xfer("WRITE",
-                                                       src_handle, src_token_descs,
-                                                       dst_handle, dst_token_descs,
-                                                       notify_status.serialize())
+            handle = self.nixl_agent.make_prepped_xfer(
+                "WRITE", src_handle, src_token_descs, dst_handle, dst_token_descs, notify_status.serialize()
+            )
 
             status = self.nixl_agent.transfer(handle)
-            assert status != 'ERR'
+            assert status != "ERR"
 
             self.inflight_transfers[group_reqeust_id] = (handle, remote_agent, False)
 
             return handle
 
         return None
-
 
     def send_abort_notify(self, remote_id: int, group_reqeust_id):
         remote_agent: RemoteAgent = self.remote_agents[remote_id][self.tp_idx]
@@ -140,7 +145,6 @@ class NixlKVTransporter:
 
         if group_reqeust_id in self.inflight_transfers:
             self.inflight_transfers[group_reqeust_id][2] = True
-
 
     def get_done_tranfers(self):
         done_req_ids = []
@@ -177,4 +181,3 @@ class NixlKVTransporter:
             for agent in agents:
                 self.nixl_agent.remove_remote_agent(agent.name)
                 self.nixl_agent.release_xfer_handle(agent.kv_xfer_handles)
-

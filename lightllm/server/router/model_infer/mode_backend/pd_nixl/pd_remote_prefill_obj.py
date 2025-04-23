@@ -18,17 +18,19 @@ except ImportError:
     logger.error("nixl is not installed, which is required for pd disagreggation!!!")
     raise
 
+
 class RemoteRequstType(Enum):
     REMOTE_CONNECT = 1
     REMOTE_PREFILL = 2
+
 
 @dataclass
 class RemotePrefillRequest:
     prompt: Union[str, List[int]]
     sampling_params: SamplingParams
     multimodal_params: MultimodalParams
-    local_cached_len: int # will skip transfer
-    token_ids: List[int] # mem cache indexes
+    local_cached_len: int  # will skip transfer
+    token_ids: List[int]  # mem cache indexes
 
 
 @dataclass
