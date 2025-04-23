@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.multiprocessing as mp
 import threading
@@ -45,7 +46,6 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
 
         mem_indexes = kwargs.get('mem_indexes')
         b_start_loc = kwargs.get('b_start_loc')
-        logger.info(req.shm_req.get_str())
         prefill_request = RemotePrefillRequest(
             prompt = req.shm_req.get_prompt_ids(),
             sampling_params=req.shm_req.sample_params,
@@ -82,6 +82,7 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
                 # forward each req to remote prefill
                 # since the token index are the same across TPs, we only need to trigger prefill on master
                 if self.is_master_in_dp:
+                    run_req.remote_prefill_start = time.time()
                     self.to_remote_queue.put(self._build_remote_prefill_task(idx, kwargs, run_req))
 
                 shm_req.set_pd_req_rank_state(self.rank_in_dp, 0) # set in progress state

@@ -23,7 +23,6 @@ from .pd_remote_prefill_obj import (PrefillRequest,
 logger = init_logger(__name__)
 
 
-
 class PDNIXLBackendBase(ModeBackend):
     _THEAD_WAIT_INTERVAL = 0.001
     def __init__(self,
@@ -56,13 +55,18 @@ class PDNIXLBackendBase(ModeBackend):
             def handle_remote_prefill(req_status: RemotePrefillStatus):
                 group_req_id = req_status.group_req_id
                 status = req_status.status
+                if status != 1:
+                    logger.warning(f"remote prefill reqeust: {group_req_id} done with state: {status}")
                 if run_req := self.remote_prefilled_reqs.get(group_req_id, None):
                     shm_req: PDChunkedPrefillReq = run_req.shm_req
                     shm_req.set_pd_req_rank_state(self.rank_in_dp, status)
                     self.remote_prefilled_reqs.pop(group_req_id)
-                    logger.info(f"remote prefill reqeust: {group_req_id} done with status: {status}")
+                    if self.is_master_in_dp:
+                        logger.info(f"remote prefill reqeust: {group_req_id} done with status: {status} "
+                                    f"took: {time.time() - run_req.remote_prefill_start} seconds")
                 else:
-                    logger.warning(f"remote prefill reqeust: {group_req_id} not found")
+                    if self.is_master_in_dp:
+                        logger.warning(f"remote prefill reqeust: {group_req_id} not found")
 
             # from local
             try:
@@ -86,15 +90,21 @@ class PDNIXLBackendBase(ModeBackend):
             done_req_ids = self.nixl_agent.get_done_tranfers()
 
             for req_id, state in done_req_ids:
-                logger.info(f"wait transfer done: {req_id} state: {state}")
+                if state != 1:
+                    logger.info(f"wait transfer done: {req_id} state: {state}")
+
                 if req_id not in self.inflght_transfer_requests:
-                    logger.warning(f"{req_id} not found in inflght_transfer_requests")
+                    if self.is_master_in_dp:
+                        logger.warning(f"{req_id} not found in inflght_transfer_requests")
                     continue
 
                 req: InferReq = self.inflght_transfer_requests[req_id]
                 shm_req: PDChunkedPrefillReq = req.shm_req
                 shm_req.set_pd_req_rank_state(self.rank_in_dp, state)
                 del self.inflght_transfer_requests[req_id]
+                if self.is_master_in_dp:
+                    logger.info(f"req: {req_id} kv transfer with state: {state} "
+                                f"took: {time.time() - req.kv_transfer_start} seconds")
             time.sleep(PDNIXLBackendBase._THEAD_WAIT_INTERVAL)
 
 
@@ -128,6 +138,7 @@ class PDNIXLBackendBase(ModeBackend):
 
         # kick off kv transfer
         if req.finish_status.is_finished():
+            req.kv_transfer_start = time.time()
             kv_transfer_req = KVMoveRequest(
                 group_req_id=group_req_id,
                 token_ids=self.model.req_manager.req_to_token_indexs[req.req_idx][:req.cur_kv_len].tolist()
@@ -149,7 +160,7 @@ class PDNIXLBackendBase(ModeBackend):
         for req in aborted_reqs:
             if req.in_prefill_or_transfer:
                 shm_req: PDChunkedPrefillReq = req.shm_req
-                state = shm_req.get_pd_req_state(self.dp_world_size)
+                state = shm_req.get_pd_req_state()
                 if state != 0:
                     new_aborted_reqs.append(req)
                     req.in_prefill_or_transfer = False
@@ -161,7 +172,7 @@ class PDNIXLBackendBase(ModeBackend):
             if req.in_prefill_or_transfer:
                 shm_req: PDChunkedPrefillReq = req.shm_req
                 # state is updated by router
-                state = shm_req.get_pd_req_state(self.dp_world_size)
+                state = shm_req.get_pd_req_state()
                 if state == 1: # success
                     req.cur_kv_len = req.get_cur_total_len() - 1
                     decode_reqs.append(req)
@@ -186,7 +197,7 @@ class PDNIXLBackendBase(ModeBackend):
         for req in ok_finished_reqs:
             if req.in_prefill_or_transfer:
                 shm_req: PDChunkedPrefillReq = req.shm_req
-                state = shm_req.get_pd_req_state(self.dp_world_size)
+                state = shm_req.get_pd_req_state()
                 if state == 1: # success
                     new_ok_finished_reqs.append(req)
                     req.in_prefill_or_transfer = False

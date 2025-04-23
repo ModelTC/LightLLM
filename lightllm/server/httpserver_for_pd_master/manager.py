@@ -106,8 +106,8 @@ class HttpServerManagerForPDMaster:
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
         import random
 
-        p_node = random.choice(self.prefill_nodes)
-        d_node = random.choice(self.decode_nodes)
+        p_node = random.choice(self.prefill_nodes) if self.prefill_nodes else None
+        d_node = random.choice(self.decode_nodes) if self.decode_nodes else None
         return p_node, d_node
 
     async def generate(
@@ -128,6 +128,10 @@ class HttpServerManagerForPDMaster:
             self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
 
             p_node, d_node = await self.select_p_d_node(prompt, sampling_params, multimodal_params)
+
+            if not p_node or not d_node:
+                logger.error(f"{group_request_id}: No p_node or d_node found")
+                return
 
             results_generator = self._wait_to_token_package(
                 p_node,

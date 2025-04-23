@@ -8,7 +8,6 @@ from .shm_array import ShmArray
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.dist_utils import get_dp_world_size
 from typing import List, Any, Union
 
 
@@ -98,6 +97,7 @@ class Req(ctypes.Structure):
         ("mtp_accepted_token_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
+        ("dp_world_size", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -337,6 +337,7 @@ class PDChunkedPrefillReq(ChunkedPrefillReq):
     def post_init(self):
         super().post_init()
         self.create_pd_req_state_shm_array()
+        self.dp_world_size = 0
 
     def create_pd_req_state_shm_array(self):
         service_uni_name = get_unique_server_name()
@@ -361,10 +362,12 @@ class PDChunkedPrefillReq(ChunkedPrefillReq):
 
     # state: -1 for failed, 0 for in progress, 1 for success
     # set by router
-    def set_pd_req_state(self, dp_world_size: int):
-        unique_state = np.unique(self.pd_req_state_shm.arr[:dp_world_size])
-        self.pd_req_state_shm.arr[dp_world_size] = unique_state[0]
+    def set_pd_req_state(self):
+        assert self.dp_world_size > 0, "dp_world_size should be set before calling this"
+        unique_state = np.unique(self.pd_req_state_shm.arr[:self.dp_world_size])
+        self.pd_req_state_shm.arr[self.dp_world_size] = unique_state[0]
 
     # read by all rank
-    def get_pd_req_state(self, dp_world_size: int):
-        return self.pd_req_state_shm.arr[dp_world_size]
+    def get_pd_req_state(self):
+        assert self.dp_world_size > 0, "dp_world_size should be set before calling this"
+        return self.pd_req_state_shm.arr[self.dp_world_size]

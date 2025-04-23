@@ -1,10 +1,13 @@
-from typing import List
+from typing import List, Any
 import zmq
+import inspect
+import pickle
 
 import torch.multiprocessing as mp
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.net_utils import get_hostname_ip
+from lightllm.utils.graceful_utils import graceful_registry
 
 from .pd_remote_prefill_obj import (
     ConnectRequest,
@@ -20,6 +23,23 @@ from .nixl_kv_transporter import NixlMetadata
 
 
 logger = init_logger(__name__)
+
+class SockWithPoller:
+    def __init__(self, sock: zmq.Socket):
+        self.sock = sock
+        self.poller = zmq.Poller()
+        self.poller.register(self.sock, zmq.POLLIN)
+
+    def recv_pyobj(self, timeout: int = 5):
+        socks = dict(self.poller.poll(timeout * 1000))
+        if socks:
+            if socks.get(self.sock) == zmq.POLLIN:
+                return self.sock.recv_pyobj()
+        else:
+            None
+
+    def send_pyobj(self, obj: Any):
+        return self.sock.send_pyobj(obj)
 
 class PDRemotePrefillBase:
     def __init__(self,
@@ -62,7 +82,7 @@ class PDRemotePrefillServer(PDRemotePrefillBase):
 
         # build control path
         _ctx = zmq.Context()
-        self.recv_from_decode = _ctx.socket(zmq.PAIR)
+        self.recv_from_decode = _ctx.socket(zmq.ROUTER)
         self.host_ip = get_hostname_ip()
         self.recv_from_decode.bind(f"tcp://{self.host_ip}:{server_port}")
 
@@ -73,33 +93,37 @@ class PDRemotePrefillServer(PDRemotePrefillBase):
         self.prefill_requests = {}
 
 
-
     def main_loop(self):
         self.local_init()
         while True:
-            request: RemoteRequest = self.recv_from_decode.recv_pyobj()
-            logger.info(f"recevied request from decode, type: {request.type}")
+            try:
+                client_obj, msg = self.recv_from_decode.recv_multipart()
+                request: RemoteRequest = pickle.loads(msg)
+                logger.info(f"recevied request from decode, type: {request.type}")
 
-            # forward request to prefill server
-            for queue in self.to_backend_queues:
-                queue.put(request)
+                # forward request to prefill server
+                for queue in self.to_backend_queues:
+                    queue.put(request)
 
-            if request.type == RemoteRequstType.REMOTE_CONNECT:
-                success = True
-                for idx in range(self.tp_size):
-                    ack = self.from_backend_queue.get()
-                    if ack != "OK":
-                        success = False
-                        break
+                if request.type == RemoteRequstType.REMOTE_CONNECT:
+                    success = True
+                    for idx in range(self.tp_size):
+                        ack = self.from_backend_queue.get()
+                        if ack != "OK":
+                            success = False
+                            break
 
-                self.recv_from_decode.send_pyobj(success)
-                if not success:
-                    logger.warning(f"Remote connect failed: {request}")
+                    self.recv_from_decode.send_multipart([client_obj, pickle.dumps(success)])
+                    if not success:
+                        logger.warning(f"Remote connect failed: {request}")
 
 
-            if request.type == RemoteRequstType.REMOTE_PREFILL:
-                request: PrefillRequest = request
-                self.trigger_prefill(request)
+                if request.type == RemoteRequstType.REMOTE_PREFILL:
+                    request: PrefillRequest = request
+                    self.trigger_prefill(request)
+
+            except Exception as e:
+                logger.error(f"Error in remote prefill server loop: {e}", exc_info=e)
 
 
 
@@ -121,54 +145,72 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
         # map from server id to prefill server info
 
         self.remote_prefill_servers = {}
+        self.client_socket_cnt = 0
+        self._ctx = zmq.Context()
+
+    def _connect_server(self, server_ip: str, port: int):
+        _socket = self._ctx.socket(zmq.DEALER)
+        _socket.setsockopt_string(zmq.IDENTITY, f"{self.id}_{self.client_socket_cnt}")
+        self.client_socket_cnt += 1
+        connect_str = f"tcp://{server_ip}:{port}"
+        _socket.connect(connect_str)
+        return SockWithPoller(_socket)
+
+    def _send_nixl_agent(self, socket: SockWithPoller):
+        socket.send_pyobj(ConnectRequest(
+            type=RemoteRequstType.REMOTE_CONNECT,
+            decode_id=self.id,
+            num_tokens=self.local_agent_meta.num_tokens,
+            agent_metadatas=self.local_agent_meta.agent_metadatas,
+            agent_mem_descs=self.local_agent_meta.agent_mem_descs))
+
+        success = socket.recv_pyobj(timeout=60)
+        if success is None:
+            logger.warning("timeout to recv remote nixl connect response")
+            return False
+
+        return success
 
     def connect_to_prefill_server(self, server_info: RemotePrefillServerInfo):
+
+        if server_info.perfill_server_id in self.remote_prefill_servers:
+            return True
+
         # build control path if not exist
-        if server_info.perfill_server_id not in self.remote_prefill_servers:
-            _ctx = zmq.Context()
-            _socket = _ctx.socket(zmq.PAIR)
-            connect_str = f"tcp://{server_info.prefill_server_ip}:{server_info.prefill_server_port}"
-            _socket.connect(connect_str)
-            _socket.send_pyobj(ConnectRequest(
-                type=RemoteRequstType.REMOTE_CONNECT,
-                decode_id=self.id,
-                num_tokens=self.local_agent_meta.num_tokens,
-                agent_metadatas=self.local_agent_meta.agent_metadatas,
-                agent_mem_descs=self.local_agent_meta.agent_mem_descs))
+        _socket = self._connect_server(server_info.prefill_server_ip, server_info.prefill_server_port)
+        success = self._send_nixl_agent(_socket)
+        if success:
+            self.remote_prefill_servers[server_info.perfill_server_id] = (_socket, server_info)
+            return True
+        else:
+            logger.warning("Remote Prefill Server Connect Failed")
+            return False
 
-            success = _socket.recv_pyobj()
-            if success:
-                self.remote_prefill_servers[server_info.perfill_server_id] = (_socket, server_info)
-                return True
-            else:
-                logger.warning("Remote Prefill Server Connect Failed")
-                return False
-
-        return True
 
     def main_loop(self):
         self.local_init()
         while True:
-            prefill_tasks: RemotePrefillTask = self.from_backend_queue.get()
-
-            # connect first
-            if(self.connect_to_prefill_server(prefill_tasks.server_info)):
-                # do prefill
-                self.remote_prefill(prefill_tasks.server_info.perfill_server_id, prefill_tasks.prefill_request)
-            else:
-                # failed to connect a remote
-                for idx in self.to_backend_queues:
-                    self.to_backend_queues.put(RemotePrefillStatus(
-                        group_req_id=prefill_tasks.prefill_request.sampling_params.group_request_id,
-                        status=-1,
-                    ))
+            try:
+                prefill_tasks: RemotePrefillTask = self.from_backend_queue.get()
+                # connect first
+                if(self.connect_to_prefill_server(prefill_tasks.server_info)):
+                    # do prefill
+                    self.remote_prefill(prefill_tasks.server_info.perfill_server_id, prefill_tasks.prefill_request)
+                else:
+                    # failed to connect a remote
+                    for idx in self.to_backend_queues:
+                        self.to_backend_queues.put(RemotePrefillStatus(
+                            group_req_id=prefill_tasks.prefill_request.sampling_params.group_request_id,
+                            status=-1,
+                        ))
+            except Exception as e:
+                logger.error(f"Remote prefill client loop error: {e}", exc_info=e)
 
     # place request to server do remote prefill
     def remote_prefill(self, server_id: int, prefill_request: RemotePrefillRequest):
         socket, _ = self.remote_prefill_servers[server_id]
         prefill_request.sampling_params.max_new_tokens = 1
         socket.send_pyobj(PrefillRequest(type=RemoteRequstType.REMOTE_PREFILL, decode_id=self.id, data=prefill_request))
-
 
 
 def remote_prefill_server_loop(
@@ -179,6 +221,7 @@ def remote_prefill_server_loop(
     to_backend_queues: List[mp.Queue],
     agent_meta_queues: List[mp.Queue],
 ):
+    graceful_registry(inspect.currentframe().f_code.co_name)
     server = PDRemotePrefillServer(id, http_server_port, server_port,
                                    from_backend_queue, to_backend_queues, agent_meta_queues)
     server.main_loop()
@@ -209,6 +252,7 @@ def remote_prefill_client_loop(
     from_backend_queue: mp.Queue,
     to_backend_queues: List[mp.Queue],
     agent_meta_queues: List[mp.Queue]):
+    graceful_registry(inspect.currentframe().f_code.co_name)
 
     client = PDRemotePrefillClient(
             id,
