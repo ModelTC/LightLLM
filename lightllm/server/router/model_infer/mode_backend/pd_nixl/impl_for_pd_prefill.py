@@ -13,12 +13,8 @@ logger = init_logger(__name__)
 
 
 class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
-    def __init__(self,
-                 transfer_task_queue: mp.Queue,
-                 transfer_done_queue: mp.Queue,
-                 nixl_meta_queue: mp.Queue) -> None:
+    def __init__(self, transfer_task_queue: mp.Queue, transfer_done_queue: mp.Queue, nixl_meta_queue: mp.Queue) -> None:
         super().__init__(transfer_task_queue, transfer_done_queue, nixl_meta_queue)
-
 
     def init_custom(self):
         super().init_custom()
@@ -27,7 +23,6 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
         self.handle_prefill_loop_thread.start()
         self.wait_transfer_loop_thread.start()
         return
-
 
     def prefill(self, reqs: List[Tuple]):
         self._init_reqs(reqs)
@@ -40,8 +35,6 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
         )
 
         ok_finished_reqs, aborted_reqs, _ = self._prefill_filter_reqs(ok_finished_reqs, aborted_reqs)
-        # print(f"{self.rank_in_dp}: {len(uinit_reqs)} uninit, {len(aborted_reqs)} aborted, {len(ok_finished_reqs)} ok finished, "
-        #       f"{len(prefill_reqs)} new prefill, {len(decode_reqs)} decode, {len(transfer_reqs)} transfer_reqs")
 
         assert len(uinit_reqs) == 0
         assert len(decode_reqs) == 0
@@ -65,10 +58,11 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
             next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
             self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs,
+                run_reqs,
+                next_token_ids,
+                next_token_logprobs,
                 is_chuncked_mode=True,
                 do_filter_finished_reqs=False,
-                extra_post_req_handle_func=lambda req, _1, _2: self._transfer_kv_to_remote(req)
+                extra_post_req_handle_func=lambda req, _1, _2: self._transfer_kv_to_remote(req),
             )
         return
-

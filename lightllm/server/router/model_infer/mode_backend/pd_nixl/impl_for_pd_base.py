@@ -1,4 +1,3 @@
-
 import time
 import torch.multiprocessing as mp
 from typing import Dict, List
@@ -12,23 +11,23 @@ from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBac
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 
 from .nixl_kv_transporter import NixlMetadata, NixlKVTransporter
-from .pd_remote_prefill_obj import (PrefillRequest,
-                                    RemoteRequest,
-                                    RemoteRequstType,
-                                    ConnectRequest,
-                                    KVMoveRequest,
-                                    RemotePrefillStatus,
-                                    ThreadSafeDict)
+from .pd_remote_prefill_obj import (
+    PrefillRequest,
+    RemoteRequest,
+    RemoteRequstType,
+    ConnectRequest,
+    KVMoveRequest,
+    RemotePrefillStatus,
+    ThreadSafeDict,
+)
 
 logger = init_logger(__name__)
 
 
 class PDNIXLBackendBase(ModeBackend):
     _THEAD_WAIT_INTERVAL = 0.001
-    def __init__(self,
-                 to_remote_queue: mp.Queue,
-                 from_remote_queue: mp.Queue,
-                 nixl_meta_queue: mp.Queue):
+
+    def __init__(self, to_remote_queue: mp.Queue, from_remote_queue: mp.Queue, nixl_meta_queue: mp.Queue):
         super().__init__()
         self.to_remote_queue = to_remote_queue
         self.from_remote_queue = from_remote_queue
@@ -41,17 +40,16 @@ class PDNIXLBackendBase(ModeBackend):
         self.remote_prefill_requests: ThreadSafeDict = ThreadSafeDict()
         self.inflght_transfer_requests: ThreadSafeDict = ThreadSafeDict()
 
-
     def init_custom(self):
         self.nixl_agent = NixlKVTransporter(self.args.pd_node_id, self.tp_rank)
         self.nixl_agent.register_kv_buffer(self.model.mem_manager.kv_buffer)
-        self.nixl_meta_queue.put((self.nixl_agent.agent_metadata,
-                                  self.nixl_agent.num_tokens,
-                                  self.nixl_agent.local_mem_desc))
-
+        self.nixl_meta_queue.put(
+            (self.nixl_agent.agent_metadata, self.nixl_agent.num_tokens, self.nixl_agent.local_mem_desc)
+        )
 
     def _prefill_wait_loop(self):
         while True:
+
             def handle_remote_prefill(req_status: RemotePrefillStatus):
                 group_req_id = req_status.group_req_id
                 status = req_status.status
@@ -62,8 +60,10 @@ class PDNIXLBackendBase(ModeBackend):
                     shm_req.set_pd_req_rank_state(self.rank_in_dp, status)
                     self.remote_prefilled_reqs.pop(group_req_id)
                     if self.is_master_in_dp:
-                        logger.info(f"remote prefill reqeust: {group_req_id} done with status: {status} "
-                                    f"took: {time.time() - run_req.remote_prefill_start} seconds")
+                        logger.info(
+                            f"remote prefill reqeust: {group_req_id} done with status: {status} "
+                            f"took: {time.time() - run_req.remote_prefill_start} seconds"
+                        )
                 else:
                     if self.is_master_in_dp:
                         logger.warning(f"remote prefill reqeust: {group_req_id} not found")
@@ -84,7 +84,6 @@ class PDNIXLBackendBase(ModeBackend):
 
             time.sleep(PDNIXLBackendBase._THEAD_WAIT_INTERVAL)
 
-
     def _wait_transfer_loop(self):
         while True:
             done_req_ids = self.nixl_agent.get_done_tranfers()
@@ -103,10 +102,11 @@ class PDNIXLBackendBase(ModeBackend):
                 shm_req.set_pd_req_rank_state(self.rank_in_dp, state)
                 del self.inflght_transfer_requests[req_id]
                 if self.is_master_in_dp:
-                    logger.info(f"req: {req_id} kv transfer with state: {state} "
-                                f"took: {time.time() - req.kv_transfer_start} seconds")
+                    logger.info(
+                        f"req: {req_id} kv transfer with state: {state} "
+                        f"took: {time.time() - req.kv_transfer_start} seconds"
+                    )
             time.sleep(PDNIXLBackendBase._THEAD_WAIT_INTERVAL)
-
 
     def _handle_prefill_loop(self):
         while True:
@@ -114,19 +114,23 @@ class PDNIXLBackendBase(ModeBackend):
             if request.type == RemoteRequstType.REMOTE_CONNECT:
                 request: ConnectRequest
                 logger.info(f"connect request received from: {request.decode_id}")
-                self.nixl_agent.add_remote_agent(NixlMetadata(
-                    id = request.decode_id,
-                    num_tokens = request.num_tokens,
-                    agent_metadatas = request.agent_metadatas,
-                    agent_mem_descs = request.agent_mem_descs
-                ))
+                self.nixl_agent.add_remote_agent(
+                    NixlMetadata(
+                        id=request.decode_id,
+                        num_tokens=request.num_tokens,
+                        agent_metadatas=request.agent_metadatas,
+                        agent_mem_descs=request.agent_mem_descs,
+                    )
+                )
                 self.to_remote_queue.put("OK")
 
             if request.type == RemoteRequstType.REMOTE_PREFILL:
                 request: PrefillRequest
                 group_request_id = request.data.sampling_params.group_request_id
-                logger.info(f"prefill request received from decode: {request.decode_id} "
-                            f"and group request id: {group_request_id}")
+                logger.info(
+                    f"prefill request received from decode: {request.decode_id} "
+                    f"and group request id: {group_request_id}"
+                )
                 self.remote_prefill_requests[group_request_id] = request
 
     def _transfer_kv_to_remote(self, req: InferReq):
@@ -141,7 +145,7 @@ class PDNIXLBackendBase(ModeBackend):
             req.kv_transfer_start = time.time()
             kv_transfer_req = KVMoveRequest(
                 group_req_id=group_req_id,
-                token_ids=self.model.req_manager.req_to_token_indexs[req.req_idx][:req.cur_kv_len].tolist()
+                token_ids=self.model.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].tolist(),
             )
             remote_request = self.remote_prefill_requests[group_req_id]
             self.nixl_agent.write_blocks(kv_transfer_req, remote_request)
@@ -150,13 +154,14 @@ class PDNIXLBackendBase(ModeBackend):
             req.kv_transfering = True
             self.inflght_transfer_requests[group_req_id] = req
 
-    def _decode_filter_reqs(self, prefill_reqs: List[InferReq],
-                            aborted_reqs: List[InferReq], decode_reqs: List[InferReq]):
+    def _decode_filter_reqs(
+        self, prefill_reqs: List[InferReq], aborted_reqs: List[InferReq], decode_reqs: List[InferReq]
+    ):
         new_prefill_reqs: List[InferReq] = []
         new_aborted_reqs: List[InferReq] = []
         remote_prefill_reqs: List[InferReq] = []
 
-         # filter out aborted requests
+        # filter out aborted requests
         for req in aborted_reqs:
             if req.in_prefill_or_transfer:
                 shm_req: PDChunkedPrefillReq = req.shm_req
@@ -165,7 +170,7 @@ class PDNIXLBackendBase(ModeBackend):
                     new_aborted_reqs.append(req)
                     req.in_prefill_or_transfer = False
                 else:
-                    #TODO trigger remote abort
+                    # TODO trigger remote abort
                     remote_prefill_reqs.append(req)
 
         for req in prefill_reqs:
@@ -173,14 +178,14 @@ class PDNIXLBackendBase(ModeBackend):
                 shm_req: PDChunkedPrefillReq = req.shm_req
                 # state is updated by router
                 state = shm_req.get_pd_req_state()
-                if state == 1: # success
+                if state == 1:  # success
                     req.cur_kv_len = req.get_cur_total_len() - 1
                     decode_reqs.append(req)
                     req.in_prefill_or_transfer = False
-                elif state == -1: # failure
+                elif state == -1:  # failure
                     aborted_reqs.append(req)
                     req.in_prefill_or_transfer = False
-                elif state == 0: # in progress
+                elif state == 0:  # in progress
                     remote_prefill_reqs.append(req)
                 else:
                     logger.warning(f"remote prefill request {shm_req.group_req_id} unexpected state {state}")
@@ -198,10 +203,10 @@ class PDNIXLBackendBase(ModeBackend):
             if req.in_prefill_or_transfer:
                 shm_req: PDChunkedPrefillReq = req.shm_req
                 state = shm_req.get_pd_req_state()
-                if state == 1: # success
+                if state == 1:  # success
                     new_ok_finished_reqs.append(req)
                     req.in_prefill_or_transfer = False
-                elif state == -1: # failure
+                elif state == -1:  # failure
                     aborted_reqs.append(req)
                     req.in_prefill_or_transfer = False
                 elif state == 0:
@@ -235,7 +240,7 @@ class PDNIXLBackendBase(ModeBackend):
             input_ids.append(input_id)
             start_loc += input_token_len
 
-        nopad_b_start_loc.append(start_loc) # last request
+        nopad_b_start_loc.append(start_loc)  # last request
 
         input_ids = np.concatenate(input_ids, dtype=np.int64)
         # g_infer_state_lock.acquire() # I don't think it's needed
@@ -257,8 +262,5 @@ class PDNIXLBackendBase(ModeBackend):
         for req_obj in req_objs:
             group_req_id = req_obj.shm_req.group_req_id
             if group_req_id in self.remote_prefill_requests:
-                self.nixl_agent.send_abort_notify(
-                    self.remote_prefill_requests[group_req_id].decode_id,
-                    group_req_id)
+                self.nixl_agent.send_abort_notify(self.remote_prefill_requests[group_req_id].decode_id, group_req_id)
                 del self.remote_prefill_requests[group_req_id]
-

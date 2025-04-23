@@ -120,11 +120,13 @@ class PDTransJoinInfo:
     # 一次连接，使用一个 uuid 为其标识
     connect_id: str
 
+
 @dataclass
 class RemotePrefillServerInfo:
     perfill_server_id: int
     prefill_server_ip: str
     prefill_server_port: int
+
 
 @dataclass
 class PDTransLeaveInfo:
