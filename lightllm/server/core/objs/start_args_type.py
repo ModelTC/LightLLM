@@ -79,3 +79,4 @@ class StartArgs:
     vit_quant_cfg: Optional[str] = field(default=None)
     enable_flashinfer_prefill: bool = field(default=False)
     enable_flashinfer_decode: bool = field(default=False)
+    sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})

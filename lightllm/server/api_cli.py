@@ -352,4 +352,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Path of quantization config. It can be used for mixed quantization.
             Examples can be found in lightllm/common/quantization/configs.""",
     )
+    parser.add_argument(
+        "--sampling_backend",
+        type=str,
+        choices=["triton", "sglang_kernel"],
+        default="triton",
+        help="""sampling used impl. 'triton' is use torch and triton kernel,
+        sglang_kernel use sglang_kernel impl""",
+    )
     return parser
