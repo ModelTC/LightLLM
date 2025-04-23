@@ -61,7 +61,7 @@ class Batch:
                 unfinished_req_ids.append(req.request_id)
                 if isinstance(req, PDChunkedPrefillReq):
                     req.link_pd_req_state_shm_array()
-                    req.set_pd_req_state(get_dp_world_size())
+                    req.set_pd_req_state()
 
         self.reqs = [self.id_to_reqs[req_id] for req_id in unfinished_req_ids]
         self.id_to_reqs = {req.request_id: req for req in self.reqs}
