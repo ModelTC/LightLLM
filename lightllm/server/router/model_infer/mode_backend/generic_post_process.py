@@ -18,10 +18,11 @@ def sample(logits, reqs, eos_id: List[int] = [2]):
         p_token_ids,
         p_token_counts,
         p_cumsum_seq_len,
-        p_max_len_in_batch,
         length_penalty_idx,
         mask_eos_reqs,
     ) = _get_post_sample_tensors(reqs)
+
+    eos_ids = torch.tensor(eos_id, dtype=torch.int32, device="cpu", pin_memory=True).cuda(non_blocking=True)
 
     logits = logits.contiguous()
 
@@ -33,13 +34,12 @@ def sample(logits, reqs, eos_id: List[int] = [2]):
         p_token_ids,
         p_token_counts,
         p_cumsum_seq_len,
-        p_max_len_in_batch,
+        exponential_decay_length_penalties,
+        length_penalty_idx,
+        eos_ids,
+        mask_eos_reqs,
     )
-    logits[:, eos_id] = logits[:, eos_id] + torch.abs(logits[:, eos_id]) * (
-        torch.pow(exponential_decay_length_penalties, length_penalty_idx).view((-1, 1)) - 1
-    )
-    if mask_eos_reqs.any():
-        logits[mask_eos_reqs, eos_id] = -1000000.0
+
     logits.div_(temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
 
@@ -94,7 +94,6 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     p_seq_len: List[int] = [
         0,
     ]
-    p_max_len_in_batch: int = 0
     length_penalty_idx: List[int] = []
     mask_eos_reqs: List[bool] = []
     for i, req_obj in enumerate(reqs):
@@ -113,11 +112,9 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         top_ps.append(sample_param.shm_param.top_p)
         top_ks.append(sample_param.shm_param.top_k)
 
-        for token_id, count in id_to_count.items():
-            p_token_ids.append(token_id)
-            p_token_counts.append(count)
+        p_token_ids.extend(list(id_to_count.keys()))
+        p_token_counts.extend(list(id_to_count.values()))
         p_seq_len.append(len(id_to_count))
-        p_max_len_in_batch = max(p_max_len_in_batch, len(id_to_count))
 
     presence_penalties_cpu = torch.tensor(presence_penalties, dtype=torch.float, device="cpu", pin_memory=True)
     frequency_penalties_cpu = torch.tensor(frequency_penalties, dtype=torch.float, device="cpu", pin_memory=True)
@@ -146,7 +143,6 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         p_token_ids_cpu.cuda(non_blocking=True),
         p_token_counts_cpu.cuda(non_blocking=True),
         p_cumsum_seq_len_cpu.cuda(non_blocking=True),
-        p_max_len_in_batch,
         length_penalty_idx_cpu.cuda(non_blocking=True),
         mask_eos_reqs_cpu.cuda(non_blocking=True),
     )
