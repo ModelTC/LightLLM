@@ -23,6 +23,8 @@ from lightllm.server.router.model_infer.mode_backend import (
     DPChunkedForPrefillNode,
     PDNIXLBackendForPrefillNode,
     PDNIXLBackendForDecodeNode,
+    PDNIXLDPBackendForPrefillNode,
+    PDNIXLDPBackendForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.core.objs import RpcShmParams, RpcShmResults, ShmSyncStatusArray
@@ -131,8 +133,11 @@ class ModelRpcServer:
             else:
                 self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
         elif is_nixl_prefill_node:
-            assert self.args.dp == 1
-            self.backend = PDNIXLBackendForPrefillNode(self.info_queue, self.result_queue, self.mem_queue)
+            if self.args.dp > 1:
+                self.backend = PDNIXLDPBackendForPrefillNode(self.info_queue, self.result_queue, self.mem_queue)
+            else:
+                self.backend = PDNIXLBackendForPrefillNode(self.info_queue, self.result_queue, self.mem_queue)
+
         elif is_decode_node:
             if self.args.dp > 1:
                 self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
@@ -140,8 +145,11 @@ class ModelRpcServer:
                 self.backend = DecodeNode(self.info_queue, self.mem_queue)
 
         elif is_nixl_decode_node:
-            assert self.args.dp == 1
-            self.backend = PDNIXLBackendForDecodeNode(self.info_queue, self.result_queue, self.mem_queue)
+            if self.args.dp > 1:
+                self.backend = PDNIXLDPBackendForDecodeNode(self.info_queue, self.result_queue, self.mem_queue)
+            else:
+                self.backend = PDNIXLBackendForDecodeNode(self.info_queue, self.result_queue, self.mem_queue)
+
         elif use_reward_model:
             self.backend = RewardModelBackend()
         elif return_all_prompt_logprobs:
