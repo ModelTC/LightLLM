@@ -15,6 +15,7 @@ class LlamaInferStateInfo(InferStateInfo):
             b_seq_len_numpy = self.b_seq_len.cpu().numpy()
             self.max_seq_len = b_seq_len_numpy.max()
             b_ready_cache_len_numpy = self.b_ready_cache_len.cpu().numpy()
+            self.q_max_seq_len = (b_seq_len_numpy - b_ready_cache_len_numpy).max()
             position_ids = torch.from_numpy(
                 np.concatenate(
                     [np.arange(b_ready_cache_len_numpy[i], b_seq_len_numpy[i]) for i in range(len(b_seq_len_numpy))],

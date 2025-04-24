@@ -251,6 +251,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         only deepseekv3 model supported now.""",
     )
     parser.add_argument(
+        "--enable_fa3",
+        action="store_true",
+        help="""inference backend will use the fa3 attention kernel for prefill and decode""",
+    )
+    parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )
     parser.add_argument(

@@ -49,6 +49,6 @@ class InferStateInfo:
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)
-                if attr_ is not None:
+                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
         return

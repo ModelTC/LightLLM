@@ -76,6 +76,7 @@ class TpPartBaseModel:
         self._verify_must()
         self._verify_params()
         self._init_quant()
+        self._init_inferstate_cls()
 
         # 更连续的显存分配可以有更好的性能
         if self.max_total_token_num is None:
@@ -106,6 +107,9 @@ class TpPartBaseModel:
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
+
+    def _init_inferstate_cls(self):
+        pass
 
     @final
     def _verify_must(self):

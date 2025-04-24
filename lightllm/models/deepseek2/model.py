@@ -4,6 +4,7 @@ from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepse
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.flashinfer_struct import Deepseek2FlashInferStateInfo
+from lightllm.models.deepseek2.flashattention_infer_struct import Deepseek2FlashAttentionStateInfo
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -62,10 +63,16 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         self.enable_flashinfer = (
             get_env_start_args().enable_flashinfer_prefill or get_env_start_args().enable_flashinfer_decode
         )
-        if self.enable_flashinfer:
-            self.infer_state_class = Deepseek2FlashInferStateInfo
         super().__init__(kvargs)
         return
+
+    def _init_inferstate_cls(self):
+        if get_env_start_args().enable_fa3:
+            self.infer_state_class = Deepseek2FlashAttentionStateInfo
+        elif self.enable_flashinfer:
+            self.infer_state_class = Deepseek2FlashInferStateInfo
+        if self.enable_flashinfer:
+            self.flashinfer_extra_state = FlashInferStateExtraInfo(self)
 
     def _init_some_value(self):
         super()._init_some_value()
@@ -77,8 +84,6 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         self.q_lora_rank = self.config["q_lora_rank"]
         self.kv_lora_rank = self.config["kv_lora_rank"]
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
-        if self.enable_flashinfer:
-            self.flashinfer_extra_state = FlashInferStateExtraInfo(self)
 
     def _init_custom(self):
         self._init_to_get_yarn_rotary()
