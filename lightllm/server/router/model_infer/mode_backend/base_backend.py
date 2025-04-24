@@ -300,12 +300,17 @@ class ModeBackend:
         return req_ids
 
     # 一些可以复用的通用功能函数
-    def _get_classed_reqs(self, req_ids: List[int], no_decode: bool = False):
+    def _get_classed_reqs(self, req_ids: List[int], no_decode: bool = False, strict_prefill: bool = False):
         """
         当将参数 no_decode 设置为True后，返回的 decode_reqs 永远为空list，主要是
         PD 分离的某些backend需要用这个参数进行控制，因为P节点永远只进行Prefill,
         避免一些特殊情况，如 radix cache 命中后，只有1token需要prefill，这个判断
         条件和decode请求的分类条件相同。所以添加一个参数进行区分。
+
+        strict_prefill参数用于控制当 cur_kv_len + 1 == input_len 时，是否将请求
+        分为 prefill,当 strict_prefill 设置为True时，表示需要将这个请求分为 prefill,
+        为 False 时，将这个请求分为decode。 strict_prefill 主要是用于diverse mode
+        使用时，其他模式目前不使用。
 
         将请求分类返回:
         1. unit reqs 还未完整初始化的请求
@@ -335,16 +340,20 @@ class ModeBackend:
                 ok_finished_reqs.append(req_obj)
                 continue
 
-            is_decode = (
-                req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
-                and req_obj.cur_kv_len + 1 != req_obj.shm_req.input_len
-            )
+            if no_decode:
+                prefill_reqs.append(req_obj)
+                continue
+
+            is_decode = req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
 
             if not is_decode:
                 prefill_reqs.append(req_obj)
             else:
-                if no_decode:
-                    prefill_reqs.append(req_obj)
+                if strict_prefill:
+                    if req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len:
+                        prefill_reqs.append(req_obj)
+                    else:
+                        decode_reqs.append(req_obj)
                 else:
                     decode_reqs.append(req_obj)
 
