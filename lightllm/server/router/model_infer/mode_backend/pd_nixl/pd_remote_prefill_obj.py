@@ -14,7 +14,7 @@ from lightllm.server.pd_io_struct import RemotePrefillServerInfo
 logger = init_logger(__name__)
 
 try:
-    from nixl._api import nixlBind, nixl_prepped_dlist_handle
+    from nixl._api import nixlBind, nixl_prepped_dlist_handle, nixl_xfer_handle
 
 except ImportError:
     logger.error("nixl is not installed, which is required for pd disagreggation!!!")
@@ -53,17 +53,26 @@ class ConnectRequest(RemoteRequest):
     agent_metadatas: List[bytes]
     agent_mem_descs: List[bytes]
 
+@dataclass
+class TransferState:
+    start_time: float
+    current_kv_len: int
+    current_chunk_id: int
 
 @dataclass
 class PrefillRequest(RemoteRequest):
     decode_id: int
     data: RemotePrefillRequest
+    # transfer status
+    transfer_state: Optional[TransferState]
 
 
 @dataclass
 class KVMoveRequest:
     group_req_id: int
     token_ids: List[int]
+    prev_kv_len: int
+    cur_kv_len: int
 
 
 @dataclass
@@ -72,6 +81,13 @@ class RemoteAgent:
     num_tokens: int
     kv_mem_desc: nixlBind.nixlRegDList
     kv_xfer_handles: nixl_prepped_dlist_handle
+
+@dataclass
+class KVMoveRequestState:
+    handles: List[nixl_xfer_handle]
+    done_handles: List[nixl_xfer_handle]
+    remote_agent: RemoteAgent
+    abort: bool
 
 
 @dataclass
@@ -160,7 +176,7 @@ class SockWithPoller:
         client_id, data = self.sock.recv_multipart()
         return client_id, pickle.loads(data)
 
-    def send_pyobj_multipart(self, client_id: str, data: Any):
+    def send_pyobj_multipart(self, client_id: bytes, data: Any):
         return self.sock.send_multipart([client_id, pickle.dumps(data)])
 
     def bind(self, addr: str):
