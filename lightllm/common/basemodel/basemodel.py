@@ -76,7 +76,6 @@ class TpPartBaseModel:
         self._verify_must()
         self._verify_params()
         self._init_quant()
-        self._init_inferstate_cls()
 
         # 更连续的显存分配可以有更好的性能
         if self.max_total_token_num is None:
@@ -92,6 +91,7 @@ class TpPartBaseModel:
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
+        self._init_inferstate_cls()
         self._init_cudagraph()
         self._check_max_len_infer()
         torch.cuda.empty_cache()

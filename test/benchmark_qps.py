@@ -29,44 +29,84 @@ def get_tokenizer(
     return tokenizer
 
 
-def get_output_length(reqs_num: int, output_len: int) -> List[int]:
-    min_len, max_len = 2, output_len * 2
-    mean = (min_len + max_len) * 0.5
-    std = mean
-    output_lens = []
-    for _ in range(reqs_num):
-        cur_len = random.gauss(mean, std)
-        cur_len = round(cur_len)
-        if cur_len < min_len:
-            cur_len = min_len
-        elif cur_len > max_len:
-            cur_len = max_len
-        output_lens.append(cur_len)
-    return output_lens
+def get_random_length(reqs_num: int, length: int, range_ratio: float) -> List[int]:
+    lens = []
+    lens = np.random.randint(
+        int(length * range_ratio),
+        length + 1,
+        size=reqs_num,
+    )
+    return lens.tolist()
 
 
-def gen_random_input_text(tokenizer) -> str:
-    random_ids = [random.randint(512, 8192) for _ in range(1024)]
+def gen_random_input_text(tokenizer, input_len) -> str:
+    random_ids = [random.randint(0, tokenizer.vocab_size) for _ in range(input_len)]
     random_text = tokenizer.decode(random_ids)
     return random_text
 
 
 def gen_random_data(
-    input_len: int, output_len: int, reqs_num: int, tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+    input_len: int,
+    output_len: int,
+    reqs_num: int,
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    range_ratio: float,
 ) -> Tuple[List[str], List[int], List[int]]:
     prompts = []
-    input_lens = []
-    output_lens = get_output_length(reqs_num, output_len)
+    output_lens = get_random_length(reqs_num, output_len, range_ratio)
+    input_lens = get_random_length(reqs_num, input_len, range_ratio)
     for i in range(reqs_num):
-        input_text = gen_random_input_text(tokenizer)
-        prompts.append(input_text)
-        input_lens.append(input_len)
+        input_text = gen_random_input_text(tokenizer, input_lens[i])
+        prompts.append((input_text, input_lens[i]))
     print("Generate random data finish.")
-    return prompts, input_lens, output_lens
+    return prompts, output_lens
 
 
-async def async_post_stream_lightllm(url, text_input, max_new_tokens, session) -> List[float]:
+model_name = []
+
+
+async def async_post_stream_openai(url, prompt, max_new_tokens, session):
     try:
+        text_input, input_len = prompt
+        data = {
+            "model": model_name[0],
+            "prompt": text_input,
+            "max_tokens": max_new_tokens,
+            "ignore_eos": True,
+            "stream": True,
+            "temperature": 0.0,
+            "best_of": 1,
+        }
+        headers = {"Content-Type": "application/json"}
+        used_time = []
+        start_time = time.time()
+        last_time = start_time
+        async with session.post(url, headers=headers, json=data) as response:
+            if response.status != 200:
+                return []
+
+            async for line in response.content:
+                line = line.strip()
+                if line:
+                    line = line.decode("utf-8")[6:]  # remove "data: "
+                    if line == "[DONE]":
+                        continue
+                    data = json.loads(line)
+                    if not data["choices"][0]["text"]:
+                        continue
+                    current_time = time.time()
+                    elapsed_time = current_time - last_time
+                    used_time.append(elapsed_time)
+                    last_time = current_time
+            return used_time, input_len
+    except Exception as e:
+        print(e)
+        pass
+
+
+async def async_post_stream_lightllm(url, prompt, max_new_tokens, session):
+    try:
+        text_input, input_len = prompt
         data = {
             "inputs": text_input,
             "parameters": {
@@ -91,16 +131,30 @@ async def async_post_stream_lightllm(url, text_input, max_new_tokens, session) -
                     elapsed_time = current_time - last_time
                     used_time.append(elapsed_time)
                     last_time = current_time
-        return used_time
-    except Exception:
+        return used_time, input_len
+    except Exception as e:
+        print(e)
         pass
 
 
 async def continuous_sender(
-    session, pending_tasks, async_task, url, prompts, max_new_tokens, request_queue, stop_send, sent_count, input_qps
+    session,
+    pending_tasks,
+    async_task,
+    url,
+    prompts,
+    max_new_tokens,
+    request_queue,
+    stop_send,
+    sent_count,
+    input_qps,
+    max_count,
+    continuous_send,
 ):
     prompt_index = 0
     while not stop_send.is_set():
+        if not continuous_send and sent_count[0] >= max_count:
+            break
         prompt = prompts[prompt_index % len(prompts)]
         max_tokens = max_new_tokens[prompt_index % len(max_new_tokens)]
 
@@ -130,11 +184,11 @@ async def response_collector(
         while True:
             try:
                 task = await asyncio.wait_for(request_queue.get(), timeout=1.0)
-                result = await task
+                result, input_len = await task
                 request_queue.task_done()
                 assert result is not None
                 if len(result) > 1 and not stop_send.is_set():
-                    results.append(result)
+                    results.append((result, input_len))
                 current_count = counter[0] + 1
                 counter[0] = current_count
                 print(f"\rfinished_reqs:{current_count} / target_reqs:{reqs_num} / sent_reqs:{sent_count[0]}", end="")
@@ -168,7 +222,7 @@ async def response_collector(
 
 
 async def run_continuous_benchmark(
-    async_task, url, prompts, max_new_tokens, reqs_num, num_clients, input_qps, force_terminate
+    async_task, url, prompts, max_new_tokens, reqs_num, num_clients, input_qps, force_terminate, continuous_send
 ):
     request_queue = asyncio.Queue()
     stop_event = asyncio.Event()
@@ -192,6 +246,8 @@ async def run_continuous_benchmark(
                 stop_send,
                 sent_count,
                 input_qps,
+                reqs_num,
+                continuous_send,
             )
         )
 
@@ -224,12 +280,14 @@ async def run_continuous_benchmark(
     return results_data, sent_count[0], end_time[0]
 
 
-model_name = []
-
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--url", type=str, default="http://127.0.0.1:8000/generate_stream")
+    parser.add_argument(
+        "--url",
+        type=str,
+        default="http://127.0.0.1:8000/generate_stream",
+        help="lightllm:http://127.0.0.1:8000/generate_stream, openai:http://127.0.0.1:8000/v1/completions",
+    )
     parser.add_argument("--num_clients", type=int, default=100)
     parser.add_argument("--tokenizer_path", type=str, default=None)
     parser.add_argument("--input_num", type=int, default=2000)
@@ -239,11 +297,18 @@ def main():
     parser.add_argument("--server_api", type=str, default="lightllm")
     parser.add_argument("--dump_file", type=str, default="")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--range_ratio", type=float, default=0.5)
     parser.add_argument(
         "--force_terminate",
         type=int,
         default=0,
         help="0: waiting all reqs return; 1: only waiting input_num reqs return",
+    )
+    parser.add_argument(
+        "--continuous_send",
+        type=int,
+        default=0,
+        help="0: only send input_num reqs; 1: send continuously until receiving input_num reqs",
     )
 
     args = parser.parse_args()
@@ -260,13 +325,19 @@ def main():
     url = args.url
     tokenizer = get_tokenizer(args.tokenizer_path)
     # qps发送模式发送请求的数量不固定，这里暂定为input_num的10倍
-    prompts, input_lens, max_new_tokens = gen_random_data(
-        args.input_len, args.output_len, 10 * args.input_num, tokenizer
+    prompts, max_new_tokens = gen_random_data(
+        args.input_len,
+        args.output_len,
+        args.input_num if not args.continuous_send else 10 * args.input_num,
+        tokenizer,
+        args.range_ratio,
     )
 
     percentiles = [25, 50, 75, 90, 95, 99, 100]
     if args.server_api == "lightllm":
         async_post_stream = async_post_stream_lightllm
+    elif args.server_api == "openai":
+        async_post_stream = async_post_stream_openai
     else:
         raise Exception(f"Not support {args.server_api} server_api.")
 
@@ -287,6 +358,7 @@ def main():
             args.num_clients,
             args.input_qps,
             args.force_terminate,
+            args.continuous_send,
         )
     )
     loop.close()
@@ -296,12 +368,14 @@ def main():
     request_time = []
     final_output_lens = []
     valid_num = 0
-    for result in results:
+    input_lens = []
+    for result, input_len in results:
         if len(result) > 1:  # 统计至少decode出两个token的数据
             first_token_time.append(result[0])
             decode_token_time.append(sum(result[1:]) / len(result[1:]))
             request_time.append(sum(result))
             final_output_lens.append(len(result))
+            input_lens.append(input_len)
             valid_num += 1
 
     print(
@@ -309,21 +383,19 @@ def main():
     )
     print(f"Total QPS: {valid_num / (end_time - start_time)}")
     print(f"Sender QPS: {sent_reqs / (end_time - start_time)}")
-    print(f"Avg Input Length: {sum(input_lens[:valid_num]) / len(input_lens[:valid_num])}")
+    print(f"Avg Input Length: {sum(input_lens) / len(input_lens)}")
     print(f"Avg Output Length: {sum(final_output_lens) / len(final_output_lens)}")
-    print(
-        f"Total Throughput: {(sum(input_lens[:valid_num]) + sum(final_output_lens)) / (end_time - start_time)} token/s"
-    )
-    print(f"Input Throughput: {sum(input_lens[:valid_num]) / (end_time - start_time)} token/s")
+    print(f"Total Throughput: {(sum(input_lens) + sum(final_output_lens)) / (end_time - start_time)} token/s")
+    print(f"Input Throughput: {sum(input_lens) / (end_time - start_time)} token/s")
     print(f"Output Throughput: {sum(final_output_lens) / (end_time - start_time)} token/s")
     print("-" * 10)
     dump_dict["request_num"] = valid_num
     dump_dict["Total QPS"] = valid_num / (end_time - start_time)
     dump_dict["Sender QPS"] = sent_reqs / (end_time - start_time)
-    dump_dict["Avg Input Length"] = sum(input_lens[:valid_num]) / len(input_lens[:valid_num])
+    dump_dict["Avg Input Length"] = sum(input_lens) / len(input_lens)
     dump_dict["Avg Output Length"] = sum(final_output_lens) / len(final_output_lens)
-    dump_dict["Total Throughput"] = (sum(input_lens[:valid_num]) + sum(final_output_lens)) / (end_time - start_time)
-    dump_dict["Input Throughput"] = sum(input_lens[:valid_num]) / (end_time - start_time)
+    dump_dict["Total Throughput"] = (sum(input_lens) + sum(final_output_lens)) / (end_time - start_time)
+    dump_dict["Input Throughput"] = sum(input_lens) / (end_time - start_time)
     dump_dict["Output Throughput"] = sum(final_output_lens) / (end_time - start_time)
 
     values = np.percentile(request_time, percentiles)

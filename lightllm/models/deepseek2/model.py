@@ -20,7 +20,7 @@ from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 logger = init_logger(__name__)
 
 
-class FlashInferStateExtraInfo:
+class DeepSeek2FlashInferStateExtraInfo:
     def __init__(self, model):
         num_heads = model.config["num_attention_heads"]
         self.tp_q_head_num = num_heads // get_dp_world_size()
@@ -71,8 +71,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
             self.infer_state_class = Deepseek2FlashAttentionStateInfo
         elif self.enable_flashinfer:
             self.infer_state_class = Deepseek2FlashInferStateInfo
-        if self.enable_flashinfer:
-            self.flashinfer_extra_state = FlashInferStateExtraInfo(self)
+            self.flashinfer_extra_state = DeepSeek2FlashInferStateExtraInfo(self)
 
     def _init_some_value(self):
         super()._init_some_value()
