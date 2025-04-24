@@ -1,13 +1,14 @@
 from typing import List, Any
 import zmq
 import inspect
-import pickle
+import random
 
 import torch.multiprocessing as mp
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.server.pd_io_struct import DistInfo
 
 from .pd_remote_prefill_obj import (
     ConnectRequest,
@@ -18,41 +19,25 @@ from .pd_remote_prefill_obj import (
     RemotePrefillServerInfo,
     RemotePrefillTask,
     RemotePrefillStatus,
+    SockWithPoller,
 )
 from .nixl_kv_transporter import NixlMetadata
 
-
 logger = init_logger(__name__)
-
-
-class SockWithPoller:
-    def __init__(self, sock: zmq.Socket):
-        self.sock = sock
-        self.poller = zmq.Poller()
-        self.poller.register(self.sock, zmq.POLLIN)
-
-    def recv_pyobj(self, timeout: int = 5):
-        socks = dict(self.poller.poll(timeout * 1000))
-        if socks:
-            if socks.get(self.sock) == zmq.POLLIN:
-                return self.sock.recv_pyobj()
-        else:
-            None
-
-    def send_pyobj(self, obj: Any):
-        return self.sock.send_pyobj(obj)
 
 
 class PDRemotePrefillBase:
     def __init__(
         self,
         id: int,
+        dist_info: DistInfo,
         from_backend_queue: mp.Queue,
         to_backend_queues: List[mp.Queue],
         agent_meta_queues: List[mp.Queue],  # need send kv cache to this process and register with nixl
     ):
         self.id = id
-        self.tp_size = len(agent_meta_queues)
+        self.dist_info = dist_info
+        assert len(agent_meta_queues) == dist_info.node_world_size
         self.agent_meta_queues = agent_meta_queues
         self.from_backend_queue = from_backend_queue
         self.to_backend_queues = to_backend_queues
@@ -60,7 +45,7 @@ class PDRemotePrefillBase:
 
     def local_init(self):
         agent_metas = NixlMetadata(id=self.id, agent_metadatas=[], num_tokens=[], agent_mem_descs=[])
-        for tp in range(self.tp_size):
+        for tp in range(self.dist_info.node_world_size):
             agent_metadata, num_tokens, mem_desc = self.agent_meta_queues[tp].get(timeout=60)
             logger.info(f"Received agent_metadata from {tp} with mem reg: {mem_desc}")
             agent_metas.num_tokens.append(num_tokens)
@@ -75,41 +60,40 @@ class PDRemotePrefillServer(PDRemotePrefillBase):
     def __init__(
         self,
         id: int,
+        dist_info: DistInfo,
         http_server_port: int,
         server_port: int,
         from_backend_queue: mp.Queue,
         to_backend_queues: List[mp.Queue],
         agent_meta_queues: List[mp.Queue],
     ):
-        super().__init__(id, from_backend_queue, to_backend_queues, agent_meta_queues)
+        super().__init__(id, dist_info, from_backend_queue, to_backend_queues, agent_meta_queues)
         # map from client id to decode server info
         self.remote_decode_clients = {}
 
         # build control path
         _ctx = zmq.Context()
-        self.recv_from_decode = _ctx.socket(zmq.ROUTER)
+        self.recv_from_decode = SockWithPoller(_ctx.socket(zmq.ROUTER))
         self.host_ip = get_hostname_ip()
         self.recv_from_decode.bind(f"tcp://{self.host_ip}:{server_port}")
 
         # build trigger remote prefill path
-        self.send_to_httpserver = _ctx.socket(zmq.PUSH)
+        self.send_to_httpserver = SockWithPoller(_ctx.socket(zmq.PUSH))
         self.send_to_httpserver.connect(f"tcp://{self.host_ip}:{http_server_port}")
-
-        self.prefill_requests = {}
 
     def main_loop(self):
         self.local_init()
         while True:
             try:
-                client_obj, msg = self.recv_from_decode.recv_multipart()
-                request: RemoteRequest = pickle.loads(msg)
+                client_obj, request = self.recv_from_decode.recv_pyobj_multipart()
+                request: RemoteRequest
                 logger.info(f"recevied request from decode, type: {request.type}")
 
-                # forward request to prefill server
-                for queue in self.to_backend_queues:
-                    queue.put(request)
-
                 if request.type == RemoteRequstType.REMOTE_CONNECT:
+                    # forward request to all prefill server
+                    for queue in self.to_backend_queues:
+                        queue.put(request)
+
                     success = True
                     for idx in range(self.tp_size):
                         ack = self.from_backend_queue.get()
@@ -117,33 +101,45 @@ class PDRemotePrefillServer(PDRemotePrefillBase):
                             success = False
                             break
 
-                    self.recv_from_decode.send_multipart([client_obj, pickle.dumps(success)])
+                    self.recv_from_decode.send_pyobj_multipart(client_obj, success)
                     if not success:
                         logger.warning(f"Remote connect failed: {request}")
 
                 if request.type == RemoteRequstType.REMOTE_PREFILL:
                     request: PrefillRequest = request
-                    self.trigger_prefill(request)
+                    if self.dist_info.dp_size_in_node > 1:
+                        group_req_id = request.data.sampling_params.group_request_id
+                        suggested_dp_index = request.data.sampling_params.suggested_dp_index
+                        if suggested_dp_index < 0: # not likely to happen
+                            suggested_dp_index = random.randint(0, self.dist_info.dp_size_in_node)
+                            request.data.sampling_params.suggested_dp_index = suggested_dp_index
+                            logger.warning(f"Suggested dp index is negative for {group_req_id}, set to {suggested_dp_index}")
+
+                        for local_rank in range(suggested_dp_index * self.dist_info.dp_world_size,
+                                                (suggested_dp_index + 1) * self.dist_info.dp_world_size):
+                            self.to_backend_queues[local_rank].put(request)
+                    else:
+                        for queue in self.to_backend_queues:
+                            queue.put(request)
+
+                    self.send_to_httpserver.send_pyobj(
+                        (request.data.prompt, request.data.sampling_params, request.data.multimodal_params)
+                    )
 
             except Exception as e:
                 logger.error(f"Error in remote prefill server loop: {e}", exc_info=e)
-
-    def trigger_prefill(self, request: PrefillRequest):
-        self.send_to_httpserver.send_pyobj(
-            (request.data.prompt, request.data.sampling_params, request.data.multimodal_params)
-        )
-        self.prefill_requests[request.data.sampling_params.group_request_id] = request
 
 
 class PDRemotePrefillClient(PDRemotePrefillBase):
     def __init__(
         self,
         id: int,
+        dist_info: DistInfo,
         from_backend_queue: mp.Queue,  # only tp0 will trigger prefill
         to_backend_queues: List[mp.Queue],  # one to many done queue
         agent_meta_queues: List[mp.Queue],
     ):
-        super().__init__(id, from_backend_queue, to_backend_queues, agent_meta_queues)
+        super().__init__(id, dist_info, from_backend_queue, to_backend_queues, agent_meta_queues)
         # map from server id to prefill server info
 
         self.remote_prefill_servers = {}
@@ -221,6 +217,7 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
 
 def remote_prefill_server_loop(
     id: int,
+    dist_info: DistInfo,
     http_server_port: int,
     server_port: int,
     from_backend_queue: mp.Queue,
@@ -229,13 +226,14 @@ def remote_prefill_server_loop(
 ):
     graceful_registry(inspect.currentframe().f_code.co_name)
     server = PDRemotePrefillServer(
-        id, http_server_port, server_port, from_backend_queue, to_backend_queues, agent_meta_queues
+        id, dist_info, http_server_port, server_port, from_backend_queue, to_backend_queues, agent_meta_queues
     )
     server.main_loop()
 
 
 def start_pd_remote_prefill_server_process(
     id: int,
+    dist_info: DistInfo,
     http_server_port: int,
     server_port: int,
     from_backend_queue: mp.Queue,
@@ -244,7 +242,7 @@ def start_pd_remote_prefill_server_process(
 ):
     proc = mp.Process(
         target=remote_prefill_server_loop,
-        args=(id, http_server_port, server_port, from_backend_queue, to_backend_queues, agent_meta_queues),
+        args=(id, dist_info, http_server_port, server_port, from_backend_queue, to_backend_queues, agent_meta_queues),
     )
     proc.start()
     assert proc.is_alive()
@@ -253,12 +251,13 @@ def start_pd_remote_prefill_server_process(
 
 
 def remote_prefill_client_loop(
-    id: int, from_backend_queue: mp.Queue, to_backend_queues: List[mp.Queue], agent_meta_queues: List[mp.Queue]
+    id: int, dist_info: DistInfo, from_backend_queue: mp.Queue, to_backend_queues: List[mp.Queue], agent_meta_queues: List[mp.Queue]
 ):
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     client = PDRemotePrefillClient(
         id,
+        dist_info,
         from_backend_queue,
         to_backend_queues,
         agent_meta_queues,
@@ -267,11 +266,11 @@ def remote_prefill_client_loop(
 
 
 def start_pd_remote_prefill_client_process(
-    id: int, from_backend_queue: mp.Queue, to_backend_queues: List[mp.Queue], agent_meta_queues: List[mp.Queue]
+    id: int, dist_info: DistInfo, from_backend_queue: mp.Queue, to_backend_queues: List[mp.Queue], agent_meta_queues: List[mp.Queue]
 ):
 
     proc = mp.Process(
-        target=remote_prefill_client_loop, args=(id, from_backend_queue, to_backend_queues, agent_meta_queues)
+        target=remote_prefill_client_loop, args=(id, dist_info, from_backend_queue, to_backend_queues, agent_meta_queues)
     )
     proc.start()
     assert proc.is_alive()

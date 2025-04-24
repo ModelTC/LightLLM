@@ -3,6 +3,8 @@ from enum import Enum
 import json
 from typing import List, Union, Optional, Any
 from threading import Lock
+import pickle
+import zmq
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.core.objs import SamplingParams
@@ -76,6 +78,8 @@ class RemoteAgent:
 class RemotePrefillStatus:
     group_req_id: int
     status: int
+    chunk_id: int
+    is_last: bool
 
     def serialize(self):
         return json.dumps(asdict(self)).encode()
@@ -133,3 +137,35 @@ class ThreadSafeDict:
     def clear(self) -> None:
         with self._lock:
             self._dict.clear()
+
+
+class SockWithPoller:
+    def __init__(self, sock: zmq.Socket):
+        self.sock = sock
+        self.poller = zmq.Poller()
+        self.poller.register(self.sock, zmq.POLLIN)
+
+    def recv_pyobj(self, timeout: int = 5):
+        socks = dict(self.poller.poll(timeout * 1000))
+        if socks:
+            if socks.get(self.sock) == zmq.POLLIN:
+                return self.sock.recv_pyobj()
+        else:
+            None
+
+    def send_pyobj(self, obj: Any):
+        return self.sock.send_pyobj(obj)
+
+    def recv_pyobj_multipart(self):
+        client_id, data = self.sock.recv_multipart()
+        return client_id, pickle.loads(data)
+
+    def send_pyobj_multipart(self, client_id: str, data: Any):
+        return self.sock.send_multipart([client_id, pickle.dumps(data)])
+
+    def bind(self, addr: str):
+        return self.sock.bind(addr)
+
+    def connect(self, addr: str):
+        return self.sock.connect(addr)
+

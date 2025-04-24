@@ -16,3 +16,5 @@ from .continues_batch.pd_mode.prefill_node_impl.prefill_impl import ChunckedPref
 from .continues_batch.pd_mode.prefill_node_impl.prefill_impl_for_dp import DPChunkedForPrefillNode
 from .pd_nixl.impl_for_pd_prefill import PDNIXLBackendForPrefillNode
 from .pd_nixl.impl_for_pd_decode import PDNIXLBackendForDecodeNode
+from .pd_nixl.impl_for_pd_decode_dp import PDNIXLDPBackendForDecodeNode
+from .pd_nixl.impl_for_pd_prefill_dp import PDNIXLDPBackendForPrefillNode

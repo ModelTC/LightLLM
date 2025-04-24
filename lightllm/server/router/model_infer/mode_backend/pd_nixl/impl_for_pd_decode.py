@@ -81,7 +81,6 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
                 self.remote_prefilled_reqs[shm_req.group_req_id] = run_req
 
         if decode_reqs:
-            # print(f"decode req: {self.rank_in_dp}: {len(decode_reqs)}")
             kwargs, run_reqs = prepare_decode_inputs(decode_reqs)
             logits = self.model.forward(**kwargs)
 
