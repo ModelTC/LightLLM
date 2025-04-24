@@ -19,6 +19,7 @@ from .pd_remote_prefill_obj import (
     KVMoveRequest,
     RemotePrefillStatus,
     ThreadSafeDict,
+    TransferState,
 )
 
 logger = init_logger(__name__)
@@ -55,15 +56,17 @@ class PDNIXLBackendBase(ModeBackend):
                 status = req_status.status
                 if status != 1:
                     logger.warning(f"remote prefill reqeust: {group_req_id} done with state: {status}")
+
                 if run_req := self.remote_prefilled_reqs.get(group_req_id, None):
-                    shm_req: PDChunkedPrefillReq = run_req.shm_req
-                    shm_req.set_pd_req_rank_state(self.rank_in_dp, status)
-                    self.remote_prefilled_reqs.pop(group_req_id)
-                    if self.is_master_in_dp:
-                        logger.info(
-                            f"remote prefill reqeust: {group_req_id} done with status: {status} "
-                            f"took: {time.time() - run_req.remote_prefill_start} seconds"
-                        )
+                    if req_status.is_last or status != 1:
+                        shm_req: PDChunkedPrefillReq = run_req.shm_req
+                        shm_req.set_pd_req_rank_state(self.rank_in_dp, status)
+                        self.remote_prefilled_reqs.pop(group_req_id)
+                        if self.is_master_in_dp:
+                            logger.info(
+                                f"remote prefill reqeust: {group_req_id} done with status: {status} "
+                                f"took: {time.time() - run_req.remote_prefill_start} seconds"
+                            )
                 else:
                     if self.is_master_in_dp:
                         logger.warning(f"remote prefill reqeust: {group_req_id} not found")
@@ -100,12 +103,15 @@ class PDNIXLBackendBase(ModeBackend):
                 req: InferReq = self.inflght_transfer_requests[req_id]
                 shm_req: PDChunkedPrefillReq = req.shm_req
                 shm_req.set_pd_req_rank_state(self.rank_in_dp, state)
-                del self.inflght_transfer_requests[req_id]
+                transfer_state = self.remote_prefill_requests[req_id].transfer_state
                 if self.is_master_in_dp:
                     logger.info(
                         f"req: {req_id} kv transfer with state: {state} "
-                        f"took: {time.time() - req.kv_transfer_start} seconds"
+                        f"took: {time.time() - transfer_state.start_time} seconds"
                     )
+                del self.remote_prefill_requests[req_id]
+                del self.inflght_transfer_requests[req_id]
+
             time.sleep(PDNIXLBackendBase._THEAD_WAIT_INTERVAL)
 
     def _handle_prefill_loop(self):
@@ -140,19 +146,36 @@ class PDNIXLBackendBase(ModeBackend):
             logger.info(f"remote prefill request {group_req_id} not found")
             return
 
-        # kick off kv transfer
-        if req.finish_status.is_finished():
-            req.kv_transfer_start = time.time()
-            kv_transfer_req = KVMoveRequest(
-                group_req_id=group_req_id,
-                token_ids=self.model.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].tolist(),
+        remote_request: PrefillRequest = self.remote_prefill_requests[group_req_id]
+        if remote_request.transfer_state is None:
+            remote_request.transfer_state = TransferState(
+                start_time=time.time(),
+                current_kv_len=0,
+                current_chunk_id=0,
             )
-            remote_request = self.remote_prefill_requests[group_req_id]
-            self.nixl_agent.write_blocks(kv_transfer_req, remote_request)
+
+        transfer_state = remote_request.transfer_state
+        token_index = self.model.req_manager.req_to_token_indexs[req.req_idx]
+        is_finished = req.finish_status.is_finished()
+
+        kv_transfer_req = KVMoveRequest(
+            group_req_id=group_req_id,
+            token_ids=token_index[ : req.cur_kv_len].tolist(),
+            prev_kv_len=transfer_state.current_kv_len,
+            cur_kv_len=req.cur_kv_len,
+        )
+        # kick off kv transfer
+        self.nixl_agent.write_blocks(kv_transfer_req, remote_request, is_finished)
+
+        if transfer_state.current_chunk_id == 0:
             shm_req: PDChunkedPrefillReq = req.shm_req
             shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)
-            req.kv_transfering = True
+            req.in_prefill_or_transfer = True
             self.inflght_transfer_requests[group_req_id] = req
+
+        transfer_state.current_kv_len = req.cur_kv_len
+        transfer_state.current_chunk_id += 1
+
 
     def _decode_filter_reqs(
         self, prefill_reqs: List[InferReq], aborted_reqs: List[InferReq], decode_reqs: List[InferReq]

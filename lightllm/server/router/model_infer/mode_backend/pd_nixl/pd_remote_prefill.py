@@ -95,13 +95,15 @@ class PDRemotePrefillServer(PDRemotePrefillBase):
                         queue.put(request)
 
                     success = True
-                    for idx in range(self.tp_size):
+                    for idx in range(self.dist_info.node_world_size):
                         ack = self.from_backend_queue.get()
+                        logger.info(f"received ack from backend {idx}: {ack}")
                         if ack != "OK":
                             success = False
                             break
 
                     self.recv_from_decode.send_pyobj_multipart(client_obj, success)
+                    logger.info(f"Sent ack to decode: {success}")
                     if not success:
                         logger.warning(f"Remote connect failed: {request}")
 
@@ -166,6 +168,7 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
         )
 
         success = socket.recv_pyobj(timeout=60)
+        logger.info(f"recv remote nixl connect response {success}")
         if success is None:
             logger.warning("timeout to recv remote nixl connect response")
             return False
@@ -203,6 +206,8 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
                             RemotePrefillStatus(
                                 group_req_id=prefill_tasks.prefill_request.sampling_params.group_request_id,
                                 status=-1,
+                                chunk_id=-1,
+                                is_last=True,
                             )
                         )
             except Exception as e:
@@ -212,7 +217,7 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
     def remote_prefill(self, server_id: int, prefill_request: RemotePrefillRequest):
         socket, _ = self.remote_prefill_servers[server_id]
         prefill_request.sampling_params.max_new_tokens = 1
-        socket.send_pyobj(PrefillRequest(type=RemoteRequstType.REMOTE_PREFILL, decode_id=self.id, data=prefill_request))
+        socket.send_pyobj(PrefillRequest(type=RemoteRequstType.REMOTE_PREFILL, decode_id=self.id, data=prefill_request, transfer_state=None))
 
 
 def remote_prefill_server_loop(
