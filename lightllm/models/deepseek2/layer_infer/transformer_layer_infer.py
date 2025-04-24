@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 
 try:
     from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+    from sgl_kernel import merge_state_v2
 except:
     logger.warning("sgl_kernel is not installed, or the installed version does not support fa3!")
 
@@ -248,31 +249,38 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         return o_tensor
 
     def _decompress_kv(
-        self, kv, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight, is_fp8
+        self,
+        kv,
+        infer_state: Deepseek2InferStateInfo,
+        layer_weight: Deepseek2TransformerLayerWeight,
+        is_fp8,
+        total_token_num,
+        b_seq_len,
+        max_seq_len,
+        b_kv_start_loc,
+        skip_sample=False,
     ):
-        if infer_state.use_dynamic_prompt_cache:
+        if infer_state.use_dynamic_prompt_cache and not skip_sample:
             if is_fp8:
                 kv = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, :-2].view(torch.float8_e4m3fn)
                 kv_scale = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, -2:].view(torch.bfloat16)
-                k_scale = self.alloc_tensor([infer_state.total_token_num, 1], dtype=kv_scale.dtype)
+                k_scale = self.alloc_tensor([total_token_num, 1], dtype=kv_scale.dtype)
             else:
                 kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
                 kv_scale = None
                 k_scale = None
 
-            compressed_kv = self.alloc_tensor(
-                [infer_state.total_token_num, 1, layer_weight.kv_lora_rank], dtype=kv.dtype
-            )
-            k_rope = self.alloc_tensor([infer_state.total_token_num, 1, self.qk_rope_head_dim], dtype=kv.dtype)
+            compressed_kv = self.alloc_tensor([total_token_num, 1, layer_weight.kv_lora_rank], dtype=kv.dtype)
+            k_rope = self.alloc_tensor([total_token_num, 1, self.qk_rope_head_dim], dtype=kv.dtype)
             sample_kv(
                 kv,
                 compressed_kv,
                 k_rope,
                 infer_state.b_req_idx,
-                infer_state.max_value_in_b_seq_len,
-                infer_state.b_seq_len,
+                max_seq_len,
+                b_seq_len,
                 infer_state.req_manager.req_to_token_indexs,
-                infer_state.b_kv_start_loc,
+                b_kv_start_loc,
                 kv_scale,
                 k_scale,
             )
@@ -294,6 +302,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         k_nope, v = torch.split(kv_nope, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         return k_nope, k_rope, v
 
+    # Adapted from:
+    # https://github.com/sgl-project/sglang/blob/c998d04b46920f06d945fbef9023884a768723fc/python/sglang/srt/models/deepseek_v2.py#L962
     def _context_attention_flashattention_kernel_with_CC(
         self,
         q: torch.Tensor,
@@ -302,9 +312,19 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Deepseek2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-        k_nope, k_rope, v = self._decompress_kv(kv, infer_state, layer_weight, False)
+        k_nope, k_rope, v = self._decompress_kv(
+            kv,
+            infer_state,
+            layer_weight,
+            False,
+            infer_state.total_token_num,
+            infer_state.b_seq_len,
+            infer_state.max_value_in_b_seq_len,
+            infer_state.b_kv_start_loc,
+            skip_sample=True,
+        )
         k = torch.cat([k_nope, torch.repeat_interleave(k_rope, self.tp_q_head_num_, dim=-2)], dim=-1)
-        o_tensor = flash_attn_varlen_func(
+        o_tensor, lse, *rest = flash_attn_varlen_func(
             q=q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
             k=k.view(-1, self.tp_k_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
             v=v.view(-1, self.tp_v_head_num_, self.v_head_dim),
@@ -314,8 +334,41 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             max_seqlen_k=infer_state.max_seq_len,
             softmax_scale=self.softmax_scale,
             causal=True,
-            return_softmax_lse=False,
+            return_softmax_lse=True,
         )
+        if infer_state.has_prefix_kv:
+            k_nope, k_rope, v = self._decompress_kv(
+                kv,
+                infer_state,
+                layer_weight,
+                False,
+                infer_state.prefix_total_token_num,
+                infer_state.b_ready_cache_len,
+                infer_state.prefix_k_max_len,
+                infer_state.cu_seqlens_prefix_k,
+            )
+            k = torch.cat([k_nope, torch.repeat_interleave(k_rope, self.tp_q_head_num_, dim=-2)], dim=-1)
+            prefix_output, prefix_lse, *rest = flash_attn_varlen_func(
+                q=q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
+                k=k.view(-1, self.tp_k_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
+                v=v.view(-1, self.tp_v_head_num_, self.v_head_dim),
+                cu_seqlens_q=infer_state.cu_seqlens_q,
+                cu_seqlens_k=infer_state.cu_seqlens_prefix_k,
+                max_seqlen_q=infer_state.q_max_seq_len,
+                max_seqlen_k=infer_state.prefix_k_max_len,
+                softmax_scale=self.softmax_scale,
+                causal=False,
+                return_softmax_lse=True,
+            )
+            lse = torch.transpose(lse, 0, 1).contiguous()
+            prefix_lse = torch.transpose(prefix_lse, 0, 1).contiguous()
+            tmp_output = (
+                self.alloc_tensor((q.shape[0], q.shape[1], self.qk_nope_head_dim), dtype=q.dtype)
+                if out is None
+                else out
+            )
+            tmp_lse = torch.empty_like(lse)
+            merge_state_v2(prefix_output, prefix_lse, o_tensor, lse, tmp_output, tmp_lse)
         return o_tensor
 
     def _context_attention_flashinfer_kernel_with_CC(
@@ -326,7 +379,16 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Deepseek2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-        k_nope, k_rope, v = self._decompress_kv(kv, infer_state, layer_weight, False)
+        k_nope, k_rope, v = self._decompress_kv(
+            kv,
+            infer_state,
+            layer_weight,
+            False,
+            infer_state.total_token_num,
+            infer_state.b_seq_len,
+            infer_state.max_value_in_b_seq_len,
+            infer_state.b_kv_start_loc,
+        )
         o_tensor = (
             self.alloc_tensor((q.shape[0], q.shape[1], self.qk_nope_head_dim), dtype=q.dtype) if out is None else out
         )
@@ -342,7 +404,16 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Deepseek2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-        k_nope, k_rope, v = self._decompress_kv(kv, infer_state, layer_weight, True)
+        k_nope, k_rope, v = self._decompress_kv(
+            kv,
+            infer_state,
+            layer_weight,
+            True,
+            infer_state.total_token_num,
+            infer_state.b_seq_len,
+            infer_state.max_value_in_b_seq_len,
+            infer_state.b_kv_start_loc,
+        )
         o_tensor = (
             self.alloc_tensor((q.shape[0], q.shape[1], self.qk_nope_head_dim), dtype=q.dtype) if out is None else out
         )
@@ -358,7 +429,16 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Deepseek2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-        k_nope, k_rope, v = self._decompress_kv(kv, infer_state, layer_weight, False)
+        k_nope, k_rope, v = self._decompress_kv(
+            kv,
+            infer_state,
+            layer_weight,
+            False,
+            infer_state.total_token_num,
+            infer_state.b_seq_len,
+            infer_state.max_value_in_b_seq_len,
+            infer_state.b_kv_start_loc,
+        )
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
         context_attention_fwd_with_v(
@@ -385,7 +465,16 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Deepseek2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-        k_nope, k_rope, v = self._decompress_kv(kv, infer_state, layer_weight, True)
+        k_nope, k_rope, v = self._decompress_kv(
+            kv,
+            infer_state,
+            layer_weight,
+            True,
+            infer_state.total_token_num,
+            infer_state.b_seq_len,
+            infer_state.max_value_in_b_seq_len,
+            infer_state.b_kv_start_loc,
+        )
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
         context_attention_fwd_with_v(

@@ -28,8 +28,13 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
                 torch.cumsum(self.b_seq_len - self.b_ready_cache_len, dim=0, dtype=torch.int32), (1, 0)
             )
             self.cu_seqlens_k = torch.cat([self.b_start_loc, self.b_start_loc[-1:] + self.b_seq_len[-1:]], dim=0)
-            self.page_table = torch.empty((self.batch_size, self.max_seq_len), dtype=torch.int32).to(input_ids.device)
-            self.page_table.copy_(model.req_manager.req_to_token_indexs[self.b_req_idx, : self.max_seq_len])
+            self.has_prefix_kv = self.b_ready_cache_len_numpy.any()
+            if self.has_prefix_kv:
+                self.cu_seqlens_prefix_k = torch.nn.functional.pad(
+                    torch.cumsum(self.b_ready_cache_len, dim=0, dtype=torch.int32), (1, 0)
+                )
+                self.prefix_k_max_len = self.b_ready_cache_len_numpy.max()
+                self.prefix_total_token_num = self.b_ready_cache_len_numpy.sum()
         else:
             # Meta information of flashattention for decoding
             self.cu_seqlens_q = torch.arange(0, self.batch_size + 1, dtype=torch.int32, device=input_ids.device)
