@@ -51,8 +51,6 @@ def test_decode_attentions(
     ).cuda()
     state.b_req_idx = torch.arange(0, state.batch_size, step=1, dtype=torch.int32).cuda()
     state.b_seq_len = torch.full((state.batch_size,), fill_value=test_seq_len, dtype=torch.int32).cuda()
-    total_token_num_tensor = torch.tensor([state.batch_size * test_seq_len], dtype=torch.int32, device="cuda")
-    state.total_token_num = total_token_num_tensor
 
     args = []
     q_head_dim = q_shape[2]
@@ -63,7 +61,7 @@ def test_decode_attentions(
     state.q_head_dim = q_head_dim
     state.kv_head_num = kv_head_num
     state.softmax_scale = 1 / (q_head_dim ** 0.5)
-    state.total_token_num = total_token_num_tensor
+    state.total_token_num = state.batch_size * test_seq_len
 
     infer_state = state
     for _ in range(test_count):

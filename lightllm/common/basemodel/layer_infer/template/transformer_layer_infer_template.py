@@ -31,12 +31,13 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         raise Exception("need to impl")
 
     def _pre_cache_kv(self, infer_state: InferStateInfo, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
-        if infer_state.mem_is_contiguous:
-            cache_kv = infer_state.mem_manager.kv_buffer[self.layer_num_][
-                infer_state.mem_start : infer_state.mem_end, :, :
-            ]
-        else:
-            cache_kv = infer_state.kv_buffer
+        cache_kv = self.alloc_tensor(
+            shape=infer_state.kv_buffer_shapedtype[0],
+            dtype=infer_state.kv_buffer_shapedtype[1],
+            device="cuda",
+            is_graph_out=False,
+            microbatch_index=infer_state.microbatch_index,
+        )
         return cache_kv
 
     def _get_qkv(
@@ -51,9 +52,8 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
     def _post_cache_kv(self, cache_kv, infer_state: InferStateInfo, layer_weight):
         mem_manager = infer_state.mem_manager
-        if not infer_state.mem_is_contiguous:
-            self._copy_kv_to_mem_cache(cache_kv, infer_state.mem_index, mem_manager)
-            return
+        self._copy_kv_to_mem_cache(cache_kv, infer_state.mem_index, mem_manager)
+        return
 
     def _copy_kv_to_mem_cache(self, buffer, mem_index, mem_manager):
         destindex_copy_kv(buffer, mem_index, mem_manager.kv_buffer[self.layer_num_])

@@ -14,7 +14,6 @@ class Deepseek2InferStateInfo(LlamaInferStateInfo):
         super().init_some_extra_state(model, input_ids)
         if not self.is_prefill:
             self.kv_starts = torch.cat([self.b_start_loc, self.b_start_loc[-1:] + self.b_seq_len[-1:]], dim=0)
-            self.total_token_num_tensor = torch.sum(self.b_seq_len)
 
         if self.is_prefill:
             self.b_kv_start_loc = self.b_seq_len.cumsum(dim=0) - self.b_seq_len
