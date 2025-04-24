@@ -41,7 +41,7 @@ class PDNIXLBackendBase(ModeBackend):
         self.inflght_transfer_requests: ThreadSafeDict = ThreadSafeDict()
 
     def init_custom(self):
-        self.nixl_agent = NixlKVTransporter(self.args.pd_node_id, self.tp_rank)
+        self.nixl_agent = NixlKVTransporter(self.args.pd_node_id, self.rank_in_node)
         self.nixl_agent.register_kv_buffer(self.model.mem_manager.kv_buffer)
         self.nixl_meta_queue.put(
             (self.nixl_agent.agent_metadata, self.nixl_agent.num_tokens, self.nixl_agent.local_mem_desc)
@@ -243,11 +243,11 @@ class PDNIXLBackendBase(ModeBackend):
         nopad_b_start_loc.append(start_loc)  # last request
 
         input_ids = np.concatenate(input_ids, dtype=np.int64)
-        # g_infer_state_lock.acquire() # I don't think it's needed
+
         if g_infer_context.radix_cache is not None:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
         mem_indexes = g_infer_context.req_manager.mem_manager.alloc(input_ids.shape[0])
-        # g_infer_state_lock.release()
+
         kwargs = {
             "batch_size": len(run_reqs),
             "input_ids": input_ids,
