@@ -365,6 +365,8 @@ class HttpServerManager:
         return
 
     async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
+        if not prompt_ids:
+            raise ValueError("prompt_ids is empty")
         prompt_tokens = len(prompt_ids)
         if prompt_tokens + sampling_params.max_new_tokens > self.max_req_total_len:
             # use long_truncation_mode to truncate long input len req.
