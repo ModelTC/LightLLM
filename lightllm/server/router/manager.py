@@ -116,7 +116,7 @@ class RouterManager:
         # 用于 kv move 管理进程 和 推理进程进行task信息的交互。
         self.info_queue: mp.Queue = mp.Queue()
         self.mem_queues: List[torch.multiprocessing.Queue] = [
-            torch.multiprocessing.Queue() for _ in range(self.world_size)
+            torch.multiprocessing.Queue() for _ in range(self.node_world_size)
         ]
         self.rpc_event = multiprocessing.Event()
         self.rpc_finished_event = multiprocessing.Event()
@@ -132,7 +132,7 @@ class RouterManager:
                 rpc_event=self.rpc_event,
                 rpc_finished_event=self.rpc_finished_event,
                 info_queue=self.info_queue,
-                mem_queue=self.mem_queues[rank_id],
+                mem_queue=self.mem_queues[(rank_id % node_world_size)],
                 router_lock=self.router_lock,
             )
             self.model_rpc_servers.append(rpc_model)
