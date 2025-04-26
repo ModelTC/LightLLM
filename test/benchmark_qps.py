@@ -34,7 +34,7 @@ def get_tokenizer(
 def get_random_length(reqs_num: int, length: int, range_ratio: float) -> List[int]:
     lens = []
     lens = np.random.randint(
-        int(length * range_ratio),
+        max(int(length * range_ratio), 1),
         length + 1,
         size=reqs_num,
     )
@@ -61,6 +61,21 @@ def gen_random_data(
         input_text = gen_random_input_text(tokenizer, input_lens[i])
         prompts.append((input_text, input_lens[i]))
     print("Generate random data finish.")
+    return prompts, output_lens
+
+
+def get_custom_input_data(data_path, output_len, tokenizer, range_ratio):
+    prompts = []
+    with open(data_path, "r") as f:
+        for line in f.readlines():
+            data_line = json.loads(line)
+            input_data = tokenizer.apply_chat_template(
+                data_line["messages"], add_generation_prompt=True, tokenize=False
+            )
+            input_len = len(tokenizer.encode(input_data))
+            prompts.append([input_data, input_len])
+    output_lens = get_random_length(len(prompts), output_len, range_ratio)
+    print("Load random data finish.")
     return prompts, output_lens
 
 
@@ -115,13 +130,13 @@ async def async_post_stream_lightllm(url, prompt, max_new_tokens, session):
                 "do_sample": False,
                 "ignore_eos": True,
                 "max_new_tokens": max_new_tokens,
+                "add_special_tokens": False,
             },
         }
         headers = {"Content-Type": "application/json"}
         used_time = []
         start_time = time.time()
         last_time = start_time
-
         async with session.post(url, headers=headers, json=data) as response:
             if response.status != 200:
                 return []
@@ -189,12 +204,11 @@ async def response_collector(
                 result, input_len = await task
                 request_queue.task_done()
                 assert result is not None
-                if len(result) > 1 and not stop_send.is_set():
+                if len(result) >= 1 and not stop_send.is_set():
                     results.append((result, input_len))
                 current_count = counter[0] + 1
                 counter[0] = current_count
                 print(f"\rfinished_reqs:{current_count} / target_reqs:{reqs_num} / sent_reqs:{sent_count[0]}", end="")
-
                 if len(results) >= reqs_num and not stop_send.is_set():
                     end_time[0] = time.time()
                     print("\nReached target number of responses")
@@ -292,6 +306,7 @@ def main():
     )
     parser.add_argument("--num_clients", type=int, default=100)
     parser.add_argument("--tokenizer_path", type=str, default=None)
+    parser.add_argument("--data_path", type=str, default=None)
     parser.add_argument("--input_num", type=int, default=2000)
     parser.add_argument("--input_qps", type=float, default=30.0)
     parser.add_argument("--input_len", type=int, default=1024)
@@ -323,17 +338,21 @@ def main():
 
     assert args.tokenizer_path is not None
     model_name.append(args.tokenizer_path)
-    seed_all(args.seed)
+    # seed_all(args.seed)
     url = args.url
     tokenizer = get_tokenizer(args.tokenizer_path)
-    # qps发送模式发送请求的数量不固定，这里暂定为input_num的10倍
-    prompts, max_new_tokens = gen_random_data(
-        args.input_len,
-        args.output_len,
-        args.input_num if not args.continuous_send else 10 * args.input_num,
-        tokenizer,
-        args.range_ratio,
-    )
+    if args.data_path is not None:
+        prompts, max_new_tokens = get_custom_input_data(args.data_path, args.output_len, tokenizer, args.range_ratio)
+        args.input_num = len(prompts)
+    else:
+        # qps发送模式发送请求的数量不固定，这里暂定为input_num的10倍
+        prompts, max_new_tokens = gen_random_data(
+            args.input_len,
+            args.output_len,
+            args.input_num if not args.continuous_send else 10 * args.input_num,
+            tokenizer,
+            args.range_ratio,
+        )
 
     percentiles = [25, 50, 75, 90, 95, 99, 100]
     if args.server_api == "lightllm":
@@ -364,7 +383,7 @@ def main():
         )
     )
     loop.close()
-
+    print(len(results))
     first_token_time = []
     decode_token_time = []
     request_time = []
@@ -375,6 +394,13 @@ def main():
         if len(result) > 1:  # 统计至少decode出两个token的数据
             first_token_time.append(result[0])
             decode_token_time.append(sum(result[1:]) / len(result[1:]))
+            request_time.append(sum(result))
+            final_output_lens.append(len(result))
+            input_lens.append(input_len)
+            valid_num += 1
+        else:
+            first_token_time.append(result[0])
+            decode_token_time.append(0)  # no decode
             request_time.append(sum(result))
             final_output_lens.append(len(result))
             input_lens.append(input_len)

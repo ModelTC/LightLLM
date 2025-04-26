@@ -20,7 +20,7 @@ def test_model_inference(args, model_class):
     workers = []
     dp_size = args.get("dp", 1)
 
-    for rank_id in range(args.tp):
+    for rank_id in range(args.node_rank * 8, (args.node_rank + 1) * 8):
         model_kvargs = {
             "args": args,
             "nccl_host": args.nccl_host,
@@ -88,6 +88,7 @@ def overlap_prefill(
         _0_b_start_loc,
         _0_b_seq_len,
         _o_b_ready_cache_len,
+        {},
     )
 
     _1_batch_size = batch_size - batch_size // 2
@@ -110,6 +111,7 @@ def overlap_prefill(
         _1_b_start_loc,
         _1_b_seq_len,
         _1_b_ready_cache_len,
+        {},
     )
 
     logits, logits1 = model_part.microbatch_overlap_prefill(micro_batch1, micro_batch2)
@@ -213,7 +215,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
 
     if model_class == Deepseek2TpPartModel:
         model_cfg, _ = PretrainedConfig.get_config_dict(model_kvargs["weight_dir"])
-        dist_group_manager.new_deepep_group(model_cfg["n_routed_experts"])
     dist.barrier()
 
     torch.cuda.empty_cache()
