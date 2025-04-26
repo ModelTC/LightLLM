@@ -4,7 +4,7 @@ import torch.distributed as dist
 import numpy as np
 
 from lightllm.models.starcoder.layer_weights.pre_and_post_layer_weight import PreAndPostLayerWeight
-from lightllm.models.starcoder.infer_struct import StarcoderInferStateInfo
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.common.basemodel import PreLayerInfer
 from lightllm.models.llama.triton_kernel.embedding import embedding
@@ -23,7 +23,7 @@ class StarcoderPreLayerInfer(PreLayerInfer):
         self.vob_start_id_ = self.tp_vocab_size_ * self.tp_rank_
         self.vob_end_id_ = self.tp_vocab_size_ * (self.tp_rank_ + 1)
 
-    def context_forward(self, input_ids, infer_state: StarcoderInferStateInfo, layer_weight: PreAndPostLayerWeight):
+    def context_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: PreAndPostLayerWeight):
         total_token_num = infer_state.total_token_num
         input_ids = input_ids[0:total_token_num]
 
@@ -43,7 +43,7 @@ class StarcoderPreLayerInfer(PreLayerInfer):
 
         return input_embdings.add_(position_embeds)
 
-    def token_forward(self, input_ids, infer_state: StarcoderInferStateInfo, layer_weight: PreAndPostLayerWeight):
+    def token_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: PreAndPostLayerWeight):
         # import ipdb;ipdb.set_trace()
         input_embdings = self.alloc_tensor(
             (input_ids.shape[0], layer_weight.wte_weight_.shape[1]), dtype=layer_weight.data_type_

@@ -1,13 +1,5 @@
-import os
-import json
-import torch
-
-from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
-from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
-from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.qwen2.layer_weights.pre_and_post_layer_weight import Qwen2PreAndPostLayerWeight
 from lightllm.models.qwen2.layer_weights.transformer_layer_weight import Qwen2TransformerLayerWeight
-
 from lightllm.models.llama.model import LlamaTpPartModel
 
 

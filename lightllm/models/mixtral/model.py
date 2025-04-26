@@ -5,7 +5,7 @@ from lightllm.common.mem_manager import MemoryManager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
-from lightllm.models.mixtral.infer_struct import MixtralInferStateInfo
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.mixtral.layer_infer.transformer_layer_infer import MixtralTransformerLayerInfer
 from lightllm.models.mixtral.layer_weights.transformer_layer_weight import MixtralTransformerLayerWeight
 
@@ -25,7 +25,7 @@ class MixtralTpPartModel(TpPartBaseModel):
     transformer_layer_infer_class = MixtralTransformerLayerInfer
 
     # infer state class
-    infer_state_class = MixtralInferStateInfo
+    infer_state_class = LlamaInferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)

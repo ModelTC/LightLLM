@@ -40,7 +40,7 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                     self.max_len_in_batch,
                     self.kv_indices,
                 )
-                self.kv_starts = torch.cat([self.b_start_loc, self.b_start_loc[-1:] + self.b_seq_len[-1:]], dim=0)
+                self.kv_starts = self.b1_cu_kv_seq_len.int()
                 if self.decode_wrapper is None:
                     self.decode_wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
                         self.flashinfer_extra_state.workspace_buffer,
@@ -65,10 +65,8 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                     )
         else:
             if get_env_start_args().enable_flashinfer_prefill:
-                q_starts = torch.zeros((self.batch_size + 1,)).int().cuda()
-                q_starts[1:] = torch.cumsum(self.b_seq_len - self.b_ready_cache_len, dim=0)
-                kv_starts = torch.zeros_like(q_starts)
-                kv_starts[1:] = torch.cumsum(self.b_seq_len, dim=0)
+                q_starts = self.b1_cu_q_seq_len.int()
+                kv_starts = self.b1_cu_kv_seq_len.int()
                 kv_last_page_len = torch.full((self.batch_size,), 1, dtype=torch.int32).to(input_ids.device)
                 if self.use_dynamic_prompt_cache:
                     kv_indices = torch.empty(

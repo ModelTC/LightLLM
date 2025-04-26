@@ -26,18 +26,15 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         super().init_some_extra_state(model, input_ids)
         if self.is_prefill:
-            self.cu_seqlens_q = torch.nn.functional.pad(
-                torch.cumsum(self.b_seq_len - self.b_ready_cache_len, dim=0, dtype=torch.int32), (1, 0)
-            )
-            self.cu_seqlens_k = torch.cat([self.b_start_loc, self.b_start_loc[-1:] + self.b_seq_len[-1:]], dim=0)
+            self.cu_seqlens_q = self.b1_cu_q_seq_len.int()
+            self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
             self.page_table = torch.empty((self.batch_size, self.max_seq_len), dtype=torch.int32).to(input_ids.device)
             self.page_table.copy_(model.req_manager.req_to_token_indexs[self.b_req_idx, : self.max_seq_len])
         else:
             # Meta information of flashattention for decoding
-            self.cu_seqlens_q = torch.arange(0, self.batch_size + 1, dtype=torch.int32, device=input_ids.device)
-            self.cu_seqlens_k = torch.cat([self.b_start_loc, self.b_start_loc[-1:] + self.b_seq_len[-1:]], dim=0)
-            b_seq_len_numpy = self.b_seq_len.cpu().numpy()
-            max_seq_len_k = b_seq_len_numpy.max()
+            self.cu_seqlens_q = self.b1_cu_q_seq_len.int()
+            self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
+            max_seq_len_k = self.max_kv_seq_len
             if self.batch_size <= model.graph_max_batch_size and self.max_len_in_batch <= model.graph_max_len_in_batch:
                 page_buffer = FlashAttentionStateInfo.get_page_table_buffer(
                     model.graph_max_batch_size, model.graph_max_len_in_batch

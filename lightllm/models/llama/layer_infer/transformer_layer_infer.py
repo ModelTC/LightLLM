@@ -9,7 +9,6 @@ from functools import partial
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.triton_kernel.context_flashattention_nopad import (
     context_attention_fwd,
-    context_attention_fwd_no_prompt_cache,
     context_attention_fwd_ppl_int8kv,
 )
 from lightllm.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd, token_att_fwd_int8k
@@ -192,97 +191,64 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, q, kv, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        if infer_state.use_dynamic_prompt_cache:
-            kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-            kv = kv.unsqueeze(1)
-            infer_state.prefill_wrapper.run(
-                q.view(q.shape[0], -1, self.head_dim_),
-                (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
-                out=o_tensor.view(q.shape[0], -1, self.head_dim_),
-            )
-        else:
-            infer_state.prefill_wrapper.run(
-                q.view(q.shape[0], -1, self.head_dim_),
-                kv[:, : self.tp_k_head_num_, :],
-                kv[:, self.tp_k_head_num_ :, :],
-                out=o_tensor.view(q.shape[0], -1, self.head_dim_),
-            )
-
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv = kv.unsqueeze(1)
+        infer_state.prefill_wrapper.run(
+            q.view(q.shape[0], -1, self.head_dim_),
+            (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
+            out=o_tensor.view(q.shape[0], -1, self.head_dim_),
+        )
         return o_tensor
 
     def _context_attention_kernel(
         self, q, kv, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        if infer_state.use_dynamic_prompt_cache:
-            kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-            context_attention_fwd(
-                q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                kv[:, 0 : self.tp_k_head_num_, :],
-                kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                infer_state.b_req_idx,
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.b_ready_cache_len,
-                infer_state.max_len_in_batch,
-                infer_state.req_manager.req_to_token_indexs,
-            )
-        else:
-            context_attention_fwd_no_prompt_cache(
-                q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                kv[:, 0 : self.tp_k_head_num_, :],
-                kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.max_len_in_batch,
-            )
-
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        context_attention_fwd(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            kv[:, 0 : self.tp_k_head_num_, :],
+            kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
+            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+            infer_state.b_req_idx,
+            infer_state.b_start_loc,
+            infer_state.b_seq_len,
+            infer_state.b_ready_cache_len,
+            infer_state.max_len_in_batch,
+            infer_state.req_manager.req_to_token_indexs,
+        )
         return o_tensor
 
     def _context_attention_kernel_ppl_int8kv(
         self, q, kv, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        if infer_state.use_dynamic_prompt_cache:
-            batch_size = infer_state.b_seq_len.shape[0]
-            kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-            kv_scale = infer_state.mem_manager.scale_buffer[self.layer_num_]
-            max_seq_len = infer_state.max_seq_len
-            kv_dequant = self.alloc_tensor(
-                (batch_size, kv.shape[1], max_seq_len, kv.shape[2]), device=q.device, dtype=q.dtype
-            )
-            destindex_copy_dequantize_kv(
-                kv,
-                kv_scale,
-                infer_state.req_manager.req_to_token_indexs,
-                infer_state.b_seq_len,
-                infer_state.b_req_idx,
-                max_seq_len,
-                kv_dequant,
-            )
-            context_attention_fwd_ppl_int8kv(
-                q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                kv_dequant[:, 0 : self.tp_k_head_num_, :, :],
-                kv_dequant[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :, :],
-                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.max_len_in_batch,
-                infer_state.b_ready_cache_len,
-            )
-        else:
-            context_attention_fwd_no_prompt_cache(
-                q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                kv[:, 0 : self.tp_k_head_num_, :],
-                kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                infer_state.b_start_loc,
-                infer_state.b_seq_len,
-                infer_state.max_len_in_batch,
-            )
-
+        batch_size = infer_state.b_seq_len.shape[0]
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv_scale = infer_state.mem_manager.scale_buffer[self.layer_num_]
+        max_seq_len = infer_state.max_seq_len
+        kv_dequant = self.alloc_tensor(
+            (batch_size, kv.shape[1], max_seq_len, kv.shape[2]), device=q.device, dtype=q.dtype
+        )
+        destindex_copy_dequantize_kv(
+            kv,
+            kv_scale,
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.b_seq_len,
+            infer_state.b_req_idx,
+            max_seq_len,
+            kv_dequant,
+        )
+        context_attention_fwd_ppl_int8kv(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            kv_dequant[:, 0 : self.tp_k_head_num_, :, :],
+            kv_dequant[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :, :],
+            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+            infer_state.b_start_loc,
+            infer_state.b_seq_len,
+            infer_state.max_len_in_batch,
+            infer_state.b_ready_cache_len,
+        )
         return o_tensor
 
     def _context_attention_flashattention(self, q, kv, infer_state: LlamaInferStateInfo, layer_weight, out=None):

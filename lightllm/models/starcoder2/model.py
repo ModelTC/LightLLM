@@ -1,6 +1,6 @@
 import torch
 
-from lightllm.models.mistral.infer_struct import MistralInferStateInfo
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.starcoder2.layer_weights.pre_and_post_layer_weight import Starcoder2PreAndPostLayerWeight
 from lightllm.models.starcoder2.layer_weights.transformer_layer_weight import Starcoder2TransformerLayerWeight
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
@@ -21,7 +21,7 @@ class Starcoder2TpPartModel(TpPartBaseModel):
     pre_layer_infer_class = LlamaPreLayerInfer
     transformer_layer_infer_class = Starcoder2TransformerLayerInfer
     post_layer_infer_class = BloomPostLayerInfer
-    infer_state_class = MistralInferStateInfo
+    infer_state_class = LlamaInferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)

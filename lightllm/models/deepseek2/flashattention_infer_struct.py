@@ -24,10 +24,8 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         super().init_some_extra_state(model, input_ids)
         if self.is_prefill:
-            self.cu_seqlens_q = torch.nn.functional.pad(
-                torch.cumsum(self.b_seq_len - self.b_ready_cache_len, dim=0, dtype=torch.int32), (1, 0)
-            )
-            self.cu_seqlens_k = torch.cat([self.b_start_loc, self.b_start_loc[-1:] + self.b_seq_len[-1:]], dim=0)
+            self.cu_seqlens_q = self.b1_cu_q_seq_len
+            self.cu_seqlens_k = self.b1_cu_kv_seq_len
             self.has_prefix_kv = self.b_ready_cache_len_numpy.any()
             if self.has_prefix_kv:
                 self.cu_seqlens_prefix_k = torch.nn.functional.pad(
@@ -37,10 +35,9 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
                 self.prefix_total_token_num = self.b_ready_cache_len_numpy.sum()
         else:
             # Meta information of flashattention for decoding
-            self.cu_seqlens_q = torch.arange(0, self.batch_size + 1, dtype=torch.int32, device=input_ids.device)
-            self.cu_seqlens_k = torch.cat([self.b_start_loc, self.b_start_loc[-1:] + self.b_seq_len[-1:]], dim=0)
-            b_seq_len_numpy = self.b_seq_len.cpu().numpy()
-            max_seq_len_k = b_seq_len_numpy.max()
+            self.cu_seqlens_q = self.b1_cu_q_seq_len
+            self.cu_seqlens_k = self.b1_cu_kv_seq_len
+            max_seq_len_k = self.max_kv_seq_len
             if self.batch_size <= model.graph_max_batch_size and self.max_len_in_batch <= model.graph_max_len_in_batch:
                 page_buffer = Deepseek2FlashAttentionStateInfo.get_page_table_buffer(
                     model.graph_max_batch_size, model.graph_max_len_in_batch

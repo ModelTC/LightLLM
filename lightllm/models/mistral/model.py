@@ -7,10 +7,8 @@ from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTr
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
-from lightllm.models.mistral.infer_struct import MistralInferStateInfo
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.mistral.layer_infer.transformer_layer_infer import MistralTransformerLayerInfer
-from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-
 from lightllm.common.mem_utils import select_mem_manager_class
 
 
@@ -25,7 +23,7 @@ class MistralTpPartModel(TpPartBaseModel):
     transformer_layer_infer_class = MistralTransformerLayerInfer
 
     # infer state class
-    infer_state_class = MistralInferStateInfo
+    infer_state_class = LlamaInferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)

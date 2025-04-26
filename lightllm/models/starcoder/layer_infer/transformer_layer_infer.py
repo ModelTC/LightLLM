@@ -1,11 +1,3 @@
-import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
-from functools import partial
-
-from lightllm.utils.infer_utils import mark_cost_time
-from lightllm.models.starcoder.infer_struct import StarcoderInferStateInfo
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 

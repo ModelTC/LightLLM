@@ -64,12 +64,8 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
                     )
         else:
             if get_env_start_args().enable_flashinfer_prefill:
-                q_starts = torch.cat(
-                    [self.b_start_loc, self.b_start_loc[-1:] + (self.b_seq_len - self.b_ready_cache_len)[-1:]], dim=0
-                ).int()
-                kv_starts = torch.cat(
-                    [self.b_kv_start_loc, self.b_kv_start_loc[-1:] + self.b_seq_len[-1:]], dim=0
-                ).int()
+                q_starts = self.b1_cu_q_seq_len.int()
+                kv_starts = self.b1_kv_start_loc.int()
                 if self.prefill_wrapper is None:
                     self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
                         self.flashinfer_extra_state.workspace_buffer, "NHD"

@@ -15,6 +15,8 @@ import asyncio
 
 
 def seed_all(seed):
+    if not seed:
+        seed = int(time.time())
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
@@ -297,7 +299,7 @@ def main():
     parser.add_argument("--server_api", type=str, default="lightllm")
     parser.add_argument("--dump_file", type=str, default="")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--range_ratio", type=float, default=0.5)
+    parser.add_argument("--range_ratio", type=float, default=1.0)
     parser.add_argument(
         "--force_terminate",
         type=int,
