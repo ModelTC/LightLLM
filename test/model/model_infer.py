@@ -64,7 +64,6 @@ def overlap_prefill(
     input_ids,
     mem_indexes,
     b_req_idx,
-    b_start_loc,
     b_seq_len,
     total_token_num,
     b_ready_cache_len,
@@ -76,7 +75,6 @@ def overlap_prefill(
     _0_mem_indexes = mem_indexes[: total_token_num // 2]
     _0_b_req_idx = b_req_idx[: batch_size // 2]
     _0_b_seq_len = b_seq_len[: batch_size // 2]
-    _0_b_start_loc = b_start_loc[: batch_size // 2]
     _o_b_ready_cache_len = b_ready_cache_len[: batch_size // 2]
     micro_batch1 = PrefillMicroBatch(
         _0_batch_size,
@@ -85,7 +83,6 @@ def overlap_prefill(
         _0_input_ids,
         _0_mem_indexes,
         _0_b_req_idx,
-        _0_b_start_loc,
         _0_b_seq_len,
         _o_b_ready_cache_len,
         {},
@@ -98,7 +95,6 @@ def overlap_prefill(
     _1_mem_indexes = mem_indexes[total_token_num // 2 :]
     _1_b_req_idx = b_req_idx[batch_size // 2 :]
     _1_b_seq_len = b_seq_len[batch_size // 2 :]
-    _1_b_start_loc = b_start_loc[: batch_size // 2]
     _1_b_ready_cache_len = b_ready_cache_len[batch_size // 2 :]
 
     micro_batch2 = PrefillMicroBatch(
@@ -108,7 +104,6 @@ def overlap_prefill(
         _1_input_ids,
         _1_mem_indexes,
         _1_b_req_idx,
-        _1_b_start_loc,
         _1_b_seq_len,
         _1_b_ready_cache_len,
         {},
@@ -119,7 +114,7 @@ def overlap_prefill(
 
 
 def overlap_decode(
-    model_part, batch_size, max_len_in_batch, input_ids, mem_indexes, b_req_idx, b_start_loc, b_seq_len, total_token_num
+    model_part, batch_size, max_len_in_batch, input_ids, mem_indexes, b_req_idx, b_seq_len, total_token_num
 ):
     _0_batch_size = batch_size // 2
     _0_total_token_num = total_token_num // 2
@@ -128,7 +123,6 @@ def overlap_decode(
     _0_mem_indexes = mem_indexes[: batch_size // 2]
     _0_b_req_idx = b_req_idx[: batch_size // 2]
     _0_b_seq_len = b_seq_len[: batch_size // 2]
-    _0_b_start_loc = b_start_loc[: batch_size // 2]
     micro_batch1 = DecodeMicroBatch(
         _0_batch_size,
         _0_total_token_num,
@@ -136,7 +130,6 @@ def overlap_decode(
         _0_input_ids,
         _0_mem_indexes,
         _0_b_req_idx,
-        _0_b_start_loc,
         _0_b_seq_len,
     )
 
@@ -147,7 +140,6 @@ def overlap_decode(
     _1_mem_indexes = mem_indexes[batch_size // 2 :]
     _1_b_req_idx = b_req_idx[batch_size // 2 :]
     _1_b_seq_len = b_seq_len[batch_size // 2 :]
-    _1_b_start_loc = b_start_loc[: batch_size // 2]
 
     micro_batch2 = DecodeMicroBatch(
         _1_batch_size,
@@ -156,7 +148,6 @@ def overlap_decode(
         _1_input_ids,
         _1_mem_indexes,
         _1_b_req_idx,
-        _1_b_start_loc,
         _1_b_seq_len,
     )
 
@@ -164,9 +155,7 @@ def overlap_decode(
     return torch.cat((logits, logits1), dim=0)
 
 
-def decode(
-    model_part, batch_size, max_len_in_batch, input_ids, mem_indexes, b_req_idx, b_start_loc, b_seq_len, total_token_num
-):
+def decode(model_part, batch_size, max_len_in_batch, input_ids, mem_indexes, b_req_idx, b_seq_len, total_token_num):
     logits = model_part.forward(
         batch_size,
         total_token_num,
@@ -174,7 +163,6 @@ def decode(
         input_ids,
         mem_indexes,
         b_req_idx,
-        b_start_loc,
         b_seq_len,
         is_prefill=False,
     )
@@ -230,11 +218,9 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
     b_req_idx = torch.tensor(
         [model_part.req_manager.alloc() for _ in range(batch_size)], dtype=torch.int32, device="cuda"
     )
-    b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     for i in range(batch_size):
-        b_start_loc[i] = i * input_len
         b_seq_len[i] = input_len
 
     total_token_num = input_len * batch_size
@@ -247,7 +233,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
             test_data,
             mem_indexes,
             b_req_idx,
-            b_start_loc,
             b_seq_len,
             total_token_num,
             b_ready_cache_len,
@@ -260,7 +245,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
             test_data,
             mem_indexes,
             b_req_idx,
-            b_start_loc,
             b_seq_len,
             b_ready_cache_len=b_ready_cache_len,
             is_prefill=True,
@@ -270,7 +254,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
     predict_ids = predict_ids.detach().cpu().numpy()
 
     for i in range(output_len):
-        b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
         total_token_num += batch_size
         b_seq_len += 1
         mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0]).cuda()
@@ -283,7 +266,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 total_token_num,
             )
@@ -295,7 +277,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 total_token_num,
             )
@@ -308,7 +289,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
     model_part.req_manager.free_all()
 
     b_req_idx = None
-    b_start_loc = None
     b_seq_len = None
 
     dist.barrier()
@@ -322,10 +302,8 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
     b_req_idx = torch.tensor(
         [model_part.req_manager.alloc() for _ in range(batch_size)], dtype=torch.int32, device="cuda"
     )
-    b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
     for i in range(batch_size):
-        b_start_loc[i] = i * input_len
         b_seq_len[i] = input_len
 
     total_token_num = batch_size * input_len
@@ -344,7 +322,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
             test_data,
             mem_indexes,
             b_req_idx,
-            b_start_loc,
             b_seq_len,
             total_token_num,
             b_ready_cache_len,
@@ -357,7 +334,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
             test_data,
             mem_indexes,
             b_req_idx,
-            b_start_loc,
             b_seq_len,
             b_ready_cache_len=b_ready_cache_len,
             is_prefill=True,
@@ -385,7 +361,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                         test_data,
                         mem_indexes,
                         b_req_idx,
-                        b_start_loc,
                         b_seq_len,
                         total_token_num,
                         b_ready_cache_len,
@@ -401,7 +376,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                         test_data,
                         mem_indexes,
                         b_req_idx,
-                        b_start_loc,
                         b_seq_len,
                         b_ready_cache_len=b_ready_cache_len,
                         is_prefill=True,
@@ -419,7 +393,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
     for i in range(output_len):
         torch.cuda.synchronize()
         step_start = time.time()
-        b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
         total_token_num += batch_size
         b_seq_len += 1
         mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0]).cuda()
@@ -432,7 +405,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 total_token_num,
             )
@@ -445,7 +417,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                         torch.from_numpy(predict_ids).cuda().reshape(-1),
                         mem_indexes,
                         b_req_idx,
-                        b_start_loc,
                         b_seq_len,
                         total_token_num,
                     ),
@@ -459,7 +430,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 total_token_num,
             )
@@ -472,7 +442,6 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
                         torch.from_numpy(predict_ids).cuda().reshape(-1),
                         mem_indexes,
                         b_req_idx,
-                        b_start_loc,
                         b_seq_len,
                         total_token_num,
                     ),

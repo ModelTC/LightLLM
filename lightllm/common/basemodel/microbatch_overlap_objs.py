@@ -10,7 +10,6 @@ class DecodeMicroBatch:
     input_ids: torch.Tensor
     mem_indexes: torch.Tensor
     b_req_idx: torch.Tensor
-    b_start_loc: torch.Tensor
     b_seq_len: torch.Tensor
 
 
@@ -22,7 +21,6 @@ class PrefillMicroBatch:
     input_ids: torch.Tensor
     mem_indexes: torch.Tensor
     b_req_idx: torch.Tensor
-    b_start_loc: torch.Tensor
     b_seq_len: torch.Tensor
     b_ready_cache_len: torch.Tensor
     multimodal_params: list

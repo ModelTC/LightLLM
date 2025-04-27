@@ -234,7 +234,6 @@ class TpPartBaseModel:
         input_ids: torch.Tensor,
         mem_indexes: torch.Tensor,
         b_req_idx: torch.Tensor,
-        b_start_loc: torch.Tensor,
         b_seq_len: torch.Tensor,
         b_ready_cache_len: torch.Tensor = None,
         multimodal_params=None,
@@ -250,7 +249,6 @@ class TpPartBaseModel:
                 input_ids,
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 b_ready_cache_len,
                 multimodal_params,
@@ -263,7 +261,6 @@ class TpPartBaseModel:
                 input_ids,
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 multimodal_params,
             )
@@ -276,7 +273,6 @@ class TpPartBaseModel:
         input_ids,
         mem_indexes,
         b_req_idx,
-        b_start_loc,
         b_seq_len,
         b_ready_cache_len,
         multimodal_params,
@@ -289,9 +285,8 @@ class TpPartBaseModel:
         infer_state.batch_size = batch_size
         infer_state.total_token_num = total_token_num
         infer_state.max_len_in_batch = max_len_in_batch
-        assert b_req_idx.shape[0] == b_start_loc.shape[0] == b_seq_len.shape[0]
+        assert b_req_idx.shape[0] == b_seq_len.shape[0]
         infer_state.b_req_idx = b_req_idx
-        infer_state.b_start_loc = b_start_loc
         infer_state.b_seq_len = b_seq_len
         if b_ready_cache_len is not None:
             infer_state.b_ready_cache_len = b_ready_cache_len
@@ -330,7 +325,6 @@ class TpPartBaseModel:
         input_ids,
         mem_indexes,
         b_req_idx,
-        b_start_loc,
         b_seq_len,
         multimodal_params,
     ):
@@ -340,9 +334,8 @@ class TpPartBaseModel:
         infer_state.total_token_num = total_token_num
         infer_state.max_len_in_batch = max_len_in_batch
         infer_state.use_dynamic_prompt_cache = self.use_dynamic_prompt_cache
-        assert b_req_idx.shape[0] == b_start_loc.shape[0] == b_seq_len.shape[0]
+        assert b_req_idx.shape[0] == b_seq_len.shape[0]
         infer_state.b_req_idx = b_req_idx
-        infer_state.b_start_loc = b_start_loc
         infer_state.b_seq_len = b_seq_len
         infer_state.multimodal_params = multimodal_params
 
@@ -382,9 +375,8 @@ class TpPartBaseModel:
             infer_state.total_token_num = cur_batch.total_token_num
             infer_state.max_len_in_batch = cur_batch.max_len_in_batch
             infer_state.use_dynamic_prompt_cache = self.use_dynamic_prompt_cache
-            assert cur_batch.b_req_idx.shape[0] == cur_batch.b_start_loc.shape[0] == cur_batch.b_seq_len.shape[0]
+            assert cur_batch.b_req_idx.shape[0] == cur_batch.b_seq_len.shape[0]
             infer_state.b_req_idx = cur_batch.b_req_idx
-            infer_state.b_start_loc = cur_batch.b_start_loc
             infer_state.b_seq_len = cur_batch.b_seq_len
             infer_state.multimodal_params = None
             infer_state.microbatch_index = batch_index
@@ -449,9 +441,8 @@ class TpPartBaseModel:
             infer_state.batch_size = cur_batch.batch_size
             infer_state.total_token_num = cur_batch.total_token_num
             infer_state.max_len_in_batch = cur_batch.max_len_in_batch
-            assert cur_batch.b_req_idx.shape[0] == cur_batch.b_start_loc.shape[0] == cur_batch.b_seq_len.shape[0]
+            assert cur_batch.b_req_idx.shape[0] == cur_batch.b_seq_len.shape[0]
             infer_state.b_req_idx = cur_batch.b_req_idx
-            infer_state.b_start_loc = cur_batch.b_start_loc
             infer_state.b_seq_len = cur_batch.b_seq_len
             if cur_batch.b_ready_cache_len is not None:
                 infer_state.b_ready_cache_len = cur_batch.b_ready_cache_len
@@ -595,7 +586,6 @@ class TpPartBaseModel:
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-            b_start_loc = torch.arange(0, 1, dtype=torch.int32, device="cuda")
             total_token_num = self.batch_max_tokens
             logics = self.forward(
                 1,
@@ -604,7 +594,6 @@ class TpPartBaseModel:
                 dummy_input_ids,
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 b_ready_cache_len=b_ready_cache_len,
                 is_prefill=True,

@@ -92,10 +92,8 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
         test_data = torch.from_numpy(test_data).cuda()
 
         b_req_idx = model_part.req_manager.alloc(batch_size).int()
-        b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         for i in range(batch_size):
-            b_start_loc[i] = i * input_len
             b_seq_len[i] = input_len
 
         total_token_num = input_len * batch_size
@@ -107,7 +105,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
             test_data,
             mem_indexes,
             b_req_idx,
-            b_start_loc,
             b_seq_len,
             is_prefill=True,
         )
@@ -116,7 +113,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
         predict_ids = predict_ids.detach().cpu().numpy()
 
         for i in range(output_len):
-            b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
             total_token_num += batch_size
             b_seq_len += 1
             mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0])
@@ -127,7 +123,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 is_prefill=False,
             )
@@ -143,7 +138,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
             print("can use req size:", model_part.req_manager.can_use_req_size)
 
         b_req_idx = None
-        b_start_loc = None
         b_seq_len = None
 
         dist.barrier()
@@ -159,10 +153,8 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
         prefill_start_time = time.time()
 
         b_req_idx = model_part.req_manager.alloc(batch_size).int()
-        b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         for i in range(batch_size):
-            b_start_loc[i] = i * input_len
             b_seq_len[i] = input_len
 
         total_token_num = batch_size * input_len
@@ -174,7 +166,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
             test_data,
             mem_indexes,
             b_req_idx,
-            b_start_loc,
             b_seq_len,
             is_prefill=True,
         )
@@ -189,7 +180,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
         for i in range(output_len):
             torch.cuda.synchronize()
             step_start = time.time()
-            b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
             total_token_num += batch_size
             b_seq_len += 1
             mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0])
@@ -200,7 +190,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 is_prefill=False,
             )
@@ -226,7 +215,6 @@ def tppart_model_infer(model_class, model_kvargs, batch_sizes, input_len, output
                     fp_file.close()
 
         b_req_idx = None
-        b_start_loc = None
         b_seq_len = None
         test_data = None
 

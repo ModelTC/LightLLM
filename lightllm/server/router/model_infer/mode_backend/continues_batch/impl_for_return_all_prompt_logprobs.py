@@ -21,7 +21,7 @@ class ReturnPromptLogProbBackend(ContinuesBatchBackend):
 
         prompt_all_logits = self.model.forward(**kwargs)
         input_ids = kwargs["input_ids"]
-        b_start_loc = kwargs["b_start_loc"]
+        b_ready_cache_len = kwargs["b_ready_cache_len"]
         b_seq_len = kwargs["b_seq_len"]
         last_index = torch.cumsum(b_seq_len, dim=0, dtype=torch.long) - 1
         logits = prompt_all_logits[last_index, :]
@@ -30,12 +30,14 @@ class ReturnPromptLogProbBackend(ContinuesBatchBackend):
         next_token_ids = next_token_ids.detach().cpu().numpy()
         next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
+        b_q_seq_len = b_seq_len - b_ready_cache_len
+        b_start_loc = torch.cumsum(b_q_seq_len, dim=0, dtype=torch.long) - b_q_seq_len
         b_start_loc = b_start_loc.cpu().numpy()
-        b_seq_len = b_seq_len.cpu().numpy()
+        b_q_seq_len = b_q_seq_len.cpu().numpy()
 
         finished_req_ids = []
-        for req_obj, next_token_id, next_token_logprob, start_loc, seq_len in zip(
-            run_reqs, next_token_ids, next_token_logprobs, b_start_loc, b_seq_len
+        for req_obj, next_token_id, next_token_logprob, start_loc, q_seq_len in zip(
+            run_reqs, next_token_ids, next_token_logprobs, b_start_loc, b_q_seq_len
         ):
             # prefill and decode is same
             req_obj: InferReq = req_obj
@@ -45,8 +47,8 @@ class ReturnPromptLogProbBackend(ContinuesBatchBackend):
             req_obj.cur_output_len += 1
 
             # 填充 logprobs 信息
-            cur_ids: torch.Tensor = input_ids[start_loc : start_loc + seq_len]
-            cur_logits = prompt_all_logits[start_loc : start_loc + seq_len]
+            cur_ids: torch.Tensor = input_ids[start_loc : start_loc + q_seq_len]
+            cur_logits = prompt_all_logits[start_loc : start_loc + q_seq_len]
             cur_logprobs = torch.log_softmax(cur_logits, dim=-1, dtype=torch.float)[0:-1, :]
             cur_logprobs = torch.gather(cur_logprobs, dim=1, index=cur_ids[1:].view(-1, 1)).detach().cpu().numpy()
 

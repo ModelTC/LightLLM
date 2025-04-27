@@ -138,7 +138,6 @@ class CudaGraph:
             mem_indexes = model.mem_manager.alloc(len(dummy_input_ids)).cuda()
             b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
             b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-            b_start_loc = torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
             total_token_num = prefill_input_len * batch_size
             logics = model.forward(
                 batch_size,
@@ -147,7 +146,6 @@ class CudaGraph:
                 dummy_input_ids,
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 b_ready_cache_len=b_ready_cache_len,
                 is_prefill=True,
@@ -162,7 +160,6 @@ class CudaGraph:
             torch.cuda.empty_cache()
 
             # dummy decoding, capture the cudagraph
-            b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
             total_token_num += batch_size
             b_seq_len += 1
             mem_indexes = model.mem_manager.alloc(len(predict_ids)).cuda()
@@ -173,7 +170,6 @@ class CudaGraph:
                 torch.from_numpy(predict_ids).cuda().reshape(-1),
                 mem_indexes,
                 b_req_idx,
-                b_start_loc,
                 b_seq_len,
                 is_prefill=False,
             )
@@ -205,7 +201,6 @@ class CudaGraph:
                 mem_indexes = model.mem_manager.alloc(len(dummy_input_ids)).cuda()
                 b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
                 b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-                b_start_loc = torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
                 total_token_num = prefill_input_len * batch_size
                 logics = model.forward(
                     batch_size,
@@ -214,7 +209,6 @@ class CudaGraph:
                     dummy_input_ids,
                     mem_indexes,
                     b_req_idx,
-                    b_start_loc,
                     b_seq_len,
                     b_ready_cache_len=b_ready_cache_len,
                     is_prefill=True,
@@ -229,7 +223,6 @@ class CudaGraph:
                 torch.cuda.empty_cache()
 
                 # dummy decoding, capture the cudagraph
-                b_start_loc = b_start_loc + torch.arange(0, batch_size, dtype=torch.int32, device="cuda")
                 total_token_num += batch_size
                 b_seq_len += 1
                 mem_indexes = model.mem_manager.alloc(len(predict_ids)).cuda()
@@ -241,7 +234,6 @@ class CudaGraph:
                     input_ids=torch.from_numpy(predict_ids).cuda().reshape(-1),
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
-                    b_start_loc=b_start_loc,
                     b_seq_len=b_seq_len,
                 )
                 decode_batches.append(micro_batch)

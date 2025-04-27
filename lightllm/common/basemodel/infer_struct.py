@@ -69,6 +69,7 @@ class InferStateInfo:
                 b_ready_cache_len=self.b_ready_cache_len,
                 b_seq_len=self.b_seq_len,
             )
+            self.b_start_loc = self.b1_cu_q_seq_len[0:-1]
         else:
             (
                 self.b_q_seq_len,
@@ -79,6 +80,7 @@ class InferStateInfo:
                 self.max_q_seq_len,
                 self.max_kv_seq_len,
             ) = gen_decode_params(b_seq_len=self.b_seq_len)
+            self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def copy_for_cuda_graph(self, new_infer_state):
         for attr_name, attr_value in vars(new_infer_state).items():
