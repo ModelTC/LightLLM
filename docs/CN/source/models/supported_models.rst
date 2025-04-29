@@ -32,14 +32,6 @@ lightllm 支持大多数的主流的开源大语言模型以及多模态模型�
     - :code:`--eos_id 151643 --trust_remote_code`
   * - `ChatGLM2-6b <https://github.com/THUDM/ChatGLM2-6B>`_
     - :code:`--trust_remote_code`
-  * - `Baichuan-7b <https://github.com/baichuan-inc/Baichuan-7B>`_
-    - :code:`--trust_remote_code`  
-  * - `Baichuan-13b <https://github.com/baichuan-inc/Baichuan-13B>`_
-    - :code:`--trust_remote_code`
-  * - `Baichuan2-7b <https://github.com/baichuan-inc/Baichuan2>`_
-    - :code:`--trust_remote_code`
-  * - `Baichuan2-13b <https://github.com/baichuan-inc/Baichuan2>`_
-    - :code:`--trust_remote_code`
   * - `InternLM-7b <https://github.com/InternLM/InternLM>`_
     - :code:`--trust_remote_code`
   * - `Yi-34b <https://huggingface.co/01-ai/Yi-34B>`_
@@ -58,6 +50,12 @@ lightllm 支持大多数的主流的开源大语言模型以及多模态模型�
     - :code:`--data_type bfloat16`
   * - `DeepSeek-V2 <https://huggingface.co/deepseek-ai/DeepSeek-V2>`_ 
     - :code:`--data_type bfloat16`
+  * - `DeepSeek-V3 <https://huggingface.co/deepseek-ai/DeepSeek-V2>`_ 
+    - 
+  * - `Qwen3 <https://github.com/QwenLM/Qwen3>`_ 
+    - 
+  * - `Qwen3-Moe <https://github.com/QwenLM/Qwen3>`_ 
+    - 
 
 
 多模态模型

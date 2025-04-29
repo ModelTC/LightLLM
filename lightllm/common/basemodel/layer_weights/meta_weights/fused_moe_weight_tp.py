@@ -45,7 +45,7 @@ class FusedMoeWeightTP(BaseWeight):
         self.e_score_correction_bias = None
         self.w2_list = [None] * self.n_routed_experts
         self.w2_scale_list = [None] * self.n_routed_experts
-        self.scoring_func = network_config["scoring_func"]
+        self.scoring_func = network_config.get("scoring_func", "softmax")
         self.w1 = [None, None]  # weight, weight_scale
         self.w2 = [None, None]  # weight, weight_scale
         self.lock = threading.Lock()
