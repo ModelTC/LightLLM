@@ -16,6 +16,10 @@ async def build_prompt(request, tools) -> str:
         kwargs["character_settings"] = request.character_settings
     if request.role_settings:
         kwargs["role_setting"] = request.role_settings
+
+    if request.chat_template_kwargs:
+        kwargs.update(request.chat_template_kwargs)
+
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
     except:

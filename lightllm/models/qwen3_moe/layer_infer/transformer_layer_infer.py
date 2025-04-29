@@ -29,6 +29,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         self.norm_topk_prob = network_config["norm_topk_prob"]
         super().__init__(layer_num, network_config, mode)
         self.head_dim_ = network_config["head_dim"]
+        self.tp_k_head_num_ = max(self.tp_k_head_num_, 1)
+        self.tp_v_head_num_ = max(self.tp_v_head_num_, 1)
         return
 
     def _bind_func(self):

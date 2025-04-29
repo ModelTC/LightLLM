@@ -19,12 +19,6 @@ from functools import partial
 
 class Qwen3TransformerLayerWeight(LlamaTransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        self.n_routed_experts = network_config["num_experts"]
-        self.is_moe = (
-            network_config["num_experts"] > 0
-            and layer_num not in network_config["mlp_only_layers"]
-            and (layer_num + 1) % network_config["decoder_sparse_step"] == 0
-        )
         super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
         return
 

@@ -46,6 +46,31 @@ class Qwen3MOETransformerLayerWeight(LlamaTransformerLayerWeight):
         self._ffn_norm_weight_name = f"model.layers.{self.layer_num_}.post_attention_layernorm.weight"
         self._ffn_norm_bias_name = None
 
+    def _parse_config(self):
+        self.tp_q_head_num_ = self.network_config_["num_attention_heads"] // self.tp_world_size_
+        self.tp_k_head_num_ = max(self.network_config_["num_key_value_heads"] // self.tp_world_size_, 1)
+        self.tp_v_head_num_ = self.tp_k_head_num_
+        self.tp_o_head_num_ = self.tp_q_head_num_
+        self.head_dim = self.network_config_["head_dim"]
+        assert self.tp_k_head_num_ * self.tp_world_size_ % self.network_config_["num_key_value_heads"] == 0
+
+    def _repeat_weight(self, name, weights):
+        repeat_size = self.tp_k_head_num_ * self.tp_world_size_ // self.network_config_["num_key_value_heads"]
+        repeat_params = (1, repeat_size, 1, 1)
+        if name in weights:
+            weights[name] = (
+                weights[name]
+                .reshape(self.network_config_["num_key_value_heads"], self.head_dim, -1)
+                .unsqueeze(1)
+                .repeat(repeat_params)
+                .reshape(self.network_config_["num_key_value_heads"] * self.head_dim * repeat_size, -1)
+            )
+
+    def load_hf_weights(self, weights):
+        self._repeat_weight(self._k_weight_name, weights)
+        self._repeat_weight(self._v_weight_name, weights)
+        return super().load_hf_weights(weights)
+
     def _init_weight(self):
         self._init_qkv()
         self._init_o()
@@ -99,6 +124,5 @@ class Qwen3MOETransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_norm(self):
         super()._init_norm()
-
         self.q_norm_weight_ = NormWeight(weight_name=self._q_norm_name, data_type=self.data_type_)
         self.k_norm_weight_ = NormWeight(weight_name=self._k_norm_name, data_type=self.data_type_)

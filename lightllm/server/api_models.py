@@ -76,6 +76,7 @@ class ChatCompletionRequest(BaseModel):
     ignore_eos: Optional[bool] = False
     role_settings: Optional[Dict[str, str]] = None
     character_settings: Optional[List[Dict[str, str]]] = None
+    chat_template_kwargs: Optional[Dict[str, bool]] = None
 
 
 class FunctionResponse(BaseModel):
