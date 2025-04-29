@@ -16,19 +16,19 @@ class RequestThread(threading.Thread):
         if response.status_code == 200:
             print(response.json())
         else:
-            print('Error:', response.status_code, response.text)
+            print("Error:", response.status_code, response.text)
 
 
-url = 'http://localhost:8000/generate'
-headers = {'Content-Type': 'application/json'}
+url = "http://localhost:8000/generate"
+headers = {"Content-Type": "application/json"}
 
 for i in range(1):
     data = {
-        'inputs': 'San Francisco is a',
+        "inputs": "San Francisco is a",
         # 'temperature': 0.1,
-        'parameters' : {
-            'do_sample': False,
-        }
+        "parameters": {
+            "do_sample": False,
+        },
     }
     thread = RequestThread(url, headers, data)
     thread.start()
@@ -37,12 +37,12 @@ time.sleep(2)
 
 for i in range(20):
     data = {
-        'inputs': 'San Francisco is a',
-        'parameters': {
-            'do_sample': False,
-            'ignore_eos': True,
-            'max_new_tokens': 200,
-        }
+        "inputs": "San Francisco is a",
+        "parameters": {
+            "do_sample": False,
+            "ignore_eos": True,
+            "max_new_tokens": 200,
+        },
     }
     thread = RequestThread(url, headers, data)
     thread.start()

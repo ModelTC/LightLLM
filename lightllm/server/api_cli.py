@@ -105,6 +105,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--eos_id", nargs="+", type=int, default=None, help="eos stop token id, if None, will load from config.json"
     )
     parser.add_argument(
+        "--tool_call_parser",
+        type=str,
+        choices=["qwen25", "llama3", "mistral"],
+        default=None,
+        help="tool call parser type",
+    )
+    parser.add_argument(
         "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
     )
     parser.add_argument("--nnodes", type=int, default=1, help="the number of nodes")

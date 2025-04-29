@@ -20,6 +20,34 @@ class Message(BaseModel):
     content: Union[str, List[MessageContent]]
 
 
+class Function(BaseModel):
+    """Function descriptions."""
+
+    description: Optional[str] = Field(default=None, examples=[None])
+    name: Optional[str] = None
+    parameters: Optional[object] = None
+
+
+class Tool(BaseModel):
+    """Function wrapper."""
+
+    type: str = Field(default="function", examples=["function"])
+    function: Function
+
+
+class ToolChoiceFuncName(BaseModel):
+    """The name of tool choice function."""
+
+    name: Optional[str] = None
+
+
+class ToolChoice(BaseModel):
+    """The tool choice definition."""
+
+    function: ToolChoiceFuncName
+    type: Literal["function"] = Field(default="function", examples=["function"])
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Message]
@@ -35,6 +63,12 @@ class ChatCompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
 
+    # OpenAI Adaptive parameters for tool call
+    tools: Optional[List[Tool]] = Field(default=None, examples=[None])
+    tool_choice: Union[ToolChoice, Literal["auto", "required", "none"]] = Field(
+        default="auto", examples=["none"]
+    )  # noqa
+
     # Additional parameters supported by LightLLM
     do_sample: Optional[bool] = False
     top_k: Optional[int] = -1
@@ -42,6 +76,21 @@ class ChatCompletionRequest(BaseModel):
     ignore_eos: Optional[bool] = False
     role_settings: Optional[Dict[str, str]] = None
     character_settings: Optional[List[Dict[str, str]]] = None
+
+
+class FunctionResponse(BaseModel):
+    """Function response."""
+
+    name: Optional[str] = None
+    arguments: Optional[str] = None
+
+
+class ToolCall(BaseModel):
+    """Tool call response."""
+
+    id: str
+    type: Literal["function"] = "function"
+    function: FunctionResponse
 
 
 class UsageInfo(BaseModel):
@@ -53,6 +102,7 @@ class UsageInfo(BaseModel):
 class ChatMessage(BaseModel):
     role: str
     content: str
+    tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -77,6 +127,7 @@ class ChatCompletionResponse(BaseModel):
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
 
 class ChatCompletionStreamResponseChoice(BaseModel):
