@@ -26,6 +26,16 @@ class Qwen3MOEModel(LlamaTpPartModel):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         return
 
+    def _init_some_value(self):
+        # Dealing with head_dim_!=n_embed // num_attention_heads scenarios, such as mistral 13B
+        head_dim_ = self.config["n_embed"] // self.config["num_attention_heads"]
+        self.head_dim_ = self.config.get("head_dim", head_dim_)
+        self.tp_k_head_num_ = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
+        self.tp_v_head_num_ = self.tp_k_head_num_
+        self.layers_num = self.config["n_layer"]
+        self.vocab_size = self.config["vocab_size"]
+        return
+
     def _init_mem_manager(self):
         head_dim_ = self.config["hidden_size"] // self.config["num_attention_heads"]
         head_dim_ = self.config.get("head_dim", head_dim_)

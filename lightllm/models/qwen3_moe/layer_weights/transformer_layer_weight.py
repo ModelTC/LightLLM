@@ -60,15 +60,21 @@ class Qwen3MOETransformerLayerWeight(LlamaTransformerLayerWeight):
         if name in weights:
             weights[name] = (
                 weights[name]
-                .reshape(self.network_config_["num_key_value_heads"], self.head_dim, -1)
+                .reshape(self.network_config_["num_key_value_heads"], -1, weights[name].shape[1])
                 .unsqueeze(1)
                 .repeat(repeat_params)
-                .reshape(self.network_config_["num_key_value_heads"] * self.head_dim * repeat_size, -1)
+                .reshape(-1, weights[name].shape[1])
             )
 
     def load_hf_weights(self, weights):
         self._repeat_weight(self._k_weight_name, weights)
         self._repeat_weight(self._v_weight_name, weights)
+        kv_b_quant_method = self.quant_cfg.get_quant_method(self.layer_num_, "kv_b_proj")
+        if self.quant_cfg.quantized_weight:
+            _k_scale_weight_name = self._k_weight_name.replace("weight", kv_b_quant_method.weight_scale_suffix)
+            self._repeat_weight(_k_scale_weight_name, weights)
+            _v_scale_weight_name = self._v_weight_name.replace("weight", kv_b_quant_method.weight_scale_suffix)
+            self._repeat_weight(_v_scale_weight_name, weights)
         return super().load_hf_weights(weights)
 
     def _init_weight(self):
