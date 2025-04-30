@@ -26,8 +26,9 @@ class LlamaFlashInferStateExtraInfo:
     def __init__(self, model):
         tp_world_size = get_dp_world_size()
         self.tp_q_head_num = model.config["num_attention_heads"] // tp_world_size
-        self.tp_kv_head_num = model.config["num_key_value_heads"] // tp_world_size
-        self.head_dim = model.config["hidden_size"] // model.config["num_attention_heads"]
+        self.tp_kv_head_num = max(model.config["num_key_value_heads"] // tp_world_size, 1)
+        head_dim = model.config["hidden_size"] // model.config["num_attention_heads"]
+        self.head_dim = model.config.get("head_dim", head_dim)
         self.workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8).to(get_current_device_id())
         self.max_seq_length = model.max_seq_length
         self.kv_indices_buffer = [
@@ -104,33 +105,29 @@ class LlamaTpPartModel(TpPartBaseModel):
         """
         模型特殊的一些初始化
         """
-        if self.config.get("use_rope_yarn", False) or (
-            self.config.get("rope_scaling", None) is not None
-            and self.config.get("rope_scaling", {}).get("type", "base") == "yarn"
-        ):
+        rope_scaling = self.config.get("rope_scaling", None)
+        if rope_scaling is None:
+            self._init_to_get_rotary()
+            return
+
+        if "rope_type" in rope_scaling:
+            scaling_type = rope_scaling["rope_type"]
+        elif "type" in rope_scaling:
+            scaling_type = rope_scaling["type"]
+        else:
+            raise ValueError(f"Unknown RoPE scaling format {rope_scaling}")
+        if scaling_type == "yarn":
             self._init_to_get_yarn_rotary()
-        elif self.config.get("use_dynamic_ntk", False) or (
-            self.config.get("rope_scaling", None) is not None
-            and self.config.get("rope_scaling", {}).get("type", "base") == "dynamic"
-        ):
+        elif scaling_type == "dynamic":
             self._init_to_get_dynamic_ntk_rotary()
-        elif (
-            self.config.get("rope_scaling", None) is not None
-            and self.config.get("rope_scaling", {}).get("type", "base") == "su"
-        ):
+        elif scaling_type == "su":
             self._init_to_su_rotary()
-        elif (
-            self.config.get("rope_scaling", None) is not None
-            and self.config.get("rope_scaling", {}).get("rope_type", "base") == "llama3"
-        ):
+        elif scaling_type == "llama3":
             self._init_to_get_llama3_rotary()
-        elif (
-            self.config.get("rope_scaling", None) is not None
-            and self.config.get("rope_scaling", {}).get("type", "base") == "mrope"
-        ):
+        elif scaling_type == "mrope":
             self._init_to_get_mrope_rotary()
         else:
-            self._init_to_get_rotary()
+            raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
         return
 
     def _init_weights(self):
@@ -269,7 +266,6 @@ class LlamaTpPartModel(TpPartBaseModel):
         pos_freqs = base ** (torch.arange(0, dim, 2).float().cuda() / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scale * pos_freqs)
-
         low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_max_position_embeddings)
         inv_freq_mask = (
             1 - linear_ramp_mask(low, high, dim // 2).float().cuda()
