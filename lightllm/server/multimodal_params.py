@@ -8,7 +8,6 @@ from PIL import Image
 from fastapi import Request
 from lightllm.utils.multimodal_utils import fetch_resource
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
 
 logger = init_logger(__name__)
 
@@ -42,6 +41,7 @@ class AudioItem:
 
             # check if valid audio bytes
             audio_values, _ = librosa.load(BytesIO(audio_data), sr=16000)
+            from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
 
             self.audio_length = max(audio_values.shape[0], MIN_AUDIO_LEN)  # 如果音频过短，会被pad到480的长度
             self._preload_data = audio_data
