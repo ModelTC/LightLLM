@@ -1,7 +1,7 @@
 import os
 import json
 import torch
-
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.stablelm.layer_infer.transformer_layer_infer import StablelmTransformerLayerInfer
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
 from lightllm.models.stablelm.layer_weights.pre_and_post_layer_weight import StableLMPreAndPostLayerWeight
@@ -10,6 +10,7 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.build_utils import repair_config
 
 
+@ModelRegistry("stablelm")
 class StablelmTpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = StableLMPreAndPostLayerWeight

@@ -6,7 +6,7 @@ import multiprocessing
 from transformers import PretrainedConfig
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.models.deepseek2.model import Deepseek2TpPartModel
+from lightllm.models import get_model
 from lightllm.common.basemodel.microbatch_overlap_objs import DecodeMicroBatch, PrefillMicroBatch
 from torch.profiler import profile, record_function, ProfilerActivity
 from lightllm.utils.log_utils import init_logger
@@ -15,12 +15,12 @@ import torch.cuda as cuda
 logger = init_logger(__name__)
 
 
-def test_model_inference(args, model_class):
+def test_model_inference(args):
     ans_queue = Queue()
     workers = []
     dp_size = args.get("dp", 1)
 
-    for rank_id in range(args.node_rank * 8, (args.node_rank + 1) * 8):
+    for rank_id in range(args.node_rank * args.tp, (args.node_rank + 1) * args.tp):
         model_kvargs = {
             "args": args,
             "nccl_host": args.nccl_host,
@@ -43,7 +43,7 @@ def test_model_inference(args, model_class):
         }
         proc = multiprocessing.Process(
             target=tppart_model_infer,
-            args=(args, model_class, model_kvargs, args.batch_size, args.input_len, args.output_len, ans_queue),
+            args=(args, model_kvargs, args.batch_size, args.input_len, args.output_len, ans_queue),
         )
         proc.start()
         workers.append(proc)
@@ -184,7 +184,7 @@ def torch_profile(fn, log_dir=None):
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
 
-def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, output_len, ans_queue):
+def tppart_model_infer(args, model_kvargs, batch_size, input_len, output_len, ans_queue):
     args = get_env_start_args()
     import triton.profiler as proton
     import torch
@@ -200,14 +200,12 @@ def tppart_model_infer(args, model_class, model_kvargs, batch_size, input_len, o
         group_size = 2
     init_distributed_env(model_kvargs)
     dist_group_manager.create_groups(group_size=group_size)
-
-    if model_class == Deepseek2TpPartModel:
-        model_cfg, _ = PretrainedConfig.get_config_dict(model_kvargs["weight_dir"])
+    model_cfg, _ = PretrainedConfig.get_config_dict(model_kvargs["weight_dir"])
     dist.barrier()
 
     torch.cuda.empty_cache()
 
-    model_part = model_class(model_kvargs)
+    model_part, _ = get_model(model_cfg, model_kvargs)
 
     # warm up
     # test_data = np.vstack([np.arange(5, input_len + 5) for _ in range(batch_size)])

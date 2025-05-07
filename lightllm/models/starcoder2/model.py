@@ -1,5 +1,5 @@
 import torch
-
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.starcoder2.layer_weights.pre_and_post_layer_weight import Starcoder2PreAndPostLayerWeight
 from lightllm.models.starcoder2.layer_weights.transformer_layer_weight import Starcoder2TransformerLayerWeight
@@ -12,6 +12,7 @@ from lightllm.common.mem_utils import select_mem_manager_class
 from lightllm.common.basemodel import TpPartBaseModel
 
 
+@ModelRegistry("starcoder2")
 class Starcoder2TpPartModel(TpPartBaseModel):
     # weight class
     pre_and_post_weight_class = Starcoder2PreAndPostLayerWeight

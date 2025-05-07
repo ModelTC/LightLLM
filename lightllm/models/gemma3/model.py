@@ -3,6 +3,7 @@ import re
 import json
 import numpy as np
 import torch
+from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.mem_utils import select_mem_manager_class
 from lightllm.models.gemma3.infer_struct import Gemma3InferStateInfo
@@ -21,6 +22,7 @@ from transformers import AutoConfig
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
 
 # Warp of the origal tokenizer
 class Gemma3Tokenizer(BaseMultiModalTokenizer):
@@ -77,6 +79,7 @@ class Gemma3Tokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
+@ModelRegistry("gemma3")
 class Gemma3TpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = Gemma3PreAndPostLayerWeight

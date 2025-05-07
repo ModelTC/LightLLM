@@ -1,3 +1,4 @@
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.starcoder.layer_infer.transformer_layer_infer import StarcoderTransformerLayerInfer
 from lightllm.models.starcoder.layer_infer.pre_layer_infer import StarcoderPreLayerInfer
 from lightllm.models.starcoder.layer_weights.transformer_layer_weight import StarcoderTransformerLayerWeight
@@ -9,6 +10,7 @@ from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel import InferStateInfo
 
 
+@ModelRegistry("gpt_bigcode")
 class StarcoderTpPartModel(TpPartBaseModel):
     # weight class
     pre_and_post_weight_class = StarcoderPreAndPostLayerWeight

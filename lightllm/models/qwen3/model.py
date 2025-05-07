@@ -1,5 +1,6 @@
 import torch
 from typing import final
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3.layer_infer.transformer_layer_infer import Qwen3TransformerLayerInfer
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -10,6 +11,7 @@ from lightllm.common.mem_utils import select_mem_manager_class
 logger = init_logger(__name__)
 
 
+@ModelRegistry("qwen3")
 class Qwen3TpPartModel(LlamaTpPartModel):
     # weight class
     transformer_weight_class = Qwen3TransformerLayerWeight

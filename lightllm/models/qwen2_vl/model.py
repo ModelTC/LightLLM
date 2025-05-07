@@ -13,6 +13,7 @@ from transformers.tokenization_utils_base import PaddingStrategy, PreTokenizedIn
 from typing import List, Optional, Union
 from transformers.utils import TensorType, logging
 from lightllm.common.build_utils import repair_config
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
@@ -90,6 +91,7 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
+@ModelRegistry(["qwen2_vl", "qwen2_5_vl"])
 class Qwen2VLTpPartModel(Qwen2TpPartModel):
 
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer

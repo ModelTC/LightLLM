@@ -2,6 +2,7 @@ import os
 import json
 import torch
 import math
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
@@ -43,6 +44,7 @@ class LlamaFlashInferStateExtraInfo:
         self.kv_data_type = model.data_type
 
 
+@ModelRegistry("llama")
 class LlamaTpPartModel(TpPartBaseModel):
     # weight class
     pre_and_post_weight_class = LlamaPreAndPostLayerWeight

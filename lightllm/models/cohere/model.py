@@ -5,6 +5,7 @@ from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_cohe
     TransformerLayerCohereInferTpl,
 )
 from lightllm.common.mem_manager import MemoryManager
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.cohere.infer_struct import CohereInferStateInfo
 from lightllm.models.cohere.layer_infer.post_layer_infer import CoherePostLayerInfer
 from lightllm.models.cohere.layer_infer.transformer_layer_infer import CohereTransformerLayerInfer
@@ -17,6 +18,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+@ModelRegistry("cohere")
 class CohereTpPartModel(LlamaTpPartModel):
     pre_and_post_weight_class = CoherePreAndPostLayerWeight
     transformer_weight_class = CohereTransformerLayerWeight

@@ -1,11 +1,13 @@
 import os
 import json
 import torch
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.minicpm.layer_weights.transformer_layer_weight import MiniCPMTransformerLayerWeight
 from lightllm.models.minicpm.layer_weights.pre_and_post_layer_weight import MiniCPMPreAndPostLayerWeight
 from lightllm.models.llama.model import LlamaTpPartModel
 
 
+@ModelRegistry("minicpm")
 class MiniCPMTpPartModel(LlamaTpPartModel):
     # weight class
     transformer_weight_class = MiniCPMTransformerLayerWeight
@@ -13,4 +15,3 @@ class MiniCPMTpPartModel(LlamaTpPartModel):
 
     def __init__(self, kvargs):
         super().__init__(kvargs)
-    

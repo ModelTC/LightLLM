@@ -1,3 +1,4 @@
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.gemma_2b.layer_weights.transformer_layer_weight import Gemma_2bTransformerLayerWeight
 from lightllm.models.gemma_2b.layer_weights.pre_and_post_layer_weight import Gemma_2bPreAndPostLayerWeight
 from lightllm.models.gemma_2b.layer_infer.pre_layer_infer import Gemma_2bPreLayerInfer
@@ -8,6 +9,7 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.mem_utils import select_mem_manager_class
 
 
+@ModelRegistry("gemma")
 class Gemma_2bTpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = Gemma_2bPreAndPostLayerWeight

@@ -7,46 +7,10 @@ import socket
 from datetime import timedelta
 from typing import Dict, List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
-from lightllm.models.cohere.model import CohereTpPartModel
-from lightllm.models.mixtral.model import MixtralTpPartModel
-from lightllm.models.bloom.model import BloomTpPartModel
-from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.starcoder.model import StarcoderTpPartModel
-from lightllm.models.starcoder2.model import Starcoder2TpPartModel
-from lightllm.models.qwen.model import QWenTpPartModel
-from lightllm.models.qwen2.model import Qwen2TpPartModel
-from lightllm.models.qwen3.model import Qwen3TpPartModel
-from lightllm.models.qwen3_moe.model import Qwen3MOEModel
-from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
-from lightllm.models.internlm.model import InternlmTpPartModel
-from lightllm.models.stablelm.model import StablelmTpPartModel
-from lightllm.models.internlm2.model import Internlm2TpPartModel
-from lightllm.models.internlm2_reward.model import Internlm2RewardTpPartModel
-from lightllm.models.mistral.model import MistralTpPartModel
-from lightllm.models.minicpm.model import MiniCPMTpPartModel
-from lightllm.models.llava.model import LlavaTpPartModel
-from lightllm.models.qwen_vl.model import QWenVLTpPartModel
-from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
-from lightllm.models.phi3.model import Phi3TpPartModel
-from lightllm.models.deepseek2.model import Deepseek2TpPartModel
-from lightllm.models.internvl.model import (
-    InternVLLlamaTpPartModel,
-    InternVLPhi3TpPartModel,
-    InternVLQwen2TpPartModel,
-    InternVLDeepSeek2TpPartModel,
-)
-from lightllm.models.internvl.model import InternVLInternlm2TpPartModel
-from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel
-from lightllm.models.qwen2_reward.model import Qwen2RewardTpPartModel
-from lightllm.models.gemma3.model import Gemma3TpPartModel
-from lightllm.models.tarsier2.model import (
-    Tarsier2Qwen2TpPartModel,
-    Tarsier2Qwen2VLTpPartModel,
-    Tarsier2LlamaTpPartModel,
-)
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.log_utils import init_logger
+from lightllm.models import get_model
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
 from lightllm.server.router.token_load import TokenLoad
@@ -148,94 +112,7 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
         }
-
-        try:
-            self.model_type = model_cfg.get("model_type", "")
-            if self.model_type == "bloom":
-                self.model = BloomTpPartModel(model_kvargs)
-            elif self.model_type == "llama":
-                self.model = LlamaTpPartModel(model_kvargs)
-            elif self.model_type == "qwen":
-                if "visual" in model_cfg:
-                    self.model = QWenVLTpPartModel(model_kvargs)
-                    self.is_multimodal = True
-                else:
-                    self.model = QWenTpPartModel(model_kvargs)
-            elif self.model_type == "gpt_bigcode":
-                self.model = StarcoderTpPartModel(model_kvargs)
-            elif self.model_type == "starcoder2":
-                self.model = Starcoder2TpPartModel(model_kvargs)
-            elif self.model_type == "chatglm":
-                self.model = ChatGlm2TpPartModel(model_kvargs)
-            elif self.model_type == "internlm":
-                self.model = InternlmTpPartModel(model_kvargs)
-            elif self.model_type == "internlm2":
-                if model_cfg["architectures"][0] == "InternLM2ForRewardModel":
-                    self.model = Internlm2RewardTpPartModel(model_kvargs)
-                else:
-                    self.model = Internlm2TpPartModel(model_kvargs)
-            elif self.model_type == "mistral":
-                self.model = MistralTpPartModel(model_kvargs)
-            elif self.model_type == "stablelm":
-                self.model = StablelmTpPartModel(model_kvargs)
-            elif self.model_type == "mixtral":
-                self.model = MixtralTpPartModel(model_kvargs)
-            elif self.model_type == "minicpm" or model_cfg["architectures"][0] == "MiniCPMForCausalLM":
-                self.model = MiniCPMTpPartModel(model_kvargs)
-            elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
-                llm_model_type = model_cfg.get("text_config").get("model_type")
-                if llm_model_type == "qwen2":
-                    self.model = Tarsier2Qwen2TpPartModel(model_kvargs)
-                elif llm_model_type == "qwen2_vl":
-                    self.model = Tarsier2Qwen2VLTpPartModel(model_kvargs)
-                elif llm_model_type == "llama":
-                    self.model = Tarsier2LlamaTpPartModel(model_kvargs)
-                self.is_multimodal = True
-            elif self.model_type == "llava":
-                self.model = LlavaTpPartModel(model_kvargs)
-                self.is_multimodal = True
-            elif self.model_type == "qwen2":
-                if model_cfg["architectures"][0] == "Qwen2ForRewardModel":
-                    self.model = Qwen2RewardTpPartModel(model_kvargs)
-                else:
-                    self.model = Qwen2TpPartModel(model_kvargs)
-            elif self.model_type == "qwen3":
-                self.model = Qwen3TpPartModel(model_kvargs)
-            elif self.model_type == "qwen3_moe":
-                self.model = Qwen3MOEModel(model_kvargs)
-            elif self.model_type in ["qwen2_vl", "qwen2_5_vl"]:
-                self.model = Qwen2VLTpPartModel(model_kvargs)
-                self.is_multimodal = True
-            elif self.model_type == "gemma":
-                self.model = Gemma_2bTpPartModel(model_kvargs)
-            elif self.model_type == "cohere":
-                self.model = CohereTpPartModel(model_kvargs)
-            elif self.model_type == "phi3":
-                self.model = Phi3TpPartModel(model_kvargs)
-            elif self.model_type in ["deepseek_v2", "deepseek_v3"]:
-                self.model = Deepseek2TpPartModel(model_kvargs)
-            elif self.model_type == "internvl_chat":
-                llm_model_type = model_cfg.get("llm_config").get("model_type")
-                if llm_model_type == "phi3":
-                    self.model = InternVLPhi3TpPartModel(model_kvargs)
-                elif llm_model_type == "internlm2":
-                    self.model = InternVLInternlm2TpPartModel(model_kvargs)
-                elif llm_model_type == "llama":
-                    self.model = InternVLLlamaTpPartModel(model_kvargs)
-                elif llm_model_type == "qwen2":
-                    self.model = InternVLQwen2TpPartModel(model_kvargs)
-                elif llm_model_type == "deepseek_v3":
-                    self.model = InternVLDeepSeek2TpPartModel(model_kvargs)
-                self.is_multimodal = True
-            elif self.model_type == "gemma3":
-                self.model = Gemma3TpPartModel(model_kvargs)
-                self.is_multimodal = True
-            else:
-                raise Exception(f"can not support {self.model_type} now")
-        except Exception as e:
-            self.logger.exception(str(e))
-            raise e
-
+        self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         set_random_seed(2147483647)
         self.radix_cache = (
             RadixCache(
@@ -253,7 +130,6 @@ class ModeBackend:
             self.preload_prompt_cache_kv_buffer(model_cfg)
 
         self.logger.info(f"loaded model class {self.model.__class__}")
-
         g_infer_context.register(
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,

@@ -1,6 +1,6 @@
 import json
 import os
-
+from lightllm.models.registry import ModelRegistry, llm_model_type_is
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -82,6 +82,7 @@ class Tarsier2Tokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
+@ModelRegistry("llava", condition=llm_model_type_is("qwen2"))
 class Tarsier2Qwen2TpPartModel(Qwen2TpPartModel):
     # weight class
     pre_and_post_weight_class = Tarsier2Qwen2PreAndPostLayerWeight
@@ -103,6 +104,7 @@ class Tarsier2Qwen2TpPartModel(Qwen2TpPartModel):
         return
 
 
+@ModelRegistry("llava", condition=llm_model_type_is("qwen2_vl"))
 class Tarsier2Qwen2VLTpPartModel(Qwen2VLTpPartModel):
     # weight class
     pre_and_post_weight_class = Tarsier2Qwen2PreAndPostLayerWeight
@@ -124,6 +126,7 @@ class Tarsier2Qwen2VLTpPartModel(Qwen2VLTpPartModel):
         return
 
 
+@ModelRegistry("llava", condition=llm_model_type_is("llama"))
 class Tarsier2LlamaTpPartModel(LlamaTpPartModel):
 
     pre_and_post_weight_class = Tarsier2LlamaPreAndPostLayerWeight

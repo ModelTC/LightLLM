@@ -2,6 +2,7 @@ import os
 import json
 import torch
 
+from lightllm.models.registry import ModelRegistry
 from lightllm.models.chatglm2.layer_infer.transformer_layer_infer import ChatGLM2TransformerLayerInfer
 from lightllm.models.chatglm2.layer_weights.transformer_layer_weight import ChatGLM2TransformerLayerWeight
 from lightllm.models.chatglm2.layer_weights.pre_and_post_layer_weight import ChatGLM2PreAndPostLayerWeight
@@ -12,6 +13,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+@ModelRegistry("chatglm")
 class ChatGlm2TpPartModel(LlamaTpPartModel):
     # Please use the fast tokenizer from:
     # [THUDM/chatglm3-6b PR #12](https://huggingface.co/THUDM/chatglm3-6b/discussions/12).
