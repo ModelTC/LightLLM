@@ -68,55 +68,39 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                 q_starts = self.b1_cu_q_seq_len.int()
                 kv_starts = self.b1_cu_kv_seq_len.int()
                 kv_last_page_len = torch.full((self.batch_size,), 1, dtype=torch.int32).to(input_ids.device)
-                if self.use_dynamic_prompt_cache:
-                    kv_indices = torch.empty(
-                        self.batch_size * self.flashinfer_extra_state.max_seq_length, dtype=torch.int32
-                    ).to(input_ids.device)
-                    repack_kv_index(
-                        self.req_manager.req_to_token_indexs,
-                        self.b_req_idx,
-                        self.b_seq_len,
-                        self.b_start_loc,
-                        self.max_len_in_batch,
-                        kv_indices,
-                    )
-                    self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
-                        self.flashinfer_extra_state.workspace_buffer,
-                        qo_indptr_buf=q_starts,
-                        paged_kv_indptr_buf=kv_starts,
-                        paged_kv_indices_buf=kv_indices,
-                        paged_kv_last_page_len_buf=kv_last_page_len,
-                    )
-                    self.prefill_wrapper.plan(
-                        q_starts,
-                        kv_starts,
-                        kv_indices,
-                        kv_last_page_len,
-                        self.flashinfer_extra_state.tp_q_head_num,
-                        self.flashinfer_extra_state.tp_kv_head_num,
-                        self.flashinfer_extra_state.head_dim,
-                        1,
-                        causal=True,
-                        pos_encoding_mode="NONE",
-                        logits_soft_cap=0.0,
-                        q_data_type=self.flashinfer_extra_state.q_data_type,
-                        kv_data_type=self.flashinfer_extra_state.kv_data_type,
-                    )
-                else:
-                    self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
-                        self.flashinfer_extra_state.workspace_buffer,
-                    )
-                    self.prefill_wrapper.plan(
-                        qo_indptr=q_starts,
-                        kv_indptr=kv_starts,
-                        num_qo_heads=self.flashinfer_extra_state.tp_q_head_num,
-                        num_kv_heads=self.flashinfer_extra_state.tp_kv_head_num,
-                        head_dim_qk=self.flashinfer_extra_state.head_dim,
-                        head_dim_vo=self.flashinfer_extra_state.head_dim,
-                        causal=True,
-                        q_data_type=self.flashinfer_extra_state.q_data_type,
-                        kv_data_type=self.flashinfer_extra_state.kv_data_type,
-                    )
+                kv_indices = torch.empty(
+                    self.batch_size * self.flashinfer_extra_state.max_seq_length, dtype=torch.int32
+                ).to(input_ids.device)
+                repack_kv_index(
+                    self.req_manager.req_to_token_indexs,
+                    self.b_req_idx,
+                    self.b_seq_len,
+                    self.b_start_loc,
+                    self.max_len_in_batch,
+                    kv_indices,
+                )
+                self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
+                    self.flashinfer_extra_state.workspace_buffer,
+                    qo_indptr_buf=q_starts,
+                    paged_kv_indptr_buf=kv_starts,
+                    paged_kv_indices_buf=kv_indices,
+                    paged_kv_last_page_len_buf=kv_last_page_len,
+                )
+                self.prefill_wrapper.plan(
+                    q_starts,
+                    kv_starts,
+                    kv_indices,
+                    kv_last_page_len,
+                    self.flashinfer_extra_state.tp_q_head_num,
+                    self.flashinfer_extra_state.tp_kv_head_num,
+                    self.flashinfer_extra_state.head_dim,
+                    1,
+                    causal=True,
+                    pos_encoding_mode="NONE",
+                    logits_soft_cap=0.0,
+                    q_data_type=self.flashinfer_extra_state.q_data_type,
+                    kv_data_type=self.flashinfer_extra_state.kv_data_type,
+                )
         return
 
     def copy_for_cuda_graph(self, new_infer_state):
