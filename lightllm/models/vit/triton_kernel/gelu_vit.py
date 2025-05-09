@@ -30,6 +30,7 @@ def gelu_fwd(input, use_custom_tensor_mananger=False):
         output = g_cache_manager.alloc_tensor(shape, dtype, device=device)
     else:
         output = torch.empty_like(input)
+    assert input.is_contiguous(), "Input tensor must be contiguous"
     n_elements = input.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
     gelu_kernel[grid](output, input, n_elements, BLOCK_SIZE=1024)

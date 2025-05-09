@@ -153,7 +153,7 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry(["internvl_chat"], condition=llm_model_type_is("phi3"))
+@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("phi3"))
 class InternVLPhi3TpPartModel(Phi3TpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLPhi3PreAndPostLayerWeight
@@ -177,7 +177,7 @@ class InternVLPhi3TpPartModel(Phi3TpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], condition=llm_model_type_is("internlm2"))
+@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("internlm2"))
 class InternVLInternlm2TpPartModel(Internlm2TpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLInternlm2PreAndPostLayerWeight
@@ -201,7 +201,7 @@ class InternVLInternlm2TpPartModel(Internlm2TpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], condition=llm_model_type_is("llama"))
+@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("llama"))
 class InternVLLlamaTpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
@@ -225,7 +225,7 @@ class InternVLLlamaTpPartModel(LlamaTpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], condition=llm_model_type_is("qwen2"))
+@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("qwen2"))
 class InternVLQwen2TpPartModel(Qwen2TpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
@@ -249,7 +249,7 @@ class InternVLQwen2TpPartModel(Qwen2TpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], condition=llm_model_type_is(["deepseek_v2", "deepseek_v3"]))
+@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is(["deepseek_v2", "deepseek_v3"]))
 class InternVLDeepSeek2TpPartModel(Deepseek2TpPartModel):
     # support Deepseek2,3,R1
     # weight class

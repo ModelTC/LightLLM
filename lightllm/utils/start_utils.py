@@ -62,13 +62,10 @@ class SubmoduleManager:
 
         # recover the gpu compute mode
         is_enable_mps = get_env_start_args().enable_mps
-        world_size = get_env_start_args().tp
         if is_enable_mps:
-            from lightllm.utils.device_utils import stop_mps, set_gpu_default_mode
+            from lightllm.utils.device_utils import stop_mps
 
             stop_mps()
-            for i in range(world_size):
-                set_gpu_default_mode(gpu_index=i)
         logger.info("All processes terminated gracefully.")
 
 

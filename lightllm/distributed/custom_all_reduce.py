@@ -19,16 +19,22 @@
 import ctypes
 from contextlib import contextmanager
 from typing import List, Optional, Union
-
+import os
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from lightllm.common.vllm_kernel import _custom_ops as ops
 from lightllm.common.cuda_wrapper import CudaRTLibrary
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.vllm_utils import is_full_nvlink
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+
+use_vllm_custom_allreduce = os.getenv("USE_VLLM_CUSTOM_ALLREDUCE", "1").upper() in ["1", "TRUE", "ON"]
+if use_vllm_custom_allreduce:
+    from lightllm.common.vllm_kernel import _custom_ops as ops
+else:
+    import sgl_kernel
+    import sgl_kernel.allreduce as ops
 
 ops.meta_size()
 custom_ar = True

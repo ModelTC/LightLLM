@@ -14,7 +14,7 @@ from lightllm.models.vit import get_load_image_func
 import torchvision.transforms as T
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from PIL import Image
-from typing import List, Union
+from typing import List, Union, final
 from io import BytesIO
 from rpyc.utils.classic import obtain
 from lightllm.common.quantization import Quantcfg
@@ -46,6 +46,7 @@ class VisionTransformer:
         self.quant_type = kvargs.get("quant_type", None)
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.load_image_func = get_load_image_func(self.weight_dir_)
+        self.max_batch_size = kvargs.get("max_batch_size", 1)
 
         self._init_datatype()
         self._init_config()
@@ -53,6 +54,30 @@ class VisionTransformer:
         self._init_quant()
         self._init_weights()
         self._init_infer_layer()
+        self._check_max_len_infer()
+        return
+
+    @final
+    @torch.no_grad()
+    def _check_max_len_infer(self):
+        disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
+        if disable_check_max_len_infer:
+            return
+
+        try:
+            dummy_images = torch.randn(
+                (self.MAX_PATH_NUM * self.max_batch_size, 3, self.IMAGE_H, self.IMAGE_W), dtype=self.data_type
+            ).cuda()
+            all_img_embeds = self.forward(dummy_images)
+            del all_img_embeds
+            logger.info(f"vit check max_len {self.batch_max_tokens} infer ok")
+        except (RuntimeError, torch.OutOfMemoryError) as e:
+            logger.exception(str(e))
+            exception_str = (
+                "Vit check max len infer fail, you can try:" "1.Set the --visual_infer_batch_size to a smaller value."
+            )
+            logger.error(exception_str)
+            raise Exception(exception_str)
         return
 
     def _init_config(self):
@@ -66,6 +91,11 @@ class VisionTransformer:
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         self.layers_num = self.config["num_hidden_layers"]
+
+        # infer info
+        self.IMAGE_H = int(os.getenv("IMAGE_H", 448))
+        self.IMAGE_W = int(os.getenv("IMAGE_W", 448))
+        self.MAX_PATH_NUM = os.getenv("MAX_PATH_NUM", 13)
         return
 
     def _padding_hidden_size(self):

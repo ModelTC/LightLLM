@@ -62,6 +62,7 @@ class VisualModelRpcServer(rpyc.Service):
                     "data_type": self.data_type,
                     "quant_type": kvargs["quant_type"],
                     "quant_cfg": kvargs["quant_cfg"],
+                    "max_batch_size": kvargs["max_batch_size"],
                 }
                 self.model = VisionTransformer(kvargs)
                 # self.model = InternVLVisionModel()
@@ -149,10 +150,6 @@ class VisualModelRpcClient:
 def _init_env(port, device_id):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
-    from lightllm.utils.device_utils import set_sm_limit
-
-    if get_env_start_args().enable_mps:
-        set_sm_limit(60, device_id)  # the visual server can take up to 60% of the sm
 
     t = ThreadedServer(VisualModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
     t.start()

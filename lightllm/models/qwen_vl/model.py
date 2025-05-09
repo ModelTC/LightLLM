@@ -92,7 +92,7 @@ class QWenVLTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry("qwen", condition=lambda cfg: "visual" in cfg)
+@ModelRegistry("qwen", is_multimodal=True, condition=lambda cfg: "visual" in cfg)
 class QWenVLTpPartModel(QWenTpPartModel):
 
     # infer class

@@ -91,7 +91,7 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry(["qwen2_vl", "qwen2_5_vl"])
+@ModelRegistry(["qwen2_vl", "qwen2_5_vl"], is_multimodal=True)
 class Qwen2VLTpPartModel(Qwen2TpPartModel):
 
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer

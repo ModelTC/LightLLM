@@ -78,7 +78,7 @@ class LlavaTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry("llava")
+@ModelRegistry("llava", is_multimodal=True)
 class LlavaTpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = LlavaPreAndPostLayerWeight
