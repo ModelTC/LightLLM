@@ -70,7 +70,7 @@ class VisionTransformer:
             ).cuda()
             all_img_embeds = self.forward(dummy_images)
             del all_img_embeds
-            logger.info(f"vit check max_len {self.batch_max_tokens} infer ok")
+            logger.info(f"vit check max_len {self.max_batch_size} infer ok")
         except (RuntimeError, torch.OutOfMemoryError) as e:
             logger.exception(str(e))
             exception_str = (

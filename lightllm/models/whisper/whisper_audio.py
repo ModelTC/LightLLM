@@ -105,7 +105,7 @@ class WhisperAudioModel:
 
     def load_model(self, weight_dir, config):
         self.audio_processor = WhisperProcessor.from_pretrained(weight_dir)
-        from transformers.models.whisper.modeling_whisper import WhisperEncoder, WhisperConfig
+        from lightllm.models.whisper.modeling_whisper import WhisperEncoder, WhisperConfig
 
         self.audio = WhisperEncoder(WhisperConfig(**config["audio_config"])).to(self.data_type)
         self.device = torch.device("cpu")
@@ -149,7 +149,7 @@ class WhisperAudioModel:
         )
         for index in range(len(audio_values)):
             padding_mask[index, : audio_lens_after_cnn[index].item()] = 0
-        last_hidden_state = self.audio(audio_values, padding_mask).last_hidden_state
+        last_hidden_state = self.audio(audio_values, padding_mask, audio_lens_after_cnn).last_hidden_state
         x = F.layer_norm(
             last_hidden_state,
             normalized_shape=(last_hidden_state.shape[-1],),
