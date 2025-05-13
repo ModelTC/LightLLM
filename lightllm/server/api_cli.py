@@ -303,7 +303,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_infer_batch_size", type=int, default=1, help="number of images to process in each inference batch"
     )
     parser.add_argument(
-        "--visual_gpu_ids", nargs="+", type=int, default=[0], help="List of GPU IDs to use, e.g., 0 1 2"
+        "--visual_gpu_ids", nargs="+", type=int, default=None, help="List of GPU IDs to use, e.g., 0 1 2"
     )
     parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
     parser.add_argument("--visual_dp", type=int, default=1, help="number of data parallel instances for ViT")

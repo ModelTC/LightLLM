@@ -3,15 +3,10 @@ import triton
 import triton.language as tl
 
 from lightllm.common.kernel_config import KernelConfigs
+from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 from frozendict import frozendict
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
-
-try:
-    HAS_SGLANG_KERNEL = True
-    from sgl_kernel import sgl_per_token_group_quant_fp8
-except:
-    HAS_SGLANG_KERNEL = False
 
 try:
     from deep_gemm import ceil_div
@@ -118,10 +113,10 @@ def per_token_group_quant_fp8(
     eps: float = 1e-10,
     dtype: torch.dtype = torch.float8_e4m3fn,
 ):
-    if HAS_SGLANG_KERNEL:
+    if HAS_SGL_KERNEL:
         finfo = torch.finfo(dtype)
         fp8_max, fp8_min = finfo.max, finfo.min
-        sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max)
+        sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max)
     else:
         lightllm_per_token_group_quant_fp8(x, group_size, x_q, x_s, eps=1e-10, dtype=torch.float8_e4m3fn)
 

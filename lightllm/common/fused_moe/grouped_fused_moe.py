@@ -23,7 +23,7 @@ import triton
 import triton.language as tl
 from typing import Any, Callable, Dict, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.vllm_kernel import _custom_ops as ops
+from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.utils.device_utils import (
     get_device_sm_count,
     get_device_sm_regs_num,
@@ -446,7 +446,7 @@ def grouped_matmul(
     if use_fp8_w8a8:
         # 当权重使用 block wise 量化时，激活也使用 per token， group size 量化
         if block_size_k == 0:
-            token_inputs, token_input_scale = ops.scaled_fp8_quant(token_inputs, token_input_scale)
+            token_inputs, token_input_scale = vllm_ops.scaled_fp8_quant(token_inputs, token_input_scale)
         else:
             _m, _k = token_inputs.shape
             assert _k % block_size_k == 0

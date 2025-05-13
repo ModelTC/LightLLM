@@ -24,14 +24,15 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from lightllm.common.vllm_kernel import _custom_ops as ops
 from lightllm.common.cuda_wrapper import CudaRTLibrary
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.vllm_utils import is_full_nvlink
+from lightllm.utils.device_utils import has_nvlink
+from lightllm.utils.light_utils import light_ops
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
-ops.meta_size()
-custom_ar = True
+
+if light_ops is not None:
+    light_ops.meta_size()
 
 logger = init_logger(__name__)
 
@@ -61,7 +62,7 @@ class CustomAllgather:
         self._IS_CAPTURING = False
         self.disabled = True
 
-        if not custom_ar:
+        if light_ops is None:
             # disable because of missing custom allgather library
             # e.g. in a non-cuda environment
             return
@@ -104,7 +105,7 @@ class CustomAllgather:
         dist.all_gather(gather_list, tensor, group=self.group)
         # physical_device_ids = [t.item() for t in gather_list]
 
-        full_nvlink = is_full_nvlink()
+        full_nvlink = has_nvlink()
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allgather is disabled because it's not supported on"
@@ -116,7 +117,7 @@ class CustomAllgather:
         self.disabled = False
         # Buffers memory are owned by this Python class and passed to C++.
         # Meta data is for synchronization
-        self.meta_ptrs = self.create_shared_buffer(ops.meta_size(), group=group)
+        self.meta_ptrs = self.create_shared_buffer(light_ops.meta_size(), group=group)
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allgather is performed
         self.buffer_ptrs = self.create_shared_buffer(max_size, group=group)
@@ -130,8 +131,8 @@ class CustomAllgather:
         self.rank = rank
         self.world_size = world_size
         self.full_nvlink = full_nvlink
-        self._ptr = ops.init_custom_gather_ar(self.meta_ptrs, self.rank_data, rank, self.full_nvlink)
-        ops.allgather_register_buffer(self._ptr, self.buffer_ptrs)
+        self._ptr = light_ops.init_custom_gather_ar(self.meta_ptrs, self.rank_data, rank, self.full_nvlink)
+        light_ops.allgather_register_buffer(self._ptr, self.buffer_ptrs)
 
     @staticmethod
     def create_shared_buffer(size_in_bytes: int, group: Optional[ProcessGroup] = None) -> List[int]:
@@ -178,7 +179,7 @@ class CustomAllgather:
                 self.register_graph_buffers()
 
     def register_graph_buffers(self):
-        handle, offset = ops.allgather_get_graph_buffer_ipc_meta(self._ptr)
+        handle, offset = light_ops.allgather_get_graph_buffer_ipc_meta(self._ptr)
         # We cannot directly use `dist.all_gather_object` here
         # because it is incompatible with `gloo` backend under inference mode.
         # see https://github.com/pytorch/pytorch/issues/126032 for details.
@@ -190,7 +191,7 @@ class CustomAllgather:
         # Unpack list of tuples to tuple of lists.
         handles = [d[0] for d in all_data]  # type: ignore
         offsets = [d[1] for d in all_data]  # type: ignore
-        ops.allgather_register_graph_buffers(self._ptr, handles, offsets)
+        light_ops.allgather_register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
         if self.disabled:
@@ -213,9 +214,9 @@ class CustomAllgather:
         buffer.
         """
         if registered:
-            ops.all_gather(self._ptr, inp, out, 0, 0)
+            light_ops.all_gather(self._ptr, inp, out, 0, 0)
         else:
-            ops.all_gather(self._ptr, inp, out, self.buffer_ptrs[self.rank], self.max_size)
+            light_ops.all_gather(self._ptr, inp, out, self.buffer_ptrs[self.rank], self.max_size)
         return out
 
     def custom_all_gather(self, output: torch.Tensor, input: torch.Tensor) -> Optional[torch.Tensor]:
@@ -240,7 +241,7 @@ class CustomAllgather:
 
     def close(self):
         if not self.disabled and self._ptr:
-            ops.allgather_dispose(self._ptr)
+            light_ops.allgather_dispose(self._ptr)
             self._ptr = 0
             self.free_shared_buffer(self.meta_ptrs)
             self.free_shared_buffer(self.buffer_ptrs)

@@ -1,9 +1,8 @@
 import yaml
 import collections
 from .registry import QUANTMETHODS
-from .ppl_quant import *
 from .torchao_quant import *
-from .vllm_quant import *
+from .w8a8_quant import *
 from .triton_quant.triton_quant import *
 from .deepgemm_quant import *
 from lightllm.utils.log_utils import init_logger

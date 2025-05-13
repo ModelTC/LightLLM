@@ -35,23 +35,14 @@ from lightllm.utils.dist_utils import (
     get_current_rank_in_dp,
 )
 from lightllm.utils.device_utils import get_device_sm_count
+from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
+from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL
 from contextlib import nullcontext, contextmanager
 
 logger = init_logger(__name__)
 
-try:
-    HAS_VLLM = True
-    from .custom_all_reduce import CustomAllreduce
-except:
-    HAS_VLLM = False
-    logger.info("vllm or lightllm_kernel is not installed, you can't use custom allreduce")
-
-try:
-    HAS_LIGHTLLM_KERNEL = True
-    from .custom_all_gather import CustomAllgather
-except:
-    HAS_LIGHTLLM_KERNEL = False
-    logger.info("lightllm_kernel is not installed, you can't use custom allgather")
+from .custom_all_reduce import CustomAllreduce
+from .custom_all_gather import CustomAllgather
 
 try:
     import deep_ep
@@ -76,7 +67,7 @@ class CustomProcessGroup:
         self.device_group = dist.new_group(ranks, backend="nccl")
 
     def init_custom_reduce(self) -> None:
-        if not HAS_VLLM or not has_nvlink() or self.dp_world_size not in [2, 4, 6, 8]:
+        if not HAS_SGL_KERNEL or not has_nvlink() or self.dp_world_size not in [2, 4, 6, 8]:
             return
         args = get_env_start_args()
         if args.disable_custom_allreduce:

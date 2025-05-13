@@ -114,6 +114,8 @@ def normal_or_p_d_start(args):
         assert args.router_token_ratio == 0.0
 
     # 检查GPU数量是否足够
+    if args.visual_gpu_ids is None:
+        args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
     total_required_gpus = args.visual_dp * args.visual_tp
     if len(args.visual_gpu_ids) < total_required_gpus:
         raise ValueError(

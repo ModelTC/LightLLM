@@ -25,20 +25,20 @@ def set_seed():
 
 
 def quantize_moe(weight):
-    try:
-        HAS_VLLM = True
-        from lightllm.common.vllm_kernel import _custom_ops as ops
-    except:
-        HAS_VLLM = False
 
-    assert HAS_VLLM
+    from lightllm.utils.vllm_utils import vllm_ops
+
+    assert (
+        vllm_ops is not None
+    ), "vllm is not installed, you can't use the api of it. \
+                    You can solve it by running `pip install vllm`."
 
     num_experts = weight.shape[0]
     qweights = []
     weight_scales = []
     qweights = torch.empty_like(weight, dtype=torch.float8_e4m3fn).cuda()
     for i in range(num_experts):
-        qweight, weight_scale = ops.scaled_fp8_quant(
+        qweight, weight_scale = vllm_ops.scaled_fp8_quant(
             weight[i].contiguous().cuda(), scale=None, use_per_token_if_dynamic=False
         )
         qweights[i] = qweight

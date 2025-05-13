@@ -26,20 +26,23 @@ from torch.distributed import ProcessGroup
 
 from lightllm.common.cuda_wrapper import CudaRTLibrary
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.vllm_utils import is_full_nvlink
+from lightllm.utils.device_utils import has_nvlink
+from lightllm.utils.sgl_utils import sgl_allreduce_ops
+from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
-use_vllm_custom_allreduce = os.getenv("USE_VLLM_CUSTOM_ALLREDUCE", "1").upper() in ["1", "TRUE", "ON"]
-if use_vllm_custom_allreduce:
-    from lightllm.common.vllm_kernel import _custom_ops as ops
-else:
-    import sgl_kernel
-    import sgl_kernel.allreduce as ops
-
-ops.meta_size()
-custom_ar = True
-
 logger = init_logger(__name__)
+
+use_vllm_custom_allreduce = os.getenv("LIGHTLLM_USE_VLLM_CUSTOM_ALLREDUCE", "0").upper() in ["ON", "TRUE", "1"]
+if use_vllm_custom_allreduce:
+    # Use vllm custom allreduce
+    ops = vllm_ops
+else:
+    # Use sgl custom allreduce
+    ops = sgl_allreduce_ops
+
+if ops is not None:
+    ops.meta_size()
 
 
 def is_weak_contiguous(inp: torch.Tensor):
@@ -67,7 +70,7 @@ class CustomAllreduce:
         self._IS_CAPTURING = False
         self.disabled = True
 
-        if not custom_ar:
+        if ops is None:
             # disable because of missing custom allreduce library
             # e.g. in a non-cuda environment
             return
@@ -110,7 +113,7 @@ class CustomAllreduce:
         dist.all_gather(gather_list, tensor, group=self.group)
         # physical_device_ids = [t.item() for t in gather_list]
 
-        full_nvlink = is_full_nvlink()
+        full_nvlink = has_nvlink()
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"

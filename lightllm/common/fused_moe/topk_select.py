@@ -19,7 +19,8 @@
 
 import os
 import torch
-from lightllm.common.vllm_kernel import _custom_ops as ops
+from lightllm.utils.sgl_utils import sgl_ops
+from lightllm.utils.light_utils import light_ops
 from typing import Callable, List, Optional, Tuple
 
 use_cuda_grouped_topk = os.getenv("LIGHTLLM_CUDA_GROUPED_TOPK", "False").upper() in ["ON", "TRUE", "1"]
@@ -32,6 +33,10 @@ def fused_topk(
     renormalize: bool,
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+    assert (
+        sgl_ops is not None
+    ), "sgl_kernel is not installed, you can't use the cuda fused_topk. \
+                    You can solve it by running `pip install sgl_kernel`."
 
     M, _ = hidden_states.shape
 
@@ -39,7 +44,7 @@ def fused_topk(
     topk_ids = torch.empty(M, topk, dtype=torch.int32, device=hidden_states.device)
     token_expert_indicies = torch.empty(M, topk, dtype=torch.int32, device=hidden_states.device)
 
-    ops.topk_softmax(
+    sgl_ops.topk_softmax(
         topk_weights,
         topk_ids,
         token_expert_indicies,
@@ -142,6 +147,8 @@ def cuda_grouped_topk(
 ):
 
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+    assert light_ops is not None, "lightllm_kernel is not installed."
+
     num_tokens = gating_output.shape[0]
     topk_weights = torch.empty(num_tokens, topk, device=hidden_states.device, dtype=torch.float32)
     topk_indices = torch.empty(num_tokens, topk, device=hidden_states.device, dtype=torch.int32)
@@ -149,7 +156,7 @@ def cuda_grouped_topk(
     group_scores = torch.empty(num_tokens, num_expert_group, device=hidden_states.device, dtype=torch.float32)
     if correction_bias is None:
         correction_bias = torch.zeros_like(gating_output, dtype=torch.float32)
-    ops.grouped_topk(
+    light_ops.grouped_topk(
         topk_weights,
         correction_bias,
         topk_indices,

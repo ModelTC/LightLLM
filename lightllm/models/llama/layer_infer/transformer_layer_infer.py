@@ -29,10 +29,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 
 logger = init_logger(__name__)
 
-try:
-    from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
-except:
-    logger.warning("sgl_kernel is not installed, or the installed version does not support fa3!")
+from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 
 
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):

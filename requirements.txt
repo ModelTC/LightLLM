@@ -64,7 +64,7 @@ torch==2.6.0
 torchvision==0.21.0
 tqdm==4.65.0
 transformers==4.51.2
-tokenizers==0.21.0
+tokenizers==0.21.1
 triton==3.2.0
 urllib3==1.26.16
 uvicorn==0.19.0
@@ -83,7 +83,7 @@ frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
 gunicorn==23.0.0
-vllm==0.7.2
+vllm==0.8.5
 flashinfer-python==0.2.4
 sgl-kernel
 httpx==0.28.1
