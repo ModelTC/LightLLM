@@ -363,6 +363,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             )
             tmp_lse = torch.empty_like(lse)
             merge_state_v2(prefix_output, prefix_lse, o_tensor, lse, tmp_output, tmp_lse)
+            o_tensor = tmp_output
         return o_tensor
 
     def _context_attention_flashinfer_kernel_with_CC(
