@@ -218,11 +218,82 @@ def moe_align1(
 
 
 @triton.jit
+def moe_align2_kernel(
+    experts_token_num_ptr,  # [expert_num,]
+    mblocks_to_expert_id,  # [max_num_m_blocks,]
+    mblocks_to_m_index,  # [max_num_m_blocks,]
+    expert_num,
+    max_num_m_blocks,
+    BLOCK_M: tl.constexpr,
+    BLOCK_EXPERT: tl.constexpr,
+):
+
+    expert_id = tl.program_id(axis=0)
+    off_expert = tl.arange(0, BLOCK_EXPERT)
+    expert_to_token_num = tl.load(experts_token_num_ptr + off_expert, mask=off_expert < expert_num, other=0)
+    expert_to_block_num = tl.cdiv(expert_to_token_num, BLOCK_M)
+    block_starts = tl.cumsum(expert_to_block_num) - expert_to_block_num
+    block_start = tl.sum(tl.where(off_expert == expert_id, block_starts, 0))
+
+    cur_expert_token_num = tl.load(experts_token_num_ptr + expert_id)
+    cur_block_num = tl.cdiv(cur_expert_token_num, BLOCK_M)
+
+    block_off = tl.arange(0, 128)
+    for start_loc in range(0, cur_block_num, 128):
+        tl.store(
+            mblocks_to_expert_id + block_start + start_loc + block_off,
+            expert_id,
+            mask=start_loc + block_off < cur_block_num,
+        )
+        tl.store(
+            mblocks_to_m_index + block_start + start_loc + block_off,
+            start_loc + block_off,
+            mask=start_loc + block_off < cur_block_num,
+        )
+
+    if expert_id == expert_num - 1:
+        for extra_fill_start in range(block_start + cur_block_num, max_num_m_blocks, 128):
+            tl.store(
+                mblocks_to_expert_id + extra_fill_start + block_off,
+                -1,
+                mask=extra_fill_start + block_off < max_num_m_blocks,
+            )
+    return
+
+
+def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, block_m: int):
+    """
+    exports_token_num is tensor shape [expert_num] , will get expert need handle token num.
+    out tensor is a tensor that contain block schduel infos tensor.
+    """
+    max_num_tokens_padded = token_num_mul_topk_num + exports_token_num.shape[0] * (block_m - 1)
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_m)
+    mblocks_to_expert_id = torch.empty((max_num_m_blocks,), dtype=torch.int32, device="cuda")
+    mblocks_to_m_index = torch.empty((max_num_m_blocks,), dtype=torch.int32, device="cuda")
+    expert_num = exports_token_num.shape[0]
+
+    grid = (expert_num,)
+    moe_align2_kernel[grid](
+        exports_token_num,
+        mblocks_to_expert_id,
+        mblocks_to_m_index,
+        expert_num,
+        max_num_m_blocks,
+        BLOCK_M=block_m,
+        BLOCK_EXPERT=triton.next_power_of_2(expert_num),
+        num_warps=4,
+        num_stages=1,
+    )
+
+    return mblocks_to_expert_id, mblocks_to_m_index
+
+
+@triton.jit
 def grouped_matmul_kernel(
-    expert_token_limit,  # int,
+    mblocks_to_expert_id,  # [max_m_block_size]
+    mblocks_to_m_index,  # [max_m_block_size]
     k,  # int
     n,  # int
-    expert_num,  # int
     topk_num,  # int
     token_scale_ptr,  # [1,] for per tensor quant, or [token_num, hidden_dim // block_size] for per token, group quant
     weight_scale_ptr,  # [expert_num,] or [export_num, n // block_size_n, k // block_size_k]
@@ -246,7 +317,8 @@ def grouped_matmul_kernel(
     out_stride_0,
     out_stride_1,
     # number of virtual SM
-    num_sm,  # int
+    m_block_num,  # int
+    n_block_num,  # int
     compute_type: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
     block_size_n: tl.constexpr,
@@ -257,126 +329,127 @@ def grouped_matmul_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr = False,
+    NEED_K_MASK: tl.constexpr = True,
 ):
-    tile_idx = tl.program_id(0)
+    pid = tl.program_id(0)
 
-    for expert_id in range(expert_num):
-        # get the gemm size of the current problem
-        cur_m = tl.load(expert_to_token_num + expert_id, eviction_policy="evict_last")
-        cur_m = tl.where(cur_m <= expert_token_limit, cur_m, 0)
-        num_m_tiles = tl.cdiv(cur_m, BLOCK_SIZE_M)
-        num_n_tiles = tl.cdiv(n, BLOCK_SIZE_N)
-        num_tiles = num_m_tiles * num_n_tiles
+    # better super-grouping for L2 Cache Optimizations
+    num_pid_m = m_block_num
+    num_pid_n = n_block_num
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    in_group_index = pid % num_pid_in_group
+    back_mark = (in_group_index // group_size_m) % 2
+    back_mark1 = -1 * (2 * back_mark - 1)
+    pid_m = first_pid_m + back_mark * (group_size_m - 1) + back_mark1 * (in_group_index % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
-        # iterate through the tiles in the current gemm problem
-        while tile_idx < num_tiles:
-            tile_idx_in_gemm = tile_idx
-            # better super-grouping for L2 Cache Optimizations
-            pid = tile_idx_in_gemm
-            num_pid_m = num_m_tiles
-            num_pid_n = num_n_tiles
-            num_pid_in_group = GROUP_SIZE_M * num_pid_n
-            group_id = pid // num_pid_in_group
-            first_pid_m = group_id * GROUP_SIZE_M
-            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-            in_group_index = pid % num_pid_in_group
-            back_mark = (in_group_index // group_size_m) % 2
-            back_mark1 = -1 * (2 * back_mark - 1)
-            pid_m = first_pid_m + back_mark * (group_size_m - 1) + back_mark1 * (in_group_index % group_size_m)
-            pid_n = (pid % num_pid_in_group) // group_size_m
+    expert_id = tl.load(mblocks_to_expert_id + pid_m)
 
-            tile_m_idx = pid_m
-            tile_n_idx = pid_n
+    if expert_id == -1:
+        return
 
-            # do regular gemm here
-            offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            a_m_index = tl.load(
-                expert_to_token_index + expert_id * expert_to_token_index_stride_0 + offs_am,
-                mask=offs_am < cur_m,
-                other=0,
-            )
-            if MUL_ROUTED_WEIGHT:
-                a_m_scale = tl.load(
-                    expert_to_weights_ptr + expert_id * expert_to_weights_stride0 + offs_am,
-                    mask=offs_am < cur_m,
-                    other=0.0,
-                )
+    tile_m_idx = tl.load(mblocks_to_m_index + pid_m)
+    tile_n_idx = pid_n
 
-            offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-            offs_k = tl.arange(0, BLOCK_SIZE_K)
+    # get the gemm size of the current problem
+    cur_m = tl.load(expert_to_token_num + expert_id, eviction_policy="evict_last")
 
-            if use_fp8_w8a8:
-                if block_size_k > 0 and block_size_n > 0:
-                    a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num) * (token_stride_0 // block_size_k)
-                    offs_bsn = offs_bn // block_size_n
-                    b_scale_ptrs = weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bsn * weight_scale_stride1
-                else:
-                    a_scale = tl.load(token_scale_ptr, eviction_policy="evict_last")
-                    b_scale = tl.load(weight_scale_ptr + expert_id, eviction_policy="evict_last")
-                    ab_scale = a_scale * b_scale
+    # do regular gemm here
+    offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    token_mask = offs_am < cur_m
+    a_m_index = tl.load(
+        expert_to_token_index + expert_id * expert_to_token_index_stride_0 + offs_am,
+        mask=token_mask,
+        other=0,
+    )
+    if MUL_ROUTED_WEIGHT:
+        a_m_scale = tl.load(
+            expert_to_weights_ptr + expert_id * expert_to_weights_stride0 + offs_am,
+            mask=token_mask,
+            other=0.0,
+        )
 
-            if use_fp8_w8a8:
-                a_ptrs = token_ptr + (a_m_index // topk_num)[None, :] * token_stride_0 + offs_k[:, None]
-                b_ptrs = (
-                    weights_ptr + weight_stride_0 * expert_id + offs_k[None, :] + offs_bn[:, None] * weight_stride_1
-                )
-                accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+    offs_bn = (tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % n
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+
+    if use_fp8_w8a8:
+        if block_size_k > 0 and block_size_n > 0:
+            a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num) * (token_stride_0 // block_size_k)
+            offs_bsn = offs_bn // block_size_n
+            b_scale_ptrs = weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bsn * weight_scale_stride1
+        else:
+            a_scale = tl.load(token_scale_ptr, eviction_policy="evict_last")
+            b_scale = tl.load(weight_scale_ptr + expert_id, eviction_policy="evict_last")
+            ab_scale = a_scale * b_scale
+
+    if use_fp8_w8a8:
+        a_ptrs = token_ptr + (a_m_index // topk_num)[None, :] * token_stride_0 + offs_k[:, None]
+        b_ptrs = weights_ptr + weight_stride_0 * expert_id + offs_k[None, :] + offs_bn[:, None] * weight_stride_1
+        accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+    else:
+        a_ptrs = token_ptr + (a_m_index // topk_num)[:, None] * token_stride_0 + offs_k[None, :]
+        b_ptrs = weights_ptr + weight_stride_0 * expert_id + offs_k[:, None] + offs_bn[None, :] * weight_stride_1
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    for step_k in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
+        # hint to Triton compiler to do proper loop pipelining
+        # tl.multiple_of(a_ptrs, [16, 16])
+        # tl.multiple_of(b_ptrs, [16, 16])
+
+        if use_fp8_w8a8:
+            if NEED_K_MASK:
+                a = tl.load(a_ptrs, mask=(token_mask[None, :]) & (offs_k[:, None] < k), other=0.0)
+                b = tl.load(b_ptrs, mask=(offs_k[None, :] < k), other=0.0)
             else:
-                a_ptrs = token_ptr + (a_m_index // topk_num)[:, None] * token_stride_0 + offs_k[None, :]
-                b_ptrs = (
-                    weights_ptr + weight_stride_0 * expert_id + offs_k[:, None] + offs_bn[None, :] * weight_stride_1
-                )
-                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+                a = tl.load(a_ptrs, mask=(token_mask[None, :]), other=0.0)
+                b = tl.load(b_ptrs)
+        else:
+            if NEED_K_MASK:
+                a = tl.load(a_ptrs, mask=(token_mask[:, None]) & (offs_k[None, :] < k), other=0.0)
+                b = tl.load(b_ptrs, mask=(offs_k[:, None] < k), other=0.0)
+            else:
+                a = tl.load(a_ptrs, mask=(token_mask[:, None]), other=0.0)
+                b = tl.load(b_ptrs)
 
-            for step_k in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
-                # hint to Triton compiler to do proper loop pipelining
-                # tl.multiple_of(a_ptrs, [16, 16])
-                # tl.multiple_of(b_ptrs, [16, 16])
+        if use_fp8_w8a8:
+            if block_size_k > 0 and block_size_n > 0:
+                offs_ks = step_k * BLOCK_SIZE_K // block_size_k
+                a_scale = tl.load(a_scale_ptrs + offs_ks, mask=token_mask, other=0.0)
+                b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
+                accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+            else:
+                accumulator = tl.dot(b, a, acc=accumulator)
+        else:
+            accumulator += tl.dot(a, b)
 
-                if use_fp8_w8a8:
-                    a = tl.load(a_ptrs, mask=(offs_am[None, :] < cur_m) & (offs_k[:, None] < k))
-                    b = tl.load(b_ptrs, mask=(offs_bn[:, None] < n) & (offs_k[None, :] < k))
-                else:
-                    a = tl.load(a_ptrs, mask=(offs_am[:, None] < cur_m) & (offs_k[None, :] < k))
-                    b = tl.load(b_ptrs, mask=(offs_bn[None, :] < n) & (offs_k[:, None] < k))
+        a_ptrs += BLOCK_SIZE_K
+        b_ptrs += BLOCK_SIZE_K
+        offs_k += BLOCK_SIZE_K
 
-                if use_fp8_w8a8:
-                    if block_size_k > 0 and block_size_n > 0:
-                        offs_ks = step_k * BLOCK_SIZE_K // block_size_k
-                        a_scale = tl.load(a_scale_ptrs + offs_ks, mask=offs_am < cur_m, other=0.0)
-                        b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
-                        accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
-                    else:
-                        accumulator = tl.dot(b, a, acc=accumulator)
-                else:
-                    accumulator += tl.dot(a, b)
+    if use_fp8_w8a8:
+        if block_size_k > 0 and block_size_n > 0:
+            accumulator = accumulator.T
+        else:
+            accumulator = accumulator.T
+            accumulator *= ab_scale
 
-                a_ptrs += BLOCK_SIZE_K
-                b_ptrs += BLOCK_SIZE_K
-                offs_k += BLOCK_SIZE_K
+    if MUL_ROUTED_WEIGHT:
+        accumulator *= a_m_scale[:, None]
 
-            if use_fp8_w8a8:
-                if block_size_k > 0 and block_size_n > 0:
-                    accumulator = accumulator.T
-                else:
-                    accumulator = accumulator.T
-                    accumulator *= ab_scale
+    c = accumulator.to(compute_type)
 
-            if MUL_ROUTED_WEIGHT:
-                accumulator *= a_m_scale[:, None]
+    offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = out_ptr + a_m_index[:, None] * out_stride_0 + offs_cn[None, :]
+    tl.store(c_ptrs, c, mask=(token_mask[:, None]) & (offs_cn[None, :] < n))
 
-            c = accumulator.to(compute_type)
-
-            offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-            c_ptrs = out_ptr + a_m_index[:, None] * out_stride_0 + offs_cn[None, :]
-            tl.store(c_ptrs, c, mask=(offs_am[:, None] < cur_m) & (offs_cn[None, :] < n))
-            tile_idx += num_sm
-
-        tile_idx -= num_tiles
     return
 
 
 def grouped_matmul(
+    token_num_mul_topk_num: int,
     token_inputs: torch.Tensor,
     token_input_scale: torch.Tensor,  # for fp8
     expert_to_token_num: torch.Tensor,
@@ -386,13 +459,14 @@ def grouped_matmul(
     expert_to_weights_scale: torch.Tensor,  # for fp8
     topk_num: int,
     out: torch.Tensor,
-    expert_token_limit: int,
     mul_routed_weight: bool,
     use_fp8_w8a8: bool,
     alloc_tensor_func=torch.empty,
+    reused_mblock_infos=None,
     **run_config,
 ):
     """
+    token_num_mul_topk_num is int equal token_num * topk_num,
     token_inputs is tensor shape [token_num, hidden_dim],
     token_input_scale is tensor shape [1,], when use_fp8_w8a8 is False, it must be None
     expert_to_token_num is tensor shape [expert_num],
@@ -401,7 +475,6 @@ def grouped_matmul(
     expert_to_weights_scale is tensor shape [expert_num] or
     [expert_num, out_dim // block_size_, hidden_dim // block_size_k],
     when use_fp8_w8a8 is False, it must be None
-    expert_token_limit use to limit handles token per expert.
     out is tensor shape [token_num * topk_num, out_dim]
     """
     compute_type = tl.bfloat16 if out.dtype == torch.bfloat16 else tl.float16
@@ -431,6 +504,7 @@ def grouped_matmul(
             use_fp8_w8a8=use_fp8_w8a8,
             out_dtype=str(out.dtype),
         )
+
     BLOCK_SIZE_M = run_config["BLOCK_SIZE_M"]
     BLOCK_SIZE_N = run_config["BLOCK_SIZE_N"]
     BLOCK_SIZE_K = run_config["BLOCK_SIZE_K"]
@@ -455,79 +529,28 @@ def grouped_matmul(
             per_token_group_quant_fp8(token_inputs, block_size_k, qinput_tensor, input_scale)
             token_inputs, token_input_scale = qinput_tensor, input_scale
 
-    kernel = grouped_matmul_kernel.warmup(
-        expert_token_limit,
-        k,
-        n,
-        expert_num,
-        topk_num,
-        token_input_scale,
-        expert_to_weights_scale,
-        expert_to_weights_scale.stride(0)
-        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim >= 1
-        else 0,
-        expert_to_weights_scale.stride(1)
-        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim >= 2
-        else 0,
-        expert_to_weights_scale.stride(2)
-        if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 3
-        else 0,
-        token_inputs,
-        token_inputs.stride(0),
-        token_inputs.stride(1),
-        expert_weights,
-        expert_weights.stride(0),
-        expert_weights.stride(1),
-        expert_weights.stride(2),
-        expert_to_weights,
-        expert_to_weights.stride(0),
-        expert_to_weights.stride(1),
-        expert_to_token_num,
-        expert_to_token_index,
-        expert_to_token_index.stride(0),
-        out,
-        out.stride(0),
-        out.stride(1),
-        num_sm=1,
-        compute_type=compute_type,
-        use_fp8_w8a8=use_fp8_w8a8,
-        block_size_n=block_size_n,
-        block_size_k=block_size_k,
-        BLOCK_SIZE_M=BLOCK_SIZE_M,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
-        GROUP_SIZE_M=GROUP_SIZE_M,
-        MUL_ROUTED_WEIGHT=mul_routed_weight,
-        num_warps=num_warps,
-        num_stages=num_stages,
-        grid=(1,),
-    )
+    if reused_mblock_infos is None:
+        mblocks_to_expert_id, mblocks_to_m_index = moe_align2(token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M)
+    else:
+        # when up group gemm and down group gemm use same BLOCK_SIZE_M,
+        # can reuse (mblocks_to_expert_id, mblocks_to_m_index) created by moe_align2 kernel.
+        mblocks_to_expert_id, mblocks_to_m_index, reused_block_size_m = reused_mblock_infos
+        if reused_block_size_m != BLOCK_SIZE_M:
+            mblocks_to_expert_id, mblocks_to_m_index = moe_align2(
+                token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M
+            )
 
-    kernel._init_handles()
-    n_regs = kernel.n_regs
-    size_smem = kernel.metadata.shared
+    block_num = triton.cdiv(n, BLOCK_SIZE_N) * mblocks_to_expert_id.shape[0]
 
-    sm_count = get_device_sm_count()
-    max_regs = get_device_sm_regs_num()
-    shared_mem_max = get_device_sm_shared_mem_num()
-    warp_size = get_device_warp_size()
+    grid = (block_num,)
 
-    occupancy = max_regs // (n_regs * warp_size * num_warps)
-    occupancy = min(occupancy, shared_mem_max // size_smem)
-    num_sm = sm_count * occupancy
-
-    need_max_grid = triton.cdiv(n, BLOCK_SIZE_N) * triton.cdiv(
-        expert_to_token_index.shape[1] + expert_num * (BLOCK_SIZE_M - 1), BLOCK_SIZE_M
-    )
-    num_sm = min(num_sm, need_max_grid)
-
-    grid = (num_sm,)
+    NEED_K_MASK = (k % BLOCK_SIZE_K) != 0
 
     grouped_matmul_kernel[grid](
-        expert_token_limit,
+        mblocks_to_expert_id,
+        mblocks_to_m_index,
         k,
         n,
-        expert_num,
         topk_num,
         token_input_scale,
         expert_to_weights_scale,
@@ -556,7 +579,8 @@ def grouped_matmul(
         out,
         out.stride(0),
         out.stride(1),
-        num_sm=num_sm,
+        m_block_num=mblocks_to_expert_id.shape[0],
+        n_block_num=triton.cdiv(n, BLOCK_SIZE_N),
         compute_type=compute_type,
         use_fp8_w8a8=use_fp8_w8a8,
         block_size_n=block_size_n,
@@ -566,10 +590,11 @@ def grouped_matmul(
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         GROUP_SIZE_M=GROUP_SIZE_M,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
+        NEED_K_MASK=NEED_K_MASK,
         num_warps=num_warps,
         num_stages=num_stages,
     )
-    return
+    return (mblocks_to_expert_id, mblocks_to_m_index, BLOCK_SIZE_M)
 
 
 def fused_experts_impl(
@@ -634,7 +659,8 @@ def fused_experts_impl(
         expert_to_token_num = torch.empty((E,), dtype=torch.int32, device="cuda")
         moe_align1(expert_to_tokens, curr_topk_weights, expert_to_weights, expert_to_token_num, topk=topk_num)
 
-        grouped_matmul(
+        reused_mblock_infos = grouped_matmul(
+            curr_topk_ids.numel(),
             curr_hidden_states,
             a1_scale,
             expert_to_token_num,
@@ -644,7 +670,6 @@ def fused_experts_impl(
             expert_to_weights_scale=w1_scale,
             topk_num=topk_num,
             out=intermediate_cache1.view(-1, N),
-            expert_token_limit=2 ** 31 - 1,
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
             alloc_tensor_func=alloc_tensor_func,
@@ -654,6 +679,7 @@ def fused_experts_impl(
         silu_and_mul_fwd(intermediate_cache1.view(-1, N), intermediate_cache2.view(-1, N // 2))
 
         grouped_matmul(
+            curr_topk_ids.numel(),
             intermediate_cache2.view(-1, N // 2),
             a2_scale,
             expert_to_token_num,
@@ -663,10 +689,10 @@ def fused_experts_impl(
             expert_to_weights_scale=w2_scale,
             topk_num=1,
             out=intermediate_cache3.view(-1, w2.shape[1]),
-            expert_token_limit=2 ** 31 - 1,
             mul_routed_weight=True,
             use_fp8_w8a8=use_fp8_w8a8,
             alloc_tensor_func=alloc_tensor_func,
+            reused_mblock_infos=reused_mblock_infos,
             **run_config,
         )
 

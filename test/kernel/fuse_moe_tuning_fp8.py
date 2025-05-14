@@ -104,6 +104,7 @@ def test_kernel(
 
     if is_up:
         grouped_matmul(
+            topk_ids.numel(),
             a,
             None,
             expert_to_token_num,
@@ -113,13 +114,13 @@ def test_kernel(
             expert_to_weights_scale=w1_scale,
             topk_num=topk,
             out=out1,
-            expert_token_limit=2 ** 31 - 1,
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
             **config,
         )
     else:
         grouped_matmul(
+            topk_ids.numel(),
             down_in,
             None,
             expert_to_token_num,
@@ -129,7 +130,6 @@ def test_kernel(
             expert_to_weights_scale=w2_scale,
             topk_num=1,
             out=out2,
-            expert_token_limit=2 ** 31 - 1,
             mul_routed_weight=True,
             use_fp8_w8a8=use_fp8_w8a8,
             **config,

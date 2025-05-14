@@ -1,7 +1,8 @@
 import torch
 import time
 import pytest
-from lightllm.common.fused_moe.grouped_fused_moe import moe_align, moe_align1, grouped_matmul
+import triton
+from lightllm.common.fused_moe.grouped_fused_moe import moe_align, moe_align1, moe_align2, grouped_matmul
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -68,6 +69,25 @@ def test_moe_align1():
     assert torch.equal(experts_info, true_experts_info)
 
 
+def test_moe_align2():
+
+    experts_token_num = torch.zeros((4,), dtype=torch.int32, device="cuda")
+    experts_token_num[0] = 8
+    experts_token_num[1] = 0
+    experts_token_num[2] = 60
+    experts_token_num[3] = 16
+
+    blocks_to_expert_id, mblocks_to_m_index = moe_align2(100, experts_token_num, block_m=16)
+    assert blocks_to_expert_id.shape[0] == triton.cdiv(100 + 4 * (16 - 1), 16)
+    assert torch.allclose(
+        blocks_to_expert_id,
+        torch.tensor([0, 2, 2, 2, 2, 3, -1, -1, -1, -1], device="cuda", dtype=torch.int32),
+    )
+    assert torch.allclose(
+        mblocks_to_m_index, torch.tensor([0, 0, 1, 2, 3, 0, 0, 0, 0, 0], device="cuda", dtype=torch.int32)
+    )
+
+
 def test_grouped_matmul():
     test_dtype = torch.bfloat16
     token_inputs = torch.randn((10, 512), dtype=test_dtype, device="cuda") / 10
@@ -93,6 +113,7 @@ def test_grouped_matmul():
     out = torch.empty((10, 1024), dtype=test_dtype, device="cuda")
     # warm up
     grouped_matmul(
+        10 * 1,
         token_inputs,
         None,
         experts_token_num,
@@ -102,7 +123,6 @@ def test_grouped_matmul():
         None,
         topk_num,
         out,
-        expert_token_limit=2 ** 31 - 1,
         mul_routed_weight=True,
         use_fp8_w8a8=False,
     )
@@ -110,6 +130,7 @@ def test_grouped_matmul():
     start = time.time()
     for _ in range(100):
         grouped_matmul(
+            10 * 1,
             token_inputs,
             None,
             experts_token_num,
@@ -119,7 +140,6 @@ def test_grouped_matmul():
             None,
             topk_num,
             out,
-            expert_token_limit=2 ** 31 - 1,
             mul_routed_weight=True,
             use_fp8_w8a8=False,
         )
