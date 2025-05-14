@@ -22,7 +22,7 @@ class MixtralTransformerLayerWeight(LlamaTransformerLayerWeight):
         return
 
     def _parse_config(self):
-        super()._init_config()
+        super()._parse_config()
         self.n_routed_experts = self.network_config_["num_local_experts"]
 
     def _init_weight_names(self):

@@ -2,9 +2,8 @@ import os
 import torch
 import math
 import numpy as np
-from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.utils.envs_utils import enable_env_vars
+from lightllm.models.qwen2.layer_weights.transformer_layer_weight import Qwen2TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     MultiROWMMWeight,
@@ -17,7 +16,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
 from functools import partial
 
 
-class Qwen3TransformerLayerWeight(LlamaTransformerLayerWeight):
+class Qwen3TransformerLayerWeight(Qwen2TransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
         super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
         return
@@ -26,6 +25,9 @@ class Qwen3TransformerLayerWeight(LlamaTransformerLayerWeight):
         super()._init_weight_names()
         self._q_norm_name = f"model.layers.{self.layer_num_}.self_attn.q_norm.weight"
         self._k_norm_name = f"model.layers.{self.layer_num_}.self_attn.k_norm.weight"
+        self._q_bias_name = None
+        self._k_bias_name = None
+        self._v_bias_name = None
 
     def _init_norm(self):
         super()._init_norm()
