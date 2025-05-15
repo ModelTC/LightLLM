@@ -136,29 +136,3 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
-
-
-async def lightllm_pd_generate_stream(request: Request, httpserver_manager: HttpServerManager) -> Response:
-
-    request_dict = await request.json()
-    prompt = request_dict.pop("inputs")
-    sample_params_dict = request_dict["parameters"]
-    _ = sample_params_dict.pop("return_details", False)
-    sampling_params = SamplingParams()
-    sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
-    sampling_params.verify()
-    if sampling_params.best_of != 1:
-        raise Exception("stream api only support best_of == 1")
-
-    multimodal_params_dict = request_dict.get("multimodal_params", {})
-    multimodal_params = MultimodalParams(**multimodal_params_dict)
-    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
-
-    # Streaming case
-    async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for sub_req_id, request_output, metadata, finish_status in results_generator:
-            ret = [sub_req_id, request_output, metadata, finish_status.value]
-            yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")
-
-    background_tasks = BackgroundTasks()
-    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)

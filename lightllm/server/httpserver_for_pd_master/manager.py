@@ -24,6 +24,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
+from lightllm.utils.error_utils import ServerBusyError
 
 logger = init_logger(__name__)
 
@@ -87,9 +88,22 @@ class HttpServerManagerForPDMaster:
             pass
         return
 
-    def tokens(self, prompt: str):
-        # to do
-        raise NotImplementedError("tokens is not implements")
+    def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
+        kwargs = {} if kwargs is None else kwargs
+        prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
+        image_tokens = 0
+        img_count = 0
+        audio_tokens = 0
+        audio_count = 0
+        for img in multimodal_params.images:
+            img_count += 1
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
+            image_tokens += self.tokenizer.get_image_token_length(img)
+        for audio in multimodal_params.audios:
+            audio_count += 1
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
+            audio_tokens += self.tokenizer.get_audio_token_length(audio)
+        return len(prompt_ids) + image_tokens + img_count + audio_tokens + audio_count
 
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
@@ -219,8 +233,8 @@ class HttpServerManagerForPDMaster:
         try:
             await asyncio.wait_for(up_status_event.wait(), timeout=60)
         except asyncio.TimeoutError:
-            logger.warning(f"group_request_id: {group_request_id} kv move time out err")
-            assert False, f"req_id {group_request_id} kv move time out, server is busy"
+            logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
+            raise ServerBusyError()
 
         sampling_params.move_kv_to_decode_node.initialize(None)
         sampling_params.max_new_tokens = old_max_new_tokens - 1
