@@ -3,7 +3,7 @@ import torch
 import threading
 from typing import Optional, Tuple, List, Dict, Any
 from .base_weight import BaseWeight
-from lightllm.utils.dist_utils import get_global_rank, get_current_device_id
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
 from lightllm.common.quantization import Quantcfg
 
 
@@ -37,7 +37,7 @@ class FusedMoeWeightTP(BaseWeight):
         self.n_routed_experts = n_routed_experts
         self.split_inter_size = split_inter_size
         self.data_type_ = data_type
-        self.tp_rank_ = get_global_rank()
+        self.tp_rank_ = get_current_rank_in_dp()
         self.experts_up_projs = [None] * self.n_routed_experts
         self.experts_gate_projs = [None] * self.n_routed_experts
         self.experts_up_proj_scales = [None] * self.n_routed_experts

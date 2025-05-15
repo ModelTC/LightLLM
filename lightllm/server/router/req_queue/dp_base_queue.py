@@ -12,7 +12,7 @@ class DpQueue:
     def __init__(self, args, router, base_queue_class, dp_size_in_node) -> None:
         self.dp_size_in_node = dp_size_in_node
         self.base_queue_class = base_queue_class
-        self.round_robin_dp_id = 0
+        self.pre_select_dp_index = self.dp_size_in_node - 1
         from lightllm.server.router.manager import RouterManager
 
         self.router: RouterManager = router
@@ -52,8 +52,8 @@ class DpQueue:
         suggested_dp_index = req.sample_params.suggested_dp_index
         if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
             logger.error(f"input req {req.request_id} dp index {suggested_dp_index} has error")
-            suggested_dp_index = self.round_robin_dp_id
-            self.round_robin_dp_id = (self.round_robin_dp_id + 1) % self.dp_size_in_node
+            suggested_dp_index = self._get_suggest_dp_index()
+            self.pre_select_dp_index = suggested_dp_index
             req.sample_params.suggested_dp_index = suggested_dp_index
             self.inner_queues[suggested_dp_index].append(req)
         else:
@@ -62,13 +62,12 @@ class DpQueue:
 
     def extend(self, req_group: List[Req]):
         # 同一个组的，要分配在同一个 dp 上，效率最高
-        index = self.round_robin_dp_id
-        self.round_robin_dp_id = (self.round_robin_dp_id + 1) % self.dp_size_in_node
+        index = self._get_suggest_dp_index()
         for req in req_group:
             suggested_dp_index = req.sample_params.suggested_dp_index
             if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
                 logger.error(f"input req {req.request_id} dp index {suggested_dp_index} has error")
-
+                self.pre_select_dp_index = index
                 req.sample_params.suggested_dp_index = index
                 self.inner_queues[index].append(req)
             else:
@@ -94,3 +93,21 @@ class DpQueue:
                     self.router.shared_token_load.set_estimated_peak_token_count(estimated_peak_token_count, dp_index)
                     self.router.shared_token_load.set_dynamic_max_load(dynamic_max_load, dp_index)
         return
+
+    def _get_suggest_dp_index(self):
+        min_length = min(len(queue.waiting_req_list) for queue in self.inner_queues)
+        select_dp_indexes = [
+            i for i, queue in enumerate(self.inner_queues) if len(queue.waiting_req_list) == min_length
+        ]
+
+        # multi thread safe keep
+        if not select_dp_indexes:
+            return random.randint(0, self.dp_size_in_node - 1)
+
+        # round_robin select.
+        for i in range(self.dp_size_in_node):
+            next_dp_index = (self.pre_select_dp_index + i + 1) % self.dp_size_in_node
+            if next_dp_index in select_dp_indexes:
+                return next_dp_index
+
+        return random.choice(select_dp_indexes)
