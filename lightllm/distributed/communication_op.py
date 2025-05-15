@@ -27,12 +27,11 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.envs_utils import get_env_start_args, get_deepep_num_max_dispatch_tokens_per_rank
 from lightllm.utils.dist_utils import (
-    get_current_device_id,
-    get_node_world_size,
     get_global_world_size,
     get_dp_world_size,
     get_global_rank,
     get_current_rank_in_dp,
+    create_new_group_for_current_dp,
 )
 from lightllm.utils.device_utils import get_device_sm_count
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
@@ -63,8 +62,7 @@ class CustomProcessGroup:
         self.custom_reduce = None
         self.custom_gather = None
         self.dp_world_size = get_dp_world_size()
-        ranks = list([get_global_rank() - get_current_rank_in_dp() + i for i in range(self.dp_world_size)])
-        self.device_group = dist.new_group(ranks, backend="nccl")
+        self.device_group = create_new_group_for_current_dp("nccl")
 
     def init_custom_reduce(self) -> None:
         if not HAS_SGL_KERNEL or not has_nvlink() or self.dp_world_size not in [2, 4, 6, 8]:
@@ -72,8 +70,7 @@ class CustomProcessGroup:
         args = get_env_start_args()
         if args.disable_custom_allreduce:
             return
-        ranks = list([get_global_rank() - get_current_rank_in_dp() + i for i in range(self.dp_world_size)])
-        cpu_group = dist.new_group(ranks, backend="gloo")
+        cpu_group = create_new_group_for_current_dp("gloo")
         self.custom_reduce = CustomAllreduce(cpu_group, torch.cuda.current_device())
         logger.info("Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.")
 
@@ -84,8 +81,8 @@ class CustomProcessGroup:
         args = get_env_start_args()
         if args.disable_custom_allgather:
             return
-        ranks = list([get_global_rank() - get_current_rank_in_dp() + i for i in range(self.dp_world_size)])
-        cpu_group = dist.new_group(ranks, backend="gloo")
+
+        cpu_group = create_new_group_for_current_dp("gloo")
         self.custom_gather = CustomAllgather(cpu_group, torch.cuda.current_device())
         logger.info("Enable Custom ALLGather.  You can disable it by settting --disable_custom_allgather")
 

@@ -19,6 +19,7 @@ from rpyc.utils.server import ThreadedServer
 from .prefill_task_cache import g_kv_move_task_cache
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.dist_utils import create_new_group_for_current_dp
 
 logger = init_logger(__name__)
 
@@ -30,11 +31,8 @@ class ChunckedPrefillForPrefillNode(ModeBackend):
         self.mem_queue: mp.Queue = mem_queue
 
     def init_custom(self):
-        ranks = []
-        for i in range(self.dp_world_size):
-            ranks.append(i + self.global_dp_rank * self.dp_world_size)
 
-        self.lock_nccl_group = dist.new_group(ranks=ranks, backend="gloo")
+        self.lock_nccl_group = create_new_group_for_current_dp("gloo")
         logger.info(f"lock_nccl_group ranks {dist.get_rank(self.lock_nccl_group)}")
 
         from .prefill_infer_rpyc import PDPrefillInferRpcServer

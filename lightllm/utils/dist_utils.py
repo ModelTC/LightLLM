@@ -189,3 +189,13 @@ def set_node_world_size(node_world_size: int):
 
 def get_node_world_size():
     return int(get_environ("LIGHTLLM_NODE_WORLD_SIZE"))
+
+
+def create_new_group_for_current_dp(backend):
+    ans_group = None
+    for iter_dp_rank in range(get_dp_size()):
+        ranks = list(i + iter_dp_rank * get_dp_world_size() for i in range(get_dp_world_size()))
+        device_group = dist.new_group(ranks, backend=backend)
+        if get_global_dp_rank() == iter_dp_rank:
+            ans_group = device_group
+    return ans_group
