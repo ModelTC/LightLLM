@@ -24,6 +24,8 @@ def get_unique_server_name():
 
 
 def set_cuda_arch(args):
+    if not torch.cuda.is_available():
+        return
     if args.enable_flashinfer_prefill or args.enable_flashinfer_decode:
         capability = torch.cuda.get_device_capability()
         arch = f"{capability[0]}.{capability[1]}"

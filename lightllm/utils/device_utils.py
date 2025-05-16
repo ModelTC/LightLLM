@@ -1,11 +1,27 @@
 import os
 import time
+import torch
 import shutil
 import subprocess
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+@lru_cache(maxsize=None)
+def is_tesla():
+    return "Tesla" in torch.cuda.get_device_name(0)
+
+
+@lru_cache(maxsize=None)
+def is_hopper():
+    return (
+        "H100" in torch.cuda.get_device_name(0)
+        or "H200" in torch.cuda.get_device_name(0)
+        or "H800" in torch.cuda.get_device_name(0)
+        or "Hopper" in torch.cuda.get_device_name(0)
+    )
 
 
 @lru_cache(maxsize=None)

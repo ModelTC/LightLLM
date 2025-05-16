@@ -7,7 +7,7 @@ import triton.language as tl
 import math
 import torch.nn.functional as F
 
-TESLA = "Tesla" in torch.cuda.get_device_name(0)
+from lightllm.utils.device_utils import is_tesla
 
 
 @triton.jit
@@ -123,7 +123,7 @@ def _fwd_kernel(
 def context_attention_fwd(
     q, k, v, o, b_req_idx, b_start_loc, b_seq_len, b_prompt_cache_len, max_input_len, req_to_token_indexs
 ):
-    BLOCK_M = 128 if not TESLA else 64
+    BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
@@ -287,7 +287,7 @@ def _fwd_kernel_no_prompt_cache(
 @torch.no_grad()
 def context_attention_fwd_no_prompt_cache(q, k, v, o, b_start_loc, b_seq_len, max_input_len):
 
-    BLOCK_M = 128 if not TESLA else 64
+    BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
@@ -456,7 +456,7 @@ def _fwd_kernel_int8kv(
 
 @torch.no_grad()
 def context_attention_fwd_ppl_int8kv(q, k, v, o, b_start_loc, b_seq_len, max_input_len, b_prompt_cache_len):
-    BLOCK_M = 128 if not TESLA else 64
+    BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv

@@ -4,9 +4,7 @@ import triton
 import triton.language as tl
 import math
 import torch.nn.functional as F
-
-TESLA = "Tesla" in torch.cuda.get_device_name(0)
-CUDA_CAPABILITY = torch.cuda.get_device_capability()
+from lightllm.utils.device_utils import is_tesla
 
 
 @triton.jit
@@ -176,7 +174,7 @@ def context_attention_fwd_fp8(
     softmax_scale,
 ):
 
-    BLOCK = 128 if not TESLA else 64
+    BLOCK = 128 if not is_tesla() else 64
     q_nope_dim = q_nope.shape[-1]
     q_rope_dim = q_rope.shape[-1]
     assert q_nope_dim == kv_nope.shape[-1]
@@ -185,9 +183,9 @@ def context_attention_fwd_fp8(
     assert q_rope_dim in {16, 32, 64, 128, 256}
 
     if q_nope_dim >= 512:
-        BLOCK = 32 if TESLA or CUDA_CAPABILITY[0] >= 9 else 64
+        BLOCK = 32 if is_tesla() or torch.cuda.get_device_capability()[0] >= 9 else 64
     else:
-        BLOCK = 128 if not TESLA else 64
+        BLOCK = 128 if not is_tesla() else 64
 
     if q_nope.dtype == torch.float32:
         BLOCK = BLOCK // 4

@@ -4,15 +4,7 @@ import triton
 import triton.language as tl
 import math
 import torch.nn.functional as F
-
-TESLA = "Tesla" in torch.cuda.get_device_name(0)
-HOPPER = (
-    "H100" in torch.cuda.get_device_name(0)
-    or "H200" in torch.cuda.get_device_name(0)
-    or "H800" in torch.cuda.get_device_name(0)
-    or "Hopper" in torch.cuda.get_device_name(0)
-)
-
+from lightllm.utils.device_utils import is_hopper
 
 if triton.__version__ >= "2.1.0":
 
@@ -211,7 +203,7 @@ def flash_attention_fwd(q, k, v, o):
     统一的 Flash Attention 接口。如果 _flash_attn_forward 存在，
     则使用 flash_attention_v3_fwd，否则使用 Triton 版本。
     """
-    if _flash_attn_v3_available and HOPPER:
+    if _flash_attn_v3_available and is_hopper():
         flash_attention_v3_fwd(q, k, v, o)
     else:
         _flash_attention_triton_fwd(q, k, v, o)
