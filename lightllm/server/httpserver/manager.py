@@ -52,6 +52,7 @@ class HttpServerManager:
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
+        self._resource_lock = asyncio.Lock()
         self.node_rank = args.node_rank
         self.transfer_lock = asyncio.Lock()  # the lock for transfer to next module in multi node mode.
         self.disable_abort = args.nnodes > 1 and args.dp == 1  # mulitnode dp=1 mode, disable abort
@@ -141,19 +142,23 @@ class HttpServerManager:
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
-            for img in multimodal_params.images:
-                self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
-                record = await self._alloc_resource(img)
-                img.uuid = record["id"]
-                img.token_id = record["token_id"]
-                img.token_num = record["token_num"]
-            for audio in multimodal_params.audios:
-                self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
-                record = await self._alloc_resource(audio)
-                audio.uuid = record["id"]
-                audio.token_id = record["token_id"]
-                audio.token_num = record["token_num"]
-        return
+            # 这里的锁是为了 防止多个含有多张图片的请求 同时申请的record数量 大于cache_capacity，从而造成死锁的问题。
+            # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
+            # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
+            async with self._resource_lock:
+                for img in multimodal_params.images:
+                    self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
+                    record = await self._alloc_resource(img)
+                    img.uuid = record["id"]
+                    img.token_id = record["token_id"]
+                    img.token_num = record["token_num"]
+                for audio in multimodal_params.audios:
+                    self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
+                    record = await self._alloc_resource(audio)
+                    audio.uuid = record["id"]
+                    audio.token_id = record["token_id"]
+                    audio.token_num = record["token_num"]
+            return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
@@ -594,7 +599,6 @@ class HttpServerManager:
             for req_status in self.req_id_to_out_inf.values():
                 if req_status.can_release():
                     release_req_status.append(req_status)
-
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 for req in req_status.group_req_objs.shm_req_objs:
