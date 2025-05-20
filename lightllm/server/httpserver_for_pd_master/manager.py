@@ -272,7 +272,7 @@ class HttpServerManagerForPDMaster:
             "node_id": p_start_args["pd_node_id"],
             "ip": p_start_args["host"],
             "rpyc_port": p_start_args["pd_remote_prefill_port"],
-            "max_new_tokens": sampling_params.max_new_tokens - 1,
+            "max_new_tokens": sampling_params.max_new_tokens,
             "pd_master_node_id": self.args.pd_node_id,
         }
 
