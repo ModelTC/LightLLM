@@ -31,8 +31,11 @@ from lightllm.utils.light_utils import light_ops
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
-if light_ops is not None:
-    light_ops.meta_size()
+try:
+    if light_ops is not None:
+        light_ops.meta_size()
+except:
+    pass
 
 logger = init_logger(__name__)
 

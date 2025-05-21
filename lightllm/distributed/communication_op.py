@@ -79,7 +79,7 @@ class CustomProcessGroup:
             return
 
         args = get_env_start_args()
-        if args.disable_custom_allgather:
+        if not args.enable_custom_allgather:
             return
 
         cpu_group = create_new_group_for_current_dp("gloo")
