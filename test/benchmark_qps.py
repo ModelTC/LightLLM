@@ -105,12 +105,6 @@ async def async_post_stream_openai(url, prompt, max_new_tokens, session):
             async for line in response.content:
                 line = line.strip()
                 if line:
-                    line = line.decode("utf-8")[6:]  # remove "data: "
-                    if line == "[DONE]":
-                        continue
-                    data = json.loads(line)
-                    if not data["choices"][0]["text"]:
-                        continue
                     current_time = time.time()
                     elapsed_time = current_time - last_time
                     used_time.append(elapsed_time)
@@ -249,7 +243,17 @@ async def run_continuous_benchmark(
     end_time = [0.0]
     pending_tasks = []
 
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=10 * reqs_num)) as session:
+    timeout = aiohttp.ClientTimeout(
+        total=3600,  # 总超时时间1小时
+        connect=300,  # 连接超时5分钟
+        sock_connect=300,
+        sock_read=3600,
+    )
+
+    async with aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=10 * reqs_num),
+        timeout=timeout,
+    ) as session:
         sender_task = asyncio.create_task(
             continuous_sender(
                 session,

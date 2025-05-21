@@ -6,19 +6,24 @@ import triton.language as tl
 
 @triton.jit
 def _fwd_kernel_destindex_copy_kv(
-    K, Dest_loc,
+    K,
+    Dest_loc,
     Out,
-    stride_k_bs, stride_k_h, stride_k_d,
-    stride_o_bs, stride_o_h, stride_o_d,
+    stride_k_bs,
+    stride_k_h,
+    stride_k_d,
+    stride_o_bs,
+    stride_o_h,
+    stride_o_d,
     head_num,
     BLOCK_DMODEL: tl.constexpr,
-    BLOCK_HEAD: tl.constexpr
+    BLOCK_HEAD: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
     offs_h = tl.arange(0, BLOCK_HEAD)
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
-    dest_index = tl.load(Dest_loc + cur_index)
+    dest_index = tl.load(Dest_loc + cur_index).to(tl.int64)
 
     k_ptrs = K + cur_index * stride_k_bs + stride_k_h * offs_h[:, None] + stride_k_d * offs_d[None, :]
     o_ptrs = Out + dest_index * stride_o_bs + stride_o_h * offs_h[:, None] + stride_o_d * offs_d[None, :]
@@ -39,9 +44,15 @@ def destindex_copy_kv(K, DestLoc, Out):
     num_warps = 1
 
     _fwd_kernel_destindex_copy_kv[grid](
-        K, DestLoc, Out,
-        K.stride(0), K.stride(1), K.stride(2),
-        Out.stride(0), Out.stride(1), Out.stride(2),
+        K,
+        DestLoc,
+        Out,
+        K.stride(0),
+        K.stride(1),
+        K.stride(2),
+        Out.stride(0),
+        Out.stride(1),
+        Out.stride(2),
         head_num,
         BLOCK_DMODEL=head_dim,
         BLOCK_HEAD=BLOCK_HEAD,
@@ -53,23 +64,35 @@ def destindex_copy_kv(K, DestLoc, Out):
 
 @triton.jit
 def _fwd_kernel_destindex_copy_quantize_kv(
-    K, Dest_loc, Out, Out_scale,
-    stride_k_bs, stride_k_h, stride_k_d,
-    stride_o_bs, stride_o_h, stride_o_d,
-    stride_os_bs, stride_os_h, stride_os_d,
+    K,
+    Dest_loc,
+    Out,
+    Out_scale,
+    stride_k_bs,
+    stride_k_h,
+    stride_k_d,
+    stride_o_bs,
+    stride_o_h,
+    stride_o_d,
+    stride_os_bs,
+    stride_os_h,
+    stride_os_d,
     head_num,
     BLOCK_DMODEL: tl.constexpr,
-    BLOCK_HEAD: tl.constexpr
+    BLOCK_HEAD: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
     offs_h = tl.arange(0, BLOCK_HEAD)
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
-    dest_index = tl.load(Dest_loc + cur_index)
-    src_data = tl.load(K + cur_index * stride_k_bs + offs_h[:, None] * stride_k_h + stride_k_d * offs_d[None, :], 
-                       mask=offs_h[:, None] < head_num, other=0.0)
+    dest_index = tl.load(Dest_loc + cur_index).to(tl.int64)
+    src_data = tl.load(
+        K + cur_index * stride_k_bs + offs_h[:, None] * stride_k_h + stride_k_d * offs_d[None, :],
+        mask=offs_h[:, None] < head_num,
+        other=0.0,
+    )
     abs_data = tl.abs(src_data)
-    data_scale = (tl.max(abs_data, axis=1) / 127.).to(Out_scale.dtype.element_ty)[:, None]
+    data_scale = (tl.max(abs_data, axis=1) / 127.0).to(Out_scale.dtype.element_ty)[:, None]
     q_src_data = (src_data / data_scale).to(tl.int8)
     o_ptrs = Out + dest_index * stride_o_bs + stride_o_h * offs_h[:, None] + stride_o_d * offs_d[None, :]
     os_ptrs = Out_scale + dest_index * stride_os_bs + stride_os_h * offs_h[:, None]
@@ -88,10 +111,19 @@ def destindex_copy_quantize_kv(K, DestLoc, Out, Out_scale):
     num_warps = 1
 
     _fwd_kernel_destindex_copy_quantize_kv[grid](
-        K, DestLoc, Out, Out_scale,
-        K.stride(0), K.stride(1), K.stride(2),
-        Out.stride(0), Out.stride(1), Out.stride(2),
-        Out_scale.stride(0), Out_scale.stride(1), Out_scale.stride(2),
+        K,
+        DestLoc,
+        Out,
+        Out_scale,
+        K.stride(0),
+        K.stride(1),
+        K.stride(2),
+        Out.stride(0),
+        Out.stride(1),
+        Out.stride(2),
+        Out_scale.stride(0),
+        Out_scale.stride(1),
+        Out_scale.stride(2),
         head_num,
         BLOCK_DMODEL=head_dim,
         BLOCK_HEAD=BLOCK_HEAD,
@@ -149,6 +181,6 @@ def test2():
     print("cos ", cos(src.flatten().to(torch.float32), (value_dest * scale_dest).flatten().to(torch.float32)))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test1()
     test2()
