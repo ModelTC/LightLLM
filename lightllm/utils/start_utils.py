@@ -98,4 +98,17 @@ def start_submodule_processes(start_funcs=[], start_args=[]):
     return
 
 
+def kill_recursive(proc):
+    try:
+        parent = psutil.Process(proc.pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            logger.info(f"Killing child process {child.pid}")
+            child.kill()
+        logger.info(f"Killing parent process {proc.pid}")
+        parent.kill()
+    except psutil.NoSuchProcess:
+        logger.warning(f"Process {proc.pid} does not exist.")
+
+
 process_manager = SubmoduleManager()

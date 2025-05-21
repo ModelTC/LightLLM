@@ -1,6 +1,7 @@
 import torch.distributed as dist
 import os
 import torch
+import requests
 
 # 规范 rank 的含义，在 llm 推理的相关代码中下述的 rank 的含义如下：
 # global_rank 全局 rank 序列id， 如两节点 8卡，会存在 0 - 15 16个global_rank
@@ -93,6 +94,7 @@ def init_distributed_env(kvargs):
     dp_size_in_node = max(1, get_dp_size() // nnodes)
     set_dp_rank_in_node(get_global_dp_rank() % dp_size_in_node)
 
+    _init_nccl_env()
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
@@ -199,3 +201,33 @@ def create_new_group_for_current_dp(backend):
         if get_global_dp_rank() == iter_dp_rank:
             ans_group = device_group
     return ans_group
+
+
+def _init_nccl_env():
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    args = get_env_start_args()
+
+    # 配置使用外部的 tcp store server 来创建 nccl 连接
+    if args.use_config_server_to_init_nccl:
+        os.environ["TORCHELASTIC_USE_AGENT_STORE"] = "True"
+        rank_id = get_global_rank()
+        world_size = get_global_world_size()
+        ip_port = f"{args.config_server_host}:{args.config_server_port}"
+        params = f"tcp_store_port={args.nccl_port}&&rank_id={rank_id}&&world_size={world_size}"
+
+        if rank_id == 0:
+            # 当使用外部config server 启动的tcpStore来初始化nccl时，需要保证配置了config_server_host.
+            # 同时也需要保证config_server_host和nccl_host是同一个ip, 这个时候 rank 0 推理进程会先调用
+            # config server的http接口来启动tcp store server, 然后再调用nccl init方法来初始化nccl.
+            assert args.config_server_host == args.nccl_host
+            url = f"http://{ip_port}/start_tcp_store_server?{params}"
+            response = requests.get(url, timeout=60 * 3)
+            assert response.status_code == 200, f"Failed to init config server nccl tcp store: {response.status_code}"
+        else:
+            assert args.config_server_host == args.nccl_host
+            url = f"http://{ip_port}/start_tcp_store_server?{params}"
+            response = requests.get(url, timeout=60 * 3)
+            assert response.status_code == 200, f"Failed to init config server nccl tcp store: {response.status_code}"
+
+    return

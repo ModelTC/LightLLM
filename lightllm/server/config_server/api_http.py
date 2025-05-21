@@ -1,13 +1,18 @@
+import time
+import asyncio
+import base64
+import pickle
+import multiprocessing as mp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query
 from threading import Lock
-from typing import Dict
+from typing import Dict, List
 from fastapi.responses import JSONResponse
 from lightllm.utils.log_utils import init_logger
 from ..pd_io_struct import PD_Master_Obj
-import base64
-import pickle
-import os
-import requests
+from .nccl_tcp_store import start_tcp_store_server
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.process_check import start_parent_check_thread
+
 
 logger = init_logger(__name__)
 app = FastAPI()
@@ -112,3 +117,90 @@ async def allocate_global_unique_multimodal_id_range():
         end_id = global_multimodal_embedding_id
 
     return {"start_id": start_id, "end_id": end_id}
+
+
+global_store_port_to_process: Dict[int, mp.Process] = {}
+global_store_port_to_client_states: Dict[int, List[bool]] = {}
+global_store_port_lock = asyncio.Lock()
+
+
+@app.get("/start_tcp_store_server")
+async def http_start_tcp_store_server(
+    tcp_store_port: int = Query(...), rank_id: int = Query(...), world_size: int = Query(...)
+):
+    """
+    Start a TCP store server for NCCL communication.
+
+    Args:
+        tcp_store_port (int): The port number for the TCP store server.
+        rank_id (int): The rank ID of inference process.
+        world_size (int): The world size of nccl group.
+
+    Returns:
+        dict: A dictionary containing the status of the server.
+    """
+    global global_store_port_to_process
+    global global_store_port_to_client_states
+    global global_store_port_lock
+
+    args = get_env_start_args()
+
+    if rank_id == 0:
+        async with global_store_port_lock:
+            if tcp_store_port in global_store_port_to_client_states:
+                logger.error(f"tcp store server {tcp_store_port} already started, rank_id 0 find client state exists")
+                assert False, f"tcp store server {tcp_store_port} already started, rank_id 0 find client state exists"
+
+            if tcp_store_port in global_store_port_to_process:
+                logger.warning(f"tcp store server {tcp_store_port} already started, kill and restart it")
+                process = global_store_port_to_process[tcp_store_port]
+                process.kill()
+                process.join()
+
+            global_store_port_to_process[tcp_store_port] = start_tcp_store_server(
+                args.config_server_host, tcp_store_port
+            )
+
+            world_size_state = [True for _ in range(world_size)]
+            global_store_port_to_client_states[tcp_store_port] = world_size_state
+
+        world_size_state[rank_id] = False
+
+        start_time = time.time()
+        while any(world_size_state):
+            await asyncio.sleep(1)
+            if time.time() - start_time > 60 * 3:
+                logger.error(
+                    f"tcp store server {tcp_store_port} rank_id {rank_id} world_size {world_size} wait all quit timeout"
+                )
+                async with global_store_port_lock:
+                    global_store_port_to_client_states.pop(tcp_store_port, None)
+                raise Exception(
+                    f"tcp store server {tcp_store_port} rank_id {rank_id} world_size {world_size} wait timeout"
+                )
+
+        async with global_store_port_lock:
+            global_store_port_to_client_states.pop(tcp_store_port, None)
+
+        return {"status": "ok"}
+    else:
+        start_time = time.time()
+        while tcp_store_port not in global_store_port_to_client_states:
+            await asyncio.sleep(1)
+            if time.time() - start_time > 60 * 3:
+                logger.error(f"tcp store port {tcp_store_port} rank_id {rank_id} world_size {world_size} state timeout")
+                raise Exception(
+                    f"tcp store server {tcp_store_port} rank_id {rank_id} world_size {world_size} state timeout"
+                )
+
+        world_size_state = global_store_port_to_client_states[tcp_store_port]
+
+        assert (
+            world_size_state[rank_id] is True
+        ), f"tcp store server {tcp_store_port} rank_id {rank_id} world_size {world_size} world_size_state error"
+        world_size_state[rank_id] = False
+        return {"status": "ok"}
+
+
+logger.info("config server start_parent_check_thread...")
+start_parent_check_thread()

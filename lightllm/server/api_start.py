@@ -5,7 +5,7 @@ import uuid
 import subprocess
 import signal
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
-from lightllm.utils.start_utils import process_manager
+from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from .visualserver.manager import start_visual_process
@@ -25,8 +25,8 @@ def setup_signal_handlers(http_server_process, process_manager):
     def signal_handler(sig, frame):
         if sig == signal.SIGINT:
             logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
-            if http_server_process and http_server_process.poll() is None:
-                http_server_process.kill()
+            if http_server_process:
+                kill_recursive(http_server_process)
 
             process_manager.terminate_all_processes()
             logger.info("All processes have been forcefully terminated.")
@@ -47,7 +47,7 @@ def setup_signal_handlers(http_server_process, process_manager):
                     logger.info("HTTP server has exited gracefully")
                 else:
                     logger.warning("HTTP server did not exit in time, killing it...")
-                    http_server_process.kill()
+                    kill_recursive(http_server_process)
 
             process_manager.terminate_all_processes()
             logger.info("All processes have been terminated gracefully.")
@@ -81,6 +81,10 @@ def normal_or_p_d_start(args):
         logger.info(f"zmq mode head: {args.zmq_mode}")
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
+
+    # 当使用config_server来初始化nccl时，nccl_host和config_server_host必须一致
+    if args.use_config_server_to_init_nccl:
+        assert args.config_server_host == args.nccl_host
 
     assert (
         args.mem_fraction > 0 and args.mem_fraction < 1

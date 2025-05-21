@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple
 
 # 只是为了更好的编程提示
 
@@ -31,7 +31,9 @@ class StartArgs:
     tp: int = field(default=1)
     dp: int = field(default=1)
     max_req_total_len: int = field(default=2048 + 1024)
+    nccl_host: str = field(default="127.0.0.1")
     nccl_port: int = field(default=28765)
+    use_config_server_to_init_nccl: bool = field(default=False)
     mode: List[str] = field(default_factory=list)
     trust_remote_code: bool = field(default=False)
     disable_log_stats: bool = field(default=False)
