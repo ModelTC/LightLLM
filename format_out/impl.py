@@ -5,7 +5,7 @@ import requests
 from lightllm.server.core.objs.py_sampling_params import SamplingParams
 from pydantic import BaseModel
 from typing import List
-from outlines.fsm.json_schema import build_regex_from_schema
+from outlines_core.fsm.json_schema import build_regex_from_schema
 
 
 from lightllm.utils.log_utils import init_logger

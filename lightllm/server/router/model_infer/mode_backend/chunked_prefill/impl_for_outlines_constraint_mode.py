@@ -1,6 +1,8 @@
 import os
 import shutil
 import torch
+import functools
+
 from .impl import ChunkedPrefillBackend
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
@@ -12,6 +14,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.server.tokenizer import get_tokenizer
 from typing import List, Tuple
 from lightllm.utils.log_utils import init_logger
+
 
 logger = init_logger(__name__)
 
@@ -42,6 +45,15 @@ class OutlinesConstraintBackend(ChunkedPrefillBackend):
         # 添加多eos_id 的逻辑
         self.tokenizer.eos_token_ids = eos_token_ids
         logger.info(f"eos_ids {self.tokenizer.eos_token_ids}")
+
+        @functools.lru_cache(maxsize=200)
+        def get_cached_regex_guide(regex: str):
+            from outlines.fsm.guide import RegexGuide
+
+            logger.info(f"regex_guide cache miss for '{regex}'")
+            return RegexGuide.from_regex(regex, self.tokenizer)
+
+        self.get_cached_regex_guide = get_cached_regex_guide
         return
 
     def decode(self):
@@ -147,11 +159,9 @@ class OutlinesConstraintBackend(ChunkedPrefillBackend):
         return
 
     def _init_guide_infos(self, run_reqs: List[InferReq]):
-        from outlines.fsm.guide import RegexGuide
-
         for i, run_obj in enumerate(run_reqs):
             run_obj: InferReq = run_obj
             sample_params = run_obj.sampling_param
             if sample_params.regular_constraint is not None:
                 if not hasattr(sample_params, "regex_guide"):
-                    sample_params.regex_guide = RegexGuide.from_regex(sample_params.regular_constraint, self.tokenizer)
+                    sample_params.regex_guide = self.get_cached_regex_guide(sample_params.regular_constraint)
