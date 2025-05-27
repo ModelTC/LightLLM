@@ -22,7 +22,9 @@ from lightllm.server.router.model_infer.mode_backend import (
     ChunckedPrefillForPrefillNode,
     DPChunkedForPrefillNode,
 )
+from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.core.objs import RpcShmParams, RpcShmResults, ShmSyncStatusArray
+from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
@@ -43,7 +45,7 @@ class ModelRpcServer:
         mem_queue: mp.Queue,
     ):
         super().__init__()
-        self.args = args
+        self.args: StartArgs = args
         self.node_world_size = node_world_size
         self.info_queue = info_queue
         self.mem_queue = mem_queue
@@ -160,10 +162,21 @@ class ModelRpcServer:
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
 
+        # only deepseekv3 can support auto_update_redundancy_expert
+        if self.args.auto_update_redundancy_expert:
+            self.redundancy_expert_manager = RedundancyExpertManager(self.backend.model)
+            logger.info("init redundancy_expert_manager")
+        else:
+            self.redundancy_expert_manager = None
+
         return
 
     def prefill(self, reqs):
         try:
+            # only deepseekv3 can support auto_update_redundancy_expert
+            if self.redundancy_expert_manager is not None:
+                self.redundancy_expert_manager.step()
+
             return self.backend.prefill(reqs)
         except Exception as e:
             err_msg = str(e)
@@ -172,6 +185,10 @@ class ModelRpcServer:
 
     def decode(self):
         try:
+            # only deepseekv3 can support auto_update_redundancy_expert
+            if self.redundancy_expert_manager is not None:
+                self.redundancy_expert_manager.step()
+
             return self.backend.decode()
         except Exception as e:
             err_msg = str(e)

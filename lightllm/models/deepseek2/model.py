@@ -88,7 +88,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_yarn_rotary()
-        dist_group_manager.new_deepep_group(self.config["n_routed_experts"])
+        dist_group_manager.new_deepep_group(self.config["n_routed_experts"], self.config["hidden_size"])
 
     def _verify_params(self):
         return super()._verify_params()

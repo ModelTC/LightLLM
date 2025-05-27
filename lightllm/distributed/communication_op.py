@@ -25,7 +25,11 @@ from torch.distributed import ReduceOp, ProcessGroup
 from typing import List, Dict, Optional, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
-from lightllm.utils.envs_utils import get_env_start_args, get_deepep_num_max_dispatch_tokens_per_rank
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_deepep_num_max_dispatch_tokens_per_rank,
+    get_redundancy_expert_num,
+)
 from lightllm.utils.dist_utils import (
     get_global_world_size,
     get_dp_world_size,
@@ -129,7 +133,7 @@ class DistributeGroupManager:
     def get_group(self, group_index: int) -> CustomProcessGroup:
         return self.groups[group_index]
 
-    def new_deepep_group(self, n_routed_experts):
+    def new_deepep_group(self, n_routed_experts, hidden_size):
         moe_mode = os.getenv("MOE_MODE", "TP")
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank()
         if moe_mode == "TP":
@@ -140,7 +144,8 @@ class DistributeGroupManager:
         deepep_group = dist.new_group(list(range(global_world_size)))
         low_latency_mode, num_rdma_bytes = True, 0
         if low_latency_mode:
-            self.ll_num_tokens, self.ll_hidden, self.ll_num_experts = num_max_dispatch_tokens_per_rank, 7168, 256
+            self.ll_num_tokens, self.ll_hidden = num_max_dispatch_tokens_per_rank, hidden_size
+            self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
             num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
                 self.ll_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
             )
@@ -149,7 +154,7 @@ class DistributeGroupManager:
             int(1e9),
             num_rdma_bytes,
             low_latency_mode=low_latency_mode,
-            num_qps_per_rank=(n_routed_experts // global_world_size if low_latency_mode else 1),
+            num_qps_per_rank=(self.ll_num_experts // global_world_size if low_latency_mode else 1),
         )
 
     def clear_deepep_buffer(self):
