@@ -22,6 +22,7 @@ import torch
 from lightllm.utils.sgl_utils import sgl_ops
 from lightllm.utils.light_utils import light_ops
 from typing import Callable, List, Optional, Tuple
+from lightllm.common.fused_moe.softmax_topk import softmax_topk
 
 use_cuda_grouped_topk = os.getenv("LIGHTLLM_CUDA_GROUPED_TOPK", "False").upper() in ["ON", "TRUE", "1"]
 
@@ -33,11 +34,9 @@ def fused_topk(
     renormalize: bool,
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
-    assert (
-        sgl_ops is not None
-    ), "sgl_kernel is not installed, you can't use the cuda fused_topk. \
-                    You can solve it by running `pip install sgl_kernel`."
 
+    if sgl_ops is None:
+        return softmax_topk(gating_output, topk, renorm=renormalize)
     M, _ = hidden_states.shape
 
     topk_weights = torch.empty(M, topk, dtype=torch.float32, device=hidden_states.device)
@@ -69,7 +68,6 @@ def grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
 ):
-
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
     if scoring_func == "sigmoid":
         scores = torch.sigmoid(gating_output)
@@ -145,7 +143,6 @@ def cuda_grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
 ):
-
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
     assert light_ops is not None, "lightllm_kernel is not installed."
 
