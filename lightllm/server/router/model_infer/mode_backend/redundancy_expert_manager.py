@@ -101,11 +101,15 @@ class RedundancyExpertManager:
                 self.rank0_redundancy_expert_config[str(w._ep_w.layer_num)] = topk_redundancy_expert_ids
 
         if self.global_rank == 0:
-            with open("./redundancy_expert_config.json", "w") as f:
-                json.dump(self.rank0_redundancy_expert_config, f, indent=4)
-            logger.info(
-                f"global rank {self.global_rank} save redundancy_expert_config.json to ./redundancy_expert_config.json"
-            )
+            try:
+                with open("./redundancy_expert_config.json", "w") as f:
+                    json.dump(self.rank0_redundancy_expert_config, f, indent=4)
+                logger.info(
+                    f"rank {self.global_rank} save redundancy_expert_config.json to ./redundancy_expert_config.json"
+                )
+            except BaseException as e:
+                logger.exception(str(e))
+                logger.error(f"global rank {self.global_rank} save redundancy_expert_config.json failed")
 
         return
 
