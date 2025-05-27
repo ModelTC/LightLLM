@@ -5,6 +5,7 @@ import time
 import enum
 import lightllm.utils.petrel_helper as utils
 import threading
+import json
 from typing import List
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe_weight_ep_redundancy import (
@@ -13,6 +14,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe_weight_ep_re
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe_weight_ep import FusedMoeWeightEP
 from lightllm.utils.envs_utils import get_env_start_args, get_redundancy_expert_update_interval
 from lightllm.utils.envs_utils import get_redundancy_expert_update_max_load_count
+from lightllm.utils.envs_utils import get_redundancy_expert_num
 from lightllm.utils.dist_utils import get_global_rank
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_func
 from lightllm.utils.log_utils import init_logger
@@ -53,6 +55,11 @@ class RedundancyExpertManager:
         # 清理counter
         self._clear_all_counter()
 
+        self.rank0_redundancy_expert_config = {
+            "redundancy_expert_num": get_redundancy_expert_num(),
+            "default": list(range(get_redundancy_expert_num())),
+        }
+
     def step(self):
         if self.load_count >= self.max_load_count:
             return
@@ -89,7 +96,21 @@ class RedundancyExpertManager:
 
     def _prepare_load_new_redundancy_expert(self):
         for w in self.ep_fused_moeweights:
-            w.prepare_redundancy_experts()
+            topk_redundancy_expert_ids = w.prepare_redundancy_experts()
+            if self.global_rank == 0:
+                self.rank0_redundancy_expert_config[str(w._ep_w.layer_num)] = topk_redundancy_expert_ids
+
+        if self.global_rank == 0:
+            try:
+                with open("./redundancy_expert_config.json", "w") as f:
+                    json.dump(self.rank0_redundancy_expert_config, f, indent=4)
+                logger.info(
+                    f"rank {self.global_rank} save redundancy_expert_config.json to ./redundancy_expert_config.json"
+                )
+            except BaseException as e:
+                logger.exception(str(e))
+                logger.error(f"global rank {self.global_rank} save redundancy_expert_config.json failed")
+
         return
 
     def _load_hf_weights(self):
