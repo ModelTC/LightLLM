@@ -6,7 +6,7 @@ import numpy as np
 
 
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.core.objs.req import PDChunkedPrefillReq
+from lightllm.server.core.objs.req import PDNIXLChunkedPrefillReq
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 
@@ -59,7 +59,7 @@ class PDNIXLBackendBase(ModeBackend):
 
                 if run_req := self.remote_prefilled_reqs.get(group_req_id, None):
                     if req_status.is_last or status != 1:
-                        shm_req: PDChunkedPrefillReq = run_req.shm_req
+                        shm_req: PDNIXLChunkedPrefillReq = run_req.shm_req
                         shm_req.set_pd_req_rank_state(self.rank_in_dp, status)
                         self.remote_prefilled_reqs.pop(group_req_id)
                         if self.is_master_in_dp:
@@ -101,7 +101,7 @@ class PDNIXLBackendBase(ModeBackend):
                     continue
 
                 req: InferReq = self.inflght_transfer_requests[req_id]
-                shm_req: PDChunkedPrefillReq = req.shm_req
+                shm_req: PDNIXLChunkedPrefillReq = req.shm_req
                 shm_req.set_pd_req_rank_state(self.rank_in_dp, state)
                 transfer_state = self.remote_prefill_requests[req_id].transfer_state
                 if self.is_master_in_dp:
@@ -168,7 +168,7 @@ class PDNIXLBackendBase(ModeBackend):
         self.nixl_agent.write_blocks(kv_transfer_req, remote_request, is_finished)
 
         if transfer_state.current_chunk_id == 0:
-            shm_req: PDChunkedPrefillReq = req.shm_req
+            shm_req: PDNIXLChunkedPrefillReq = req.shm_req
             shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)
             req.in_prefill_or_transfer = True
             self.inflght_transfer_requests[group_req_id] = req
@@ -187,7 +187,7 @@ class PDNIXLBackendBase(ModeBackend):
         # filter out aborted requests
         for req in aborted_reqs:
             if req.in_prefill_or_transfer:
-                shm_req: PDChunkedPrefillReq = req.shm_req
+                shm_req: PDNIXLChunkedPrefillReq = req.shm_req
                 state = shm_req.get_pd_req_state()
                 if state != 0:
                     new_aborted_reqs.append(req)
@@ -198,7 +198,7 @@ class PDNIXLBackendBase(ModeBackend):
 
         for req in prefill_reqs:
             if req.in_prefill_or_transfer:
-                shm_req: PDChunkedPrefillReq = req.shm_req
+                shm_req: PDNIXLChunkedPrefillReq = req.shm_req
                 # state is updated by router
                 state = shm_req.get_pd_req_state()
                 if state == 1:  # success
@@ -224,7 +224,7 @@ class PDNIXLBackendBase(ModeBackend):
 
         for req in ok_finished_reqs:
             if req.in_prefill_or_transfer:
-                shm_req: PDChunkedPrefillReq = req.shm_req
+                shm_req: PDNIXLChunkedPrefillReq = req.shm_req
                 state = shm_req.get_pd_req_state()
                 if state == 1:  # success
                     new_ok_finished_reqs.append(req)

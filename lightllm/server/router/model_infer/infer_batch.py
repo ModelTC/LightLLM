@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any
 from lightllm.common.req_manager import ReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
-from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager, PDChunkedPrefillReq
+from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager, PDNIXLChunkedPrefillReq
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id

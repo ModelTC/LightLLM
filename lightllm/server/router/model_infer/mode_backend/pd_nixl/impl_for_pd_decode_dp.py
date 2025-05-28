@@ -4,7 +4,7 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 from typing import List
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
-from lightllm.server.core.objs.req import PDChunkedPrefillReq
+from lightllm.server.core.objs.req import PDNIXLChunkedPrefillReq
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.utils.envs_utils import get_env_start_args
@@ -49,7 +49,7 @@ class PDNIXLDPBackendForDecodeNode(PDNIXLBackendForDecodeNode):
             kwargs, run_reqs = self._prepare_remote_prefill_inputs(prefill_reqs)
             for idx, run_req in enumerate(run_reqs):
                 run_req: InferReq = run_req
-                shm_req: PDChunkedPrefillReq = run_req.shm_req
+                shm_req: PDNIXLChunkedPrefillReq = run_req.shm_req
                 # forward each req to remote prefill
                 # since the token index are the same across TPs, we only need to trigger prefill on master
                 if self.is_master_in_dp:
