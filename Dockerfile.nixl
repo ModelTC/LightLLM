@@ -1,0 +1,89 @@
+FROM nvcr.io/nvidia/tritonserver:25.04-py3-min as base
+ARG PYTORCH_VERSION=2.6.0
+ARG PYTHON_VERSION=3.9
+ARG CUDA_VERSION=12.4
+ARG MAMBA_VERSION=23.1.0-1
+ARG TARGETPLATFORM
+ARG INSTALL_NIXL=false
+
+ENV PATH=/opt/conda/bin:$PATH \
+    CONDA_PREFIX=/opt/conda
+
+RUN chmod 777 -R /tmp && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl-dev \
+    curl \
+    g++ \
+    make \
+    git && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN case ${TARGETPLATFORM} in \
+    "linux/arm64")  MAMBA_ARCH=aarch64  ;; \
+    *)              MAMBA_ARCH=x86_64   ;; \
+    esac && \
+    curl -fsSL -o ~/mambaforge.sh -v "https://github.com/conda-forge/miniforge/releases/download/${MAMBA_VERSION}/Mambaforge-${MAMBA_VERSION}-Linux-${MAMBA_ARCH}.sh" && \
+    bash ~/mambaforge.sh -b -p /opt/conda && \
+    rm ~/mambaforge.sh
+
+RUN case ${TARGETPLATFORM} in \
+    "linux/arm64")  exit 1 ;; \
+    *)              /opt/conda/bin/conda update -y conda &&  \
+    /opt/conda/bin/conda install -y "python=${PYTHON_VERSION}" ;; \
+    esac && \
+    /opt/conda/bin/conda clean -ya
+
+
+WORKDIR /root
+
+COPY ./requirements.txt /lightllm/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r /lightllm/requirements.txt --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu124
+
+RUN pip install --no-cache-dir https://github.com/ModelTC/flash-attn-3-build/releases/download/v2.7.4.post1/flash_attn-3.0.0b1-cp39-cp39-linux_x86_64.whl
+
+RUN --mount=type=cache,target=/root/.cache/pip pip install nvidia-nccl-cu12==2.25.1  # for allreduce hang issues in multinode H100
+
+RUN if [ "$INSTALL_NIXL" == "true" ]; then \
+        apt-get update && apt-get install -y cmake automake autotools-dev  libtool libz-dev && \
+        DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev; \
+        rm -rf /usr/lib/ucx && \
+        rm -rf /opt/hpcx/ucx && \
+        cd /usr/local/src && \
+        git clone https://github.com/openucx/ucx.git && \
+        cd ucx && 			     \
+        git checkout v1.19.x &&	     \
+        ./autogen.sh && ./configure     \
+        --enable-shared             \
+        --disable-static            \
+        --disable-doxygen-doc       \
+        --enable-optimizations      \
+        --enable-cma                \
+        --enable-devel-headers      \
+        --with-cuda=/usr/local/cuda \
+        --with-verbs=yes                \
+        --with-dm                   \
+        --with-gdrcopy=/usr/local   \
+        --with-efa                  \
+        --enable-mt &&              \
+        make -j &&                      \
+        make -j install-strip &&        \
+        ldconfig;    \
+    fi
+
+RUN if [ "$INSTALL_NIXL" == "true" ]; then \
+        apt-get update && apt-get install -y  pkg-config tmux net-tools; \
+        cd /usr/local/src; \
+        pip install --upgrade meson pybind11 patchelf; \
+        git clone https://github.com/ai-dynamo/nixl.git -b main && \
+        cd nixl && \
+        rm -rf build && \
+        mkdir build && \
+        meson setup build/ --prefix=/usr/local/nixl && \
+        cd build && \
+        ninja && \
+        ninja install && \
+        cd .. && pip install . --no-deps; \
+    fi
+
+COPY . /lightllm
+RUN pip install -e /lightllm --no-cache-dir
