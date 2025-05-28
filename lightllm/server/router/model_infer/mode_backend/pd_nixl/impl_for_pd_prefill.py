@@ -40,12 +40,7 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
         assert len(decode_reqs) == 0
 
         self._prefill_abort_remote(aborted_reqs)
-        self._filter_reqs(aborted_reqs)
-
-        if ok_finished_reqs:
-            for req in ok_finished_reqs:
-                self._transfer_kv_to_remote(req)
-            self._filter_reqs(ok_finished_reqs)
+        self._filter_reqs(aborted_reqs + ok_finished_reqs)
 
         if prefill_reqs:
             kwargs, run_reqs = prepare_prefill_inputs(
