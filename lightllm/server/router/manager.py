@@ -16,7 +16,7 @@ from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd, StopStrMatchedReqCmd
-from lightllm.server.core.objs import ShmReqManager, StartArgs, PDChunkedPrefillReq
+from lightllm.server.core.objs import ShmReqManager, StartArgs, PDNIXLChunkedPrefillReq
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
@@ -202,8 +202,8 @@ class RouterManager:
             start_pd_remote_prefill_server_process(
                 self.args.pd_node_id,
                 dist_info = dist_info,
-                http_server_port=self.args.pd_remote_prefill_http_port,
-                server_port=self.args.pd_remote_prefill_port,
+                http_server_port=self.args.pd_nixl_remote_prefill_http_port,
+                server_port=self.args.pd_nixl_remote_prefill_port,
                 from_backend_queue=self.info_queue,
                 to_backend_queues=self.result_queues,
                 agent_meta_queues=self.mem_queues,
@@ -426,7 +426,7 @@ class RouterManager:
             req._router_aborted = False
             # 作用同 _router_aborted 类似
             req._router_stop_str_matched = False
-            if isinstance(req, PDChunkedPrefillReq):
+            if isinstance(req, PDNIXLChunkedPrefillReq):
                 req.dp_world_size = self.world_size
             req_group.append(req)
 
