@@ -5,7 +5,7 @@ try:
     # TODO: lightllm_kernel release
     import lightllm_kernel
 
-    light_ops = lightllm_kernel
+    light_ops = getattr(lightllm_kernel, "ops", lightllm_kernel)
     HAS_LIGHTLLM_KERNEL = True
 except:
     light_ops = None

@@ -26,6 +26,7 @@ from lightllm.models.llama.triton_kernel.ppl_quant_copy_kv import destindex_copy
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 
 logger = init_logger(__name__)
 
@@ -539,11 +540,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
 
-        from lightllm_ppl_kernel import group8_int8kv_decode_attention
-
         # group_int8kv_decode_attention(at::Tensor o, at::Tensor q, at::Tensor k, at::Tensor k_s,  at::Tensor v,
         # at::Tensor v_s, at::Tensor b_loc, at::Tensor b_seq_len, int max_len_in_batch)
-        group8_int8kv_decode_attention(
+        light_ops.group8_int8kv_decode_attention(
             o_tensor.view(calcu_shape1),
             q.view(calcu_shape1),
             infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],

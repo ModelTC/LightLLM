@@ -6,6 +6,15 @@ import torch.nn.functional as F
 from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
+from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
+
+if HAS_LIGHTLLM_KERNEL:
+
+    def scaled_fp8_quant(tensor, *args, **kwargs):
+        return light_ops.per_token_quant_bf16_fp8(tensor)
+
+else:
+    scaled_fp8_quant = vllm_ops.scaled_fp8_quant
 
 
 class BaseQuantizationMethod(QuantizationMethod):
@@ -71,7 +80,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     def quantize(self, weight: torch.Tensor):
         if self.is_moe:
             return self.quantize_moe(weight)
-        qweight, weight_scale = vllm_ops.scaled_fp8_quant(
+        qweight, weight_scale = scaled_fp8_quant(
             weight.contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
         )
         return qweight.transpose(0, 1), weight_scale
@@ -82,7 +91,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         weight_scales = []
         qweights = torch.empty_like(weight, dtype=torch.float8_e4m3fn).cuda(self.device_id_)
         for i in range(num_experts):
-            qweight, weight_scale = vllm_ops.scaled_fp8_quant(
+            qweight, weight_scale = scaled_fp8_quant(
                 weight[i].contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=False
             )
             qweights[i] = qweight
@@ -91,7 +100,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         return qweights, weight_scale
 
     def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
-        x_q, x_scale = vllm_ops.scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
+        x_q, x_scale = scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
         m = input_tensor.shape[0]
         n = weights[0].shape[1]
         if out is None:
