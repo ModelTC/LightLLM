@@ -164,14 +164,15 @@ class PDNIXLBackendBase(ModeBackend):
             prev_kv_len=transfer_state.current_kv_len,
             cur_kv_len=req.cur_kv_len,
         )
-        # kick off kv transfer
-        self.nixl_agent.write_blocks(kv_transfer_req, remote_request, is_finished)
-
         if transfer_state.current_chunk_id == 0:
             shm_req: PDNIXLChunkedPrefillReq = req.shm_req
             shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)
             req.in_prefill_or_transfer = True
             self.inflght_transfer_requests[group_req_id] = req
+            logger.debug(f"put {group_req_id} into inflght_transfer_requests and size: {len(self.inflght_transfer_requests)}")
+
+        # kick off kv transfer
+        self.nixl_agent.write_blocks(kv_transfer_req, remote_request, is_finished)
 
         transfer_state.current_kv_len = req.cur_kv_len
         transfer_state.current_chunk_id += 1
@@ -206,7 +207,7 @@ class PDNIXLBackendBase(ModeBackend):
                     decode_reqs.append(req)
                     req.in_prefill_or_transfer = False
                 elif state == -1:  # failure
-                    aborted_reqs.append(req)
+                    new_aborted_reqs.append(req)
                     req.in_prefill_or_transfer = False
                 elif state == 0:  # in progress
                     remote_prefill_reqs.append(req)
