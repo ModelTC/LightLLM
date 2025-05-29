@@ -128,7 +128,7 @@ class ThreadSafeDict:
 
     def __len__(self) -> int:
         with self._lock:
-            return len(self._data)
+            return len(self._dict)
 
     def get(self, key, default=None):
         with self._lock:
