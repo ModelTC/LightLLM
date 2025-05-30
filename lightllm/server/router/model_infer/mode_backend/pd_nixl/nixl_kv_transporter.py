@@ -7,9 +7,13 @@ import threading
 from lightllm.utils.log_utils import init_logger
 
 from .pd_remote_prefill_obj import (
-    RemoteAgent, KVMoveRequest, PrefillRequest,
-    RemotePrefillStatus, ThreadSafeDict, KVMoveRequestState
-    )
+    RemoteAgent,
+    KVMoveRequest,
+    PrefillRequest,
+    RemotePrefillStatus,
+    ThreadSafeDict,
+    KVMoveRequestState,
+)
 
 
 logger = init_logger(__name__)
@@ -120,10 +124,10 @@ class NixlKVTransporter:
             return
 
         kv_move_start = max(skip_kv_move_len, request.prev_kv_len)
-        kv_move_end   = request.cur_kv_len
+        kv_move_end = request.cur_kv_len
 
         src_token_ids = request.token_ids[kv_move_start:]
-        dst_token_ids = prefill_request.data.token_ids[kv_move_start - skip_kv_move_len: kv_move_end]
+        dst_token_ids = prefill_request.data.token_ids[kv_move_start - skip_kv_move_len : kv_move_end]
 
         remote_agent: RemoteAgent = self.remote_agents[prefill_request.decode_id][
             self.tp_idx
@@ -140,7 +144,8 @@ class NixlKVTransporter:
                 group_req_id=group_reqeust_id,
                 status=1,
                 chunk_id=prefill_request.transfer_state.current_chunk_id,
-                is_last=is_finished)
+                is_last=is_finished,
+            )
 
             handle = self.nixl_agent.make_prepped_xfer(
                 "WRITE", src_handle, src_token_descs, dst_handle, dst_token_descs, notify_status.serialize()
@@ -151,10 +156,7 @@ class NixlKVTransporter:
 
             if group_reqeust_id not in self.inflight_transfers:
                 self.inflight_transfers[group_reqeust_id] = KVMoveRequestState(
-                    handles=[],
-                    done_handles=[],
-                    remote_agent=remote_agent,
-                    abort=False
+                    handles=[], done_handles=[], remote_agent=remote_agent, abort=False
                 )
             self.inflight_transfers[group_reqeust_id].handles.append(handle)
 
@@ -199,7 +201,9 @@ class NixlKVTransporter:
                     logger.warning(f"{req_id} Transfer failed with state {xfer_state}")
                     failed = True
                     kv_move_state.done_handles.append(handle)
-                    notify_failed_status = RemotePrefillStatus(group_req_id=req_id, status=-1, chunk_id=-1, is_last=True)
+                    notify_failed_status = RemotePrefillStatus(
+                        group_req_id=req_id, status=-1, chunk_id=-1, is_last=True
+                    )
                     self.nixl_agent.send_notif(remote_agent.name, notify_failed_status.serialize())
 
             kv_move_state.handles = left_handles

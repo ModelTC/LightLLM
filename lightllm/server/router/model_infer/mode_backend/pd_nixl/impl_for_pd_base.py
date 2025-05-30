@@ -160,7 +160,7 @@ class PDNIXLBackendBase(ModeBackend):
 
         kv_transfer_req = KVMoveRequest(
             group_req_id=group_req_id,
-            token_ids=token_index[ : req.cur_kv_len].tolist(),
+            token_ids=token_index[: req.cur_kv_len].tolist(),
             prev_kv_len=transfer_state.current_kv_len,
             cur_kv_len=req.cur_kv_len,
         )
@@ -169,14 +169,15 @@ class PDNIXLBackendBase(ModeBackend):
             shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)
             req.in_prefill_or_transfer = True
             self.inflght_transfer_requests[group_req_id] = req
-            logger.debug(f"put {group_req_id} into inflght_transfer_requests and size: {len(self.inflght_transfer_requests)}")
+            logger.debug(
+                f"put {group_req_id} into inflght_transfer_requests and size: {len(self.inflght_transfer_requests)}"
+            )
 
         # kick off kv transfer
         self.nixl_agent.write_blocks(kv_transfer_req, remote_request, is_finished)
 
         transfer_state.current_kv_len = req.cur_kv_len
         transfer_state.current_chunk_id += 1
-
 
     def _decode_filter_reqs(
         self, prefill_reqs: List[InferReq], aborted_reqs: List[InferReq], decode_reqs: List[InferReq]

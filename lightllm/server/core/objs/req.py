@@ -343,6 +343,7 @@ class PdNixlReqState(ctypes.Structure):
     _pack_ = 4
     _MAX_TP_SIZE = 32
     _fields_ = [("dp_world_size", ctypes.c_int), ("state", ctypes.c_int * _MAX_TP_SIZE)]
+
     def __init__(self):
         self.dp_world_size = 0
         self.state = (ctypes.c_int * self._MAX_TP_SIZE)(*([0] * self._MAX_TP_SIZE))
@@ -351,8 +352,9 @@ class PdNixlReqState(ctypes.Structure):
         self.dp_world_size = size
 
     def set_tp_state(self, tp_id: int, state: int):
-        assert self.dp_world_size > 0 and tp_id >= 0 and tp_id < self.dp_world_size, \
-            f"tp_id {tp_id} out of range [0, {self.dp_world_size})"
+        assert (
+            self.dp_world_size > 0 and tp_id >= 0 and tp_id < self.dp_world_size
+        ), f"tp_id {tp_id} out of range [0, {self.dp_world_size})"
         self.state[tp_id] = state
 
     def set_state(self):
@@ -369,12 +371,13 @@ class PDNIXLChunkedPrefillReq(ChunkedPrefillReq):
     _pack_ = 4
     _fields_ = ChunkedPrefillReq._fields_ + [
         # 用于pd nixl状态同步
-        ("pd_nixl_req_state", PdNixlReqState)]
+        ("pd_nixl_req_state", PdNixlReqState)
+    ]
 
     def set_dp_world_size(self, dp_world_size):
         self.pd_nixl_req_state.dp_world_size = dp_world_size
 
-     # called by each tp rank, no contention
+    # called by each tp rank, no contention
     def set_pd_req_rank_state(self, tp_id: int, state: int):
         self.pd_nixl_req_state.set_tp_state(tp_id, state)
 
