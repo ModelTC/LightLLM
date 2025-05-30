@@ -30,6 +30,17 @@ jobs:
       id-token: write
 
     steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+          docker-images: false
+
       - name: Checkout repository
         uses: actions/checkout@v3
 
