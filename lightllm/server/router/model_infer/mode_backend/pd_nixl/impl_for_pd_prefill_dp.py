@@ -73,7 +73,11 @@ class PDNIXLDPBackendForPrefillNode(PDNIXLBackendForPrefillNode):
             next_token_ids = next_token_ids.detach().cpu().numpy()
             next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
             self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=True, do_filter_finished_reqs=False,
+                run_reqs,
+                next_token_ids,
+                next_token_logprobs,
+                is_chuncked_mode=True,
+                do_filter_finished_reqs=False,
                 extra_post_req_handle_func=lambda req, _1, _2: self._transfer_kv_to_remote(req),
             )
 
@@ -104,6 +108,10 @@ class PDNIXLDPBackendForPrefillNode(PDNIXLBackendForPrefillNode):
             next_token_ids = next_token_ids.detach().cpu().numpy()
             next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
             self._post_handle(
-                all_run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=True, do_filter_finished_reqs=False,
+                all_run_reqs,
+                next_token_ids,
+                next_token_logprobs,
+                is_chuncked_mode=True,
+                do_filter_finished_reqs=False,
                 extra_post_req_handle_func=lambda req, _1, _2: self._transfer_kv_to_remote(req),
             )

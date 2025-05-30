@@ -197,12 +197,18 @@ class RouterManager:
                 start_pd_remote_prefill_server_process,
             )
 
-            dist_info = DistInfo(self.world_size, self.nnodes, self.dp_size,
-                                 self.dp_world_size, self.dp_size_in_node, self.node_world_size)
+            dist_info = DistInfo(
+                self.world_size,
+                self.nnodes,
+                self.dp_size,
+                self.dp_world_size,
+                self.dp_size_in_node,
+                self.node_world_size,
+            )
 
             start_pd_remote_prefill_server_process(
                 self.args.pd_node_id,
-                dist_info = dist_info,
+                dist_info=dist_info,
                 http_server_port=self.args.pd_nixl_remote_prefill_http_port,
                 server_port=self.args.pd_nixl_remote_prefill_port,
                 from_backend_queue=self.info_queue,
@@ -222,8 +228,15 @@ class RouterManager:
             from lightllm.server.router.model_infer.mode_backend.pd_nixl.pd_remote_prefill import (
                 start_pd_remote_prefill_client_process,
             )
-            dist_info = DistInfo(self.world_size, self.nnodes, self.dp_size,
-                                 self.dp_world_size, self.dp_size_in_node, self.node_world_size)
+
+            dist_info = DistInfo(
+                self.world_size,
+                self.nnodes,
+                self.dp_size,
+                self.dp_world_size,
+                self.dp_size_in_node,
+                self.node_world_size,
+            )
 
             start_pd_remote_prefill_client_process(
                 self.args.pd_node_id,

@@ -112,13 +112,17 @@ class PDRemotePrefillServer(PDRemotePrefillBase):
                     if self.dist_info.dp_size_in_node > 1:
                         group_req_id = request.data.sampling_params.group_request_id
                         suggested_dp_index = request.data.sampling_params.suggested_dp_index
-                        if suggested_dp_index < 0: # not likely to happen
+                        if suggested_dp_index < 0:  # not likely to happen
                             suggested_dp_index = random.randint(0, self.dist_info.dp_size_in_node)
                             request.data.sampling_params.suggested_dp_index = suggested_dp_index
-                            logger.warning(f"Suggested dp index is negative for {group_req_id}, set to {suggested_dp_index}")
+                            logger.warning(
+                                f"Suggested dp index is negative for {group_req_id}, set to {suggested_dp_index}"
+                            )
 
-                        for local_rank in range(suggested_dp_index * self.dist_info.dp_world_size,
-                                                (suggested_dp_index + 1) * self.dist_info.dp_world_size):
+                        for local_rank in range(
+                            suggested_dp_index * self.dist_info.dp_world_size,
+                            (suggested_dp_index + 1) * self.dist_info.dp_world_size,
+                        ):
                             self.to_backend_queues[local_rank].put(request)
                     else:
                         for queue in self.to_backend_queues:
@@ -217,7 +221,11 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
     def remote_prefill(self, server_id: int, prefill_request: RemotePrefillRequest):
         socket, _ = self.remote_prefill_servers[server_id]
         prefill_request.sampling_params.max_new_tokens = 1
-        socket.send_pyobj(PrefillRequest(type=RemoteRequstType.REMOTE_PREFILL, decode_id=self.id, data=prefill_request, transfer_state=None))
+        socket.send_pyobj(
+            PrefillRequest(
+                type=RemoteRequstType.REMOTE_PREFILL, decode_id=self.id, data=prefill_request, transfer_state=None
+            )
+        )
 
 
 def remote_prefill_server_loop(
@@ -256,7 +264,11 @@ def start_pd_remote_prefill_server_process(
 
 
 def remote_prefill_client_loop(
-    id: int, dist_info: DistInfo, from_backend_queue: mp.Queue, to_backend_queues: List[mp.Queue], agent_meta_queues: List[mp.Queue]
+    id: int,
+    dist_info: DistInfo,
+    from_backend_queue: mp.Queue,
+    to_backend_queues: List[mp.Queue],
+    agent_meta_queues: List[mp.Queue],
 ):
     graceful_registry(inspect.currentframe().f_code.co_name)
 
@@ -271,11 +283,16 @@ def remote_prefill_client_loop(
 
 
 def start_pd_remote_prefill_client_process(
-    id: int, dist_info: DistInfo, from_backend_queue: mp.Queue, to_backend_queues: List[mp.Queue], agent_meta_queues: List[mp.Queue]
+    id: int,
+    dist_info: DistInfo,
+    from_backend_queue: mp.Queue,
+    to_backend_queues: List[mp.Queue],
+    agent_meta_queues: List[mp.Queue],
 ):
 
     proc = mp.Process(
-        target=remote_prefill_client_loop, args=(id, dist_info, from_backend_queue, to_backend_queues, agent_meta_queues)
+        target=remote_prefill_client_loop,
+        args=(id, dist_info, from_backend_queue, to_backend_queues, agent_meta_queues),
     )
     proc.start()
     assert proc.is_alive()
