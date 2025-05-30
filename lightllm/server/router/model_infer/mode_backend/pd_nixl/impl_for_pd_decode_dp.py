@@ -25,6 +25,7 @@ class PDNIXLDPBackendForDecodeNode(PDNIXLBackendForDecodeNode):
 
         self.reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
         from lightllm.server.router.model_infer.mode_backend.dp_backend.pre_process import padded_prepare_prefill_inputs
+
         kwargs, run_reqs, padded_req_num = padded_prepare_prefill_inputs([], 1, is_multimodal=self.is_multimodal)
         self.model.forward(**kwargs)
         assert len(run_reqs) == 0 and padded_req_num == 1

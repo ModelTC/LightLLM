@@ -53,11 +53,13 @@ class ConnectRequest(RemoteRequest):
     agent_metadatas: List[bytes]
     agent_mem_descs: List[bytes]
 
+
 @dataclass
 class TransferState:
     start_time: float
     current_kv_len: int
     current_chunk_id: int
+
 
 @dataclass
 class PrefillRequest(RemoteRequest):
@@ -81,6 +83,7 @@ class RemoteAgent:
     num_tokens: int
     kv_mem_desc: nixlBind.nixlRegDList
     kv_xfer_handles: nixl_prepped_dlist_handle
+
 
 @dataclass
 class KVMoveRequestState:
@@ -184,4 +187,3 @@ class SockWithPoller:
 
     def connect(self, addr: str):
         return self.sock.connect(addr)
-
