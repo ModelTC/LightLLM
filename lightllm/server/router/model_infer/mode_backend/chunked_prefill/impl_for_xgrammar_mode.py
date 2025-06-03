@@ -27,9 +27,9 @@ class XgrammarBackend(ChunkedPrefillBackend):
             self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
         )
 
-        tokenizer_info = xgr.TokenizerInfo.from_huggingface(self.tokenizer)
-        self.xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
-        self.xgrammar_token_bitmask = xgr.allocate_token_bitmask(1, tokenizer_info.vocab_size)
+        self.tokenizer_info = xgr.TokenizerInfo.from_huggingface(self.tokenizer)
+        self.xgrammar_compiler = xgr.GrammarCompiler(self.tokenizer_info, max_threads=8)
+        self.xgrammar_token_bitmask = xgr.allocate_token_bitmask(1, self.tokenizer_info.vocab_size)
 
         eos_token_ids = []
         eos_token_ids.append(self.tokenizer.eos_token_id)
@@ -61,6 +61,8 @@ class XgrammarBackend(ChunkedPrefillBackend):
                     self._mask_req_out_token(i, run_obj, logits[i])
 
             logits[logits == float("-inf")] = -1000000.0
+            # mask out the padding token logits
+            logits[:, self.tokenizer_info.vocab_size :] = -1000000.0
 
             next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
             next_token_ids = next_token_ids.detach().cpu().numpy()
@@ -93,6 +95,8 @@ class XgrammarBackend(ChunkedPrefillBackend):
 
                 # fix the logics with -inf to a large negative value
                 logits[logits == float("-inf")] = -1000000.0
+                # mask out the padding token logits
+                logits[:, self.tokenizer_info.vocab_size :] = -1000000.0
 
                 next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
                 next_token_ids = next_token_ids.detach().cpu().numpy()
