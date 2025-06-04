@@ -197,6 +197,8 @@ class PDNIXLBackendBase(ModeBackend):
                 else:
                     # TODO trigger remote abort
                     remote_prefill_reqs.append(req)
+            else:
+                new_aborted_reqs.append(req)
 
         for req in prefill_reqs:
             if req.in_prefill_or_transfer:
