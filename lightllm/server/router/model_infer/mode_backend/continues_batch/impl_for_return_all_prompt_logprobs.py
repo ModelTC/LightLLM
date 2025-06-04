@@ -55,7 +55,6 @@ class ReturnPromptLogProbBackend(ContinuesBatchBackend):
             for i in range(req_obj.shm_req.input_len - 1):
                 req_obj.shm_req.shm_logprobs.arr[i + 1] = cur_logprobs[i]
 
-            req_obj.out_token_id_count[next_token_id] += 1
             req_obj.update_finish_status(self.eos_id)
 
             if req_obj.finish_status.is_finished() or req_obj.shm_req.router_aborted:

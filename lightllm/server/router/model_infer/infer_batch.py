@@ -257,6 +257,8 @@ class InferReq:
         self.vocab_size = vocab_size
         self.initialized = False
         self.paused = False
+        self.need_out_token_id_statistics = True
+        self.out_token_id_count: Dict[int, int] = None
 
     def init_all(self):
         if self.initialized is False:
@@ -264,10 +266,8 @@ class InferReq:
             self.shm_req.link_prompt_ids_shm_array()
             self.shm_req.link_logprobs_shm_array()
             self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
-            if self.sampling_param.shm_param.input_penalty:
-                self.out_token_id_count = collections.Counter(self.shm_req.get_prompt_ids())
-            else:
-                self.out_token_id_count = collections.defaultdict(int)
+
+            g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
             self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
             # token healing mode 才被使用的管理对象

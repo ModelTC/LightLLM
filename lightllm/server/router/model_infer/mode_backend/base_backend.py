@@ -259,6 +259,7 @@ class ModeBackend:
 
         for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
             req_obj: InferReq = req_obj
+            shm_req = req_obj.shm_req
             if is_chuncked_mode:
                 new_kv_len = req_obj.get_chuncked_input_token_len()
             else:
@@ -266,12 +267,12 @@ class ModeBackend:
 
             req_obj.cur_kv_len = new_kv_len
             if self.is_master_in_dp:
-                req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
+                shm_req.shm_cur_kv_len = req_obj.cur_kv_len
 
             # 这个地方主要是为了提前判断是否存在abort的情况，如果abort了
             # 直接将请求放入finished 处理队列中。
             if req_obj.is_finished_or_aborted():
-                finished_req_ids.append(req_obj.shm_req.request_id)
+                finished_req_ids.append(shm_req.request_id)
                 continue
 
             # 对于没有到达需要输出 token 阶段的请求，直接略过
@@ -282,7 +283,6 @@ class ModeBackend:
             req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
             req_obj.cur_output_len += 1
 
-            req_obj.out_token_id_count[next_token_id] += 1
             req_obj.update_finish_status(self.eos_id)
 
             if extra_post_req_handle_func is not None:
@@ -290,19 +290,23 @@ class ModeBackend:
 
             # 判断是否已经满足生成结束条件。
             if req_obj.is_finished_or_aborted():
-                finished_req_ids.append(req_obj.shm_req.request_id)
+                finished_req_ids.append(shm_req.request_id)
 
             if self.is_master_in_dp:
                 # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
                 # finish_token_index finish_status candetoken_out_len 是
                 # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
-                req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
+                shm_req.shm_cur_output_len = req_obj.cur_output_len
 
                 if req_obj.finish_status.is_finished():
-                    req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                    req_obj.shm_req.finish_status = req_obj.finish_status
+                    shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
+                    shm_req.finish_status = req_obj.finish_status
 
-                req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
+                shm_req.candetoken_out_len = req_obj.cur_output_len
+
+        g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
+            req_objs=run_reqs, next_token_ids=next_token_ids
+        )
 
         if do_filter_finished_reqs:
             g_infer_context.filter(finished_req_ids)

@@ -32,7 +32,6 @@ class RewardModelBackend(ContinuesBatchBackend):
             req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
             req_obj.cur_output_len += 1
 
-            req_obj.out_token_id_count[next_token_id] += 1
             req_obj.update_finish_status(self.eos_id)
 
             if req_obj.finish_status.is_finished() or req_obj.shm_req.router_aborted:
