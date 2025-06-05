@@ -62,6 +62,7 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
+    response_format: Optional[Dict] = None
 
     # OpenAI Adaptive parameters for tool call
     tools: Optional[List[Tool]] = Field(default=None, examples=[None])

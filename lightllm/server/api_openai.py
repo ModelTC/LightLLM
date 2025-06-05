@@ -124,6 +124,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "best_of": request.n,
         "add_special_tokens": False,
     }
+    if request.response_format:
+        obj = request.response_format.get("schema")
+        if obj:
+            # guided_json takes str instead of dict obj
+            sampling_params_dict["guided_json"] = json.dumps(obj)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
