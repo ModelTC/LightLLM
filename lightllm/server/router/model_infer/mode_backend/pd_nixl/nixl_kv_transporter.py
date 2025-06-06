@@ -47,7 +47,6 @@ class NixlKVTransporter:
         self.num_heads = -1
         self.head_dims = -1
         self.token_len = -1
-        self.layer_len = -1
 
         self.reg_desc = None
         self.local_xfer_handles = None
@@ -73,11 +72,12 @@ class NixlKVTransporter:
 
     def _create_xfer_handles(self, reg_desc: nixlBind.nixlRegDList, num_tokens: int, agent_name: str = ""):
         base_addr, _, device_id, _ = reg_desc[0]
+        layer_len = num_tokens * self.token_len
         tokens_data = []
         for layer_id in range(self.num_layers):
             for token_id in range(num_tokens):
                 tokens_data.append(
-                    (base_addr + layer_id * self.layer_len + token_id * self.token_len, self.token_len, device_id)
+                    (base_addr + layer_id * layer_len + token_id * self.token_len, self.token_len, device_id)
                 )
         descs = self.nixl_agent.get_xfer_descs(tokens_data, "VRAM", True)
         return self.nixl_agent.prep_xfer_dlist(agent_name, descs, is_sorted=True)
@@ -85,7 +85,6 @@ class NixlKVTransporter:
     def register_kv_buffer(self, kv_buffer: Tensor):
         self.num_layers, self.num_tokens, self.num_heads, self.head_dim = kv_buffer.shape
         self.token_len = self.num_heads * self.head_dim * kv_buffer.element_size()
-        self.layer_len = self.num_tokens * self.token_len
 
         self.reg_desc = self.nixl_agent.register_memory(kv_buffer)
         self.local_xfer_handles = self._create_xfer_handles(self.reg_desc, self.num_tokens)
@@ -108,11 +107,11 @@ class NixlKVTransporter:
                 )
             )
 
-    def _get_token_desc_ids(self, token_ids: List[int]):
+    def _get_token_desc_ids(self, token_ids: List[int], num_tokens: int):
         descs_ids = []
         for layer_id in range(self.num_layers):
             for token_id in token_ids:
-                descs_ids.append(layer_id * self.num_tokens + token_id)
+                descs_ids.append(layer_id * num_tokens + token_id)
         return descs_ids
 
     def write_blocks(self, request: KVMoveRequest, prefill_request: PrefillRequest, is_finished: bool):
@@ -135,8 +134,8 @@ class NixlKVTransporter:
 
         if len(src_token_ids) > 0:
             assert len(src_token_ids) == len(dst_token_ids), f"{len(src_token_ids)} {len(dst_token_ids)}"
-            src_token_descs = self._get_token_desc_ids(src_token_ids)
-            dst_token_descs = self._get_token_desc_ids(dst_token_ids)
+            src_token_descs = self._get_token_desc_ids(src_token_ids, self.num_tokens)
+            dst_token_descs = self._get_token_desc_ids(dst_token_ids, remote_agent.num_tokens)
 
             src_handle = self.local_xfer_handles
             dst_handle = remote_agent.kv_xfer_handles
