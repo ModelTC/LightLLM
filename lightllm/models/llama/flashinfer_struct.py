@@ -28,9 +28,9 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                         : self.batch_size * self.flashinfer_extra_state.max_seq_length
                     ]
                 else:
-                    self.kv_indices = torch.empty(
-                        self.batch_size * self.flashinfer_extra_state.max_seq_length, dtype=torch.int32
-                    ).to(input_ids.device)
+                    self.kv_indices = torch.zeros(self.flashinfer_extra_state.max_seq_length, dtype=torch.int32).to(
+                        input_ids.device
+                    )
 
                 repack_kv_index(
                     self.req_manager.req_to_token_indexs,
@@ -68,9 +68,9 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                 q_starts = self.b1_cu_q_seq_len.int()
                 kv_starts = self.b1_cu_kv_seq_len.int()
                 kv_last_page_len = torch.full((self.batch_size,), 1, dtype=torch.int32).to(input_ids.device)
-                kv_indices = torch.empty(
-                    self.batch_size * self.flashinfer_extra_state.max_seq_length, dtype=torch.int32
-                ).to(input_ids.device)
+                kv_indices = torch.zeros(self.flashinfer_extra_state.max_seq_length, dtype=torch.int32).to(
+                    input_ids.device
+                )
                 repack_kv_index(
                     self.req_manager.req_to_token_indexs,
                     self.b_req_idx,
