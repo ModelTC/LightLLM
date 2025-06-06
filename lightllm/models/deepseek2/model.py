@@ -30,15 +30,15 @@ class DeepSeek2FlashInferStateExtraInfo:
         self.kv_lora_rank = model.kv_lora_rank
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
-        self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(get_current_device_id())
+        self.workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=get_current_device_id())
         self.max_seq_length = model.max_seq_length
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
         self.kv_indices_buffer = [
-            torch.empty(model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32).to(
-                get_current_device_id()
+            torch.empty(
+                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
             ),
-            torch.empty(model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32).to(
-                get_current_device_id()
+            torch.empty(
+                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
             ),
         ]
         if model.config["rope_scaling"] is not None:

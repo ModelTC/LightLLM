@@ -36,6 +36,8 @@ def _fwd_kernel_repack_kv_index(
 @torch.no_grad()
 def repack_kv_index(kv_index, req_index, seq_len, start_loc, max_seq_len, out_kv_index):
     batch_size = req_index.shape[0]
+    # flashinfer requires out_kv_index to be zeroed before use
+    out_kv_index.zero_()
     BLOCK = 64
     grid = (
         batch_size,
