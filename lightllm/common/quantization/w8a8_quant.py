@@ -114,7 +114,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         return out
 
 
-@QUANTMETHODS.register(["vllm-fp8w8a8-b128, fp8w8a8-b128"])
+@QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128"])
 class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
