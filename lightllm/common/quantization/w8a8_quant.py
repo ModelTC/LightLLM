@@ -14,7 +14,8 @@ if HAS_LIGHTLLM_KERNEL:
         return light_ops.per_token_quant_bf16_fp8(tensor)
 
 else:
-    scaled_fp8_quant = vllm_ops.scaled_fp8_quant
+    if HAS_VLLM:
+        scaled_fp8_quant = vllm_ops.scaled_fp8_quant
 
 
 class BaseQuantizationMethod(QuantizationMethod):

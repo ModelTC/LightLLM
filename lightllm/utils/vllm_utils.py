@@ -3,7 +3,7 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 try:
-    if not torch.cuda.is_initialized():
+    if torch.cuda.is_available() and not torch.cuda.is_initialized():
         torch.cuda.init()
     from vllm import _custom_ops as ops
 

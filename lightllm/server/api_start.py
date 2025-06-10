@@ -8,8 +8,6 @@ from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
-from .visualserver.manager import start_visual_process
-from .audioserver.manager import start_audio_process
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
 from lightllm.utils.envs_utils import get_lightllm_gunicorn_time_out_seconds, get_lightllm_gunicorn_keep_alive
@@ -229,6 +227,8 @@ def normal_or_p_d_start(args):
     ports_locker.release_port()
 
     if args.enable_multimodal:
+        from .visualserver.manager import start_visual_process
+
         process_manager.start_submodule_processes(
             start_funcs=[
                 start_cache_manager,
@@ -236,6 +236,8 @@ def normal_or_p_d_start(args):
             start_args=[(cache_port, args)],
         )
         if args.enable_multimodal_audio:
+            from .audioserver.manager import start_audio_process
+
             process_manager.start_submodule_processes(
                 start_funcs=[
                     start_visual_process,
