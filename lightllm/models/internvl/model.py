@@ -9,6 +9,7 @@ from lightllm.models.internlm2.model import Internlm2TpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.phi3.model import Phi3TpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
+from lightllm.models.qwen3.model import Qwen3TpPartModel
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.models.internvl.layer_weights.pre_and_post_layer_weight import (
@@ -252,6 +253,30 @@ class InternVLQwen2TpPartModel(Qwen2TpPartModel):
 @ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is(["deepseek_v2", "deepseek_v3"]))
 class InternVLDeepSeek2TpPartModel(Deepseek2TpPartModel):
     # support Deepseek2,3,R1
+    # weight class
+    pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
+
+    # infer class
+    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
+
+    def __init__(self, kvargs):
+        super().__init__(kvargs)
+        return
+
+    def _init_config(self):
+        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
+            self.config = json.load(json_file)["llm_config"]
+        # rename keys
+        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
+        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
+        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        if self.finetune_config:
+            self.config["vocab_size"] = self.finetune_config.vocab_size
+        return
+
+
+@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("qwen3"))
+class InternVLQwen3TpPartModel(Qwen3TpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
 
