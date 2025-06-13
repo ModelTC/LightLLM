@@ -34,6 +34,7 @@ from .moe_kernel_configs import MoeGroupedGemmKernelConfig
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
+from lightllm.utils.dist_utils import get_current_rank_in_dp
 
 FFN_MOE_CHUNK_SIZE = 8 * 1024
 
@@ -220,8 +221,13 @@ def moe_align1(
 @triton.jit
 def moe_align2_kernel(
     experts_token_num_ptr,  # [expert_num,]
-    mblocks_to_expert_id,  # [max_num_m_blocks,]
-    mblocks_to_m_index,  # [max_num_m_blocks,]
+    expert_to_token_index_ptr,  # [expert_num, token_num * topk_num]
+    expert_to_token_index_stride_0,
+    expert_to_weights_ptr,
+    expert_to_weights_stride_0,
+    mblocks_to_expert_id_ptr,  # [max_num_m_blocks,]
+    padded_expert_to_token_index_ptr,
+    padded_expert_to_weights_ptr,
     expert_num,
     max_num_m_blocks,
     BLOCK_M: tl.constexpr,
@@ -241,27 +247,49 @@ def moe_align2_kernel(
     block_off = tl.arange(0, 128)
     for start_loc in range(0, cur_block_num, 128):
         tl.store(
-            mblocks_to_expert_id + block_start + start_loc + block_off,
+            mblocks_to_expert_id_ptr + block_start + start_loc + block_off,
             expert_id,
             mask=start_loc + block_off < cur_block_num,
         )
+
+    cur_expert_to_token_index_ptr = expert_to_token_index_ptr + expert_id * expert_to_token_index_stride_0
+    for start_loc in range(0, cur_block_num):
+        offset = start_loc * BLOCK_M + tl.arange(0, BLOCK_M)
+        m_index = tl.load(cur_expert_to_token_index_ptr + offset, mask=offset < cur_expert_token_num, other=0)
         tl.store(
-            mblocks_to_m_index + block_start + start_loc + block_off,
-            start_loc + block_off,
-            mask=start_loc + block_off < cur_block_num,
+            padded_expert_to_token_index_ptr + block_start * BLOCK_M + offset,
+            m_index,
+            mask=offset < cur_expert_token_num,
+        )
+
+        m_weight = tl.load(
+            expert_to_weights_ptr + expert_id * expert_to_weights_stride_0 + offset,
+            mask=offset < cur_expert_token_num,
+            other=0.0,
+        )
+        tl.store(
+            padded_expert_to_weights_ptr + block_start * BLOCK_M + offset,
+            m_weight,
+            mask=offset < cur_expert_token_num,
         )
 
     if expert_id == expert_num - 1:
         for extra_fill_start in range(block_start + cur_block_num, max_num_m_blocks, 128):
             tl.store(
-                mblocks_to_expert_id + extra_fill_start + block_off,
+                mblocks_to_expert_id_ptr + extra_fill_start + block_off,
                 -1,
                 mask=extra_fill_start + block_off < max_num_m_blocks,
             )
     return
 
 
-def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, block_m: int):
+def moe_align2(
+    token_num_mul_topk_num: int,
+    exports_token_num: torch.Tensor,
+    block_m: int,
+    expert_to_token_index: torch.Tensor,
+    expert_to_weights: torch.Tensor,
+):
     """
     exports_token_num is tensor shape [expert_num] , will get expert need handle token num.
     out tensor is a tensor that contain block schduel infos tensor.
@@ -269,14 +297,20 @@ def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, blo
     max_num_tokens_padded = token_num_mul_topk_num + exports_token_num.shape[0] * (block_m - 1)
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_m)
     mblocks_to_expert_id = torch.empty((max_num_m_blocks,), dtype=torch.int32, device="cuda")
-    mblocks_to_m_index = torch.empty((max_num_m_blocks,), dtype=torch.int32, device="cuda")
+    padded_expert_to_token_index = torch.empty(max_num_tokens_padded, dtype=torch.int32, device="cuda").fill_(-1)
+    padded_expert_to_weights = torch.empty(max_num_tokens_padded, dtype=torch.float32, device="cuda")
     expert_num = exports_token_num.shape[0]
 
     grid = (expert_num,)
     moe_align2_kernel[grid](
         exports_token_num,
+        expert_to_token_index,
+        expert_to_token_index.stride(0),
+        expert_to_weights,
+        expert_to_weights.stride(0),
         mblocks_to_expert_id,
-        mblocks_to_m_index,
+        padded_expert_to_token_index,
+        padded_expert_to_weights,
         expert_num,
         max_num_m_blocks,
         BLOCK_M=block_m,
@@ -285,13 +319,14 @@ def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, blo
         num_stages=1,
     )
 
-    return mblocks_to_expert_id, mblocks_to_m_index
+    return mblocks_to_expert_id, padded_expert_to_token_index, padded_expert_to_weights
 
 
 @triton.jit
 def grouped_matmul_kernel(
     mblocks_to_expert_id,  # [max_m_block_size]
-    mblocks_to_m_index,  # [max_m_block_size]
+    padded_expert_to_token_index,  # [max_m_block_size]
+    padded_expert_to_weights,  # [max_m_block_size]
     k,  # int
     n,  # int
     topk_num,  # int
@@ -307,12 +342,7 @@ def grouped_matmul_kernel(
     weight_stride_0,
     weight_stride_1,
     weight_stride_2,
-    expert_to_weights_ptr,  # [expert_num, token_num * topk]
-    expert_to_weights_stride0,
-    expert_to_weights_stride1,
     expert_to_token_num,  # [expert_num]
-    expert_to_token_index,  # [expert_num, token_num * topk_num]
-    expert_to_token_index_stride_0,
     out_ptr,  # [token_num * topk_num, n]
     out_stride_0,
     out_stride_1,
@@ -350,28 +380,14 @@ def grouped_matmul_kernel(
 
     if expert_id == -1:
         return
-
-    tile_m_idx = tl.load(mblocks_to_m_index + pid_m)
     tile_n_idx = pid_n
-
-    # get the gemm size of the current problem
-    cur_m = tl.load(expert_to_token_num + expert_id, eviction_policy="evict_last")
-
     # do regular gemm here
-    offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    token_mask = offs_am < cur_m
+    offs_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    # token_mask = offs_am < cur_m
     a_m_index = tl.load(
-        expert_to_token_index + expert_id * expert_to_token_index_stride_0 + offs_am,
-        mask=token_mask,
-        other=0,
+        padded_expert_to_token_index + offs_am,
     )
-    if MUL_ROUTED_WEIGHT:
-        a_m_scale = tl.load(
-            expert_to_weights_ptr + expert_id * expert_to_weights_stride0 + offs_am,
-            mask=token_mask,
-            other=0.0,
-        )
-
+    token_mask = a_m_index != -1
     offs_bn = (tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % n
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
@@ -437,6 +453,11 @@ def grouped_matmul_kernel(
             accumulator *= ab_scale
 
     if MUL_ROUTED_WEIGHT:
+        a_m_scale = tl.load(
+            padded_expert_to_weights + offs_am,
+            mask=token_mask,
+            other=0.0,
+        )
         accumulator *= a_m_scale[:, None]
 
     c = accumulator.to(compute_type)
@@ -530,16 +551,22 @@ def grouped_matmul(
             token_inputs, token_input_scale = qinput_tensor, input_scale
 
     if reused_mblock_infos is None:
-        mblocks_to_expert_id, mblocks_to_m_index = moe_align2(token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M)
+        mblocks_to_expert_id, padded_expert_to_token_index, padded_expert_to_weights = moe_align2(
+            token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M, expert_to_token_index, expert_to_weights
+        )
     else:
         # when up group gemm and down group gemm use same BLOCK_SIZE_M,
         # can reuse (mblocks_to_expert_id, mblocks_to_m_index) created by moe_align2 kernel.
-        mblocks_to_expert_id, mblocks_to_m_index, reused_block_size_m = reused_mblock_infos
+        (
+            mblocks_to_expert_id,
+            padded_expert_to_token_index,
+            padded_expert_to_weights,
+            reused_block_size_m,
+        ) = reused_mblock_infos
         if reused_block_size_m != BLOCK_SIZE_M:
-            mblocks_to_expert_id, mblocks_to_m_index = moe_align2(
-                token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M
+            mblocks_to_expert_id, padded_expert_to_token_index, padded_expert_to_weights = moe_align2(
+                token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M, expert_to_token_index, expert_to_weights
             )
-
     block_num = triton.cdiv(n, BLOCK_SIZE_N) * mblocks_to_expert_id.shape[0]
 
     grid = (block_num,)
@@ -548,7 +575,8 @@ def grouped_matmul(
 
     grouped_matmul_kernel[grid](
         mblocks_to_expert_id,
-        mblocks_to_m_index,
+        padded_expert_to_token_index,
+        padded_expert_to_weights,
         k,
         n,
         topk_num,
@@ -570,12 +598,7 @@ def grouped_matmul(
         expert_weights.stride(0),
         expert_weights.stride(1),
         expert_weights.stride(2),
-        expert_to_weights,
-        expert_to_weights.stride(0),
-        expert_to_weights.stride(1),
         expert_to_token_num,
-        expert_to_token_index,
-        expert_to_token_index.stride(0),
         out,
         out.stride(0),
         out.stride(1),
@@ -594,7 +617,7 @@ def grouped_matmul(
         num_warps=num_warps,
         num_stages=num_stages,
     )
-    return (mblocks_to_expert_id, mblocks_to_m_index, BLOCK_SIZE_M)
+    return (mblocks_to_expert_id, padded_expert_to_token_index, padded_expert_to_weights, BLOCK_SIZE_M)
 
 
 def fused_experts_impl(
