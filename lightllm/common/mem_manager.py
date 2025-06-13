@@ -11,7 +11,7 @@ from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.distributed.pynccl import PyNcclCommunicator
-
+from lightllm.utils.dist_utils import get_current_device_id
 
 logger = init_logger(__name__)
 
@@ -65,6 +65,10 @@ class MemoryManager:
         available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         self.size = int(available_memory * 1024 ** 3 / cell_size)
+        if world_size > 1:
+            tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
+            dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+            self.size = tensor.item()
         logger.info(
             f"{str(available_memory)} GB space is available after load the model weight\n"
             f"{str(cell_size / 1024 ** 2)} MB is the size of one token kv cache\n"
