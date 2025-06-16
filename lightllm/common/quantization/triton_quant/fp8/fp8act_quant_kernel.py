@@ -6,7 +6,7 @@ from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 from frozendict import frozendict
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     from deep_gemm import ceil_div
@@ -109,16 +109,45 @@ def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
     x_q: torch.Tensor,
-    x_s: torch.Tensor,
+    x_s: torch.Tensor = None,
     eps: float = 1e-10,
     dtype: torch.dtype = torch.float8_e4m3fn,
+    column_major_scales: bool = False,
+    scale_tma_aligned: bool = False,
+    alloc_func: Callable = torch.empty,
 ):
+    # Adapted from
+    # https://github.com/sgl-project/sglang/blob/7e257cd666c0d639626487987ea8e590da1e9395/python/sglang/srt/layers/quantization/fp8_kernel.py#L290
     if HAS_SGL_KERNEL:
         finfo = torch.finfo(dtype)
         fp8_max, fp8_min = finfo.max, finfo.min
-        sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max, False)
+        if column_major_scales:
+            if scale_tma_aligned:
+                # aligned to 4 * sizeof(float)
+                aligned_size = (x.shape[-2] + 3) // 4 * 4
+                x_s = alloc_func(
+                    x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
+                    device=x.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)[: x.shape[-2], :]
+            else:
+                x_s = alloc_func(
+                    (x.shape[-1] // group_size,) + x.shape[:-1],
+                    device=x.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)
+        else:
+            if x_s is None:
+                x_s = alloc_func(
+                    x.shape[:-1] + (x.shape[-1] // group_size,),
+                    device=x.device,
+                    dtype=torch.float32,
+                )
+        sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max)
     else:
         lightllm_per_token_group_quant_fp8(x, group_size, x_q, x_s, eps=1e-10, dtype=torch.float8_e4m3fn)
+
+    return x_q, x_s
 
 
 # copy from
@@ -229,8 +258,8 @@ def test_per_token_group_quant_fp8():
 
     x_q = torch.randn((1024, 8192)).cuda().to(torch.float8_e4m3fn)
     # x_s = torch.randn((1024, 8192 // group_size), dtype=torch.float32).cuda()
-    x_s = torch.randn((8192 // group_size, 1024 + 10), dtype=torch.float32).cuda().t()
-    per_token_group_quant_fp8(x, group_size, x_q, x_s)
+    # x_s = torch.randn((8192 // group_size, 1024 + 10), dtype=torch.float32).cuda().t()
+    _, x_s = per_token_group_quant_fp8(x, group_size, x_q, None, column_major_scales=True)
     x_s = x_s[:1024]
     th_x_q, th_x_s = torch_quant(x, group_size)
     print("th_x_s - x_s", torch.abs(th_x_s - x_s.reshape(-1)).max())
@@ -238,4 +267,5 @@ def test_per_token_group_quant_fp8():
 
 
 if __name__ == "__main__":
-    test_tma_align()
+    test_per_token_group_quant_fp8()
+    # test_tma_align()
