@@ -115,6 +115,14 @@ def normal_or_p_d_start(args):
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
 
+    # mtp params check
+    if args.mtp_mode is not None:
+        assert args.mtp_draft_model_dir is not None
+        assert args.mtp_step > 0
+    else:
+        assert args.mtp_draft_model_dir is None
+        assert args.mtp_step == 0
+
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))

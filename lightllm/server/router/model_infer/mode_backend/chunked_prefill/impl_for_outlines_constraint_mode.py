@@ -6,7 +6,7 @@ import functools
 from .impl import ChunkedPrefillBackend
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
-from lightllm.server.router.model_infer.mode_backend.generic_pre_process import (
+from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
     prepare_decode_inputs,
 )
@@ -66,8 +66,9 @@ class OutlinesConstraintBackend(ChunkedPrefillBackend):
 
         # 先 decode
         if decode_reqs:
-            kwargs, run_reqs = prepare_decode_inputs(decode_reqs)
-            logits = self.model.forward(**kwargs)
+            model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+            model_output = self.model.forward(model_input)
+            logits = model_output.logits
             self._overlap_req_init_and_filter(
                 uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
             )
@@ -91,16 +92,18 @@ class OutlinesConstraintBackend(ChunkedPrefillBackend):
                 do_filter_finished_reqs=False,
                 extra_post_req_handle_func=self._update_state_fsm,
             )
-            logits = None
+            del model_output
+            del logits
 
         # 再 prefill
         if len(decode_reqs) == 0 or (self.forward_step % self.max_wait_step == 0) or (self.need_prefill_count > 0):
             if prefill_reqs:
                 self.need_prefill_count -= 1
-                kwargs, run_reqs = prepare_prefill_inputs(
+                model_input, run_reqs = prepare_prefill_inputs(
                     prefill_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
                 )
-                logits = self.model.forward(**kwargs)
+                model_output = self.model.forward(model_input)
+                logits = model_output.logits
                 self._overlap_req_init_and_filter(
                     uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
                 )
@@ -123,7 +126,8 @@ class OutlinesConstraintBackend(ChunkedPrefillBackend):
                     do_filter_finished_reqs=False,
                     extra_post_req_handle_func=self._update_state_fsm,
                 )
-                logits = None
+                del model_output
+                del logits
 
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         self.forward_step += 1

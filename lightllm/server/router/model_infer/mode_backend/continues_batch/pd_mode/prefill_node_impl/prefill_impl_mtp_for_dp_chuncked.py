@@ -1,28 +1,21 @@
-import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
-from typing import List, Tuple
-from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams, g_infer_context
+from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
-from .prefill_impl import ChunckedPrefillForPrefillNode
-from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
+from .prefill_impl_for_dp_chuncked import DPChunkedForPrefillNode
+from ....dp_backend.impl_mtp import DPChunkedPrefillWithMTPBackend
 
 logger = init_logger(__name__)
 
 
-class DPChunkedForPrefillNode(ChunckedPrefillForPrefillNode):
+class DPChunkedForMtpPrefillNode(DPChunkedForPrefillNode):
     def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
         super().__init__(info_queue=info_queue, mem_queue=mem_queue)
-        self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
-
-    def init_custom(self):
-        super().init_custom()
-        self.reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
         return
 
-    def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs)
+    def init_model(self, kvargs):
+        super().init_model(kvargs)
+        DPChunkedPrefillWithMTPBackend._init_mtp_draft_model(self, kvargs)
         return
 
     def decode(self):
@@ -45,14 +38,23 @@ class DPChunkedForPrefillNode(ChunckedPrefillForPrefillNode):
         self.reduce_tensor.fill_(current_dp_prefill_num)
         dist.all_reduce(self.reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
         max_prefill_num = self.reduce_tensor.item()
+
         if max_prefill_num != 0:
             if not self.enable_prefill_microbatch_overlap:
-                DPChunkedPrefillBackend.normal_prefill_reqs(
-                    self, prefill_reqs, max_prefill_num, uninit_reqs, ok_finished_reqs
+                DPChunkedPrefillWithMTPBackend.normal_mtp_prefill_reqs(
+                    self,
+                    prefill_reqs=prefill_reqs,
+                    max_prefill_num=max_prefill_num,
+                    uninit_reqs=uninit_reqs,
+                    ok_finished_reqs=ok_finished_reqs,
                 )
             else:
-                DPChunkedPrefillBackend.overlap_prefill_reqs(
-                    self, prefill_reqs, max_prefill_num, uninit_reqs, ok_finished_reqs
+                DPChunkedPrefillWithMTPBackend.overlap_mtp_prefill_reqs(
+                    self,
+                    prefill_reqs=prefill_reqs,
+                    max_prefill_num=max_prefill_num,
+                    uninit_reqs=uninit_reqs,
+                    ok_finished_reqs=ok_finished_reqs,
                 )
 
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)

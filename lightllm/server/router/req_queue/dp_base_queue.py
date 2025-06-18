@@ -51,7 +51,7 @@ class DpQueue:
     def append(self, req: Req):
         suggested_dp_index = req.sample_params.suggested_dp_index
         if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
-            logger.error(f"input req {req.request_id} dp index {suggested_dp_index} has error")
+            logger.warning(f"input req {req.request_id} dp index {suggested_dp_index} is invalid")
             suggested_dp_index = self._get_suggest_dp_index()
             self.pre_select_dp_index = suggested_dp_index
             req.sample_params.suggested_dp_index = suggested_dp_index
@@ -66,7 +66,7 @@ class DpQueue:
         for req in req_group:
             suggested_dp_index = req.sample_params.suggested_dp_index
             if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
-                logger.error(f"input req {req.request_id} dp index {suggested_dp_index} has error")
+                logger.warning(f"input req {req.request_id} dp index {suggested_dp_index} is invalid")
                 self.pre_select_dp_index = index
                 req.sample_params.suggested_dp_index = index
                 self.inner_queues[index].append(req)

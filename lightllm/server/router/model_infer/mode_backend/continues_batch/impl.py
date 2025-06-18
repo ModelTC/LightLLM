@@ -4,7 +4,7 @@ from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBac
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.server.router.model_infer.mode_backend.generic_pre_process import (
+from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
     prepare_decode_inputs,
 )
@@ -30,10 +30,11 @@ class ContinuesBatchBackend(ModeBackend):
             g_infer_context.filter_reqs(aborted_reqs)
 
         if prefill_reqs:
-            kwargs, run_reqs = prepare_prefill_inputs(
+            model_input, run_reqs = prepare_prefill_inputs(
                 prefill_reqs, is_chuncked_mode=False, is_multimodal=self.is_multimodal
             )
-            logits = self.model.forward(**kwargs)
+            model_output = self.model.forward(model_input)
+            logits = model_output.logits
 
             self._overlap_req_init_and_filter(
                 uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
@@ -48,8 +49,9 @@ class ContinuesBatchBackend(ModeBackend):
             )
 
         if decode_reqs:
-            kwargs, run_reqs = prepare_decode_inputs(decode_reqs)
-            logits = self.model.forward(**kwargs)
+            model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+            model_output = self.model.forward(model_input)
+            logits = model_output.logits
 
             self._overlap_req_init_and_filter(
                 uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True

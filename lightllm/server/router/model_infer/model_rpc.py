@@ -21,6 +21,12 @@ from lightllm.server.router.model_infer.mode_backend import (
     DPForDecodeNode,
     ChunckedPrefillForPrefillNode,
     DPChunkedForPrefillNode,
+    ContinuesBatchWithMTPBackend,
+    DPChunkedPrefillWithMTPBackend,
+    DPForMtpDecodeNode,
+    ContinuesBatchBackendForMtpDecodeNode,
+    ChunckedPrefillForMtpPrefillNode,
+    DPChunkedForMtpPrefillNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.core.objs import RpcShmParams, RpcShmResults, ShmSyncStatusArray
@@ -108,38 +114,48 @@ class ModelRpcServer:
         # 填充真正的 rank_id 参数
         kvargs["rank_id"] = self.rank
         self.world_size = kvargs["world_size"]
-        disable_chunked_prefill = kvargs.get("disable_chunked_prefill", False)
-        return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
-        use_reward_model = kvargs.get("use_reward_model", False)
-        diverse_mode = kvargs.get("diverse_mode", False)
-        is_token_healing = kvargs.get("is_token_healing", False)
-        is_first_token_constraint_mode = kvargs.get("is_first_token_constraint_mode", False)
-        if kvargs.get("args", None) is not None:
-            is_outlines_constraint_mode = kvargs.get("args", None).output_constraint_mode == "outlines"
-            is_xgrammar_constraint_mode = kvargs.get("args", None).output_constraint_mode == "xgrammar"
-            assert not (
-                is_outlines_constraint_mode and is_xgrammar_constraint_mode
-            ), "only one constraint mode can be true"
-            is_prefill_node = kvargs.get("args", None).run_mode == "prefill"
-            is_decode_node = kvargs.get("args", None).run_mode == "decode"
-        else:
-            is_outlines_constraint_mode = False
-            is_xgrammar_constraint_mode = False
-            is_prefill_node = False
-            is_decode_node = False
+        disable_chunked_prefill = self.args.disable_chunked_prefill
+        return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
+        use_reward_model = self.args.use_reward_model
+        diverse_mode = self.args.diverse_mode
+        is_token_healing = self.args.token_healing_mode
+        is_first_token_constraint_mode = self.args.first_token_constraint_mode
+
+        is_outlines_constraint_mode = self.args.output_constraint_mode == "outlines"
+        is_xgrammar_constraint_mode = self.args.output_constraint_mode == "xgrammar"
+        assert not (is_outlines_constraint_mode and is_xgrammar_constraint_mode), "only one constraint mode can be true"
+        is_prefill_node = self.args.run_mode == "prefill"
+        is_decode_node = self.args.run_mode == "decode"
+
+        enable_mtp = self.args.mtp_mode is not None
 
         if is_prefill_node:
-            if kvargs.get("args", None).dp > 1:
-                self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
+            if enable_mtp:
+                if self.args.dp > 1:
+                    self.backend = DPChunkedForMtpPrefillNode(self.info_queue, self.mem_queue)
+                else:
+                    self.backend = ChunckedPrefillForMtpPrefillNode(self.info_queue, self.mem_queue)
             else:
-                self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
+                if self.args.dp > 1:
+                    self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
+                else:
+                    self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
         elif is_decode_node:
-            if kvargs.get("args", None).dp > 1:
-                self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
+            if enable_mtp:
+                if self.args.dp > 1:
+                    self.backend = DPForMtpDecodeNode(self.info_queue, self.mem_queue)
+                else:
+                    self.backend = ContinuesBatchBackendForMtpDecodeNode(self.info_queue, self.mem_queue)
             else:
-                self.backend = ContinuesBatchBackendForDecodeNode(self.info_queue, self.mem_queue)
-        elif kvargs.get("dp_size", 1) > 1:
-            self.backend = DPChunkedPrefillBackend()
+                if self.args.dp > 1:
+                    self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
+                else:
+                    self.backend = ContinuesBatchBackendForDecodeNode(self.info_queue, self.mem_queue)
+        elif self.args.dp > 1:
+            if enable_mtp:
+                self.backend = DPChunkedPrefillWithMTPBackend()
+            else:
+                self.backend = DPChunkedPrefillBackend()
         elif use_reward_model:
             self.backend = RewardModelBackend()
         elif return_all_prompt_logprobs:
@@ -155,9 +171,15 @@ class ModelRpcServer:
         elif is_first_token_constraint_mode:
             self.backend = FirstTokenConstraintBackend()
         elif disable_chunked_prefill:
-            self.backend = ContinuesBatchBackend()
+            if enable_mtp:
+                self.backend = ContinuesBatchWithMTPBackend()
+            else:
+                self.backend = ContinuesBatchBackend()
         else:
-            self.backend = ChunkedPrefillBackend()
+            if enable_mtp:
+                self.backend = ContinuesBatchWithMTPBackend()
+            else:
+                self.backend = ChunkedPrefillBackend()
 
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)

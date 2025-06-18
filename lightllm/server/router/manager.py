@@ -22,7 +22,7 @@ from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
-from lightllm.server.core.objs import ShmReqManager
+from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .stats import Stats
 from .pause_strategy import Fcfs, select_paused_reqs
@@ -35,11 +35,12 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 
+
 logger = init_logger(__name__)
 
 
 class RouterManager:
-    def __init__(self, args, router_port, detokenization_port, metric_port):
+    def __init__(self, args: StartArgs, router_port, detokenization_port, metric_port):
         self.args = args
         self.model_weightdir = args.model_dir
         self.world_size = args.tp
@@ -61,6 +62,8 @@ class RouterManager:
         self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
+
+        self.mtp_step = args.mtp_step
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
         self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
@@ -383,8 +386,7 @@ class RouterManager:
         self.overlap_event.set()
         await self.model_rpc_client.prefill(reqs)
         batch.filter_out_finished_req(self.shm_req_manager)
-        # 发个None包触发一下detokenization
-        self.send_to_detokenization.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
+        self._send_detokenization_pack()
 
         logger.debug(f"Prefill Batch: {batch.simple_log()} \n")
         self.metric_client.histogram_observe(
@@ -400,8 +402,8 @@ class RouterManager:
         # 在 self.is_multinode_and_multidp 为 True 时，传入的 batch 对象可能为 None。
         if batch is not None:
             batch.filter_out_finished_req(self.shm_req_manager)
-        # 发个None包触发一下detokenization
-        self.send_to_detokenization.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
+
+        self._send_detokenization_pack()
         self.metric_client.histogram_observe(
             "lightllm_batch_inference_duration_bucket", time.time() - start_time, "decode"
         )
@@ -423,6 +425,14 @@ class RouterManager:
         return (
             batch.get_batch_decode_need_tokens()[dp_index] + self.get_used_tokens(dp_index) <= self.max_total_token_num
         )
+
+    def _send_detokenization_pack(self):
+        # 发 mtp_step + 1 个 None 包触发一下 detokenization, 因为在开启 mtp feature 以后，每一步
+        # 生成的 token 数量最多为 mtp_step + 1 个，如果不及时触发 detokenization， 会带来一些性能
+        # 损失
+        for _ in range(self.mtp_step + 1):
+            self.send_to_detokenization.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
+        return
 
     def get_used_tokens(self, dp_index):
         if not self.args.disable_dynamic_prompt_cache:

@@ -330,9 +330,29 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--graph_max_batch_size",
         type=int,
+        default=256,
+        help="""Maximum batch size that can be captured by the cuda graph for decodign stage.""",
+    )
+    parser.add_argument(
+        "--graph_split_batch_size",
+        type=int,
+        default=32,
+        help="""
+        Controls the interval for generating CUDA graphs during decoding.
+        CUDA graphs will be generated continuously for values ranging from 1 up to the specified
+        graph_split_batch_size. For values from graph_split_batch_size to graph_max_batch_size,
+        a new CUDA graph will be generated for every increment of graph_grow_step_size.
+        Properly configuring this parameter can help optimize the performance of CUDA graph execution.
+        """,
+    )
+    parser.add_argument(
+        "--graph_grow_step_size",
+        type=int,
         default=16,
-        help="""Maximum batch size that can be captured by the cuda graph for decodign stage.
-                The default value is 8. It will turn into eagar mode if encounters a larger value.""",
+        help="""
+        For batch_size values from graph_split_batch_size to graph_max_batch_size,
+        a new CUDA graph will be generated for every increment of graph_grow_step_size.
+        """,
     )
     parser.add_argument(
         "--graph_max_len_in_batch",
@@ -390,5 +410,28 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--auto_update_redundancy_expert",
         action="store_true",
         help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
+    )
+    parser.add_argument(
+        "--mtp_mode",
+        choices=["deepseekv3", None],
+        default=None,
+        help="""supported mtp mode, None is not enable mtp, """,
+    )
+    parser.add_argument(
+        "--mtp_draft_model_dir",
+        type=str,
+        default=None,
+        help="""Path to the draft model for the MTP multi-prediction feature,
+        used for loading the MTP multi-output token model.""",
+    )
+    parser.add_argument(
+        "--mtp_step",
+        type=int,
+        default=0,
+        help="""Specifies the number of additional tokens to predict using the draft model.
+        Currently, this feature supports only the DeepSeekV3 model.
+        Increasing this value allows for more predictions,
+        but ensure that the model is compatible with the specified step count.
+        currently, deepseekv3 model only support 1 step""",
     )
     return parser

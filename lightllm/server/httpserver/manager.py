@@ -53,7 +53,7 @@ class HttpServerManager:
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
-        self._shm_lock_pool = AtomicShmArrayLock("lightllm_resource_lock", 1)
+        self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 1)
         self._resource_lock = AsyncLock(self._shm_lock_pool.get_lock_context(0))
         self.node_rank = args.node_rank
         self.transfer_lock = asyncio.Lock()  # the lock for transfer to next module in multi node mode.
@@ -542,6 +542,10 @@ class HttpServerManager:
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
                         x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
+
+                        mtp_avg_token_per_step = out_token_counter / max(
+                            (out_token_counter - metadata["mtp_accepted_token_num"]), 1
+                        )
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
                             f"X-Request-Id:{x_request_id} "
@@ -552,6 +556,7 @@ class HttpServerManager:
                             f"prompt_token_num:{prompt_tokens} "
                             f"prompt_cache_len:{prompt_cache_len} "
                             f"prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
                         if group_request_id < 0:
                             # health 探测请求，不记录日志和监控
@@ -654,6 +659,7 @@ class HttpServerManager:
                             "special": special,
                             "count_output_tokens": count_output_tokens,
                             "prompt_cache_len": req.prompt_cache_len,
+                            "mtp_accepted_token_num": req.mtp_accepted_token_num,
                         }
                         if self.args.return_all_prompt_logprobs:
                             metadata.update(req.get_all_prompt_metadata())

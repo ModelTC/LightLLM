@@ -17,6 +17,7 @@ from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
+from lightllm.utils.envs_utils import get_env_start_args
 
 logger = init_logger(__name__)
 
@@ -260,6 +261,12 @@ class InferReq:
         self.need_out_token_id_statistics = True
         self.out_token_id_count: Dict[int, int] = None
 
+        # mtp_gen_token_ids 用于处理一个请求可以通过mtp进行很多token的预先生成
+        # 的技术，在没有开启 mtp 功能的时候，这个成员变量不会有任何的实际实用意义。
+        # 当开启后，mtp_gen_token_ids 保存多生成的多余的token_id,但是在后面的
+        # 步骤中需要重新进行校验。
+        self.mtp_gen_token_ids: List[int] = []
+
     def init_all(self):
         if self.initialized is False:
             self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
@@ -329,6 +336,10 @@ class InferReq:
         self.shm_req.shm_prompt_ids.arr[index] = next_token_id
         self.shm_req.shm_logprobs.arr[index] = logprob
         return
+
+    def update_mtp_accepted_token_num(self, accept_token_num: int):
+        # 用于统计 mtp 的接受率
+        self.shm_req.mtp_accepted_token_num += accept_token_num
 
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]

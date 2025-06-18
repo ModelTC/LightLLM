@@ -94,6 +94,10 @@ class Req(ctypes.Structure):
         ("reward_score", ctypes.c_float),
         # 请求回复累计概率和
         ("cumlogprob", ctypes.c_float),
+        # mtp draft model 多输出命中接受的token数量
+        ("mtp_accepted_token_num", ctypes.c_int),
+        # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
+        ("_mtp_step", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -145,6 +149,8 @@ class Req(ctypes.Structure):
         self.create_prompt_ids_shm_array()
         self.chunked_prefill_size = chunked_prefill_size
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
+        self.mtp_accepted_token_num = 0
+        self._mtp_step = get_env_start_args().mtp_step
 
         self.post_init()
 
@@ -264,8 +270,8 @@ class NormalReq(Req):
         return (a_len, b_len)
 
     def get_decode_need_tokens(self):
-
-        return 1
+        # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
+        return self._mtp_step + 1
 
     def get_first_router_need_tokens(self):
 
@@ -305,7 +311,12 @@ class ChunkedPrefillReq(Req):
         """
         chunkedprefill 调度模式的实现
         """
-        return min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
+        # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
+        need_tokens = min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
+        if need_tokens == 1:
+            need_tokens = self._mtp_step + 1
+
+        return need_tokens
 
     def get_first_router_need_tokens(self):
 

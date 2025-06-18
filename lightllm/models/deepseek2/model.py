@@ -97,12 +97,18 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         manager_class = Deepseek2MemoryManager
         if "triton_fp8kv" in self.mode:
             manager_class = Deepseek2FP8KVMemoryManager
+
+        # mtp 模式下需要在mem manger上扩展draft model使用的layer
+        added_mtp_layer_num = 0
+        if get_env_start_args().mtp_mode == "deepseekv3":
+            added_mtp_layer_num += get_env_start_args().mtp_step
+
         self.mem_manager = manager_class(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=1,
             head_dim=self.config["kv_lora_rank"] + self.config["qk_rope_head_dim"],
-            layer_num=self.config["num_hidden_layers"],
+            layer_num=self.config["num_hidden_layers"] + added_mtp_layer_num,
             mem_fraction=self.mem_fraction,
         )
         return
@@ -190,5 +196,4 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     @final
     def _context_forward(self, input_ids, infer_state):
         predict_logics = super()._context_forward(input_ids, infer_state)
-        dist_group_manager.clear_deepep_buffer()
         return predict_logics

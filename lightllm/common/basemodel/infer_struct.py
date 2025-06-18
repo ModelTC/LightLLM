@@ -2,7 +2,7 @@ import torch
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 
@@ -54,6 +54,15 @@ class InferStateInfo:
         self.max_q_seq_len: int = None
         self.max_kv_seq_len: int = None
 
+        # 一些特殊模型，特殊模式使用的输入变量，本身这些变量不适合放在
+        # inferstate的基类中，但是为了代码的简洁和方便，都放在基类中
+        # 进行管理。注意这些成员变量只会在特定的模型和模式下才会生效。
+
+        # deepseekv3 mtp draft model 使用的额外输入参数,
+        # 在开启 mtp_mode == deepseekv3 时，mtp draft model
+        # 的输入会用到，其他模型和场景都不会用到
+        self.deepseekv3_mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         if self.is_prefill:
             (
@@ -82,7 +91,7 @@ class InferStateInfo:
             ) = gen_decode_params(b_seq_len=self.b_seq_len)
             self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
-    def copy_for_cuda_graph(self, new_infer_state):
+    def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)

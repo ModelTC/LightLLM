@@ -114,3 +114,13 @@ def tensor_copy_3dim(dest_tensor: torch.Tensor, source_tensor: torch.Tensor):
         num_stages=3,
     )
     return
+
+
+def pad2dim_tensor_to_new_batch(input: torch.Tensor, new_batch_size: int):
+    assert input.ndim == 2
+    origin_batch_size = input.shape[0]
+    hidden = input.shape[1]
+    out = torch.empty((new_batch_size, hidden), dtype=input.dtype, device=input.device, requires_grad=False)
+    out[0:origin_batch_size, :] = input
+    out[origin_batch_size:, :] = input[0:1, :]
+    return out

@@ -175,7 +175,7 @@ class ReqSamplingParamsManager:
 
         if not self.enable_gpu_buffer_for_out_token_id_counter:
             for req_obj, next_token_id in zip(req_objs, next_token_ids):
-                if req_obj.need_out_token_id_statistics:
+                if req_obj.need_out_token_id_statistics and req_obj.cur_output_len > 0:
                     req_obj.out_token_id_count[next_token_id] += 1
         else:
             b_req_idx = torch.tensor(

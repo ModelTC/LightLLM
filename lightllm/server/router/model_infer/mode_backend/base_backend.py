@@ -15,9 +15,11 @@ from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
+from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.server.core.objs import ShmReqManager
+from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
 from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
@@ -33,26 +35,26 @@ class ModeBackend:
         pass
 
     def init_model(self, kvargs):
-        self.args = kvargs.get("args", None)
+        self.args: StartArgs = kvargs.get("args", None)
+        assert self.args is not None
         # p d 分离模式下会有特殊的一些初始化, 所以需要传递
         # 模式参数到模型的初始化过程中进行控制
-        self.run_mode = "normal" if self.args is None else self.args.run_mode
+        self.run_mode = self.args.run_mode
         self.is_multimodal = False
         self.nnodes = self.args.nnodes
         self.node_rank = self.args.node_rank
-        self.tp_rank = kvargs["rank_id"]
         self.world_size = kvargs["world_size"]
-        self.dp_size = kvargs.get("dp_size", 1)
+        self.dp_size = self.args.dp
         # dp_size_in_node 计算兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, self.dp_size // self.nnodes)
         self.load_way = kvargs["load_way"]
         self.mode = kvargs["mode"]
-        self.disable_chunked_prefill = kvargs.get("disable_chunked_prefill", False)
-        self.chunked_prefill_size = kvargs.get("chunked_prefill_size", None)
-        self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
-        self.use_dynamic_prompt_cache = not kvargs.get("disable_dynamic_prompt_cache", False)
+        self.disable_chunked_prefill = self.args.disable_chunked_prefill
+        self.chunked_prefill_size = self.args.chunked_prefill_size
+        self.return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
+        self.use_dynamic_prompt_cache = not self.args.disable_dynamic_prompt_cache
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
-        self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
+        self.disable_cudagraph = self.args.disable_cudagraph
 
         self.cache = {}
         self.logger = init_logger(__name__)
@@ -113,6 +115,7 @@ class ModeBackend:
             "run_mode": self.run_mode,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
+        self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.radix_cache = (
             RadixCache(
@@ -260,6 +263,7 @@ class ModeBackend:
         for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
             req_obj: InferReq = req_obj
             shm_req = req_obj.shm_req
+            finish_status = req_obj.finish_status
             if is_chuncked_mode:
                 new_kv_len = req_obj.get_chuncked_input_token_len()
             else:
@@ -269,13 +273,8 @@ class ModeBackend:
             if self.is_master_in_dp:
                 shm_req.shm_cur_kv_len = req_obj.cur_kv_len
 
-            # 这个地方主要是为了提前判断是否存在abort的情况，如果abort了
-            # 直接将请求放入finished 处理队列中。
-            if req_obj.is_finished_or_aborted():
-                finished_req_ids.append(shm_req.request_id)
-                continue
-
-            # 对于没有到达需要输出 token 阶段的请求，直接略过
+            # 对于没有到达需要输出 token 阶段的请求，直接略过, 说明还
+            # 处于chuncked prefill kv 填充的阶段。
             if req_obj.cur_kv_len < req_obj.get_cur_total_len():
                 continue
 
@@ -283,13 +282,26 @@ class ModeBackend:
             req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
             req_obj.cur_output_len += 1
 
+            # 这里提前判定的主要作用是：
+            # 在 mtp mode 下，可以存在同一个 req 对象的多次处理，
+            # 在这种情况下， 如果前一步接收的mtp token 已经导致了请求
+            # 达到了finished 状态，后续的请求就不再进行后续的复杂流程
+            # 判断和处理，但是，因为 mtp 多请求还是导致了kv 的使用，所以
+            # 还是需要更新对应的 input_tokens 和 cur_kv_len 信息，否则
+            # 在 filter req 的时候，容易导致kv 管理的泄露和插入radix cache
+            # 的信息不完整等问题。
+            if finish_status.is_finished():
+                finished_req_ids.append(shm_req.request_id)
+                continue
+
+            # 更新判断请求的 finished 状态
             req_obj.update_finish_status(self.eos_id)
 
             if extra_post_req_handle_func is not None:
                 extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
 
             # 判断是否已经满足生成结束条件。
-            if req_obj.is_finished_or_aborted():
+            if finish_status.is_finished():
                 finished_req_ids.append(shm_req.request_id)
 
             if self.is_master_in_dp:
@@ -298,7 +310,7 @@ class ModeBackend:
                 # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
                 shm_req.shm_cur_output_len = req_obj.cur_output_len
 
-                if req_obj.finish_status.is_finished():
+                if finish_status.is_finished():
                     shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
                     shm_req.finish_status = req_obj.finish_status
 
@@ -308,8 +320,13 @@ class ModeBackend:
             req_objs=run_reqs, next_token_ids=next_token_ids
         )
 
+        # mtp_mode 模式下，因为存在重复对象，需要进行去重操作。
+        if self.args.mtp_mode is not None:
+            finished_req_ids = list(set(finished_req_ids))
+
         if do_filter_finished_reqs:
             g_infer_context.filter(finished_req_ids)
+
         return finished_req_ids
 
     # 一些可以复用的通用功能函数
@@ -358,6 +375,76 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _trans_req_ids_to_req_objs(self, req_ids: List[int]) -> List[InferReq]:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
+
+    # 对mtp 运行模式下的请求进行校验和过滤，保留校验成功的请求对象，并释放不再使用的kv 的 mem_index
+    def _verify_mtp(self, run_reqs: List[InferReq], next_token_ids_cpu: np.ndarray, input_mem_indexes_cpu: np.ndarray):
+        verify_ok_reqs = []
+        verify_ok_req_indexes = []
+        verify_ok_req_last_indexes = []
+        need_free_mem_indexes = []
+        grouped_reqs = self._group_mtp_run_reqs(run_reqs, next_token_ids_cpu, input_mem_indexes_cpu)
+        for req_group in grouped_reqs:
+            pre_req, pre_out_token_id, _, pre_index = req_group[0]
+            verify_ok_reqs.append(pre_req)
+            verify_ok_req_indexes.append(pre_index)
+            need_verify = True
+            verify_ok_count = 0
+            for i in range(1, len(req_group)):
+                cur_req, cur_out_token_id, cur_mem_index, cur_index = req_group[i]
+                cur_req: InferReq = cur_req
+                # cur_req 的输入，等于pre_req 的输出，表示校验成功
+                if need_verify and cur_req.mtp_gen_token_ids[i - 1] == pre_out_token_id:
+                    verify_ok_reqs.append(cur_req)
+                    verify_ok_req_indexes.append(cur_index)
+                    pre_req, pre_out_token_id, _, pre_index = (
+                        cur_req,
+                        cur_out_token_id,
+                        cur_mem_index,
+                        cur_index,
+                    )
+                    verify_ok_count += 1
+                    continue
+
+                need_verify = False
+                need_free_mem_indexes.append(cur_mem_index)
+
+            verify_ok_req_last_indexes.append(verify_ok_req_indexes[-1])
+
+            # 清理每个请求上的 mtp_gen_token_ids, 并更新接受率信息
+            pre_req.mtp_gen_token_ids = []
+            if self.is_master_in_dp:
+                pre_req.update_mtp_accepted_token_num(accept_token_num=verify_ok_count)
+
+        return verify_ok_reqs, verify_ok_req_indexes, verify_ok_req_last_indexes, need_free_mem_indexes
+
+    def _group_mtp_run_reqs(self, reqs: List[InferReq], next_token_ids_cpu: np.ndarray, input_mem_indexes: np.ndarray):
+        if not reqs:
+            return []
+
+        grouped_reqs = []
+        current_group = [(reqs[0], next_token_ids_cpu[0], input_mem_indexes[0], 0)]
+
+        for i in range(1, len(reqs)):
+            req = reqs[i]
+            if req.req_id == current_group[-1][0].req_id:
+                current_group.append((req, next_token_ids_cpu[i], input_mem_indexes[i], i))
+            else:
+                grouped_reqs.append(current_group)
+                current_group = [(req, next_token_ids_cpu[i], input_mem_indexes[i], i)]
+
+        grouped_reqs.append(current_group)
+        return grouped_reqs
+
+    def _gen_argmax_token_ids(self, model_output: ModelOutput):
+        logits = model_output.logits
+        probs = torch.softmax(logits, dim=-1)
+        draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+        return draft_next_token_ids_gpu, draft_next_token_ids_gpu.detach().cpu().numpy()
+
+    def _update_reqs_mtp_gen_token_ids(self, reqs: List[InferReq], mtp_draft_next_token_ids: np.ndarray):
+        for req, token_id in zip(reqs, mtp_draft_next_token_ids):
+            req.mtp_gen_token_ids.append(token_id)
+        return
 
     def preload_prompt_cache_kv_buffer(self, model_cfg):
         self.logger.info("Preload prompt cache kv buffer.")

@@ -5,6 +5,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import unittest
 from model_infer import test_model_inference
+from model_infer_mtp import test_model_inference_mtp
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.utils.envs_utils import set_env_start_args, get_env_start_args
 from lightllm.utils.config_utils import get_config_json, get_dtype
@@ -15,7 +16,10 @@ class TestModelInfer(unittest.TestCase):
         args = get_env_start_args()
         if args.data_type is None:
             args.data_type = get_dtype(args.model_dir)
-        test_model_inference(args)
+        if args.mtp_mode == "deepseekv3":
+            test_model_inference_mtp(args)
+        else:
+            test_model_inference(args)
         return
 
 
