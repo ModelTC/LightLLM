@@ -26,7 +26,9 @@ def get_unique_server_name():
 def set_cuda_arch(args):
     if not torch.cuda.is_available():
         return
-    if args.enable_flashinfer_prefill or args.enable_flashinfer_decode:
+    from lightllm.utils.sgl_utils import HAS_FLASHINFER
+
+    if HAS_FLASHINFER:
         capability = torch.cuda.get_device_capability()
         arch = f"{capability[0]}.{capability[1]}"
         os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"
@@ -77,15 +79,13 @@ def get_lightllm_websocket_max_message_size():
     return int(os.getenv("LIGHTLLM_WEBSOCKET_MAX_SIZE", 16 * 1024 * 1024))
 
 
-# get_redundancy_expert_ids and get_redundancy_expert_num are primarily
-# used to obtain the IDs and number of redundant experts during inference.
-# They depend on a configuration file specified by ep_redundancy_expert_config_path,
-# which is a JSON formatted text file.
+# get_redundancy_expert_ids and get_redundancy_expert_num are primarily used to obtain the IDs
+# and number of redundant experts during inference. They depend on a configuration file specified
+# by ep_redundancy_expert_config_path, which is a JSON formatted text file.
 # The content format is as follows:
 # {
 #   "redundancy_expert_num": 1,  # Number of redundant experts per rank
-#   "0": [0],                    # Key: layer_index (string),
-#                                # Value: list of original expert IDs that are redundant for this layer
+#   "0": [0],                    # Key: layer_index (string), Value: list of redundant expert IDs of this layer
 #   "1": [0],
 #   "default": [0]               # Default list of redundant expert IDs if layer-specific entry is not found
 # }

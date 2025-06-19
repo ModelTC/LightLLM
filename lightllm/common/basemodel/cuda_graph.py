@@ -188,6 +188,37 @@ class CudaGraph:
         # for typing easy
         from .basemodel import TpPartBaseModel
 
+        for batch_size in range(self.max_batch_size, self.max_batch_size - 1, -1):
+            # dummy prefill
+            prefill_input_len = 1
+            dummy_input_ids = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
+            b_req_idx = torch.tensor(
+                [model.req_manager.alloc() for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+            )
+            mem_indexes = model.mem_manager.alloc(len(dummy_input_ids)).cuda()
+            b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
+            b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+            total_token_num = prefill_input_len * batch_size
+            logics = model.forward(
+                batch_size,
+                total_token_num,
+                prefill_input_len,
+                dummy_input_ids,
+                mem_indexes,
+                b_req_idx,
+                b_seq_len,
+                b_ready_cache_len=b_ready_cache_len,
+                is_prefill=True,
+                multimodal_params=[],
+            )
+            mem_indexes = None
+            prob_out = torch.softmax(logics, dim=-1)
+            logics = None
+            predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
+            prob_out = None
+            predict_ids = predict_ids.detach().cpu().numpy()
+            torch.cuda.empty_cache()
+
         model: TpPartBaseModel = model
 
         # decode cuda graph init

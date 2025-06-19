@@ -116,7 +116,7 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, **run_config):
     if not run_config:
         run_config = MoeSiluAndMulKernelConfig.try_to_get_best_config(M=size_m, N=size_n, out_dtype=str(output.dtype))
 
-    if size_m <= 1024:
+    if size_m <= 4096:
         BLOCK_N = run_config["BLOCK_N"]
         grid = (
             size_m,
