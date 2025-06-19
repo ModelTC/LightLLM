@@ -114,6 +114,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "do_sample": True,
         "presence_penalty": request.presence_penalty,
         "frequency_penalty": request.frequency_penalty,
+        "repetition_penalty": request.repetition_penalty,
         "temperature": request.temperature,
         "top_p": request.top_p,
         "top_k": request.top_k,
