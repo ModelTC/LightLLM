@@ -8,7 +8,14 @@ def tensor2bytes(t: torch.Tensor):
     # t = t.cpu().numpy().tobytes()
     # return t
     buf = BytesIO()
-    torch.save(t.detach().cpu(), buf)
+    t = t.detach().cpu()
+    # 这个地方进行新的empty并复制是因为，torch的tensor save的机制存在问题
+    # 如果 t 是从一个大 tensor 上切片复制下来的的tensor， 在save的时候，其
+    # 会保存大tensor的所有数据，所以会导致存储开销较大，需要申请一个新的tensor
+    # 并进行复制，来打断这种联系。
+    dest = torch.empty_like(t)
+    dest.copy_(t)
+    torch.save(dest, buf, _use_new_zipfile_serialization=False, pickle_protocol=4)
     buf.seek(0)
     return buf.read()
 
