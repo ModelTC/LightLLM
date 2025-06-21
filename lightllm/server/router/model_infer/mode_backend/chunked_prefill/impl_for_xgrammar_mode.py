@@ -1,3 +1,5 @@
+import copy
+import functools
 import torch
 from typing import List, Tuple
 
@@ -34,6 +36,22 @@ class XgrammarBackend(ChunkedPrefillBackend):
         eos_token_ids = []
         eos_token_ids.append(self.tokenizer.eos_token_id)
         eos_token_ids.extend(self.args.eos_id)
+
+        @functools.lru_cache(maxsize=200)
+        def get_cached_grammar(type: str, grammar: str):
+            logger.info(f"grammar cache miss for {type}: '{grammar}'")
+            try:
+                if type == "grammar":
+                    return self.xgrammar_compiler.compile_grammar(grammar)
+                elif type == "schema":
+                    return self.xgrammar_compiler.compile_json_schema(grammar)
+                else:
+                    raise ValueError(f"Unknown xgrammar type: {type}")
+            except Exception as e:
+                logger.error(f"Failed to compile {type}: {e}")
+                raise
+
+        self.get_cached_grammar = get_cached_grammar
         return
 
     @calculate_time(show=False, min_cost_ms=300)
@@ -149,10 +167,10 @@ class XgrammarBackend(ChunkedPrefillBackend):
             sample_params = run_obj.sampling_param
             if sample_params.guided_grammar is not None:
                 if not hasattr(sample_params, "xgrammar_matcher"):
-                    xgrammar_compiled_grammar = self.xgrammar_compiler.compile_grammar(sample_params.guided_grammar)
-                    sample_params.xgrammar_matcher = xgr.GrammarMatcher(xgrammar_compiled_grammar)
+                    ctx = self.get_cached_grammar("grammar", sample_params.guided_grammar)
+                    sample_params.xgrammar_matcher = xgr.GrammarMatcher(ctx)
             elif sample_params.guided_json is not None:
                 if not hasattr(sample_params, "xgrammar_matcher"):
-                    xgrammar_compiled_grammar = self.xgrammar_compiler.compile_json_schema(sample_params.guided_json)
-                    sample_params.xgrammar_matcher = xgr.GrammarMatcher(xgrammar_compiled_grammar)
+                    ctx = self.get_cached_grammar("schema", sample_params.guided_json)
+                    sample_params.xgrammar_matcher = xgr.GrammarMatcher(ctx)
         return
