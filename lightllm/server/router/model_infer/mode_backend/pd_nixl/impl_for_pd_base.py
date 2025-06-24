@@ -26,13 +26,14 @@ logger = init_logger(__name__)
 
 
 class PDNIXLBackendBase(ModeBackend):
-    _THEAD_WAIT_INTERVAL = 0.001
+    _THREAD_WAIT_INTERVAL = 0.001
 
     def __init__(self, to_remote_queue: mp.Queue, from_remote_queue: mp.Queue, nixl_meta_queue: mp.Queue):
         super().__init__()
         self.to_remote_queue = to_remote_queue
         self.from_remote_queue = from_remote_queue
         self.nixl_meta_queue = nixl_meta_queue
+        self.prefill_post_handle_queue = queue.Queue()
 
         # for decode
         self.remote_prefilled_reqs: ThreadSafeDict = ThreadSafeDict()
@@ -85,12 +86,21 @@ class PDNIXLBackendBase(ModeBackend):
                     prefill_status = RemotePrefillStatus.deserialize(req_status)
                     handle_remote_prefill(prefill_status)
 
-            time.sleep(PDNIXLBackendBase._THEAD_WAIT_INTERVAL)
+            time.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
+
+    def _handle_transfer_loop(self):
+        while True:
+            try:
+                req: InferReq = self.prefill_post_handle_queue.get()
+                self._transfer_kv_to_remote(req)
+                time.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
+            except queue.Empty:
+                pass
+
 
     def _wait_transfer_loop(self):
         while True:
             done_req_ids = self.nixl_agent.get_done_tranfers()
-
             for req_id, state in done_req_ids:
                 if state != 1:
                     logger.info(f"wait transfer done: {req_id} state: {state}")
@@ -112,7 +122,7 @@ class PDNIXLBackendBase(ModeBackend):
                 del self.remote_prefill_requests[req_id]
                 del self.inflght_transfer_requests[req_id]
 
-            time.sleep(PDNIXLBackendBase._THEAD_WAIT_INTERVAL)
+            time.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
 
     def _handle_prefill_loop(self):
         while True:
@@ -145,7 +155,7 @@ class PDNIXLBackendBase(ModeBackend):
         if group_req_id not in self.remote_prefill_requests:
             logger.info(f"remote prefill request {group_req_id} not found")
             return
-
+        start = time.time()
         remote_request: PrefillRequest = self.remote_prefill_requests[group_req_id]
         if remote_request.transfer_state is None:
             remote_request.transfer_state = TransferState(
@@ -178,6 +188,11 @@ class PDNIXLBackendBase(ModeBackend):
 
         transfer_state.current_kv_len = req.cur_kv_len
         transfer_state.current_chunk_id += 1
+        logger.info(
+            f"transfer kv to remote: {group_req_id} "
+            f"current chunk id: {transfer_state.current_chunk_id} "
+            f"took: {time.time() - start} seconds"
+        )
 
     def _decode_filter_reqs(
         self, prefill_reqs: List[InferReq], aborted_reqs: List[InferReq], decode_reqs: List[InferReq]

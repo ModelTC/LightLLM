@@ -91,6 +91,7 @@ class KVMoveRequestState:
     done_handles: List[nixl_xfer_handle]
     remote_agent: RemoteAgent
     abort: bool
+    is_last_arrived: bool
 
 
 @dataclass

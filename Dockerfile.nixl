@@ -71,14 +71,14 @@ RUN if [ "$INSTALL_NIXL" == "true" ]; then \
     fi
 
 RUN if [ "$INSTALL_NIXL" == "true" ]; then \
-        apt-get update && apt-get install -y  pkg-config tmux net-tools; \
+        apt-get update && apt-get install -y  pkg-config tmux net-tools;  \
         cd /usr/local/src; \
         pip install --upgrade meson pybind11 patchelf; \
         git clone https://github.com/ai-dynamo/nixl.git -b main && \
         cd nixl && \
         rm -rf build && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl && \
+        meson setup build/ --prefix=/usr/local/nixl --buildtype=release && \
         cd build && \
         ninja && \
         ninja install && \
