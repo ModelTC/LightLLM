@@ -20,7 +20,10 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
         super().init_custom()
         self.handle_prefill_loop_thread = threading.Thread(target=self._handle_prefill_loop, daemon=True)
         self.wait_transfer_loop_thread = threading.Thread(target=self._wait_transfer_loop, daemon=True)
+        self.handle_transfer_loop_thread = threading.Thread(target=self._handle_transfer_loop, daemon=True)
+
         self.handle_prefill_loop_thread.start()
+        self.handle_transfer_loop_thread.start()
         self.wait_transfer_loop_thread.start()
         return
 
@@ -58,6 +61,6 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
                 next_token_logprobs,
                 is_chuncked_mode=True,
                 do_filter_finished_reqs=False,
-                extra_post_req_handle_func=lambda req, _1, _2: self._transfer_kv_to_remote(req),
+                extra_post_req_handle_chunk_func=lambda req: self.prefill_post_handle_queue.put(req),
             )
         return

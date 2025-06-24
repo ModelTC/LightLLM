@@ -78,7 +78,7 @@ class PDNIXLDPBackendForPrefillNode(PDNIXLBackendForPrefillNode):
                 next_token_logprobs,
                 is_chuncked_mode=True,
                 do_filter_finished_reqs=False,
-                extra_post_req_handle_func=lambda req, _1, _2: self._transfer_kv_to_remote(req),
+                extra_post_req_handle_chunk_func=lambda req: self.prefill_post_handle_queue.put(req),
             )
 
     def overlap_prefill_reqs(self, prefill_reqs: List[InferReq], max_prefill_num: int, uninit_reqs, ok_finished_reqs):
@@ -113,5 +113,5 @@ class PDNIXLDPBackendForPrefillNode(PDNIXLBackendForPrefillNode):
                 next_token_logprobs,
                 is_chuncked_mode=True,
                 do_filter_finished_reqs=False,
-                extra_post_req_handle_func=lambda req, _1, _2: self._transfer_kv_to_remote(req),
+                extra_post_req_handle_chunk_func=lambda req: self.prefill_post_handle_queue.put(req),
             )
