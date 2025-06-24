@@ -2,7 +2,6 @@ from collections import defaultdict
 from typing import Dict, List, Any
 from torch import Tensor
 from dataclasses import dataclass
-import threading
 
 from lightllm.utils.log_utils import init_logger
 
@@ -126,28 +125,29 @@ class NixlKVTransporter:
         kv_move_end = request.cur_kv_len
 
         src_token_ids = request.token_ids[kv_move_start:]
-        dst_token_ids = prefill_request.data.token_ids[kv_move_start - skip_kv_move_len : kv_move_end]
+        dst_token_ids = prefill_request.data.token_ids[kv_move_start - skip_kv_move_len : kv_move_end - skip_kv_move_len]
 
         remote_agent: RemoteAgent = self.remote_agents[prefill_request.decode_id][
             self.tp_idx
         ]  # TODO one-one mapping now
 
         if len(src_token_ids) > 0:
-            assert len(src_token_ids) == len(dst_token_ids), f"{len(src_token_ids)} {len(dst_token_ids)}"
+            assert len(src_token_ids) == len(dst_token_ids), f"{len(src_token_ids)} {len(dst_token_ids)} {kv_move_start} {kv_move_end} {skip_kv_move_len}"
             src_token_descs = self._get_token_desc_ids(src_token_ids, self.num_tokens)
             dst_token_descs = self._get_token_desc_ids(dst_token_ids, remote_agent.num_tokens)
 
             src_handle = self.local_xfer_handles
             dst_handle = remote_agent.kv_xfer_handles
+
             notify_status = RemotePrefillStatus(
                 group_req_id=group_reqeust_id,
                 status=1,
                 chunk_id=prefill_request.transfer_state.current_chunk_id,
                 is_last=is_finished,
-            )
+            ).serialize() if is_finished else b""
 
             handle = self.nixl_agent.make_prepped_xfer(
-                "WRITE", src_handle, src_token_descs, dst_handle, dst_token_descs, notify_status.serialize()
+                "WRITE", src_handle, src_token_descs, dst_handle, dst_token_descs, notify_status
             )
 
             status = self.nixl_agent.transfer(handle)
@@ -155,9 +155,13 @@ class NixlKVTransporter:
 
             if group_reqeust_id not in self.inflight_transfers:
                 self.inflight_transfers[group_reqeust_id] = KVMoveRequestState(
-                    handles=[], done_handles=[], remote_agent=remote_agent, abort=False
+                    handles=[], done_handles=[], remote_agent=remote_agent, abort=False, is_last_arrived=False
                 )
+
             self.inflight_transfers[group_reqeust_id].handles.append(handle)
+
+            if is_finished:
+                self.inflight_transfers[group_reqeust_id].is_last_arrived = True
 
             return handle
 
@@ -173,12 +177,14 @@ class NixlKVTransporter:
 
     def get_done_tranfers(self):
         done_req_ids = []
-
         for req_id, kv_move_state in self.inflight_transfers.items():
             kv_move_state: KVMoveRequestState
             if kv_move_state.abort:
                 logger.warning(f"{req_id} Transfer aborted")
                 done_req_ids.append((req_id, -1))
+                continue
+
+            if not kv_move_state.is_last_arrived:
                 continue
 
             remote_agent: RemoteAgent = kv_move_state.remote_agent
@@ -219,7 +225,6 @@ class NixlKVTransporter:
                 self.nixl_agent.release_xfer_handle(handle)
 
             del self.inflight_transfers[req_id]
-
         return done_req_ids
 
     def shutdonw(self):
