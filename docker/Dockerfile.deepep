@@ -1,0 +1,81 @@
+FROM nvcr.io/nvidia/tritonserver:24.04-py3-min as base
+ARG PYTORCH_VERSION=2.6.0
+ARG PYTHON_VERSION=3.9
+ARG CUDA_VERSION=12.4
+ARG MAMBA_VERSION=23.1.0-1
+ARG TARGETPLATFORM
+
+ENV PATH=/opt/conda/bin:$PATH \
+    CONDA_PREFIX=/opt/conda
+
+RUN chmod 777 -R /tmp && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl-dev \
+    curl \
+    g++ \
+    make \
+    git && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV http_proxy=http://devsft:d0663c03baee@10.119.176.202:3128
+ENV https_proxy=http://devsft:d0663c03baee@10.119.176.202:3128
+RUN case ${TARGETPLATFORM} in \
+    "linux/arm64")  MAMBA_ARCH=aarch64  ;; \
+    *)              MAMBA_ARCH=x86_64   ;; \
+    esac && \
+    curl -fsSL -o ~/mambaforge.sh -v "https://github.com/conda-forge/miniforge/releases/download/${MAMBA_VERSION}/Mambaforge-${MAMBA_VERSION}-Linux-${MAMBA_ARCH}.sh" && \
+    bash ~/mambaforge.sh -b -p /opt/conda && \
+    rm ~/mambaforge.sh
+
+RUN case ${TARGETPLATFORM} in \
+    "linux/arm64")  exit 1 ;; \
+    *)              /opt/conda/bin/conda update -y conda &&  \
+    /opt/conda/bin/conda install -y "python=${PYTHON_VERSION}" ;; \
+    esac && \
+    /opt/conda/bin/conda clean -ya
+
+
+WORKDIR /root
+
+COPY ./requirements.txt /lightllm/requirements.txt
+RUN pip install -r /lightllm/requirements.txt --no-cache-dir --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu124
+
+RUN pip install --no-cache-dir nvidia-nccl-cu12==2.25.1  # for allreduce hang issues in multinode H100
+
+RUN git clone https://github.com/Dao-AILab/flash-attention.git -b v2.7.4.post1
+RUN cd flash-attention/hopper && FLASH_ATTN_CUDA_ARCHS=90 NVCC_THREADS=128 python setup.py install
+
+RUN git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git
+RUN cd DeepGEMM && python setup.py install
+
+WORKDIR /root
+RUN git clone https://github.com/deepseek-ai/DeepEP.git
+
+# NVSHMEM
+RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/source/nvshmem_src_3.2.5-1.txz
+RUN tar -xf nvshmem_src_3.2.5-1.txz \
+    && mv nvshmem_src nvshmem
+
+WORKDIR /root/nvshmem
+RUN git apply /root/DeepEP/third-party/nvshmem.patch
+
+WORKDIR /root/nvshmem
+ENV CUDA_HOME=/usr/local/cuda
+RUN NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=/root/nvshmem/install -DCMAKE_CUDA_ARCHITECTURES=90 -DMLX5_lib=/usr/lib/x86_64-linux-gnu/libmlx5.so.1 \
+    && cd build \
+    && make install -j64
+
+WORKDIR /root/DeepEP
+ENV NVSHMEM_DIR=/root/nvshmem/install
+RUN NVSHMEM_DIR=/root/nvshmem/install python setup.py install
+
+COPY . /lightllm
+RUN pip install -e /lightllm --no-cache-dir

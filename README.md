@@ -1,6 +1,6 @@
 <div align="center">
   <picture>
-    <img alt="LightLLM" src="assets/lightllm.drawio.png" width=90%>
+    <img alt="LightLLM" src="assets/logo_new.png" width=90%>
   </picture>
 </div>
 
@@ -29,8 +29,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 
 - [Install LightLLM](https://lightllm-en.readthedocs.io/en/latest/getting_started/installation.html)
 - [Quick Start](https://lightllm-en.readthedocs.io/en/latest/getting_started/quickstart.html)
-- [LLM Service](https://lightllm-en.readthedocs.io/en/latest/models/test.html#llama)
-- [VLM Service](https://lightllm-en.readthedocs.io/en/latest/models/test.html#llava)
+- [TuTorial](https://lightllm-en.readthedocs.io/en/latest/tutorial/)
 
 
 ## Performance
@@ -45,23 +44,8 @@ Please refer to the [FAQ](https://lightllm-en.readthedocs.io/en/latest/faq.html)
 
 We welcome any coopoeration and contribution. If there is a project requires LightLLM's support, please contact us via email or create a pull request.
 
-
-1. <details><summary> <b><a href=https://github.com/LazyAGI/LazyLLM>LazyLLM</a></b>: Easyest and lazyest way for building multi-agent LLMs applications.</summary>
-
-    Once you have installed `lightllm` and `lazyllm`, and then you can use the following code to build your own chatbot:
-
-    ~~~python
-    from lazyllm import TrainableModule, deploy, WebModule
-    # Model will be download automatically if you have an internet connection
-    m = TrainableModule('internlm2-chat-7b').deploy_method(deploy.lightllm)
-    WebModule(m).start().wait()
-    ~~~
-
-    Documents: https://lazyllm.readthedocs.io/
-
-    </details>
-
 Projects based on LightLLM or referenced LightLLM components:
+- [LazyLLM](https://github.com/LazyAGI/LazyLLM)
 - [LoongServe, Peking University](https://github.com/LoongServe/LoongServe)
 - [OmniKV, Ant Group](https://github.com/antgroup/OmniKV)
 - [vLLM](https://github.com/vllm-project/vllm) (some LightLLM's kernel used)

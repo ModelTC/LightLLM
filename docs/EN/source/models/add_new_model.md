@@ -1,25 +1,25 @@
 # How to Add New Model Support
 
-## 1. Introduction of inference architecture
+## 1. Current Inference Architecture Introduction
 
-In the lightllm/common/basemodel directory, you will find the base class implementation for the entire inference architecture.
+Under the ***lightllm/common/basemodel*** directory is the base class implementation of the entire inference architecture
 
 ~~~shell
-├── basemodel.py   # Model architecture class
-├── infer_struct.py # State class for inference
+├── basemodel.py   # Model framework class
+├── infer_struct.py # Inference state class
 ├── __init__.py
-├── layer_infer # Inference layer base class
+├── layer_infer # Base class implementation of inference layers
 │   ├── base_layer_infer.py
 │   ├── __init__.py
 │   ├── post_layer_infer.py
 │   ├── pre_layer_infer.py
-│   ├── template # Template implementation of the inference layer. 
+│   ├── template # Template implementation of inference layers, inheriting from templates can reduce development effort and duplicate code
 │   │   ├── __init__.py
 │   │   ├── post_layer_infer_template.py
 │   │   ├── pre_layer_infer_template.py
 │   │   └── transformer_layer_infer_template.py
 │   └── transformer_layer_infer.py
-├── layer_weights # base class of weight
+├── layer_weights # Weight base class implementation
 │   ├── base_layer_weight.py
 │   ├── hf_load_utils.py
 │   ├── __init__.py
@@ -31,41 +31,41 @@ In the lightllm/common/basemodel directory, you will find the base class impleme
     └── __init__.py
 ~~~
 
-As shown above, the current model inference architecture mainly consists of two parts: weight and inference.
+As shown above, the current model inference architecture mainly consists of two parts: weights and inference.
 
-### Weight
+### Weights
 
-The layer_weights directory contains weight-related codes. In theory, a newly added model needs to inherit the PreAndPostLayerWeight and TransformerLayerWeight classes in pre_and_post_layer_weight.py and transformer_layer_weight.py to load weights.
+Under the layer_weights directory is the weight-related code. Theoretically, for a newly added model, you need to inherit and implement the PreAndPostLayerWeight and TransformerLayerWeight classes in pre_and_post_layer_weight.py and transformer_layer_weight.py to implement weight loading.
 
-| Weight base class      | Responsibilities                                                         |
-| ---------------------- | ------------------------------------------------------------ |
-| PreAndPostLayerWeight  | Responsible for loading the weights of the first Embedding layer and the last post-processing layer of the LLM model and splitting the weights according to the tp parameters used |
-| TransformerLayerWeight | Responsible for loading the weights of the LLM model transformer layer and splitting the weights according to the tp parameters used |
+| Weight Base Class            | Responsibilities                                             |
+| ---------------------------- | ------------------------------------------------------------ |
+| PreAndPostLayerWeight        | Responsible for loading weights of the first Embedding layer and the last post-processing layer of LLM models, and splitting weights according to the tp parameter used |
+| TransformerLayerWeight       | Responsible for loading weights of transformer layers of LLM models and splitting weights according to the tp parameter used |
 
 ### Inference
 
-The layer_infer directory contains the base classes for inference processing, and some templates are provided in the template directory. Inheriting from the template class can reduce some unnecessary duplication of code and simplify the implementation. There are three inference classes that need to be inherited in this directory.
+Under the layer_infer directory are the relevant base classes for inference processing, and some templates are provided under the template directory. Inheriting from template classes can reduce some unnecessary duplicate code and simplify implementation. There are three inference classes that need to be inherited and implemented under this directory.
 
-| Inference base class  | Responsibilities                    |
-| --------------------- | ------------------------------------------ |
-| PreLayerInfer         | Responsible for inference of the Embedding layer                  |
-| TransformerLayerInfer | Responsible for inference of th transformer layer                |
-| PostLayerInfer        | Responsible for inference of converting the final hidden layer output of the network into logits  |
+| Inference Base Class         | Responsibilities                             |
+| ---------------------------- | -------------------------------------------- |
+| PreLayerInfer                | Responsible for inference of Embedding layer |
+| TransformerLayerInfer        | Responsible for inference of transformer layer |
+| PostLayerInfer               | Responsible for converting the final hidden layer output of the network to logits inference |
 
-The base class BaseLayerInfer of the above three classes provides two most important external service function interfaces. All inference behaviors will be entered through these two interfaces.
+The base class BaseLayerInfer of the above three classes provides two most important external service function interfaces. All inference behaviors will enter through these two interfaces.
 
-| interface                                                    | Responsibilities                                           |
-| ------------------------------------------------------------ | ---------------------------------------------- |
-| def context_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: BaseLayerWeight): | the first inference of batch（prefill） |
-| def token_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: BaseLayerWeight): | the inference of  decode      |
+| Interface                                                     | Responsibilities                                             |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| def context_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: BaseLayerWeight): | First inference of batch (also called prefill in code) |
+| def token_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: BaseLayerWeight): | Single step decode stage inference |
 
-### Operator
+### Operators
 
-The triton_kernel directory contains some operators needed for inference implemented using openai triton.
+Under the triton_kernel directory are some operators needed for inference implemented using OpenAI triton.
 
-### State class
+### State Class
 
-The InferStateInfo class in infer_struct.py is a state class that passes some important information between layers when performing a model inference. Different models can inherit and implement this class to add unique state information that each model needs to pass. The InferStateInfo class provides an inherited init_some_extra_state interface for initializing the transmission of additional unique information.
+The InferStateInfo class in infer_struct.py is a state class that passes some important information between layers during a model inference. Different models can inherit and implement this class to add unique state information that each model needs to pass. The InferStateInfo class provides an inheritable init_some_extra_state interface for initializing additional unique information.
 
 ~~~python
     def init_some_extra_state(self, 
@@ -81,9 +81,9 @@ The InferStateInfo class in infer_struct.py is a state class that passes some im
         pass
 ~~~
 
-### Model class
+### Model Framework Class
 
-The TpPartBaseModel class in basemodel.py is the entry point of the entire model. Each type of model needs to inherit and implement this class. This class uses the inference class, weight class, and state class to complete the model loading and inference functions in a similar way to building blocks. Many of its interfaces can be inherited and implemented to complete the unique operations of each model type.
+The TpPartBaseModel class in basemodel.py is the entry point of the entire model. Each type of model needs to inherit and implement this class. This class uses inference classes, weight classes, and state classes in a building block-like manner to complete model loading and inference functions. There are many interfaces that can be inherited and implemented to complete unique operations for each model type.
 
 ~~~python
 class TpPartBaseModel:
@@ -99,9 +99,7 @@ class TpPartBaseModel:
     # infer state class
     infer_state_class = InferStateInfo
 
-    def __init__(self, tp_rank, world_size, weight_dir, max_total_token_num, load_way="HF", mode=[]):
-        self.tp_rank_ = tp_rank
-        self.tp_world_size_ = world_size
+    def __init__(self, weight_dir, max_total_token_num, load_way="HF", mode=[]):
         self.weight_dir_ = weight_dir
         self.max_total_token_num = max_total_token_num
         self.load_way = load_way
@@ -120,21 +118,21 @@ class TpPartBaseModel:
    ...
 ~~~
 
-Common interfaces that need to be inherited and implemented
+Commonly used interfaces that need to be inherited and implemented
 
-| interfaces                   | effect                                                         |
+| Interface                     | Function                                                     |
 | ---------------------------- | ------------------------------------------------------------ |
-| def _init_config(self)：     | Read the config.json of the initialization model and perform some key name legalization operations |
-| def _verify_params(self)：   | Verification parameters                                                     |
-| def _init_mem_manager(self): | Initialize the mem manager object used by token attention               |
-| def _init_some_value(self):  | Initialize the values ​​of some member variables used by the inference framework                       |
-| def _init_custom(self):      | Some models have their own personalized initialization, such as llama initializing its own Rotary value  |
+| def _init_config(self)：     | Read the config.json for initializing the model and perform some key name legalization operations |
+| def _verify_params(self)：   | Validate parameters                                           |
+| def _init_mem_manager(self): | Initialize the mem manager object used by token attention    |
+| def _init_some_value(self):  | Initialize values of some member variables that the inference framework will use |
+| def _init_custom(self):      | Some personalized initialization of the model itself, such as llama initializing its own Rotary values |
 
-## 2. the example  of adding bloom model
+## 2. Example of Adding Bloom Model
 
-The specific implementation is in the ***lightllm/models/bloom*** directory. Please read the corresponding source code for the following code snippets. The triton_kernel directory contains some kernels used by the inference class, which will not be introduced in detail below. At the same time, the bloom model uses the default state class because it does not need to pass special state information. If you want to understand the entire framework more deeply, you can further refer to the access implementation source code of models such as llama and llama2.
+The specific implementation is under the ***lightllm/models/bloom*** directory. Please read the source code for the code snippets below. The triton_kernel directory contains some kernels used by inference classes, which will not be introduced in detail in this article. At the same time, the bloom model uses the default state class because it doesn't need to pass special state information. For a deeper understanding of the entire framework, you can further refer to the source code implementation of llama and llama2 model integration.
 
-### （1） Add implementation weight class
+### (1) Add Implementation Weight Classes
 
 ***pre_and_post_layer_weight.py***
 

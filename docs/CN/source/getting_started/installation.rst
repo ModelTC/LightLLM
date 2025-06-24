@@ -48,7 +48,8 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $ python tools/quick_launch_docker.py --help
 
 .. note::
-    如果你使用多卡，你也许需要提高上面的 –shm_size 的参数设置。
+    如果你使用多卡，你也许需要提高上面的 –shm_size 的参数设置。如果需要跑DeepSeek模型的EP模式，请使用镜像
+    ghcr.io/modeltc/lightllm:main-deepep。
 
 .. _build_from_source:
 

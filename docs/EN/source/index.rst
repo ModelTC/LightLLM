@@ -1,5 +1,5 @@
-Welcome Lightllm!
-==================
+Welcome to Lightllm!
+====================
 
 .. figure:: ./assets/logos/lightllm-logo.png
   :width: 100%
@@ -10,7 +10,7 @@ Welcome Lightllm!
 .. raw:: html
 
    <p style="text-align:center">
-   <strong>A Light and Fast inference Services for LLM
+   <strong>A Lightweight and High-Performance Large Language Model Service Framework
    </strong>
    </p>
 
@@ -22,94 +22,52 @@ Welcome Lightllm!
    </p>
 
 
-LightLLM is a Python-based LLM (Large Language Model) inference and serving framework, notable for its lightweight design, easy scalability, and high-speed performance. LightLLM harnesses the strengths of numerous well-regarded open-source implementations, including but not limited to FasterTransformer, TGI, vLLM, and FlashAttention.
+Lightllm is a pure Python-based large language model inference and serving framework, featuring lightweight design, easy extensibility, and high performance.
+Lightllm integrates the advantages of numerous open-source solutions, including but not limited to FasterTransformer, TGI, vLLM, SGLang, and FlashAttention.
 
-**Features**:
+**Key Features**:
 
-* Tri-process asynchronous collaboration: tokenization, model inference, and detokenization are performed asynchronously, leading to a considerable improvement in GPU utilization.
-* Nopad (Unpad): offers support for nopad attention operations across multiple models to efficiently handle requests with large length disparities.
-* Dynamic Batch: enables dynamic batch scheduling of requests
-* FlashAttention: incorporates FlashAttention to improve speed and reduce GPU memory footprint during inference.
-* Tensor Parallelism: utilizes tensor parallelism over multiple GPUs for faster inference.
-* Token Attention: implements token-wise's KV cache memory management mechanism, allowing for zero memory waste during inference.
-* High-performance Router: collaborates with Token Attention to meticulously manage the GPU memory of each token, thereby optimizing system throughput.
-* Int8KV Cache: This feature will increase the capacity of tokens to almost twice as much. only llama support.
+* Multi-process Collaboration: Input text encoding, language model inference, visual model inference, and output decoding are performed asynchronously, significantly improving GPU utilization.
+* Cross-process Request Object Sharing: Through shared memory, cross-process request object sharing is achieved, reducing inter-process communication latency.
+* Efficient Scheduling Strategy: Peak memory scheduling strategy with prediction, maximizing GPU memory utilization while reducing request eviction.
+* High-performance Inference Backend: Efficient operator implementation, support for multiple parallelization methods (tensor parallelism, data parallelism, and expert parallelism), dynamic KV cache, rich quantization support (int8, fp8, int4), structured output, and multi-result prediction.
 
-**Supported Model List**：
-
-- `BLOOM <https://huggingface.co/bigscience/bloom>`_
-- `LLaMA <https://github.com/facebookresearch/llama>`_
-- `LLaMA V2 <https://huggingface.co/meta-llama>`_
-- `StarCoder <https://github.com/bigcode-project/starcoder>`_
-- `Qwen-7b <https://github.com/QwenLM/Qwen-7B>`_
-- `ChatGLM2-6b <https://github.com/THUDM/ChatGLM2-6B>`_
-- `Baichuan-7b <https://github.com/baichuan-inc/Baichuan-7B>`_
-- `Baichuan2-7b <https://github.com/baichuan-inc/Baichuan2>`_
-- `Baichuan2-13b <https://github.com/baichuan-inc/Baichuan2>`_
-- `Baichuan-13b <https://github.com/baichuan-inc/Baichuan-13B>`_
-- `InternLM-7b <https://github.com/InternLM/InternLM>`_
-- `Yi-34b <https://huggingface.co/01-ai/Yi-34B>`_
-- `Qwen-VL <https://huggingface.co/Qwen/Qwen-VL>`_
-- `Qwen-VL-Chat <https://huggingface.co/Qwen/Qwen-VL-Chat>`_
-- `Llava-7b <https://huggingface.co/liuhaotian/llava-v1.5-7b>`_
-- `Llava-13b <https://huggingface.co/liuhaotian/llava-v1.5-13b>`_
-- `Mixtral <https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1>`_
-- `Stablelm <https://huggingface.co/stabilityai/stablelm-2-1_6b>`_
-- `MiniCPM <https://huggingface.co/openbmb/MiniCPM-2B-sft-bf16>`_
-- `Phi-3 <https://huggingface.co/collections/microsoft/phi-3-6626e15e9585a200d2d761e3>`_
-- `CohereForAI <https://huggingface.co/CohereForAI/c4ai-command-r-plus>`_
-- `DeepSeek-V2-Lite <https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite>`_ 
-- `DeepSeek-V2 <https://huggingface.co/deepseek-ai/DeepSeek-V2>`_ 
-
-
-Docs List
--------------
+Documentation List
+------------------
 
 .. toctree::
    :maxdepth: 1
-   :caption: Getting started
+   :caption: Quick Start
 
-   getting_started/installation
-   getting_started/quickstart
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Lightllm
-
-   lightllm/lightllm_intro
-   lightllm/lightllm_impl
+   Installation Guide <getting_started/installation>
+   Quick Start <getting_started/quickstart>
+   Performance Benchmark <getting_started/benchmark>
 
 .. toctree::
    :maxdepth: 1
-   :caption: Model
+   :caption: Deployment Tutorials
 
-   Supported Model <models/supported_models>
-   Examples <models/test>
-   Add new models <models/add_new_model>
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Launching Server
-
-   Server Args <server/api_server_args>
-   Benchmark <server/benchmark>
-
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Using Server
-
-   user/api_param
-   user/openapi_docs
-   
+   DeepSeek R1 Deployment <tutorial/deepseek_deployment>
+   Multimodal Deployment <tutorial/multimodal>
+   Reward Model Deployment <tutorial/reward_model>
+   OpenAI api Usage <tutorial/openai>
+   APIServer Parameters <tutorial/api_server_args_zh>
+   Lightllm API Introduction <tutorial/api_param>
    
 .. toctree::
    :maxdepth: 1
-   :caption: development docs
+   :caption: Model Support
 
-   dev/token_attention
-   dev/router
-   dev/performance
+   Supported Models List <models/supported_models>
+   Adding New Models <models/add_new_model>
+   
+.. toctree::
+   :maxdepth: 1
+   :caption: Architecture Introduction
+
+   Architecture Overview <framework/framework>
+   Token Attention <framework/token_attention>
+   Efficient Router <framework/router>
    
 .. Indices and tables
 .. ==================

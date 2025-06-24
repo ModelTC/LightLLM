@@ -95,12 +95,25 @@ jobs:
         uses: docker/build-push-action@ac9327eae2b366085ac7f6a2d02df8aa8ead720a
         with:
           context: .
+          file: ./docker/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Build and push specific Docker image for deepep
+      # https://github.com/docker/build-push-action
+      - name: Build and push deepep Docker image
+        id: build-and-push-deepep
+        uses: docker/build-push-action@ac9327eae2b366085ac7f6a2d02df8aa8ead720a
+        with:
+          context: .
+          file: ./docker/Dockerfile.deepep
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ghcr.io/modeltc/lightllm:main-deepep
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # Sign the resulting Docker image digest except on PRs.
       # This will only write to the public Rekor transparency log when the Docker

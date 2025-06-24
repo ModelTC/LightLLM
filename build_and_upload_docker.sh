@@ -17,5 +17,9 @@ fi
 IMAGE_TAG=$2
 ACCOUNT=$1
 aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin $ACCOUNT.dkr.ecr.us-west-2.amazonaws.com
-DOCKER_BUILDKIT=1 docker build -t $ACCOUNT.dkr.ecr.us-west-2.amazonaws.com/lightllm:$IMAGE_TAG .
+DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile $ACCOUNT.dkr.ecr.us-west-2.amazonaws.com/lightllm:$IMAGE_TAG .
 docker push $ACCOUNT.dkr.ecr.us-west-2.amazonaws.com/lightllm:$IMAGE_TAG
+
+#deepep
+DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.deepep -t $ACCOUNT.dkr.ecr.us-west-2.amazonaws.com/lightllm:$IMAGE_TAG-deepep .
+docker push $ACCOUNT.dkr.ecr.us-west-2.amazonaws.com/lightllm:$IMAGE_TAG-deepep

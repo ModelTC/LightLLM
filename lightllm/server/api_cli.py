@@ -375,7 +375,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="""Path of quantization config. It can be used for mixed quantization.
-            Examples can be found in lightllm/common/quantization/configs.""",
+            Examples can be found in test/advanced_config/mixed_quantization/llamacls-mix-down.yaml.""",
     )
     parser.add_argument(
         "--vit_quant_type",

@@ -1,24 +1,23 @@
-Supported Models
-================
+Supported Models List
+=====================
 
-lightllm supports most mainstream open source large language models and multimodal models, and will continue to expand the list of supported models. In later versions, lightllm will support more types of models (such as reward models).
+Lightllm supports most mainstream open-source large language models and multimodal models, and will continue to expand the list of supported models. In future versions, lightllm will support more types of models (such as reward models).
 
 .. note::
 
-  Due to its lightweight design, Lightllm is highly extensible, which means that adding new model support is very simple. For more information, please refer to the **How to Add New Model Support** section.
+    Due to its lightweight design, Lightllm is highly extensible, which means that adding new model support is very simple. For more information, please refer to the **Adding New Models** section.
 
 -----
 
-LLM
-^^^^^^^^^^^^^^^^^^^^^^
-
+Large Language Models
+^^^^^^^^^^^^^^^^^^^^^
 
 .. list-table::
   :widths: 25 25 
   :header-rows: 1
 
-  * - model
-    - note
+  * - Model
+    - Notes
   * - `BLOOM <https://huggingface.co/bigscience/bloom>`_
     -  
   * - `LLaMA <https://github.com/facebookresearch/llama>`_
@@ -42,29 +41,29 @@ LLM
   * - `MiniCPM <https://huggingface.co/openbmb/MiniCPM-2B-sft-bf16>`_
     -   
   * - `Phi-3 <https://huggingface.co/collections/microsoft/phi-3-6626e15e9585a200d2d761e3>`_
-    -  only supports Mini and Small.
+    -  Only supports Mini and Small.
   * - `CohereForAI <https://huggingface.co/CohereForAI/c4ai-command-r-plus>`_
     - :code:`--data_type bfloat16`
   * - `DeepSeek-V2-Lite <https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite>`_ 
     - :code:`--data_type bfloat16`
   * - `DeepSeek-V2 <https://huggingface.co/deepseek-ai/DeepSeek-V2>`_ 
     - :code:`--data_type bfloat16`
+  * - `DeepSeek-V3 <https://huggingface.co/deepseek-ai/DeepSeek-V2>`_ 
+    - 
   * - `Qwen3 <https://github.com/QwenLM/Qwen3>`_ 
     - 
   * - `Qwen3-Moe <https://github.com/QwenLM/Qwen3>`_ 
     - 
 
-
-
-VLM
+Multimodal Models
 ^^^^^^^^^^^^^^^^^
 
 .. list-table::
   :widths: 25 25 
   :header-rows: 1
 
-  * - model
-    - note
+  * - Model
+    - Notes
   * - `Qwen-VL <https://huggingface.co/Qwen/Qwen-VL>`_
     -  :code:`--trust_remote_code --enable_multimodal`
   * - `Qwen-VL-Chat <https://huggingface.co/Qwen/Qwen-VL-Chat>`_
@@ -73,19 +72,22 @@ VLM
     -  :code:`--enable_multimodal`
   * - `Llava-13b <https://huggingface.co/liuhaotian/llava-v1.5-13b>`_
     -  :code:`--enable_multimodal`
+  * - `Qwen2-VL <https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct>`_
+    -  :code:`--enable_multimodal`
   * - `Google Gemma3 <https://huggingface.co/google/gemma-3-12b-it>`_
     -  :code:`--enable_multimodal`
 
-
-Reward Model
-^^^^^^^^^^^^^^^^^
+Reward Models
+^^^^^^^^^^^^^
 
 .. list-table::
   :widths: 25 25 
   :header-rows: 1
 
-  * - model
-    - note
+  * - Model
+    - Notes
   * - `internLM-reward <https://huggingface.co/internlm/internlm2-1_8b-reward>`_
+    -  :code:`--use_reward_model`
+  * - `Qwen2-Reward <https://huggingface.co/Qwen/Qwen2-Reward>`_
     -  :code:`--use_reward_model`
 

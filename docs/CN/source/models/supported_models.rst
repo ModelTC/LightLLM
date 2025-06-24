@@ -92,4 +92,5 @@ Reward模型
     - 备注
   * - `internLM-reward <https://huggingface.co/internlm/internlm2-1_8b-reward>`_
     -  :code:`--use_reward_model`
-
+  * - `Qwen2-Reward <https://huggingface.co/Qwen/Qwen2-Reward>`_
+    -  :code:`--use_reward_model`
