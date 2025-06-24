@@ -29,7 +29,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 
 - [Install LightLLM](https://lightllm-en.readthedocs.io/en/latest/getting_started/installation.html)
 - [Quick Start](https://lightllm-en.readthedocs.io/en/latest/getting_started/quickstart.html)
-- [TuTorial](https://lightllm-en.readthedocs.io/en/latest/tutorial/)
+- [TuTorial](https://lightllm-en.readthedocs.io/en/latest/tutorial/deepseek_deployment.html)
 
 
 ## Performance

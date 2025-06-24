@@ -11,10 +11,10 @@ Basic Configuration Parameters
     Set the running mode, optional values:
     
     * ``normal``: Single server mode (default)
-    * ``prefill``: Prefill mode (for pd separation running mode)
-    * ``decode``: Decode mode (for pd separation running mode)
-    * ``pd_master``: pd master node mode (for pd separation running mode)
-    * ``config_server``: Configuration server mode (for pd separation mode, used to register pd_master nodes and get pd_master node list), specifically designed for large-scale, high-concurrency scenarios, used when `pd_master` encounters significant CPU bottlenecks.
+    * ``prefill``: Prefill mode (for pd disaggregation running mode)
+    * ``decode``: Decode mode (for pd disaggregation running mode)
+    * ``pd_master``: pd master node mode (for pd disaggregation running mode)
+    * ``config_server``: Configuration server mode (for pd disaggregation mode, used to register pd_master nodes and get pd_master node list), specifically designed for large-scale, high-concurrency scenarios, used when `pd_master` encounters significant CPU bottlenecks.
 
 .. option:: --host
 
@@ -37,7 +37,7 @@ Basic Configuration Parameters
     
     Can only choose from ``['tcp://', 'ipc:///tmp/']``
 
-PD Separation Mode Parameters
+PD disaggregation Mode Parameters
 ----------------------------
 
 .. option:: --pd_master_ip
@@ -100,7 +100,7 @@ Memory and Batch Processing Parameters
 
 .. option:: --max_total_token_num
 
-    Total token count supported by GPU and model, equals max_batch * (input_len + output_len)
+    Total token number of kv cache. 
     
     If not specified, will be automatically calculated based on mem_fraction
 
@@ -197,3 +197,312 @@ Attention Type Selection Parameters
     * ``triton_fp8kv``: Use float8 to store kv cache, currently only used for deepseek2
     
     Need to read source code to confirm specific modes supported by all models 
+
+Scheduling Parameters
+--------------------
+
+.. option:: --router_token_ratio
+
+    Threshold for determining if the service is busy, default is ``0.0``. Once the kv cache usage exceeds this value, it will directly switch to conservative scheduling.
+
+.. option:: --router_max_new_token_len
+
+    The request output length used by the scheduler when evaluating request kv usage, default is ``1024``, generally lower than the max_new_tokens set by the user. This parameter only takes effect when --router_token_ratio is greater than 0.
+    Setting this parameter will make request scheduling more aggressive, allowing the system to process more requests simultaneously, but will inevitably cause request pause and recalculation.
+
+.. option:: --router_max_wait_tokens
+
+    Trigger scheduling of new requests every router_max_wait_tokens decoding steps, default is ``6``
+
+.. option:: --disable_aggressive_schedule
+
+    Disable aggressive scheduling
+    
+    Aggressive scheduling may cause frequent prefill interruptions during decoding. Disabling it can make the router_max_wait_tokens parameter work more effectively.
+
+.. option:: --disable_dynamic_prompt_cache
+
+    Disable kv cache caching
+
+.. option:: --chunked_prefill_size
+
+    Chunked prefill size, default is ``4096``
+
+.. option:: --disable_chunked_prefill
+
+    Whether to disable chunked prefill
+
+.. option:: --diverse_mode
+
+    Multi-result output mode
+
+Output Constraint Parameters
+---------------------------
+
+.. option:: --token_healing_mode
+
+.. option:: --output_constraint_mode
+
+    Set the output constraint backend, optional values:
+    
+    * ``outlines``: Use outlines backend
+    * ``xgrammar``: Use xgrammar backend
+    * ``none``: No output constraint (default)
+
+.. option:: --first_token_constraint_mode
+
+    Constrain the allowed range of the first token
+    Use environment variable FIRST_ALLOWED_TOKENS to set the range, e.g., FIRST_ALLOWED_TOKENS=1,2
+
+Multimodal Parameters
+--------------------
+
+.. option:: --enable_multimodal
+
+    Whether to allow loading additional visual models
+
+.. option:: --enable_multimodal_audio
+
+    Whether to allow loading additional audio models (requires --enable_multimodal)
+
+.. option:: --enable_mps
+
+    Whether to enable nvidia mps for multimodal services
+
+.. option:: --cache_capacity
+
+    Cache server capacity for multimodal resources, default is ``200``
+
+.. option:: --cache_reserved_ratio
+
+    Reserved capacity ratio after cache server cleanup, default is ``0.5``
+
+.. option:: --visual_infer_batch_size
+
+    Number of images processed in each inference batch, default is ``1``
+
+.. option:: --visual_gpu_ids
+
+    List of GPU IDs to use, e.g., 0 1 2
+
+.. option:: --visual_tp
+
+    Number of tensor parallel instances for ViT, default is ``1``
+
+.. option:: --visual_dp
+
+    Number of data parallel instances for ViT, default is ``1``
+
+.. option:: --visual_nccl_ports
+
+    List of NCCL ports for ViT, e.g., 29500 29501 29502, default is [29500]
+
+Performance Optimization Parameters
+----------------------------------
+
+.. option:: --disable_custom_allreduce
+
+    Whether to disable custom allreduce
+
+.. option:: --enable_custom_allgather
+
+    Whether to enable custom allgather
+
+.. option:: --enable_tpsp_mix_mode
+
+    The inference backend will use TP SP mixed running mode
+    
+    Currently only supports llama and deepseek series models
+
+.. option:: --enable_prefill_microbatch_overlap
+
+    The inference backend will use microbatch overlap mode for prefill
+    
+    Currently only supports deepseek series models
+
+.. option:: --enable_decode_microbatch_overlap
+
+    The inference backend will use microbatch overlap mode for decoding
+    
+.. option:: --enable_flashinfer_prefill
+
+    The inference backend will use flashinfer's attention kernel for prefill
+    
+.. option:: --enable_flashinfer_decode
+
+    The inference backend will use flashinfer's attention kernel for decoding
+    
+.. option:: --enable_fa3
+
+    The inference backend will use fa3 attention kernel for prefill and decoding
+
+.. option:: --disable_cudagraph
+
+    Disable cudagraph in the decoding phase
+
+.. option:: --graph_max_batch_size
+
+    Maximum batch size that can be captured by cuda graph in the decoding phase, default is ``256``
+
+.. option:: --graph_split_batch_size
+
+    Controls the interval for generating CUDA graphs during decoding, default is ``32``
+    
+    For values from 1 to the specified graph_split_batch_size, CUDA graphs will be generated continuously.
+    For values from graph_split_batch_size to graph_max_batch_size,
+    a new CUDA graph will be generated for every increase of graph_grow_step_size.
+    Properly configuring this parameter can help optimize the performance of CUDA graph execution.
+
+.. option:: --graph_grow_step_size
+
+    For batch_size values from graph_split_batch_size to graph_max_batch_size,
+    a new CUDA graph will be generated for every increase of graph_grow_step_size, default is ``16``
+
+.. option:: --graph_max_len_in_batch
+
+    Maximum sequence length that can be captured by cuda graph in the decoding phase, default is ``max_req_total_len``
+
+Quantization Parameters
+----------------------
+
+.. option:: --quant_type
+
+    Quantization method, optional values:
+    
+    * ``ppl-w4a16-128``
+    * ``flashllm-w6a16``
+    * ``ao-int4wo-[32,64,128,256]``
+    * ``ao-int8wo``
+    * ``ao-fp8w8a16``
+    * ``ao-fp6w6a16``
+    * ``vllm-w8a8``
+    * ``vllm-fp8w8a8``
+    * ``vllm-fp8w8a8-b128``
+    * ``triton-fp8w8a8-block128``
+    * ``none`` (default)
+
+.. option:: --quant_cfg
+
+    Path to quantization configuration file. Can be used for mixed quantization.
+    
+    Examples can be found in test/advanced_config/mixed_quantization/llamacls-mix-down.yaml.
+
+.. option:: --vit_quant_type
+
+    ViT quantization method, optional values:
+    
+    * ``ppl-w4a16-128``
+    * ``flashllm-w6a16``
+    * ``ao-int4wo-[32,64,128,256]``
+    * ``ao-int8wo``
+    * ``ao-fp8w8a16``
+    * ``ao-fp6w6a16``
+    * ``vllm-w8a8``
+    * ``vllm-fp8w8a8``
+    * ``none`` (default)
+
+.. option:: --vit_quant_cfg
+
+    Path to ViT quantization configuration file. Can be used for mixed quantization.
+    
+    Examples can be found in lightllm/common/quantization/configs.
+
+Sampling and Generation Parameters
+--------------------------------
+
+.. option:: --sampling_backend
+
+    Implementation used for sampling, optional values:
+    
+    * ``triton``: Use torch and triton kernel (default)
+    * ``sglang_kernel``: Use sglang_kernel implementation
+
+.. option:: --return_all_prompt_logprobs
+
+    Return logprobs for all prompt tokens
+
+.. option:: --use_reward_model
+
+    Use reward model
+
+.. option:: --long_truncation_mode
+
+    How to handle when input_token_len + max_new_tokens > max_req_total_len, optional values:
+    
+    * ``None``: Throw exception (default)
+    * ``head``: Remove some head tokens to make input_token_len + max_new_tokens <= max_req_total_len
+    * ``center``: Remove some tokens at the center position to make input_token_len + max_new_tokens <= max_req_total_len
+
+.. option:: --use_tgi_api
+
+    Use tgi input and output format
+
+MTP Multi-Prediction Parameters
+------------------------------
+
+.. option:: --mtp_mode
+
+    Supported mtp modes, optional values:
+    
+    * ``deepseekv3``
+    * ``None``: Do not enable mtp (default)
+
+.. option:: --mtp_draft_model_dir
+
+    Path to the draft model for MTP multi-prediction functionality
+    
+    Used to load the MTP multi-output token model.
+
+.. option:: --mtp_step
+
+    Specify the number of additional tokens predicted by the draft model, default is ``0``
+    
+    Currently this feature only supports DeepSeekV3/R1 models.
+    Increasing this value allows more predictions, but ensure the model is compatible with the specified number of steps.
+    Currently deepseekv3/r1 models only support 1 step
+
+DeepSeek Redundant Expert Parameters
+-----------------------------------
+
+.. option:: --ep_redundancy_expert_config_path
+
+    Path to redundant expert configuration. Can be used for deepseekv3 models.
+
+.. option:: --auto_update_redundancy_expert
+
+    Whether to update redundant experts for deepseekv3 models through online expert usage counters.
+
+Monitoring and Logging Parameters
+--------------------------------
+
+.. option:: --disable_log_stats
+
+    Disable throughput statistics logging
+
+.. option:: --log_stats_interval
+
+    Interval for recording statistics (seconds), default is ``10``
+
+.. option:: --health_monitor
+
+    Check service health status and restart on error
+
+.. option:: --metric_gateway
+
+    Address for collecting monitoring metrics
+
+.. option:: --job_name
+
+    Job name for monitoring, default is ``lightllm``
+
+.. option:: --grouping_key
+
+    Grouping key for monitoring, format is key=value, can specify multiple
+
+.. option:: --push_interval
+
+    Interval for pushing monitoring metrics (seconds), default is ``10``
+
+.. option:: --enable_monitor_auth
+
+    Whether to enable authentication for push_gateway 

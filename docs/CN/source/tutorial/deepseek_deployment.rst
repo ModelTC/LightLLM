@@ -199,7 +199,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --disable_cudagraph \
     --pd_master_ip $pd_master_ip \
     --pd_master_port 60011
-    # if you want to enable microbatch overlap, you can uncomment the following lines
+    # 如果需要启用微批次重叠，可以取消注释以下行
     #--enable_prefill_microbatch_overlap
 
 **步骤 3: 启动 Decode 服务**
@@ -223,7 +223,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --disable_cudagraph \
     --pd_master_ip $pd_master_ip \
     --pd_master_port 60011
-    # if you want to enable microbatch overlap, you can uncomment the following lines
+    # 如果需要启用微批次重叠，可以取消注释以下行
     #--enable_decode_microbatch_overlap
 
 3.2 多 PD Master 模式
@@ -291,7 +291,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --disable_cudagraph \
     --config_server_host $config_server_host \
     --config_server_port 60088
-    # if you want to enable microbatch overlap, you can uncomment the following lines
+    # 如果需要启用微批次重叠，可以取消注释以下行
     #--enable_prefill_microbatch_overlap
 
     # Decode 服务
@@ -309,7 +309,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --enable_fa3 \
     --config_server_host $config_server_host \
     --config_server_port 60088
-    # if you want to enable microbatch overlap, you can uncomment the following lines
+    # 如果需要启用微批次重叠，可以取消注释以下行
     #--enable_decode_microbatch_overlap
 
 4. 测试和验证

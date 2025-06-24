@@ -74,8 +74,6 @@ You can also install Lightllm from source:
     $ # Install Lightllm
     $ python setup.py install
 
-NOTE: If you use torch with cuda 11.x for some reason, please run `pip install nvidia-nccl-cu12==2.20.5` to support torch cuda graph.
-
 .. note::
 
     Lightllm code has been tested on various GPUs including V100, A100, A800, 4090, and H800.
