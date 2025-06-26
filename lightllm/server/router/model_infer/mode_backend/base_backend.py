@@ -1,18 +1,13 @@
 import os
-import asyncio
 import numpy as np
-import rpyc
 import torch
-import socket
-from datetime import timedelta
-from typing import Dict, List, Tuple, Callable, Optional
+from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -26,12 +21,18 @@ from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
 from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.distributed import dist_group_manager
+from .chuncked_prefill_state import ChunkedPrefillState
 import torch.distributed as dist
 
 
 class ModeBackend:
     def __init__(self) -> None:
         self.shm_req_manager = ShmReqManager()
+
+        # 当子类处于chuncked prefill 相关模式时，会使用该管理变量进行一些 chuncked prefill
+        # 的推理控制，具体使用方式可以参考 ChunkedPrefillBackend 类中的使用方式。如果是非
+        # chuncked prefill 相关的模式，该状态变量不会生效。
+        self.chunked_prefill_state = ChunkedPrefillState()
         pass
 
     def init_model(self, kvargs):
@@ -56,7 +57,6 @@ class ModeBackend:
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
         self.disable_cudagraph = self.args.disable_cudagraph
 
-        self.cache = {}
         self.logger = init_logger(__name__)
 
         self.weight_dir = kvargs["weight_dir"]
@@ -139,6 +139,14 @@ class ModeBackend:
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
         )
+
+        # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
+        if self.dp_size > 1:
+            self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+            self.dp_all_gather_tensor = torch.tensor(
+                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+            )
 
         self.init_custom()
         return
@@ -445,6 +453,27 @@ class ModeBackend:
         for req, token_id in zip(reqs, mtp_draft_next_token_ids):
             req.mtp_gen_token_ids.append(token_id)
         return
+
+    def _dp_all_gather_prefill_req_num(self, prefill_reqs: List[InferReq]) -> Tuple[np.ndarray, int]:
+        """
+        Gather the number of prefill requests across all DP ranks.
+        """
+        current_dp_prefill_num = len(prefill_reqs)
+        self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
+        dist.all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
+        dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
+        max_prefill_num = np.max(dp_prefill_req_nums)
+        return dp_prefill_req_nums, max_prefill_num
+
+    def _dp_all_reduce_decode_req_num(self, decode_reqs: List[InferReq]) -> int:
+        """
+        Reduce the number of decode requests across all DP ranks.
+        """
+        current_dp_decode_num = len(decode_reqs)
+        self.dp_reduce_tensor.fill_(current_dp_decode_num)
+        dist.all_reduce(self.dp_reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
+        max_decode_num = self.dp_reduce_tensor.item()
+        return max_decode_num
 
     def preload_prompt_cache_kv_buffer(self, model_cfg):
         self.logger.info("Preload prompt cache kv buffer.")

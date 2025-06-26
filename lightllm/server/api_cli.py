@@ -198,6 +198,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""aggressive schedule can lead to frequent prefill interruptions during decode.
                 disabling it allows the router_max_wait_tokens parameter to work more effectively.""",
     )
+    parser.add_argument(
+        "--dp_prefill_wait_step",
+        type=int,
+        default=0,
+        help="""dp_prefill_wait_step is used to control the pacing of dp chunked prefill mode, aiming to reduce
+                computational waste during prefill. However, higher values can negatively impact the
+                first token latency. It is generally recommended to set this value between 0 and 12.""",
+    )
 
     parser.add_argument(
         "--use_dynamic_prompt_cache", action="store_true", help="This argument is deprecated and no longer in use."

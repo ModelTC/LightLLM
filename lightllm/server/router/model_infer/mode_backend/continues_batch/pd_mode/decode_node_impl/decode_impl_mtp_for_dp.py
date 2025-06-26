@@ -26,9 +26,7 @@ class DPForMtpDecodeNode(DPForDecodeNode):
 
         self._filter_reqs(aborted_reqs)
 
-        self.reduce_tensor.fill_(len(decode_reqs))
-        dist.all_reduce(self.reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
-        max_decode_num = self.reduce_tensor.item()
+        max_decode_num = self._dp_all_reduce_decode_req_num(decode_reqs=decode_reqs)
         if max_decode_num != 0:
             if not self.enable_decode_microbatch_overlap:
                 DPChunkedPrefillWithMTPBackend.normal_mtp_decode(

@@ -1,5 +1,4 @@
 import torch.multiprocessing as mp
-import torch.distributed as dist
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
 from .prefill_impl_for_dp_chuncked import DPChunkedForPrefillNode
@@ -34,12 +33,8 @@ class DPChunkedForMtpPrefillNode(DPChunkedForPrefillNode):
             ok_finished_reqs.clear()
 
         # 进行 chuncked prefill
-        current_dp_prefill_num = len(prefill_reqs)
-        self.reduce_tensor.fill_(current_dp_prefill_num)
-        dist.all_reduce(self.reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
-        max_prefill_num = self.reduce_tensor.item()
-
-        if max_prefill_num != 0:
+        dp_prefill_req_nums, max_prefill_num = self._dp_all_gather_prefill_req_num(prefill_reqs=prefill_reqs)
+        if self.chunked_prefill_state.dp_need_prefill(prefill_reqs, decode_reqs, dp_prefill_req_nums, max_prefill_num):
             if not self.enable_prefill_microbatch_overlap:
                 DPChunkedPrefillWithMTPBackend.normal_mtp_prefill_reqs(
                     self,

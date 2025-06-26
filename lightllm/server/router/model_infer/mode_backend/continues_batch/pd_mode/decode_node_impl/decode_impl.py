@@ -4,18 +4,13 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 import threading
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
 from typing import List, Tuple
-from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, InferSamplingParams
+from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.core.objs import FinishStatus
-from lightllm.server.pd_io_struct import UpKVStatus
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.router.model_infer.mode_backend.pre import prepare_decode_inputs
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
-from .up_status import UpStatusManager
 from rpyc.utils.server import ThreadedServer
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock, g_router_lock
+from lightllm.common.basemodel.infer_lock import g_router_lock
 from .decode_task_cache import g_success_kv_move_task_cache, KVMoveTask
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -68,21 +63,8 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
         self._filter_reqs(aborted_reqs)
 
         if decode_reqs:
-
-            model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-            model_output = self.model.forward(model_input)
-            logits = model_output.logits
-
-            self._overlap_req_init_and_filter(
-                uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
-            )
-
-            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
-            self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=False, do_filter_finished_reqs=False
+            ContinuesBatchBackend.normal_decode(
+                self, decode_reqs=decode_reqs, uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs
             )
 
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)

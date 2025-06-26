@@ -1,5 +1,4 @@
 import torch
-import torch.distributed as dist
 import numpy as np
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
@@ -24,10 +23,6 @@ class DPChunkedPrefillWithMTPBackend(ContinuesBatchWithMTPBackend):
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
         pass
 
-    def init_custom(self):
-        self.reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-        return
-
     def prefill(self, reqs: List[Tuple]):
         self._init_reqs(reqs, init_req_obj=False)
         return
@@ -40,19 +35,15 @@ class DPChunkedPrefillWithMTPBackend(ContinuesBatchWithMTPBackend):
         if aborted_reqs:
             g_infer_context.filter_reqs(aborted_reqs)
 
-        current_dp_prefill_num = len(prefill_reqs)
-        self.reduce_tensor.fill_(current_dp_prefill_num)
-        dist.all_reduce(self.reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
-        max_prefill_num = self.reduce_tensor.item()
-        if max_prefill_num != 0:
+        dp_prefill_req_nums, max_prefill_num = self._dp_all_gather_prefill_req_num(prefill_reqs=prefill_reqs)
+
+        if self.chunked_prefill_state.dp_need_prefill(prefill_reqs, decode_reqs, dp_prefill_req_nums, max_prefill_num):
             if not self.enable_prefill_microbatch_overlap:
                 self.normal_mtp_prefill_reqs(prefill_reqs, max_prefill_num, uninit_reqs, ok_finished_reqs)
             else:
                 self.overlap_mtp_prefill_reqs(prefill_reqs, max_prefill_num, uninit_reqs, ok_finished_reqs)
 
-        self.reduce_tensor.fill_(len(decode_reqs))
-        dist.all_reduce(self.reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
-        max_decode_num = self.reduce_tensor.item()
+        max_decode_num = self._dp_all_reduce_decode_req_num(decode_reqs=decode_reqs)
         if max_decode_num != 0:
             if not self.enable_decode_microbatch_overlap:
                 self.normal_mtp_decode(decode_reqs, max_decode_num, uninit_reqs, ok_finished_reqs)

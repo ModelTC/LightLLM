@@ -283,7 +283,14 @@ class ChunkedPrefillReq(Req):
 
     def get_tuple_tokens(self, is_busy, router_max_new_token_len):
         args = get_env_start_args()
-        max_waiting_token = args.router_max_wait_tokens
+        # chuncked prefill 推理的过程中，存在很多模式的延迟 step 推理的控制， 用于
+        # 保证更好的包间数据或者是提升 dp 模式下prefill 的效率，但是在估计 token 显存
+        # 占用量的过程中，分chuncked 需要考虑其因为分 chuncked带来的生命期的延长，具体
+        # 体现就是在 b_len 的计算中，xxx * (max_waiting_token + 1) 的部分，这部分
+        # 就是通过模拟加长其输出token长度，来延长其在估计阶段的生命周期。max_waiting_token
+        # 的计算是保守的，每次chuncked prefill 延迟的最大步数为两种模式之合，因为
+        # 这个并不会导致预估的token占用量大幅增加，所以可以放心使用。
+        max_waiting_token = args.router_max_wait_tokens + args.dp_prefill_wait_step
         has_out_len = self.shm_cur_output_len
         if self.sample_params.ignore_eos:
             cur_max_new_token_len = self.sample_params.max_new_tokens

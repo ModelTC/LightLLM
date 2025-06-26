@@ -110,7 +110,6 @@ class RouterManager:
         # 调度和推理进行折叠使用的线程池
         self.overlap_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.schedule_task = None
-        self.overlap_event = threading.Event()
         return
 
     async def wait_to_model_ready(self):
@@ -288,8 +287,12 @@ class RouterManager:
 
     async def get_schedule_result(self, running_batch: Batch):
         if self.schedule_task is None:
+            _start_time = time.time()
 
             def get_new_batch():
+                if time.time() - _start_time < 0.001:
+                    time.sleep(0.003)
+
                 limit_router_queue_length = None
                 if self.is_multinode_tp:
                     # 使用 all_reduce 获取最小值
@@ -300,9 +303,6 @@ class RouterManager:
                     dist.all_reduce(limit_router_queue_length_tensor, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
                     limit_router_queue_length = limit_router_queue_length_tensor.item()
 
-                self.overlap_event.wait(timeout=0.020)
-                self.overlap_event.clear()
-                time.sleep(0.003)
                 new_batch = self.req_queue.generate_new_batch(running_batch, limit_router_queue_length)
                 return new_batch
 
@@ -320,7 +320,7 @@ class RouterManager:
         # 删除所有已经 finished 的 req
         # 当前无运行请求时
         if self.running_batch is None:
-            new_batch = await self.get_schedule_result(self.running_batch)
+            new_batch: Batch = await self.get_schedule_result(self.running_batch)
             if new_batch is not None:
                 self.metric_client.histogram_observe("lightllm_batch_next_size", len(new_batch.reqs))
                 for req in new_batch.reqs:
@@ -383,7 +383,6 @@ class RouterManager:
         start_time = time.time()
         self.metric_client.counter_inc("lightllm_batch_inference_count", "prefill")
         reqs = [r.to_router_rpc_obj() for r in batch.reqs]
-        self.overlap_event.set()
         await self.model_rpc_client.prefill(reqs)
         batch.filter_out_finished_req(self.shm_req_manager)
         self._send_detokenization_pack()
@@ -397,7 +396,6 @@ class RouterManager:
     async def _decode_batch(self, batch: Batch):
         start_time = time.time()
         self.metric_client.counter_inc("lightllm_batch_inference_count", "decode")
-        self.overlap_event.set()
         await self.model_rpc_client.decode()
         # 在 self.is_multinode_and_multidp 为 True 时，传入的 batch 对象可能为 None。
         if batch is not None:

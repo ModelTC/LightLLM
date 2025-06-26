@@ -1,10 +1,8 @@
-import torch
 import torch.multiprocessing as mp
-import torch.distributed as dist
 from typing import List, Tuple
-from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams, g_infer_context
+from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 from .prefill_impl import ChunckedPrefillForPrefillNode
 from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
 
@@ -15,11 +13,6 @@ class DPChunkedForPrefillNode(ChunckedPrefillForPrefillNode):
     def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
         super().__init__(info_queue=info_queue, mem_queue=mem_queue)
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
-
-    def init_custom(self):
-        super().init_custom()
-        self.reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-        return
 
     def prefill(self, reqs: List[Tuple]):
         self._init_reqs(reqs)
@@ -41,11 +34,8 @@ class DPChunkedForPrefillNode(ChunckedPrefillForPrefillNode):
             ok_finished_reqs.clear()
 
         # 进行 chuncked prefill
-        current_dp_prefill_num = len(prefill_reqs)
-        self.reduce_tensor.fill_(current_dp_prefill_num)
-        dist.all_reduce(self.reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
-        max_prefill_num = self.reduce_tensor.item()
-        if max_prefill_num != 0:
+        dp_prefill_req_nums, max_prefill_num = self._dp_all_gather_prefill_req_num(prefill_reqs=prefill_reqs)
+        if self.chunked_prefill_state.dp_need_prefill(prefill_reqs, decode_reqs, dp_prefill_req_nums, max_prefill_num):
             if not self.enable_prefill_microbatch_overlap:
                 DPChunkedPrefillBackend.normal_prefill_reqs(
                     self, prefill_reqs, max_prefill_num, uninit_reqs, ok_finished_reqs

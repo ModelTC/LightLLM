@@ -6,15 +6,11 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 from typing import List, Tuple
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams, g_infer_context
-from lightllm.server.core.objs import FinishStatus
+from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.pd_io_struct import KVMoveTask, DecodeNodeInfo
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.router.model_infer.mode_backend.generic_pre_process import prepare_prefill_inputs
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.infer_lock import g_router_lock, g_infer_state_lock
+from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
 from rpyc.utils.server import ThreadedServer
 from .prefill_task_cache import g_kv_move_task_cache
 from lightllm.utils.device_utils import kv_trans_use_p2p
@@ -70,20 +66,11 @@ class ChunckedPrefillForPrefillNode(ModeBackend):
         if ok_finished_reqs:
             self.prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(ok_finished_reqs)
             self._filter_reqs(ok_finished_reqs)
+            ok_finished_reqs.clear()
 
         if prefill_reqs:
-            model_input, run_reqs = prepare_prefill_inputs(
-                prefill_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
-            )
-
-            model_output = self.model.forward(model_input)
-            logits = model_output.logits
-            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
-            self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=True, do_filter_finished_reqs=False
+            ContinuesBatchBackend.normal_prefill_reqs(
+                self, prefill_reqs=prefill_reqs, uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs
             )
         return
 

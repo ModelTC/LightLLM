@@ -22,6 +22,7 @@ from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus
 from lightllm.server.core.objs import SamplingParams
+from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
@@ -281,8 +282,12 @@ class HttpServerManager:
             alloced_req_indexes = []
             while len(alloced_req_indexes) < sampling_params.n:
                 alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
+                sleep_time = 0.1
                 while alloc_req_index is None:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(sleep_time)
+                    sleep_time *= 1.1
+                    sleep_time = min(1, sleep_time)
+
                     alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
                 alloced_req_indexes.append(alloc_req_index)
             req_objs = []
@@ -648,31 +653,38 @@ class HttpServerManager:
                 token_list = []
                 for req in req_status.group_req_objs.shm_req_objs:
                     req_id = req.request_id
-                    if not req.out_tokens_queue.is_empty():
+                    read_token_count = 1
+                    if req.out_tokens_queue.is_full():
+                        read_token_count = LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 
-                        text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
-                        req.cumlogprob += float(req.shm_logprobs.arr[src_index])
-                        metadata = {
-                            "id": int(req.shm_prompt_ids.arr[src_index]),
-                            "logprob": float(req.shm_logprobs.arr[src_index]),
-                            "cumlogprob": float(req.cumlogprob) / count_output_tokens,
-                            "special": special,
-                            "count_output_tokens": count_output_tokens,
-                            "prompt_cache_len": req.prompt_cache_len,
-                            "mtp_accepted_token_num": req.mtp_accepted_token_num,
-                        }
-                        if self.args.return_all_prompt_logprobs:
-                            metadata.update(req.get_all_prompt_metadata())
-                        if self.args.use_reward_model:
-                            metadata["score"] = float(req.reward_score)
+                    for _ in range(read_token_count):
+                        if not req.out_tokens_queue.is_empty():
 
-                        req.out_tokens_queue.pop_no_ret()
+                            text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
+                            req.cumlogprob += float(req.shm_logprobs.arr[src_index])
+                            metadata = {
+                                "id": int(req.shm_prompt_ids.arr[src_index]),
+                                "logprob": float(req.shm_logprobs.arr[src_index]),
+                                "cumlogprob": float(req.cumlogprob) / count_output_tokens,
+                                "special": special,
+                                "count_output_tokens": count_output_tokens,
+                                "prompt_cache_len": req.prompt_cache_len,
+                                "mtp_accepted_token_num": req.mtp_accepted_token_num,
+                            }
+                            if self.args.return_all_prompt_logprobs:
+                                metadata.update(req.get_all_prompt_metadata())
+                            if self.args.use_reward_model:
+                                metadata["score"] = float(req.reward_score)
 
-                        if req.finish_token_index != src_index:
-                            token_list.append((req_id, text, metadata, FinishStatus()))
+                            req.out_tokens_queue.pop_no_ret()
+
+                            if req.finish_token_index != src_index:
+                                token_list.append((req_id, text, metadata, FinishStatus()))
+                            else:
+                                finish_status = FinishStatus(req.finish_status.status)
+                                token_list.append((req_id, text, metadata, finish_status))
                         else:
-                            finish_status = FinishStatus(req.finish_status.status)
-                            token_list.append((req_id, text, metadata, finish_status))
+                            break
 
                 async with req_status.lock:
                     req_status.out_token_info_list.extend(token_list)
