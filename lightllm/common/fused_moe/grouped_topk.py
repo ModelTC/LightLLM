@@ -208,6 +208,7 @@ def triton_grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     group_score_used_topk_num=2,
+    num_fused_shared_experts: int = 0,
 ):
 
     if correction_bias is not None:
@@ -222,8 +223,8 @@ def triton_grouped_topk(
         dtype = torch.float32
 
     scores_buffer = torch.empty((token_num, total_expert_num), dtype=dtype, device="cuda")
-    out_topk_weights = torch.empty((token_num, topk), dtype=torch.float32, device="cuda")
-    out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device="cuda")
+    out_topk_weights = torch.empty((token_num, topk + num_fused_shared_experts), dtype=torch.float32, device="cuda")
+    out_topk_ids = torch.empty((token_num, topk + num_fused_shared_experts), dtype=torch.long, device="cuda")
 
     assert total_expert_num % num_expert_group == 0
 

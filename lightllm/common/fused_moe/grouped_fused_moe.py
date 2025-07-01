@@ -648,7 +648,6 @@ def fused_experts_impl(
     CHUNK_SIZE = FFN_MOE_CHUNK_SIZE
     topk_num = topk_ids.shape[1]
     M = min(num_tokens, CHUNK_SIZE)
-
     intermediate_cache1 = alloc_tensor_func((M, topk_num, N), device=hidden_states.device, dtype=hidden_states.dtype)
     intermediate_cache2 = alloc_tensor_func(
         (M, topk_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype

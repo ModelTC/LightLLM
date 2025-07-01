@@ -16,6 +16,7 @@ class FusedMoeWeightTP(BaseWeight):
         e_score_correction_bias_name: str,
         weight_prefix: str,
         n_routed_experts: int,
+        num_fused_shared_experts: int,
         split_inter_size: int,
         data_type: torch.dtype,
         network_config: Dict[str, Any],
@@ -34,7 +35,10 @@ class FusedMoeWeightTP(BaseWeight):
 
         self.e_score_correction_bias_name = e_score_correction_bias_name
         self.weight_prefix = weight_prefix
-        self.n_routed_experts = n_routed_experts
+        assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
+        self.n_routed_experts = n_routed_experts + num_fused_shared_experts
+        self.num_fused_shared_experts = num_fused_shared_experts
+        self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.split_inter_size = split_inter_size
         self.data_type_ = data_type
         self.tp_rank_ = get_current_rank_in_dp()
@@ -63,7 +67,11 @@ class FusedMoeWeightTP(BaseWeight):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             scoring_func=self.scoring_func,
+            num_fused_shared_experts=self.num_fused_shared_experts,
         )
+        if self.num_fused_shared_experts > 0:
+            topk_ids[:, -1] = self.n_routed_experts - 1
+            topk_weights[:, -1] = 1.0 / self.routed_scaling_factor
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2
         use_fp8_w8a8 = self.quant_method is not None

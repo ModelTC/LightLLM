@@ -666,7 +666,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
-        if self.n_shared_experts is not None:
+        # if fused_shared_experts is not enabled, compute shared_output
+        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 
         router_logits = layer_weight.moe_gate.mm(hidden_states)
@@ -682,7 +683,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         hidden_states.mul_(self.routed_scaling_factor)
 
-        if self.n_shared_experts is not None:
+        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             hidden_states.add_(shared_output)
 
         return hidden_states.view(num_tokens, hidden_dim)
