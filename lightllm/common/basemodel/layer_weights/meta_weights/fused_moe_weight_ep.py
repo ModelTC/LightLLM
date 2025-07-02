@@ -84,16 +84,18 @@ class FusedMoeWeightEP(BaseWeight):
         self.e_score_correction_bias = None
         self.w2_list = [None] * ep_load_expert_num
         self.w2_scale_list = [None] * ep_load_expert_num
-        self.scoring_func = network_config["scoring_func"]
+        self.scoring_func = network_config.get("scoring_func", "softmax")
         self.w1 = [None, None]  # weight, weight_scale
         self.w2 = [None, None]  # weight, weight_scale
         self.use_fp8_w8a8 = self.quant_method is not None
-
+        network_config["n_group"] = network_config.get("n_group", 0)
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
         self.use_grouped_topk = network_config["n_group"] > 0
         self.norm_topk_prob = network_config["norm_topk_prob"]
         self.n_group = network_config["n_group"]
+        network_config["topk_group"] = network_config.get("topk_group", 0)
         self.topk_group = network_config["topk_group"]
+        network_config["routed_scaling_factor"] = network_config.get("routed_scaling_factor", 0)
         self.routed_scaling_factor = network_config["routed_scaling_factor"]
 
         self.lock = threading.Lock()

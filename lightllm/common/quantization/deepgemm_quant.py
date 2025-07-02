@@ -41,11 +41,16 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         self.act_scale_suffix = None  # no support for static input tensor scale for ds model.
 
     def quantize(self, weight: torch.Tensor):
+        from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_quant_kernel import weight_quant
 
-        raise Exception("Not implemented")
+        return weight_quant(weight, self.block_size)
 
     def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
-        qweight, weight_scale, input_scale = weights
+        if len(weights) == 3:
+            qweight, weight_scale, input_scale = weights
+        else:
+            qweight, weight_scale = weights
+            input_scale = None
         m, k = input_tensor.shape
         n = weights[0].shape[1]
         if input_scale is None:
