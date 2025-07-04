@@ -6,7 +6,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-def test_mark_mubltimodal_obj():
+def test_mark_multimodal_obj():
     obj_start_ids = torch.tensor([1, 4, 100], device="cuda", dtype=torch.int64)
     obj_token_lens = torch.tensor([1, 3, 2], device="cuda", dtype=torch.int64)
     input_ids = torch.tensor([1, 7, 9, 333], device="cuda", dtype=torch.int64)
