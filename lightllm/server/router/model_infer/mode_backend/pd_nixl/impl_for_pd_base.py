@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 import torch.multiprocessing as mp
 from typing import Dict, List
 import queue
@@ -88,11 +89,32 @@ class PDNIXLBackendBase(ModeBackend):
 
             time.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
 
+    def _handle_chunked_transfer(self, req: InferReq):
+        shm_req: PDNIXLChunkedPrefillReq = req.shm_req
+        group_req_id = shm_req.group_req_id
+        if group_req_id not in self.remote_prefill_requests:
+            logger.info(f"remote prefill request {group_req_id} not found")
+            return
+
+        remote_request: PrefillRequest = self.remote_prefill_requests[group_req_id]
+        if remote_request.transfer_state is None:
+            remote_request.transfer_state = TransferState(
+                start_time=time.time(),
+                current_kv_len=0,
+                current_chunk_id=0,
+            )
+            shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)
+            req.in_prefill_or_transfer = True
+
+        self.prefill_post_handle_queue.put((req, group_req_id, req.cur_kv_len, req.finish_status.is_finished()))
+        # self._transfer_kv_to_remote(req, group_req_id, req.cur_kv_len, req.finish_status.is_finished())
+
+
     def _handle_transfer_loop(self):
         while True:
             try:
-                req: InferReq = self.prefill_post_handle_queue.get()
-                self._transfer_kv_to_remote(req)
+                req, group_req_id, cur_kv_len, is_finished = self.prefill_post_handle_queue.get()
+                self._transfer_kv_to_remote(req, group_req_id, cur_kv_len, is_finished)
                 time.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
             except queue.Empty:
                 pass
@@ -149,35 +171,25 @@ class PDNIXLBackendBase(ModeBackend):
                 )
                 self.remote_prefill_requests[group_request_id] = request
 
-    def _transfer_kv_to_remote(self, req: InferReq):
-        group_req_id = req.shm_req.group_req_id
-        # set state
-        if group_req_id not in self.remote_prefill_requests:
-            logger.info(f"remote prefill request {group_req_id} not found")
-            return
+    def _transfer_kv_to_remote(self, req: InferReq, group_req_id: int, cur_kv_len: int, is_finished: bool):
+
         start = time.time()
         remote_request: PrefillRequest = self.remote_prefill_requests[group_req_id]
-        if remote_request.transfer_state is None:
-            remote_request.transfer_state = TransferState(
-                start_time=time.time(),
-                current_kv_len=0,
-                current_chunk_id=0,
-            )
 
         transfer_state = remote_request.transfer_state
         token_index = self.model.req_manager.req_to_token_indexs[req.req_idx]
-        is_finished = req.finish_status.is_finished()
+        # is_finished = req.finish_status.is_finished()
 
         kv_transfer_req = KVMoveRequest(
             group_req_id=group_req_id,
-            token_ids=token_index[: req.cur_kv_len].tolist(),
+            token_ids=token_index[: cur_kv_len].tolist(),
             prev_kv_len=transfer_state.current_kv_len,
-            cur_kv_len=req.cur_kv_len,
+            cur_kv_len=cur_kv_len,
         )
         if transfer_state.current_chunk_id == 0:
-            shm_req: PDNIXLChunkedPrefillReq = req.shm_req
-            shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)
-            req.in_prefill_or_transfer = True
+            # shm_req: PDNIXLChunkedPrefillReq = req.shm_req
+            # shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)
+            # req.in_prefill_or_transfer = True
             self.inflght_transfer_requests[group_req_id] = req
             logger.debug(
                 f"put {group_req_id} into inflght_transfer_requests and size: {len(self.inflght_transfer_requests)}"
@@ -186,11 +198,11 @@ class PDNIXLBackendBase(ModeBackend):
         # kick off kv transfer
         self.nixl_agent.write_blocks(kv_transfer_req, remote_request, is_finished)
 
-        transfer_state.current_kv_len = req.cur_kv_len
+        transfer_state.current_kv_len = cur_kv_len
         transfer_state.current_chunk_id += 1
         logger.info(
             f"transfer kv to remote: {group_req_id} "
-            f"current chunk id: {transfer_state.current_chunk_id} "
+            f"current chunk id: {transfer_state.current_chunk_id} {cur_kv_len} "
             f"took: {time.time() - start} seconds"
         )
 
