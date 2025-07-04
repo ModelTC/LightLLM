@@ -55,12 +55,13 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
             next_token_ids = next_token_ids.detach().cpu().numpy()
             next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
+
             self._post_handle(
                 run_reqs,
                 next_token_ids,
                 next_token_logprobs,
                 is_chuncked_mode=True,
                 do_filter_finished_reqs=False,
-                extra_post_req_handle_chunk_func=lambda req: self.prefill_post_handle_queue.put(req),
+                extra_post_req_handle_chunk_func=self._handle_chunked_transfer,
             )
         return

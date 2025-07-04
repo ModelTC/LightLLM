@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Dict, List, Any
 from torch import Tensor
 from dataclasses import dataclass
+import time
 
 from lightllm.utils.log_utils import init_logger
 
@@ -72,12 +73,12 @@ class NixlKVTransporter:
     def _create_xfer_handles(self, reg_desc: nixlBind.nixlRegDList, num_tokens: int, agent_name: str = ""):
         base_addr, _, device_id, _ = reg_desc[0]
         layer_len = num_tokens * self.token_len
-        tokens_data = []
+        tokens_data = [0] * (self.num_layers * num_tokens)
+        idx = 0
         for layer_id in range(self.num_layers):
             for token_id in range(num_tokens):
-                tokens_data.append(
-                    (base_addr + layer_id * layer_len + token_id * self.token_len, self.token_len, device_id)
-                )
+                tokens_data[idx] = base_addr + layer_id * layer_len + token_id * self.token_len, self.token_len, device_id
+                idx += 1
         descs = self.nixl_agent.get_xfer_descs(tokens_data, "VRAM", True)
         return self.nixl_agent.prep_xfer_dlist(agent_name, descs, is_sorted=True)
 
@@ -107,10 +108,12 @@ class NixlKVTransporter:
             )
 
     def _get_token_desc_ids(self, token_ids: List[int], num_tokens: int):
-        descs_ids = []
+        token_ids_len, idx = len(token_ids), 0
+        descs_ids = [0] * (self.num_layers * token_ids_len)
         for layer_id in range(self.num_layers):
             for token_id in token_ids:
-                descs_ids.append(layer_id * num_tokens + token_id)
+                descs_ids[idx] = layer_id * num_tokens + token_id
+                idx += 1
         return descs_ids
 
     def write_blocks(self, request: KVMoveRequest, prefill_request: PrefillRequest, is_finished: bool):
@@ -132,7 +135,7 @@ class NixlKVTransporter:
         ]  # TODO one-one mapping now
 
         if len(src_token_ids) > 0:
-            assert len(src_token_ids) == len(dst_token_ids), f"{len(src_token_ids)} {len(dst_token_ids)} {kv_move_start} {kv_move_end} {skip_kv_move_len}"
+            assert len(src_token_ids) == len(dst_token_ids), f"{len(src_token_ids)} {len(dst_token_ids)} {kv_move_start} {kv_move_end} {skip_kv_move_len}, {len(prefill_request.data.token_ids)}"
             src_token_descs = self._get_token_desc_ids(src_token_ids, self.num_tokens)
             dst_token_descs = self._get_token_desc_ids(dst_token_ids, remote_agent.num_tokens)
 
@@ -149,6 +152,12 @@ class NixlKVTransporter:
             handle = self.nixl_agent.make_prepped_xfer(
                 "WRITE", src_handle, src_token_descs, dst_handle, dst_token_descs, notify_status
             )
+
+            # handle = self.nixl_agent.make_prepped_xfer_by_tokens(
+            #     "WRITE", src_handle, src_token_ids, dst_handle, dst_token_ids,
+            #     self.num_layers, self.num_tokens, remote_agent.num_tokens,
+            #     notify_status
+            # )
 
             status = self.nixl_agent.transfer(handle)
             assert status != "ERR"
@@ -227,7 +236,7 @@ class NixlKVTransporter:
             del self.inflight_transfers[req_id]
         return done_req_ids
 
-    def shutdonw(self):
+    def shutdown(self):
         self.nixl_agent.deregister_memory(self.reg_desc)
         self.nixl_agent.release_dlist_handle(self.local_xfer_handles)
         for id, agents in self.remote_agents.items():
