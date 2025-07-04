@@ -22,6 +22,8 @@ from safetensors import safe_open
 from transformers.utils import TensorType
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import PatchEmbed, VisionRotaryEmbedding
+from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
+from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 # adapted from
 # https://github.com/huggingface/transformers/blob/
@@ -123,7 +125,7 @@ def apply_rotary_pos_emb_vision(
     return q_embed, k_embed
 
 
-class Qwen2_5_VLVisionAttention(nn.Module):
+class Qwen2_5_VLVisionFlashAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -148,78 +150,13 @@ class Qwen2_5_VLVisionAttention(nn.Module):
             cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
-        attention_mask = torch.full(
-            [1, seq_length, seq_length],
-            torch.finfo(q.dtype).min,
-            device=q.device,
-            dtype=q.dtype,
-        )
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = 0
-
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
-        attn_weights = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(self.head_dim)
-        attn_weights = attn_weights + attention_mask
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
-        attn_output = torch.matmul(attn_weights, v)
-        attn_output = attn_output.transpose(0, 1)
+        cu_seqlens = cu_seqlens.to(q.device, torch.int32)
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
+        flash_attention_fwd(q, k, v, attn_output, cu_seqlens, max_seqlen)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
-
-
-class Qwen2_5_VLVisionSdpaAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int = 16) -> None:
-        super().__init__()
-        self.num_heads = num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=True)
-        self.proj = nn.Linear(dim, dim)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> torch.Tensor:
-        seq_length = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        if position_embeddings is None:
-            emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-        else:
-            cos, sin = position_embeddings
-        q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
-
-        attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = True
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
-        attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
-        attn_output = attn_output.transpose(0, 1)
-        attn_output = attn_output.reshape(seq_length, -1)
-        attn_output = self.proj(attn_output)
-        return attn_output
-
-
-QWEN2_5_VL_VISION_ATTENTION_CLASSES = {
-    "eager": Qwen2_5_VLVisionAttention,
-    # "flash_attention_2": Qwen2_5_VLVisionFlashAttention2,
-    "sdpa": Qwen2_5_VLVisionSdpaAttention,
-}
 
 
 class Qwen2_5_VLVisionBlock(nn.Module):
@@ -229,13 +166,12 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         intermediate_size,
         num_heads,
         hidden_act,
-        attn_implementation: str = "eager",
     ) -> None:
         super().__init__()
         self.norm1 = Qwen2RMSNorm(hidden_size, eps=1e-6)
         self.norm2 = Qwen2RMSNorm(hidden_size, eps=1e-6)
 
-        self.attn = QWEN2_5_VL_VISION_ATTENTION_CLASSES[attn_implementation](hidden_size, num_heads=num_heads)
+        self.attn = Qwen2_5_VLVisionFlashAttention(hidden_size, num_heads=num_heads)
         self.mlp = Qwen2_5_VLMLP(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
@@ -312,8 +248,6 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
 
         self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
 
-        self.attn_implementation = "eager"
-
         self.patch_embed = PatchEmbed(
             patch_size=self.patch_size,
             temporal_patch_size=self.temporal_patch_size,
@@ -331,7 +265,6 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                     self.intermediate_size,
                     self.num_heads,
                     self.hidden_act,
-                    self.attn_implementation,
                 )
                 for _ in range(self.depth)
             ]

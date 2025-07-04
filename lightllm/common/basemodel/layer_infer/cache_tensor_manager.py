@@ -93,6 +93,10 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self.cuda_graph_cur_batch_size = None
             self.is_cuda_graph = False
             self.managed_total_tensor_bytes = 0
+            # 防止误用导致显存泄露，添加标记变量。
+            # 当使用者没有合法的调用 cache_env_in 和 cache_env_out 的时候
+            # 如果调用了alloc_tensor 接口，则退化为 torch.empty 申请方式。
+            self.cache_env_ok = False
 
         def cache_env_in(
             self, is_cuda_graph: bool = False, cur_batch_size: int = 0, cuda_graph_max_batch_size: int = 0
@@ -107,6 +111,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
                     assert self.inner_cuda_graph_manager.cuda_graph_max_batch_size == cuda_graph_max_batch_size
                 self.cuda_graph_cur_batch_size = cur_batch_size
                 assert cur_batch_size != 0
+            self.cache_env_ok = True
             return
 
         def cache_env_out(self):
@@ -115,6 +120,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self.free_shape_dtype_to_bufs.clear()
             self.calcu_shape_cache.clear()
             self.changed_ptr.clear()
+            self.cache_env_ok = False
             return
 
         def alloc_tensor(
@@ -129,6 +135,11 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             # shape 类型转换
             if isinstance(shape, list):
                 shape = torch.Size(shape)
+
+            # cache manager 没有被正常使用时
+            if not self.cache_env_ok:
+                return torch.empty(shape, dtype=data_type, device=device, requires_grad=False)
+
             # 是 cuda graph的时候，由cuda graph manager 接管
             if self.is_cuda_graph:
                 return self.inner_cuda_graph_manager.alloc_tensor_for_cuda_graph(
