@@ -69,10 +69,8 @@ class ModelRpcServer:
         self.rank_in_node = rank_in_node
         logger.info(f"Initialized RPC server for rank {self.rank}.")
 
-        # 多卡才是跨进程的
-        if self.args.tp != 1:
-            self.loop_thread = threading.Thread(target=self.rpc_loop)
-            self.loop_thread.start()
+        self.loop_thread = threading.Thread(target=self.rpc_loop)
+        self.loop_thread.start()
         return
 
     def rpc_loop(self):
@@ -225,17 +223,7 @@ class ModelRpcServer:
 
 
 class ModelRpcClient:
-    def __init__(self, model_infer_servers: List[ModelRpcServer], world_size, rpc_event, rpc_finished_event):
-        # model_infer_servers 是传入的推理服务对象，但是在重构后，
-        # 单卡不使用rpc 通信的时候，里面才有真实对象，当多卡使用rpc
-        # 以后，model_infer_servers 传入的是 None 数组
-        if world_size == 1:
-            self.model_infer_server: ModelRpcServer = model_infer_servers[0]
-        else:
-            self.model_infer_server: ModelRpcServer = None
-
-        self.world_size = world_size
-        self.use_rpc = self.world_size != 1
+    def __init__(self, rpc_event, rpc_finished_event):
         self.rpc_shm_params = RpcShmParams()
         self.rpc_shm_params.create_or_link_shm()
         self.rpc_shm_results = RpcShmResults()
@@ -246,65 +234,46 @@ class ModelRpcClient:
         return
 
     async def init_model(self, kvargs):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("init_model", (kvargs,))
-            self.rpc_event.set()
+        self.rpc_shm_params.write_func_params("init_model", (kvargs,))
+        self.rpc_event.set()
 
-            self.rpc_finished_event.wait()
-            self.rpc_finished_event.clear()
-            return
-        else:
-            self.model_infer_server.init_model(kvargs)
-            return
+        self.rpc_finished_event.wait()
+        self.rpc_finished_event.clear()
+        return
 
     async def prefill(self, reqs):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("prefill", (reqs,))
-            self.rpc_event.set()
+        self.rpc_shm_params.write_func_params("prefill", (reqs,))
+        self.rpc_event.set()
 
-            await asyncio.to_thread(self.rpc_finished_event.wait)
-            self.rpc_finished_event.clear()
-            return
-        else:
-            self.model_infer_server.prefill(reqs)
-            return
+        await asyncio.to_thread(self.rpc_finished_event.wait)
+        self.rpc_finished_event.clear()
+        return
 
     async def decode(self):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("decode", ())
-            self.rpc_event.set()
+        self.rpc_shm_params.write_func_params("decode", ())
+        self.rpc_event.set()
 
-            await asyncio.to_thread(self.rpc_finished_event.wait)
-            self.rpc_finished_event.clear()
-            return
-        else:
-            self.model_infer_server.decode()
-            return
+        await asyncio.to_thread(self.rpc_finished_event.wait)
+        self.rpc_finished_event.clear()
+        return
 
     async def pause_reqs(self, req_ids):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("pause_reqs", (req_ids,))
-            self.rpc_event.set()
+        self.rpc_shm_params.write_func_params("pause_reqs", (req_ids,))
+        self.rpc_event.set()
 
-            self.rpc_finished_event.wait()
-            self.rpc_finished_event.clear()
-            return
-        else:
-            self.model_infer_server.pause_reqs(req_ids)
-            return
+        self.rpc_finished_event.wait()
+        self.rpc_finished_event.clear()
+        return
 
     async def get_max_total_token_num(self):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("get_max_total_token_num", ())
-            self.rpc_event.set()
+        self.rpc_shm_params.write_func_params("get_max_total_token_num", ())
+        self.rpc_event.set()
 
-            self.rpc_finished_event.wait()
-            self.rpc_finished_event.clear()
-            func_name, ret = self.rpc_shm_results.read_func_result()
-            assert func_name == "get_max_total_token_num"
-            return ret
-        else:
-            return self.model_infer_server.get_max_total_token_num()
+        self.rpc_finished_event.wait()
+        self.rpc_finished_event.clear()
+        func_name, ret = self.rpc_shm_results.read_func_result()
+        assert func_name == "get_max_total_token_num"
+        return ret
 
 
 def _init_env(
@@ -351,19 +320,6 @@ async def start_model_process(
     router_lock: mp.Queue,
 ):
     import lightllm.utils.rpyc_fix_utils as _
-
-    # 单卡单机时不使用 rpc
-    if node_world_size == 1 and args.nnodes == 1:
-        return ModelRpcServer(
-            args,
-            rank,
-            rank_in_node,
-            node_world_size,
-            rpc_event,
-            rpc_finished_event,
-            info_queue,
-            mem_queue,
-        )
 
     success_event = mp.Event()
     proc = mp.Process(
