@@ -33,7 +33,7 @@ class AudioManager:
 
         self.recv_from_visualserver = context.socket(zmq.PULL)
         self.recv_from_visualserver.bind(f"{args.zmq_mode}127.0.0.1:{audio_port}")
-        self.cache_client = rpyc.connect("localhost", cache_port)
+        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
         self.cache_port = cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
