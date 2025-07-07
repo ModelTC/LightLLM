@@ -38,7 +38,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.cache_port = kvargs["cache_port"]
         weight_dir = kvargs["weight_dir"]
         self.vit_rank_id = kvargs["vit_rank_id"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port)
+        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         self.data_type = kvargs["data_type"]
 
         init_vision_distributed_env(kvargs)

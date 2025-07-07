@@ -89,54 +89,100 @@ class InMemoryCache(CacheManager):
                 if deleted >= max_delete:
                     break
 
-    def alloc(self, md5sum: str, token_num: int) -> dict:
+    # def alloc(self, md5sum: str, token_num: int) -> dict:
+    #     with self.lock:
+    #         t = time.time()
+    #         # add new record
+    #         if md5sum not in self._md5_to_record:
+
+    #             # full, need to clear some unused items
+    #             if self.occupied >= self.capacity:
+    #                 self._clear()
+    #                 if self.occupied >= self.capacity:
+    #                     return None
+
+    #             id = uuid.uuid1()
+    #             id = id.int
+    #             self._check_and_set_new_id_range(token_num)
+    #             record = Record(
+    #                 id=id,
+    #                 md5sum=md5sum,
+    #                 ref=1,
+    #                 data=False,
+    #                 embed=False,
+    #                 createtime=t,
+    #                 visittime=t,
+    #                 token_id=self.token_id_range_start,
+    #                 token_num=token_num,
+    #             )
+    #             self.token_id_range_start += token_num
+    #             self._records[id] = record
+    #             self._md5_to_record[md5sum] = record
+    #             self.occupied += 1
+
+    #         # cache hit
+    #         else:
+    #             record = self._md5_to_record[md5sum]
+    #             record.visittime = t
+    #             record.ref += 1
+
+    #         return {"id": record.id, "token_id": record.token_id, "token_num": record.token_num}
+
+    def alloc_batch(self, md5_list: list[str], token_num_list: list[int]) -> list[dict]:
+        results = []
         with self.lock:
-            t = time.time()
-            # add new record
-            if md5sum not in self._md5_to_record:
-
-                # full, need to clear some unused items
-                if self.occupied >= self.capacity:
-                    self._clear()
+            for md5, tnum in zip(md5_list, token_num_list):
+                t = time.time()
+                if md5 not in self._md5_to_record:
+                    # 若不存在则分配新记录（与alloc逻辑相同）
                     if self.occupied >= self.capacity:
-                        return None
-
-                id = uuid.uuid1()
-                id = id.int
-                self._check_and_set_new_id_range(token_num)
-                record = Record(
-                    id=id,
-                    md5sum=md5sum,
-                    ref=1,
-                    data=False,
-                    embed=False,
-                    createtime=t,
-                    visittime=t,
-                    token_id=self.token_id_range_start,
-                    token_num=token_num,
-                )
-                self.token_id_range_start += token_num
-                self._records[id] = record
-                self._md5_to_record[md5sum] = record
-                self.occupied += 1
-
-            # cache hit
-            else:
-                record = self._md5_to_record[md5sum]
-                record.visittime = t
-                record.ref += 1
-
-            return {"id": record.id, "token_id": record.token_id, "token_num": record.token_num}
+                        self._clear()
+                        if self.occupied >= self.capacity:
+                            results.append(None)
+                            continue
+                    new_id = uuid.uuid1().int
+                    self._check_and_set_new_id_range(tnum)
+                    record = Record(
+                        id=new_id,
+                        md5sum=md5,
+                        ref=1,
+                        data=False,
+                        embed=False,
+                        createtime=t,
+                        visittime=t,
+                        token_id=self.token_id_range_start,
+                        token_num=tnum,
+                    )
+                    self.token_id_range_start += tnum
+                    self._records[new_id] = record
+                    self._md5_to_record[md5] = record
+                    self.occupied += 1
+                else:
+                    # 缓存命中，更新引用计数和访问时间
+                    record = self._md5_to_record[md5]
+                    record.visittime = t
+                    record.ref += 1
+                results.append({"id": record.id, "token_id": record.token_id, "token_num": record.token_num})
+        return results
 
     def release(self, id: int) -> None:
         with self.lock:
             self._records[id].ref -= 1
 
-    def set_item_data(self, id: int) -> None:
-        self._records[id].data = True
+    # def set_item_data(self, id: int) -> None:
+    #     self._records[id].data = True
 
-    def get_item_data(self, id: int) -> bool:
-        return self._records[id].data
+    # def get_item_data(self, id: int) -> bool:
+    #     return self._records[id].data
+
+    def get_items_data(self, ids: list[int]) -> list[bool]:
+        with self.lock:
+            return [self._records.get(i).data if i in self._records else False for i in ids]
+
+    def set_items_data(self, ids: list[int]) -> None:
+        with self.lock:
+            for i in ids:
+                self._records[i].data = True
 
     def set_item_embed(self, id: int) -> None:
         self._records[id].embed = True

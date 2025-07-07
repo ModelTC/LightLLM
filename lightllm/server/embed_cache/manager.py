@@ -22,23 +22,23 @@ class CacheServer(rpyc.Service):
         # (to finalize the service, if needed)
         pass
 
-    def exposed_alloc(self, md5sum: str, token_num: int) -> dict:
-        md5sum = obtain(md5sum)
-        token_num = obtain(token_num)
-        record = self._impl.alloc(md5sum, token_num)
+    def exposed_alloc_batch(self, md5sum_list: list[str], token_num_list: list[int]) -> dict:
+        md5sum_list = obtain(md5sum_list)
+        token_num_list = obtain(token_num_list)
+        record = self._impl.alloc(md5sum_list, token_num_list)
         return record
 
     def exposed_release(self, id: int) -> None:
         id = obtain(id)
         return self._impl.release(id)
 
-    def exposed_set_item_data(self, id: int) -> None:
-        id = obtain(id)
-        return self._impl.set_item_data(id=id)
+    def exposed_set_items_data(self, ids: list[int]) -> None:
+        ids = obtain(ids)
+        return self._impl.set_items_data(ids=ids)
 
-    def exposed_get_item_data(self, id: int) -> bool:
-        id = obtain(id)
-        return self._impl.get_item_data(id=id)
+    def exposed_get_items_data(self, ids: list[int]) -> list[bool]:
+        ids = obtain(ids)
+        return self._impl.get_items_data(ids=ids)
 
     def exposed_set_item_embed(self, id: int) -> None:
         id = obtain(id)
