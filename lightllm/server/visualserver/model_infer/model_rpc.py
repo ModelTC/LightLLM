@@ -94,14 +94,20 @@ class VisualModelRpcServer(rpyc.Service):
         images = obtain(images)
         all_img_embeds, uuids, valid_ids = self.forward(images)
         all_img_embeds = all_img_embeds.to(torch.device("cpu"))
+
         if self.tp_rank_id == 0:
-            for i in range(len(uuids)):
+            ready_flags = self.cache_client.root.get_items_embed(uuids)
+            ids_to_set = []
+            for i, ready in enumerate(ready_flags):
+                if ready:
+                    continue
                 uid = uuids[i]
-                if not self.cache_client.root.get_item_embed(uid):
-                    start, end = valid_ids[i]
-                    cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                    create_shm(get_shm_name_embed(uuids[i]), cur_embed_bytes)
-                    self.cache_client.root.set_item_embed(uuids[i])
+                start, end = valid_ids[i]
+                cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
+                create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                ids_to_set.append(uid)
+            if ids_to_set:
+                self.cache_client.root.set_items_embed(ids_to_set)
         return
 
 
