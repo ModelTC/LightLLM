@@ -229,6 +229,8 @@ class Req(ctypes.Structure):
         """
         return_all_prompt_logprobs mode use to return all logprobs cacul ppl
         """
+        if hasattr(self, "_cache_prompt_metadata"):
+            return self._cache_prompt_metadata
         metadata = {}
         cur_ids = self.shm_prompt_ids.arr[0 : self.input_len]
         all_prompts = []
@@ -238,6 +240,7 @@ class Req(ctypes.Structure):
 
         metadata["prompt_logprobs"] = all_prompts
         metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
+        self._cache_prompt_metadata = metadata
         return metadata
 
 

@@ -49,10 +49,12 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
 
-from .api_openai import chat_completions_impl
+from .api_openai import chat_completions_impl, completions_impl
 from .api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    CompletionRequest,
+    CompletionResponse,
 )
 from .build_prompt import build_prompt, init_tokenizer
 
@@ -220,6 +222,12 @@ async def compat_generate(request: Request) -> Response:
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
     resp = await chat_completions_impl(request, raw_request)
+    return resp
+
+
+@app.post("/v1/completions", response_model=CompletionResponse)
+async def completions(request: CompletionRequest, raw_request: Request) -> Response:
+    resp = await completions_impl(request, raw_request)
     return resp
 
 

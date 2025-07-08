@@ -7,6 +7,7 @@ import base64
 import os
 from io import BytesIO
 import pickle
+import uuid
 
 from .function_call_parser import TOOLS_TAG_LIST, FunctionCallParser
 from .build_prompt import build_prompt, init_tokenizer
@@ -14,10 +15,9 @@ from .build_prompt import build_prompt, init_tokenizer
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import ujson as json
 from http import HTTPStatus
-import uuid
 from PIL import Image
 import multiprocessing as mp
-from typing import AsyncGenerator, Union
+from typing import AsyncGenerator, Union, List, Dict
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -36,6 +36,12 @@ from dataclasses import dataclass
 
 from .api_models import (
     ChatCompletionRequest,
+    CompletionRequest,
+    CompletionResponse,
+    CompletionChoice,
+    CompletionLogprobs,
+    CompletionStreamResponse,
+    CompletionStreamChoice,
     FunctionResponse,
     ToolCall,
     UsageInfo,
@@ -178,7 +184,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 if finish_reason == "stop":
                     finish_reason = "function_call"
                 try:
-                    parser = FunctionCallParser(tools, g_objs.args.tool_call_parser)
+                    # 为 tool_call_parser 提供默认值
+                    tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
+                    parser = FunctionCallParser(tools, tool_parser)
                     full_normal_text, call_info_list = parser.parse_non_stream(text)
                     tool_calls = [
                         ToolCall(
@@ -207,7 +215,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         return resp
 
     if sampling_params.n != 1:
-        raise Exception("stream api only support n = 1")
+        return create_error_response(HTTPStatus.BAD_REQUEST, "stream api only support n = 1")
 
     parser_dict = {}
 
@@ -224,9 +232,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 finish_reason = finish_status.get_finish_reason()
 
                 if index not in parser_dict:
+                    # 为 tool_call_parser 提供默认值
+                    tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                     parser_dict[index] = FunctionCallParser(
                         tools=request.tools,
-                        tool_call_parser=g_objs.args.tool_call_parser,
+                        tool_call_parser=tool_parser,
                     )
                 parser = parser_dict[index]
 
@@ -238,7 +248,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=0,
                         delta=DeltaMessage(content=normal_text),
-                        finish_reason=finish_reason if finish_reason else "",
+                        finish_reason=finish_reason if finish_reason else None,
                     )
                     chunk = ChatCompletionStreamResponse(
                         id=group_request_id,
@@ -304,3 +314,333 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+
+
+async def completions_impl(request: CompletionRequest, raw_request: Request) -> Response:
+    from .api_http import g_objs
+
+    if request.logit_bias is not None:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The logit_bias parameter is not currently supported",
+        )
+
+    created_time = int(time.time())
+
+    # Parse and normalize prompts
+    prompts = []
+    if isinstance(request.prompt, list):
+        if len(request.prompt) == 0:
+            return create_error_response(
+                HTTPStatus.BAD_REQUEST,
+                "Prompt cannot be empty",
+            )
+
+        # Check if it's a list of integers (token IDs)
+        if isinstance(request.prompt[0], int):
+            prompts.append(request.prompt)
+        elif isinstance(request.prompt[0], list):
+            for token_list in request.prompt:
+                prompts.append(token_list)
+        else:
+            # List of strings
+            prompts = request.prompt
+    else:
+        # Single string
+        prompts = [request.prompt]
+
+    # Handle suffix for completion mode
+    if request.suffix:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The suffix parameter is not currently supported",
+        )
+
+    # Prepare sampling parameters - same as g_generate_stream_func pattern
+    sampling_params_dict = {
+        "do_sample": request.do_sample,
+        "presence_penalty": request.presence_penalty,
+        "frequency_penalty": request.frequency_penalty,
+        "repetition_penalty": request.repetition_penalty,
+        "temperature": request.temperature,
+        "top_p": request.top_p,
+        "top_k": request.top_k,
+        "ignore_eos": request.ignore_eos,
+        "max_new_tokens": request.max_tokens,
+        "stop_sequences": request.stop,
+        "n": request.n,
+        "best_of": request.best_of,
+        "add_special_tokens": False,
+    }
+
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+    sampling_params.verify()
+
+    # v1/completions does not support multimodal inputs, so we use an empty MultimodalParams
+    multimodal_params = MultimodalParams()
+
+    return await _process_prompts_completion(
+        prompts, sampling_params, sampling_params_dict, multimodal_params, raw_request, request, created_time
+    )
+
+
+async def _process_prompts_completion(
+    prompts: List[str] | List[List[int]],
+    sampling_params: SamplingParams,
+    sampling_params_dict: Dict,
+    multimodal_params: MultimodalParams,
+    raw_request: Request,
+    request: CompletionRequest,
+    created_time: int,
+) -> Response:
+    from .api_http import g_objs
+    import asyncio
+
+    if request.stream:
+        if len(prompts) > 1:
+            return create_error_response(
+                HTTPStatus.BAD_REQUEST,
+                "Streaming is not supported for batch requests",
+            )
+
+        if sampling_params.n != 1:
+            return create_error_response(HTTPStatus.BAD_REQUEST, "stream api only support n = 1")
+
+        return await _handle_streaming_completion(
+            prompts[0], sampling_params, multimodal_params, raw_request, request, created_time
+        )
+
+    async def process_single_prompt(prompt: str | List[int], prompt_index: int):
+        if len(prompts) > 1:
+            individual_sampling_params = SamplingParams()
+            individual_sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+            individual_sampling_params.verify()
+        else:
+            individual_sampling_params = sampling_params
+
+        # Convert token array to string for _collect_generation_results
+        prompt_str = prompt
+        if isinstance(prompt, list):
+            prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
+
+        generator = g_objs.httpserver_manager.generate(
+            prompt, individual_sampling_params, multimodal_params, request=raw_request
+        )
+
+        return await _collect_generation_results(generator, request, prompt_str, prompt_index)
+
+    tasks = [asyncio.create_task(process_single_prompt(prompt, i)) for i, prompt in enumerate(prompts)]
+
+    results = await asyncio.gather(*tasks)
+    return _build_completion_response(results, request, created_time, len(prompts) > 1)
+
+
+async def _handle_streaming_completion(
+    prompt: str | List[int],
+    sampling_params: SamplingParams,
+    multimodal_params: MultimodalParams,
+    raw_request: Request,
+    request: CompletionRequest,
+    created_time: int,
+) -> Response:
+    from .api_http import g_objs
+
+    results_generator = g_objs.httpserver_manager.generate(
+        prompt, sampling_params, multimodal_params, request=raw_request
+    )
+
+    async def stream_results() -> AsyncGenerator[bytes, None]:
+        from .req_id_generator import convert_sub_id_to_group_id
+
+        async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            group_request_id = convert_sub_id_to_group_id(sub_req_id)
+
+            current_finish_reason = None
+            if finish_status.is_finished():
+                current_finish_reason = finish_status.get_finish_reason()
+
+            output_text = request_output
+            if request.echo and metadata.get("is_first_token", False):
+                prompt_str = prompt
+                if isinstance(prompt, list):
+                    prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
+                output_text = prompt_str + output_text
+
+            stream_choice = CompletionStreamChoice(
+                index=0,
+                text=output_text,
+                finish_reason=current_finish_reason,
+                logprobs=None if request.logprobs is None else {},
+            )
+            stream_resp = CompletionStreamResponse(
+                id=group_request_id,
+                created=created_time,
+                model=request.model,
+                choices=[stream_choice],
+            )
+            yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
+
+        yield "data: [DONE]\n\n".encode("utf-8")
+
+    background_tasks = BackgroundTasks()
+    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+
+
+async def _collect_generation_results(generator, request: CompletionRequest, prompt: str, prompt_index: int):
+    final_output = []
+    count_output_tokens = 0
+    finish_reason = None
+    prompt_tokens = 0
+    token_infos = [] if request.logprobs is not None else None
+    prompt_logprobs = None
+    prompt_token_ids = None
+    is_first_metadata = True
+
+    async for sub_req_id, request_output, metadata, finish_status in generator:
+        if is_first_metadata:
+            prompt_logprobs = metadata.get("prompt_logprobs", None)
+            prompt_token_ids = metadata.get("prompt_token_ids", None)
+            is_first_metadata = False
+
+        count_output_tokens += 1
+        final_output.append(request_output)
+
+        if request.logprobs is not None and token_infos is not None:
+            token_info = {
+                "text": request_output,
+                "logprob": metadata.get("logprob", None),
+                "id": metadata.get("id", None),
+            }
+            token_infos.append(token_info)
+
+        if finish_status.is_finished():
+            finish_reason = finish_status.get_finish_reason()
+            prompt_tokens = metadata["prompt_tokens"]
+
+    return {
+        "index": prompt_index,
+        "text": "".join(final_output),
+        "finish_reason": finish_reason,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": count_output_tokens,
+        "token_infos": token_infos,
+        "prompt_logprobs": prompt_logprobs,
+        "prompt_token_ids": prompt_token_ids,
+        "prompt_text": prompt,
+    }
+
+
+def _build_completion_response(results: List[Dict], request: CompletionRequest, created_time: int, is_batch: bool):
+    from .api_http import g_objs
+
+    choices = []
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+
+    for result in results:
+        text = result["text"]
+        if request.echo:
+            text = result["prompt_text"] + text
+
+        logprobs_data = _build_logprobs_data(result, request, g_objs.httpserver_manager.tokenizer)
+
+        choice = CompletionChoice(
+            index=result["index"],
+            text=text,
+            finish_reason=result["finish_reason"],
+            logprobs=CompletionLogprobs(**logprobs_data) if logprobs_data else None,
+        )
+        choices.append(choice)
+
+        total_prompt_tokens += result["prompt_tokens"]
+        total_completion_tokens += result["completion_tokens"]
+
+    usage = UsageInfo(
+        prompt_tokens=total_prompt_tokens,
+        completion_tokens=total_completion_tokens,
+        total_tokens=total_prompt_tokens + total_completion_tokens,
+    )
+
+    if is_batch:
+        group_request_id = f"cmpl-batch-{uuid.uuid4().hex[:8]}"
+    else:
+        group_request_id = f"cmpl-{uuid.uuid4().hex[:8]}"
+
+    return CompletionResponse(
+        id=group_request_id, created=created_time, model=request.model, choices=choices, usage=usage
+    )
+
+
+def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) -> Dict:
+    if request.logprobs is None:
+        return None
+
+    all_tokens = []
+    all_token_logprobs = []
+    all_text_offsets = []
+    offset = 0
+
+    def add_tokens_to_logprobs(token_ids=None, token_infos=None, logprob_map=None):
+        nonlocal offset
+
+        def add_single_token(token_text: str, logprob: float):
+            nonlocal offset
+            all_tokens.append(token_text)
+            all_token_logprobs.append(logprob)
+            all_text_offsets.append(offset)
+            offset += len(token_text)
+
+        if token_ids is not None:
+            for token_id in token_ids:
+                token_text = tokenizer.decode([token_id], skip_special_tokens=False)
+                logprob = logprob_map.get(token_id, None) if logprob_map else None
+                add_single_token(token_text, logprob)
+        elif token_infos is not None:
+            for token_info in token_infos:
+                add_single_token(token_info["text"], token_info["logprob"])
+
+    # 处理 echo 模式下的 prompt tokens
+    if request.echo and result.get("prompt_logprobs") is not None:
+        prompt_logprobs = result["prompt_logprobs"]
+        prompt_token_ids = result.get("prompt_token_ids")
+
+        # 创建 token_id 到 logprob 的映射
+        logprob_map = {}
+        for current_token_id, logprobs_dict in prompt_logprobs:
+            for next_token_id, logprob in logprobs_dict.items():
+                logprob_map[int(next_token_id)] = logprob
+
+        # 处理所有 prompt tokens
+        if prompt_token_ids is not None:
+            add_tokens_to_logprobs(token_ids=prompt_token_ids, logprob_map=logprob_map)
+
+    elif request.echo:
+        # echo=True 但没有 prompt logprobs
+        prompt_token_ids = result.get("prompt_token_ids")
+        if prompt_token_ids is not None:
+            add_tokens_to_logprobs(token_ids=prompt_token_ids)
+        else:
+            # 回退：重新 tokenize prompt
+            prompt_tokens = tokenizer.encode(result["prompt_text"], add_special_tokens=False)
+            add_tokens_to_logprobs(token_ids=prompt_tokens)
+
+    # 添加生成的 tokens 和 logprobs
+    if result.get("token_infos"):
+        add_tokens_to_logprobs(token_infos=result["token_infos"])
+
+    top_logprobs_list = []
+    for i, (token, logprob) in enumerate(zip(all_tokens, all_token_logprobs)):
+        if logprob is not None:
+            # TODO: 标准实现需要从后端获取top-k个logprobs数据
+            # 目前后端不支持，只能获取所选token的logprobs
+            top_logprobs_list.append({token: logprob})
+        else:
+            top_logprobs_list.append(None)
+
+    return {
+        "tokens": all_tokens,
+        "token_logprobs": all_token_logprobs,
+        "top_logprobs": top_logprobs_list,
+        "text_offset": all_text_offsets,
+    }
