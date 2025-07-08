@@ -386,7 +386,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
 
 
 async def _process_prompts_completion(
-    prompts: List[str] | List[List[int]],
+    prompts: Union[List[str], List[List[int]]],
     sampling_params: SamplingParams,
     sampling_params_dict: Dict,
     multimodal_params: MultimodalParams,
@@ -411,7 +411,7 @@ async def _process_prompts_completion(
             prompts[0], sampling_params, multimodal_params, raw_request, request, created_time
         )
 
-    async def process_single_prompt(prompt: str | List[int], prompt_index: int):
+    async def process_single_prompt(prompt: Union[str, List[int]], prompt_index: int):
         if len(prompts) > 1:
             individual_sampling_params = SamplingParams()
             individual_sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
@@ -437,7 +437,7 @@ async def _process_prompts_completion(
 
 
 async def _handle_streaming_completion(
-    prompt: str | List[int],
+    prompt: Union[str, List[int]],
     sampling_params: SamplingParams,
     multimodal_params: MultimodalParams,
     raw_request: Request,
