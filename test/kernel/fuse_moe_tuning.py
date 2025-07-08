@@ -105,7 +105,7 @@ def test_kernel(
     expert_to_weights = torch.empty((expert_num, (topk + num_fused_experts) * m), dtype=torch.float32, device="cuda")
     moe_align(topk_ids=topk_ids, out=expert_to_tokens)
     expert_to_token_num = torch.empty((expert_num,), dtype=torch.int32, device="cuda")
-    moe_align1(expert_to_tokens, topk_weights, expert_to_weights, expert_to_token_num, topk=topk + 1)
+    moe_align1(expert_to_tokens, topk_weights, expert_to_weights, expert_to_token_num, topk=topk + num_fused_experts)
 
     out1 = torch.zeros((m * (topk + 1), 2 * n), dtype=torch.bfloat16, device="cuda")
     down_in = torch.zeros((m * (topk + 1), n), dtype=torch.bfloat16, device="cuda")
