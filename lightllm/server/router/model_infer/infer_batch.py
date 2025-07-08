@@ -110,6 +110,7 @@ class InferenceContext:
                     self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                     req.shared_kv_node = None
 
+
     def _save_promptcache_kvbuffer(self):
         """
         save prompt cache kv buffer

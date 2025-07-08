@@ -158,6 +158,7 @@ class RouterManager:
             "return_all_prompt_logprobs": self.args.return_all_prompt_logprobs,
             "use_reward_model": self.args.use_reward_model,
             "disable_dynamic_prompt_cache": self.args.disable_dynamic_prompt_cache,
+            "use_hi_dynamic_prompt_cache": self.args.use_hi_dynamic_prompt_cache,
             "data_type": self.args.data_type,
             "eos_id": self.eos_id,
             "diverse_mode": self.args.diverse_mode,

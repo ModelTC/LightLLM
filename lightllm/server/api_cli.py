@@ -220,6 +220,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable_dynamic_prompt_cache", action="store_true", help="disable dynamic prompt cache")
 
     parser.add_argument("--chunked_prefill_size", type=int, default=4096, help="chunked prefill size")
+    parser.add_argument("--use_hi_dynamic_prompt_cache", action="store_true", help="enable hierachy prompt cache")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
@@ -326,7 +327,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_infer_batch_size", type=int, default=1, help="number of images to process in each inference batch"
     )
     parser.add_argument(
-        "--visual_gpu_ids", nargs="+", type=int, default=None, help="List of GPU IDs to use, e.g., 0 1 2"
+        "--visual_gpu_ids", nargs="+", type=int, default=[0, 1, 2, 3, 4, 5, 6, 7], help="List of GPU IDs to use, e.g., 0 1 2"
     )
     parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
     parser.add_argument("--visual_dp", type=int, default=1, help="number of data parallel instances for ViT")

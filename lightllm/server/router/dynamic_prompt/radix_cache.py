@@ -123,6 +123,8 @@ class RadixCache:
         )
         self.tree_total_tokens_num.arr[0] = 0
 
+        self.is_hi_radix_cache = False
+
     def insert(self, key, value=None):
         if value is None:
             value = key
