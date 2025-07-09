@@ -247,7 +247,7 @@ class Req(ctypes.Structure):
 # 估计不准确的问题，通过加长输出的长度，进行偏向保守一些的调度
 # 理论上不会多估计太多的 token 占用量, 同时得到较高的token显存
 # 使用率
-ADDED_OUTPUT_LEN = 6
+ADDED_OUTPUT_LEN = 16
 
 
 class NormalReq(Req):
