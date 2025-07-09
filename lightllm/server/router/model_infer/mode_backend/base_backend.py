@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import torch
+import time
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
@@ -188,6 +189,10 @@ class ModeBackend:
                             self._init_reqs(reqs=cmds, init_req_obj=False)
 
                 self.decode()
+
+                # 没有请求时，休眠。
+                if len(g_infer_context.requests_mapping) == 0:
+                    time.sleep(0.005)
 
         except BaseException as e:
             self.logger.exception(str(e))
