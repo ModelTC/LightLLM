@@ -18,10 +18,6 @@ class DPForDecodeNode(ContinuesBatchBackendForDecodeNode):
         self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
         return
 
-    def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs, init_req_obj=False)
-        return
-
     def decode(self):
         uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
             g_infer_context.infer_req_ids

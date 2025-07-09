@@ -10,10 +10,24 @@ class RewardModelBackend(ContinuesBatchBackend):
     def __init__(self) -> None:
         super().__init__()
 
-    def prefill(self, reqs: List[Tuple]):
-        req_ids = self._init_reqs(reqs, init_req_obj=True)
+    def decode(self):
+        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
+            g_infer_context.infer_req_ids
+        )
 
-        req_objs = self._trans_req_ids_to_req_objs(req_ids)
+        if aborted_reqs:
+            g_infer_context.filter_reqs(aborted_reqs)
+
+        if prefill_reqs:
+            self._prefill_reqs(req_objs=prefill_reqs)
+
+        if decode_reqs:
+            self.normal_decode(decode_reqs=decode_reqs, uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs)
+
+        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
+        return
+
+    def _prefill_reqs(self, req_objs: List[InferReq]):
         model_input, run_reqs = prepare_prefill_inputs(
             req_objs, is_chuncked_mode=False, is_multimodal=self.is_multimodal
         )

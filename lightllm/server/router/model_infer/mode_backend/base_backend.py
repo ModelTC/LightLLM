@@ -187,6 +187,7 @@ class ModeBackend:
                                     req.infer_aborted = True
                         else:
                             self._init_reqs(reqs=cmds, init_req_obj=False)
+                            self.chunked_prefill_state.need_prefill_count += 1
 
                 self.decode()
 
@@ -198,10 +199,6 @@ class ModeBackend:
             self.logger.exception(str(e))
             raise e
         return
-
-    def prefill(self, reqs: List[Tuple]):
-        """This method can be overridden in subclasses."""
-        raise NotImplementedError()
 
     # @calculate_time(show=True, min_cost_ms=200)
     def decode(self):

@@ -11,12 +11,6 @@ class ReturnPromptLogProbBackend(ContinuesBatchBackend):
     def __init__(self) -> None:
         super().__init__()
 
-    def prefill(self, run_reqs: List[Tuple]):
-        # 在 return all_prompt_logprobs 的模式下，不能启用 dynamic prompt cache
-        assert self.radix_cache is None
-        self._init_reqs(run_reqs, init_req_obj=False)
-        return
-
     def normal_prefill_reqs(
         self,
         prefill_reqs: List[InferReq],
@@ -25,6 +19,8 @@ class ReturnPromptLogProbBackend(ContinuesBatchBackend):
         mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None,
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
     ):
+        # 在 return all_prompt_logprobs 的模式下，不能启用 dynamic prompt cache
+        assert self.radix_cache is None
         model_input, run_reqs = prepare_prefill_inputs(
             prefill_reqs, is_chuncked_mode=False, is_multimodal=self.is_multimodal
         )

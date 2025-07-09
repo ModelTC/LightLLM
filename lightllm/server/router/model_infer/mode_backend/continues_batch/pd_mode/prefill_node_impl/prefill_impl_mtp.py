@@ -22,7 +22,7 @@ class ChunckedPrefillForMtpPrefillNode(ChunckedPrefillForPrefillNode):
             g_infer_context.infer_req_ids,
             no_decode=True,
         )
-        assert len(uinit_reqs) == 0
+
         assert len(decode_reqs) == 0
 
         self._filter_reqs(aborted_reqs)
@@ -36,4 +36,6 @@ class ChunckedPrefillForMtpPrefillNode(ChunckedPrefillForPrefillNode):
             ContinuesBatchWithMTPBackend.normal_mtp_prefill_reqs(
                 self, prefill_reqs=prefill_reqs, uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs
             )
+
+        self._overlap_req_init_and_filter(uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         return

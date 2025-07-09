@@ -22,7 +22,6 @@ class DPChunkedForMtpPrefillNode(DPChunkedForPrefillNode):
             g_infer_context.infer_req_ids,
             no_decode=True,
         )
-        assert len(uninit_reqs) == 0
         assert len(decode_reqs) == 0
 
         self._filter_reqs(aborted_reqs)

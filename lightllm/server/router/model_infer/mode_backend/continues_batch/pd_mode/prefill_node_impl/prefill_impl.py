@@ -49,19 +49,15 @@ class ChunckedPrefillForPrefillNode(ModeBackend):
 
         return
 
-    def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs)
-        return
-
     def decode(self):
         uinit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
             g_infer_context.infer_req_ids,
             no_decode=True,
         )
-        assert len(uinit_reqs) == 0
         assert len(decode_reqs) == 0
 
-        self._filter_reqs(aborted_reqs)
+        if aborted_reqs:
+            self._filter_reqs(aborted_reqs)
 
         if ok_finished_reqs:
             self.prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(ok_finished_reqs)
@@ -72,6 +68,8 @@ class ChunckedPrefillForPrefillNode(ModeBackend):
             ContinuesBatchBackend.normal_prefill_reqs(
                 self, prefill_reqs=prefill_reqs, uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs
             )
+
+        self._overlap_req_init_and_filter(uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         return
 
     def prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, run_reqs: List[InferReq]):

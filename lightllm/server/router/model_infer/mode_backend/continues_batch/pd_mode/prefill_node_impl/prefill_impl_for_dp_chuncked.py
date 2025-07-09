@@ -14,16 +14,11 @@ class DPChunkedForPrefillNode(ChunckedPrefillForPrefillNode):
         super().__init__(info_queue=info_queue, mem_queue=mem_queue)
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
 
-    def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs)
-        return
-
     def decode(self):
         uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
             g_infer_context.infer_req_ids,
             no_decode=True,
         )
-        assert len(uninit_reqs) == 0
         assert len(decode_reqs) == 0
 
         self._filter_reqs(aborted_reqs)
