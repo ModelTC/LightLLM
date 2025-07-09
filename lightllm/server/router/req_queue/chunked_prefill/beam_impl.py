@@ -52,13 +52,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
             < self.max_total_tokens
         )
 
-        if not req.is_paused:
-            ok_req_num = len(self.cache_len_list) + len(self.pause_req_dict) <= self.running_max_req_size
-        else:
-            ok_req_num = (
-                len(self.cache_len_list) + len(self.pause_req_dict) - len(cur_handle_group_reqs)
-                <= self.running_max_req_size
-            )
+        ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
 
         # prefill ok
         ok_prefill = new_batch_first_router_need_tokens <= self.batch_max_tokens
@@ -97,7 +91,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
         aborted_count = 0
         cur_group_reqs = []
         for req in self.waiting_req_list:
-            if req.is_aborted and not req.is_paused:
+            if req.is_aborted:
                 aborted_count += 1
                 abort_req_list.append(req)
                 continue
@@ -110,10 +104,6 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
             )
             if ok_insert:
                 can_run_list.extend(cur_group_reqs)
-                for cur_req in cur_group_reqs:
-                    if cur_req.is_paused:
-                        self.pause_req_dict.pop(cur_req.request_id)
-                        cur_req.is_paused = False
                 cur_group_reqs = [req]  # 等待判断的组
             else:
                 cur_group_reqs = []
@@ -125,10 +115,6 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
             )
             if ok_insert:
                 can_run_list.extend(cur_group_reqs)
-                for req in cur_group_reqs:
-                    if req.is_paused:
-                        self.pause_req_dict.pop(req.request_id)
-                        req.is_paused = False
 
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)

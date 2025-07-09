@@ -194,19 +194,6 @@ class RouterManager:
 
         return
 
-    def add_req(self, group_req_indexes: GroupReqIndexes):
-        req_group = []
-        for req_index in group_req_indexes.shm_req_indexes:
-            req = self.shm_req_manager.get_req_obj_by_index(req_index)
-            req.multimodal_params = group_req_indexes.multimodal_params
-            req.start_time = group_req_indexes.time_mark
-            req_group.append(req)
-
-            logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
-        self.req_queue.extend(req_group)
-        self.send_to_detokenization.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-        return
-
     async def loop_for_fwd(
         self,
     ):
@@ -215,7 +202,7 @@ class RouterManager:
             await self._step()
             counter_count += 1
             if self.running_batch is not None:
-                if counter_count % 50 == 0:
+                if counter_count % 100 == 0:
                     for dp_index in range(self.dp_size_in_node):
                         token_ratio1 = self.get_used_tokens(dp_index) / self.max_total_token_num
                         token_ratio2 = (
@@ -225,17 +212,16 @@ class RouterManager:
                         d_i = dp_index
                         frozen_token_num = self.shared_token_load.get_frozened_token_count(d_i)
                         estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(d_i)
+                        paused_req_num = self._get_paused_req_num_in_dp_index(dp_index=d_i)
                         logger.debug(
                             f"dp_i {d_i} current batch size: {len(self.running_batch.reqs)} \n"
-                            f"dp_i {d_i} paused req num: {self.req_queue.get_paused_req_num(d_i)} \n"
+                            f"dp_i {d_i} paused req num: {paused_req_num} \n"
                             f"dp_i {d_i} frozen token num: {frozen_token_num} \n"
                             f"dp_i {d_i} estimated_peak_token_count: {estimated_peak_token_count} \n"
                             f"dp_i {d_i} token used ratio: {token_ratio1} not contain prompt cache tree unrefed token\n"
                             f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token"
                         )
-                        self.metric_client.gauge_set(
-                            "lightllm_batch_pause_size", self.req_queue.get_paused_req_num(d_i)
-                        )
+                        self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
                 self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
@@ -264,22 +250,6 @@ class RouterManager:
 
             await asyncio.sleep(0.005)  # 5ms
 
-    def generate_new_batch(self):
-        limit_router_queue_length = None
-        if self.is_multinode_tp:
-            # 使用 all_reduce 获取最小值
-            limit_router_queue_length = len(self.req_queue.waiting_req_list)
-            limit_router_queue_length_tensor = torch.tensor(limit_router_queue_length, dtype=torch.int32, device="cpu")
-            dist.all_reduce(limit_router_queue_length_tensor, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-            limit_router_queue_length = limit_router_queue_length_tensor.item()
-
-        # 调度的时候需要考虑当前运行的batch，和调度了但是暂时还没有推理的部分请求。
-        new_batch = self.req_queue.generate_new_batch(
-            Batch.merge_two_batch(self.running_batch, self.schedule_new_batch), limit_router_queue_length
-        )
-        self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
-        return
-
     async def _step(self):
         """
         事件处理循环
@@ -292,10 +262,8 @@ class RouterManager:
             self.schedule_new_batch = None
             self._add_new_batch_to_running_batch(new_batch=new_batch)
             await self._add_batch(new_batch)
-            self._filter_reqs_from_running_batch()
 
         self._filter_reqs_from_running_batch()
-
         aborted_reqs = self._get_aborted_reqs_from_running_batch()
         if aborted_reqs:
             await self._aborted_reqs(aborted_reqs=aborted_reqs)
@@ -345,6 +313,26 @@ class RouterManager:
                 ans.append(req)
         return ans
 
+    def _get_paused_req_num(self) -> int:
+        if self.running_batch is None:
+            return 0
+        else:
+            count = 0
+            for req in self.running_batch.reqs:
+                if req.is_paused:
+                    count += 1
+            return count
+
+    def _get_paused_req_num_in_dp_index(self, dp_index: int) -> int:
+        if self.running_batch is None:
+            return 0
+        else:
+            count = 0
+            for req in self.running_batch.reqs:
+                if req.is_paused and req.sample_params.suggested_dp_index == dp_index:
+                    count += 1
+            return count
+
     def get_used_tokens(self, dp_index):
         if not self.args.disable_dynamic_prompt_cache:
             return (
@@ -355,6 +343,35 @@ class RouterManager:
         else:
             return self.max_total_token_num - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
 
+    def _add_req(self, group_req_indexes: GroupReqIndexes):
+        req_group = []
+        for req_index in group_req_indexes.shm_req_indexes:
+            req = self.shm_req_manager.get_req_obj_by_index(req_index)
+            req.multimodal_params = group_req_indexes.multimodal_params
+            req.start_time = group_req_indexes.time_mark
+            req_group.append(req)
+
+            logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
+        self.req_queue.extend(req_group)
+        self.send_to_detokenization.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+        return
+
+    def _generate_new_batch(self):
+        limit_router_queue_length = None
+        if self.is_multinode_tp:
+            # 使用 all_reduce 获取最小值
+            limit_router_queue_length = len(self.req_queue.waiting_req_list)
+            limit_router_queue_length_tensor = torch.tensor(limit_router_queue_length, dtype=torch.int32, device="cpu")
+            dist.all_reduce(limit_router_queue_length_tensor, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
+            limit_router_queue_length = limit_router_queue_length_tensor.item()
+
+        # 调度的时候需要考虑当前运行的batch，和调度了但是暂时还没有推理的部分请求。
+        new_batch = self.req_queue.generate_new_batch(
+            Batch.merge_two_batch(self.running_batch, self.schedule_new_batch), limit_router_queue_length
+        )
+        self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
+        return
+
     async def loop_for_netio_req(self):
         recv_max_count = 64
 
@@ -364,7 +381,7 @@ class RouterManager:
                 for _ in range(recv_max_count):
                     recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
-                        self.add_req(recv_req)
+                        self._add_req(recv_req)
                     else:
                         assert False, f"Error Req Inf {recv_req}"
 
@@ -377,7 +394,9 @@ class RouterManager:
 
             await asyncio.sleep(0.02)
 
-            self.generate_new_batch()
+            # 只有当推理侧没有发生暂停的时候，才执行新的调度
+            if self._get_paused_req_num() == 0:
+                self._generate_new_batch()
         return
 
     def clean_up(self):

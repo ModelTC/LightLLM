@@ -36,11 +36,7 @@ class ChunkedPrefillQueue(BaseQueue):
             < self.max_total_tokens
         )
 
-        if not req.is_paused:
-            ok_req_num = len(self.cache_len_list) + len(self.pause_req_dict) <= self.running_max_req_size
-        else:
-            ok_req_num = len(self.cache_len_list) + len(self.pause_req_dict) - 1 <= self.running_max_req_size
-
+        ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
         new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
         ok_prefill = new_batch_first_router_need_tokens <= self.batch_max_tokens
 
@@ -61,7 +57,7 @@ class ChunkedPrefillQueue(BaseQueue):
             return None
 
         # 如果当前已经被调度的请求数量超过了上限，直接不调度新的请求了。
-        exist_req_num = self.get_batch_dp_req_size(current_batch) + len(self.pause_req_dict)
+        exist_req_num = self.get_batch_dp_req_size(current_batch)
         req_is_full = exist_req_num >= self.running_max_req_size
         if req_is_full:
             return None
@@ -83,7 +79,7 @@ class ChunkedPrefillQueue(BaseQueue):
             waiting_queue = self.waiting_req_list[:limit_router_queue_length]
 
         for req in waiting_queue:
-            if req.is_aborted and not req.is_paused:
+            if req.is_aborted:
                 # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.
                 # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token的泄漏
                 aborted_count += 1
@@ -94,9 +90,6 @@ class ChunkedPrefillQueue(BaseQueue):
             )
             if ok_insert:
                 can_run_list.append(req)
-                if req.is_paused:
-                    self.pause_req_dict.pop(req.request_id)
-                    req.is_paused = False
             else:
                 break
 
