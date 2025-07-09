@@ -248,7 +248,7 @@ class RouterManager:
                             logger.debug(f"dp_i {dp_i} frozen token num: {frozen_token_num} \n")
                             logger.debug(f"dp_i {dp_i} estimated_peak_token_count: {estimated_peak_token_count} \n")
 
-            await asyncio.sleep(0.005)  # 5ms
+            await asyncio.sleep(0.03)  # 30ms
 
     async def _step(self):
         """
