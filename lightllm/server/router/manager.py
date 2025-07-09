@@ -257,7 +257,7 @@ class RouterManager:
         # 判断是否有新请求加入推理
         # 激进调度满足，有新的推理batch就需要进行加入。
         # 或者延迟step的步数满足了当前条件，也需要进行新的推理batch的加入。
-        if (self.schedule_new_batch is not None) and (not self.args.disable_aggressive_schedule):
+        if (self.schedule_new_batch is not None) and self.shm_reqs_io_buffer.is_empty():
             new_batch = self.schedule_new_batch
             self.schedule_new_batch = None
             self._add_new_batch_to_running_batch(new_batch=new_batch)
