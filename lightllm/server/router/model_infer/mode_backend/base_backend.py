@@ -262,7 +262,7 @@ class ModeBackend:
                 uinit_reqs.append(req_obj)
                 continue
 
-            if req_obj.shm_req.router_aborted:
+            if req_obj.infer_aborted:
                 aborted_reqs.append(req_obj)
                 continue
 
