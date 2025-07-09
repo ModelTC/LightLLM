@@ -11,7 +11,7 @@ LIGHTLLM_REQS_BUFFER_BYTE_SIZE = int(os.getenv("LIGHTLLM_REQS_BUFFER_BYTE_SIZE",
 logger = init_logger(__name__)
 
 
-class ShmReqsBuffer:
+class ShmReqsIOBuffer:
     def __init__(self):
         self.args = get_env_start_args()
         self.name = f"{get_unique_server_name()}_ShmReqsBufferParams"
