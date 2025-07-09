@@ -15,11 +15,11 @@ from typing import Dict, List, Optional
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
-from lightllm.server.core.objs.io_objs import GroupReqIndexes
+from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .stats import Stats
-from .pause_strategy import Fcfs, select_paused_reqs
+from .shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
@@ -57,8 +57,6 @@ class RouterManager:
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
 
-        self.mtp_step = args.mtp_step
-
         # 共享变量，用于存储router端调度分析得到的机器负载信息
         self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
         for dp_index in range(self.dp_size_in_node):
@@ -68,11 +66,7 @@ class RouterManager:
             self.shared_token_load.set_logical_max_load(0.0, dp_index)
             self.shared_token_load.set_dynamic_max_load(0.0, dp_index)
 
-        self.pause_strategy = Fcfs()
         self.running_batch: Batch = None
-        self.eos_id = args.eos_id
-        self.has_wait_tokens = 0
-        self.max_wait_tokens = args.router_max_wait_tokens
         context = zmq.Context(2)
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{router_port}")
@@ -88,11 +82,6 @@ class RouterManager:
                 rank=args.node_rank,
             )
 
-        self.is_token_healing = self.args.token_healing_mode
-        self.chunked_prefill_size = args.chunked_prefill_size
-        self.disable_chunked_prefill = args.disable_chunked_prefill
-
-        self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
         self.metric_client = MetricClient(metric_port)
         self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
         self.is_pd_decode_mode = self.args.run_mode == "decode"
@@ -100,12 +89,13 @@ class RouterManager:
         # 主要是为了防止调度失误，造成 OOM 等错误
         self.router_lock = mp.Lock()
         g_router_lock.obj = self.router_lock
+
+        self.shm_reqs_io_buffer = ShmReqsIOBuffer()
         return
 
     async def wait_to_model_ready(self):
         # 调度使用的对象
         self.schedule_new_batch: Batch = None
-        self.schedule_event = asyncio.Event()
 
         # 初始化模型
         self.model_rpc_servers = []
@@ -152,14 +142,14 @@ class RouterManager:
             "nccl_host": self.args.nccl_host,
             "nccl_port": self.args.nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
-            "disable_chunked_prefill": self.disable_chunked_prefill,
-            "chunked_prefill_size": self.chunked_prefill_size,
+            "disable_chunked_prefill": self.args.disable_chunked_prefill,
+            "chunked_prefill_size": self.args.chunked_prefill_size,
             "is_token_healing": self.args.token_healing_mode,
             "return_all_prompt_logprobs": self.args.return_all_prompt_logprobs,
             "use_reward_model": self.args.use_reward_model,
             "disable_dynamic_prompt_cache": self.args.disable_dynamic_prompt_cache,
             "data_type": self.args.data_type,
-            "eos_id": self.eos_id,
+            "eos_id": self.args.eos_id,
             "diverse_mode": self.args.diverse_mode,
             "graph_max_batch_size": self.args.graph_max_batch_size,
             "graph_max_len_in_batch": self.args.graph_max_len_in_batch,
@@ -248,7 +238,6 @@ class RouterManager:
                         )
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
-                self.stats_tool.print_stats()
                 self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
                 self.metric_client.gauge_set("lightllm_queue_size", self.req_queue.get_wait_req_num())
                 self.metric_client.gauge_set(
@@ -273,8 +262,7 @@ class RouterManager:
                             logger.debug(f"dp_i {dp_i} frozen token num: {frozen_token_num} \n")
                             logger.debug(f"dp_i {dp_i} estimated_peak_token_count: {estimated_peak_token_count} \n")
 
-            if self.running_batch is None:
-                await asyncio.sleep(0.01)  # 10ms
+            await asyncio.sleep(0.005)  # 5ms
 
     def generate_new_batch(self):
         limit_router_queue_length = None
@@ -299,52 +287,38 @@ class RouterManager:
         # 判断是否有新请求加入推理
         # 激进调度满足，有新的推理batch就需要进行加入。
         # 或者延迟step的步数满足了当前条件，也需要进行新的推理batch的加入。
-        if (self.schedule_new_batch is not None) and (
-            (not self.args.disable_aggressive_schedule) or (self.has_wait_tokens >= self.max_wait_tokens)
-        ):
+        if (self.schedule_new_batch is not None) and (not self.args.disable_aggressive_schedule):
             new_batch = self.schedule_new_batch
             self.schedule_new_batch = None
             self._add_new_batch_to_running_batch(new_batch=new_batch)
-            await self._prefill_batch(new_batch)
-            self.stats_tool.count_prompt_tokens(new_batch)
+            await self._add_batch(new_batch)
             self._filter_reqs_from_running_batch()
-            self.has_wait_tokens = 0
 
-        # Check if need pause some requests for decode.
-        for dp_index in range(self.dp_size_in_node):
-            while not self._can_decode(self.running_batch, dp_index=dp_index):
-                # pause strategy
-                paused_reqs = select_paused_reqs(
-                    self.running_batch, self.pause_strategy, self.req_queue, self.max_total_token_num, dp_index=dp_index
-                )
-                await self._pause_reqs(paused_reqs)
-                logger.debug(f"DP index {dp_index} pasues req num: {self.req_queue.get_paused_req_num(dp_index)}")
-                self.has_wait_tokens = 0
-
-        # Decode
-        self.stats_tool.count_output_tokens(self.running_batch)
-        await self._decode_batch()
         self._filter_reqs_from_running_batch()
-        self.has_wait_tokens += 1
+
+        aborted_reqs = self._get_aborted_reqs_from_running_batch()
+        if aborted_reqs:
+            await self._aborted_reqs(aborted_reqs=aborted_reqs)
         return
 
-    async def _prefill_batch(self, batch: Batch):
+    async def _add_batch(self, batch: Batch):
         # 添加新请求
         reqs = [r.to_router_rpc_obj() for r in batch.reqs]
-        await self.model_rpc_client.prefill(reqs)
-        self._send_detokenization_pack()
+        while not self.shm_reqs_io_buffer.is_empty():
+            await asyncio.sleep(0.02)
+
+        self.shm_reqs_io_buffer.write_obj(reqs)
+        self.shm_reqs_io_buffer.set_ready()
         logger.debug(f"Prefill Batch: {batch.simple_log()} \n")
         return
 
-    async def _decode_batch(self):
-        self.schedule_event.set()
-        await self.model_rpc_client.decode()
-        self._send_detokenization_pack()
-        return
+    async def _aborted_reqs(self, aborted_reqs: List[Req]):
+        cmds = [AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs]
+        while not self.shm_reqs_io_buffer.is_empty():
+            await asyncio.sleep(0.02)
 
-    async def _pause_reqs(self, pasue_reqs: List[Req]):
-        pasue_req_ids = [r.request_id for r in pasue_reqs]
-        await self.model_rpc_client.pause_reqs(pasue_req_ids)
+        self.shm_reqs_io_buffer.write_obj(cmds)
+        self.shm_reqs_io_buffer.set_ready()
         return
 
     def _add_new_batch_to_running_batch(self, new_batch: Batch):
@@ -361,20 +335,15 @@ class RouterManager:
                 self.running_batch = None
         return
 
-    def _can_decode(self, batch: Batch, dp_index: int):
-        if self.is_pd_run_mode or self.is_safe_schedule or batch is None:
-            return True
-        return (
-            batch.get_batch_decode_need_tokens()[dp_index] + self.get_used_tokens(dp_index) <= self.max_total_token_num
-        )
-
-    def _send_detokenization_pack(self):
-        # 发 mtp_step + 1 个 None 包触发一下 detokenization, 因为在开启 mtp feature 以后，每一步
-        # 生成的 token 数量最多为 mtp_step + 1 个，如果不及时触发 detokenization， 会带来一些性能
-        # 损失
-        for _ in range(self.mtp_step + 1):
-            self.send_to_detokenization.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
-        return
+    def _get_aborted_reqs_from_running_batch(self) -> List[Req]:
+        ans = []
+        if self.running_batch is None:
+            return ans
+        for req in self.running_batch.reqs:
+            if req.is_aborted and req.router_aborted is False:
+                req.router_aborted = True
+                ans.append(req)
+        return ans
 
     def get_used_tokens(self, dp_index):
         if not self.args.disable_dynamic_prompt_cache:
@@ -406,15 +375,9 @@ class RouterManager:
                 # 当队列已经开始清空的时候，将一次接受的数量下调
                 recv_max_count = 64
 
-            try:
-                await asyncio.wait_for(self.schedule_event.wait(), timeout=0.02)
-            except asyncio.TimeoutError:
-                pass
+            await asyncio.sleep(0.02)
 
-            if self.schedule_event.is_set():
-                self.generate_new_batch()
-                self.schedule_event.clear()
-
+            self.generate_new_batch()
         return
 
     def clean_up(self):

@@ -69,8 +69,8 @@ class ModelRpcServer:
         self.rank_in_node = rank_in_node
         logger.info(f"Initialized RPC server for rank {self.rank}.")
 
-        self.loop_thread = threading.Thread(target=self.rpc_loop)
-        self.loop_thread.start()
+        self.rpc_loop_thread = threading.Thread(target=self.rpc_loop, daemon=True)
+        self.rpc_loop_thread.start()
         return
 
     def rpc_loop(self):
@@ -189,34 +189,10 @@ class ModelRpcServer:
         else:
             self.redundancy_expert_manager = None
 
+        # 启动infer_loop_thread
+        self.infer_loop_thread = threading.Thread(target=self.backend.infer_loop, daemon=True)
+        self.infer_loop_thread.start()
         return
-
-    def prefill(self, reqs):
-        try:
-            # only deepseekv3 can support auto_update_redundancy_expert
-            if self.redundancy_expert_manager is not None:
-                self.redundancy_expert_manager.step()
-
-            return self.backend.prefill(reqs)
-        except Exception as e:
-            err_msg = str(e)
-            logger.exception(f"Batch prefill encountered an unexpected ERROR: {err_msg}")
-            raise e
-
-    def decode(self):
-        try:
-            # only deepseekv3 can support auto_update_redundancy_expert
-            if self.redundancy_expert_manager is not None:
-                self.redundancy_expert_manager.step()
-
-            return self.backend.decode()
-        except Exception as e:
-            err_msg = str(e)
-            logger.exception(f"Batch decode encountered an unexpected ERROR: {err_msg}")
-            raise e
-
-    def pause_reqs(self, req_ids):
-        return self.backend.pause_reqs(req_ids)
 
     def get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
@@ -235,30 +211,6 @@ class ModelRpcClient:
 
     async def init_model(self, kvargs):
         self.rpc_shm_params.write_func_params("init_model", (kvargs,))
-        self.rpc_event.set()
-
-        self.rpc_finished_event.wait()
-        self.rpc_finished_event.clear()
-        return
-
-    async def prefill(self, reqs):
-        self.rpc_shm_params.write_func_params("prefill", (reqs,))
-        self.rpc_event.set()
-
-        await asyncio.to_thread(self.rpc_finished_event.wait)
-        self.rpc_finished_event.clear()
-        return
-
-    async def decode(self):
-        self.rpc_shm_params.write_func_params("decode", ())
-        self.rpc_event.set()
-
-        await asyncio.to_thread(self.rpc_finished_event.wait)
-        self.rpc_finished_event.clear()
-        return
-
-    async def pause_reqs(self, req_ids):
-        self.rpc_shm_params.write_func_params("pause_reqs", (req_ids,))
         self.rpc_event.set()
 
         self.rpc_finished_event.wait()
@@ -304,7 +256,7 @@ def _init_env(
     )
     success_event.set()
 
-    model_rpc_server.loop_thread.join()
+    model_rpc_server.rpc_loop_thread.join()
     return
 
 

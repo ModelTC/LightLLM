@@ -15,13 +15,15 @@ from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
+from lightllm.server.core.objs.io_objs import AbortedReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
 from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
-from lightllm.utils.dist_utils import get_dp_rank_in_node
+from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
 from lightllm.distributed import dist_group_manager
 from .chuncked_prefill_state import ChunkedPrefillState
+from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
 import torch.distributed as dist
 
 
@@ -148,7 +150,12 @@ class ModeBackend:
                 [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
             )
 
+        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+        self.node_nccl_group = create_new_group_for_current_node("nccl")
+
         self.init_custom()
+
+        self.shm_reqs_io_buffer = ShmReqsIOBuffer()
         return
 
     def init_custom(self):
@@ -156,6 +163,36 @@ class ModeBackend:
 
     def get_max_total_token_num(self):
         return self.model.mem_manager.size
+
+    def infer_loop(self):
+        try:
+            torch.cuda.set_device(get_current_device_id())
+            while True:
+                if self.is_master_in_node:
+                    if self.shm_reqs_io_buffer.is_ready():
+                        self.node_broadcast_tensor.fill_(1)
+                    else:
+                        self.node_broadcast_tensor.fill_(0)
+                dist.broadcast(self.node_broadcast_tensor, src=0, group=self.node_nccl_group, async_op=False)
+                new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+                if new_buffer_is_ready:
+                    cmds: List = self.shm_reqs_io_buffer.read_obj()
+                    self.shm_reqs_io_buffer.sub_state()
+                    if cmds:
+                        if isinstance(cmds[0], AbortedReqCmd):
+                            for obj in cmds:
+                                if obj.req_id in g_infer_context.requests_mapping:
+                                    req: InferReq = g_infer_context.requests_mapping[obj.req_id]
+                                    req.infer_aborted = True
+                        else:
+                            self._init_reqs(reqs=cmds, init_req_obj=False)
+
+                self.decode()
+
+        except BaseException as e:
+            self.logger.exception(str(e))
+            raise e
+        return
 
     def prefill(self, reqs: List[Tuple]):
         """This method can be overridden in subclasses."""
@@ -515,4 +552,9 @@ class ModeBackend:
                 self.is_master_in_dp = True
             else:
                 self.is_master_in_dp = False
+
+        if self.rank_in_node == 0:
+            self.is_master_in_node = True
+        else:
+            self.is_master_in_node = False
         return
