@@ -139,7 +139,7 @@ def get_redundancy_expert_update_max_load_count():
 
 @lru_cache(maxsize=None)
 def get_kv_quant_calibration_warmup_count():
-    # 服务启动后前warmup次推理不计入量化校准统计，该参数可以控制在一个更大的校准数据集不同位置开始校准。
+    # 服务启动后前warmup次推理不计入量化校准统计，该参数可以控制在一个更大的校准数据集的不同位置处开始校准。
     return int(os.getenv("LIGHTLLM_KV_QUANT_CALIBRARTION_WARMUP_COUNT", 0))
 
 
@@ -147,3 +147,17 @@ def get_kv_quant_calibration_warmup_count():
 def get_kv_quant_calibration_inference_count():
     # warmup后开始进行量化校准统计，推理次数达到inference_count后输出统计校准结果，通过该参数可以控制对量化校准数据的采集量。
     return int(os.getenv("LIGHTLLM_KV_QUANT_CALIBRARTION_INFERENCE_COUNT", 4000))
+
+
+g_model_init_done = False
+
+
+def get_model_init_status():
+    global g_model_init_done
+    return g_model_init_done
+
+
+def set_model_init_status(status: bool):
+    global g_model_init_done
+    g_model_init_done = status
+    return g_model_init_done

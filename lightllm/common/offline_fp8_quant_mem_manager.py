@@ -7,8 +7,7 @@ from lightllm.utils.envs_utils import get_kv_quant_calibration_warmup_count
 from lightllm.utils.dist_utils import get_global_rank
 from lightllm.utils.config_utils import get_model_architectures
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.basemodel import get_model_init_status
+from lightllm.utils.envs_utils import get_env_start_args, get_model_init_status
 
 logger = init_logger(__name__)
 
@@ -30,10 +29,12 @@ class OfflineFP8QuantMemManager(MemoryManager):
         self.total_head_num = head_num * dist.get_world_size() if dist.is_initialized() else head_num
         self.count = 0
         self.scales = None
+        self.scales_list = None
         self.abs_max = None
 
         if is_export_mode:
-            self.abs_max = torch.zeros((layer_num, 2 * head_num), dtype=torch.float32, device="cuda")
+            scales_shape = [layer_num, 2 * head_num] if get_env_start_args().enable_fa3 else [layer_num, 2]
+            self.abs_max = torch.zeros(scales_shape, dtype=torch.float32, device="cuda")
         elif get_env_start_args().kv_quant_calibration_config_path is not None:
             logger.info(
                 f"kv_quant_calibration_config_path {get_env_start_args().kv_quant_calibration_config_path} is set, "
@@ -41,14 +42,20 @@ class OfflineFP8QuantMemManager(MemoryManager):
             )
             cfg = self._load_and_check_config()
 
-            self.scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
-            if dist.is_initialized() and dist.get_world_size() > 1:
+            self.scales_list = cfg["scales"]
+            self.scales = torch.tensor(self.scales_list, dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
+            if not get_env_start_args().enable_fa3:
+                self.scales = torch.repeat_interleave(self.scales, self.head_num, dim=-1)
+            if get_env_start_args().enable_fa3 and dist.is_initialized() and dist.get_world_size() > 1:
                 half_head = self.total_head_num // 2
                 start_head = dist.get_rank() * head_num
                 end_head = start_head + head_num
                 k_scales = self.scales[:, start_head:end_head].contiguous()
                 v_scales = self.scales[:, start_head + half_head : end_head + half_head].contiguous()
-                self.scales = torch.cat((k_scales, v_scales), dim=-1)
+                current_scales = torch.cat((k_scales, v_scales), dim=-1)
+
+                self.scales_list = current_scales.tolist()
+                self.scales = current_scales
         else:
             logger.warning("scales is None, no kv_quant_calibration_config_path be set, will use 1.0 as scales")
 
@@ -74,8 +81,12 @@ class OfflineFP8QuantMemManager(MemoryManager):
                 raise ValueError(
                     f"num_head {cfg['num_head']} in config " f"not match current model head num {self.total_head_num}"
                 )
-            if cfg["quant_type"] != "per_head":
-                raise ValueError(f"quant type {cfg['quant_type']} in config not match fa3 backend")
+            if get_env_start_args().enable_fa3:
+                if cfg["quant_type"] != "per_head":
+                    raise ValueError(f"quant type {cfg['num_head']} in config not match fa3 backend")
+            else:
+                if cfg["quant_type"] != "per_tensor":
+                    raise ValueError(f"quant type {cfg['quant_type']} in config not match flashinfer backend")
 
             return cfg
         else:
@@ -93,21 +104,29 @@ class OfflineFP8QuantMemManager(MemoryManager):
             logger.info("kv cache calibration mode will collect kv cache data for quantization calibration")
 
         if self.abs_max is not None and self.count >= warmup_counts:
-            kv_max = kv_buffer.abs().amax(dim=(0, 2)).to(torch.float32)
+            if get_env_start_args().enable_fa3:
+                kv_max = kv_buffer.abs().amax(dim=(0, 2)).to(torch.float32)
+            else:
+                k_max = kv_buffer[:, : self.head_num, :].abs().amax(dim=()).to(torch.float32)
+                v_max = kv_buffer[:, self.head_num :, :].abs().amax(dim=()).to(torch.float32)
+                kv_max = torch.tensor([k_max, v_max], device="cuda", dtype=torch.float32)
             self.abs_max[layer_index] = torch.maximum(self.abs_max[layer_index], kv_max)
             if self.count == warmup_counts + inference_counts - 1 and layer_index == self.layer_num - 1:
                 final_abs_max = self.abs_max
                 if dist.is_initialized() and dist.get_world_size() > 1:
-                    k_max, v_max = torch.chunk(self.abs_max, 2, dim=-1)
-                    k_max = k_max.contiguous()
-                    v_max = v_max.contiguous()
-                    gathered_k_max = [torch.zeros_like(k_max) for _ in range(dist.get_world_size())]
-                    gathered_v_max = [torch.zeros_like(v_max) for _ in range(dist.get_world_size())]
-                    dist.all_gather(gathered_k_max, k_max, group=None, async_op=False)
-                    dist.all_gather(gathered_v_max, v_max, group=None, async_op=False)
-                    k_max = torch.cat(gathered_k_max, dim=-1)
-                    v_max = torch.cat(gathered_v_max, dim=-1)
-                    final_abs_max = torch.cat((k_max, v_max), dim=-1)
+                    if get_env_start_args().enable_fa3:
+                        k_max, v_max = torch.chunk(self.abs_max, 2, dim=-1)
+                        k_max = k_max.contiguous()
+                        v_max = v_max.contiguous()
+                        gathered_k_max = [torch.zeros_like(k_max) for _ in range(dist.get_world_size())]
+                        gathered_v_max = [torch.zeros_like(v_max) for _ in range(dist.get_world_size())]
+                        dist.all_gather(gathered_k_max, k_max, group=None, async_op=False)
+                        dist.all_gather(gathered_v_max, v_max, group=None, async_op=False)
+                        k_max = torch.cat(gathered_k_max, dim=-1)
+                        v_max = torch.cat(gathered_v_max, dim=-1)
+                        final_abs_max = torch.cat((k_max, v_max), dim=-1)
+                    else:
+                        dist.all_reduce(self.abs_max, op=dist.ReduceOp.MAX, group=None, async_op=False)
 
                 self.scales = final_abs_max / self.qmax
                 self.scales = torch.where(self.scales > 0, self.scales, torch.ones_like(self.scales))
@@ -124,7 +143,7 @@ class OfflineFP8QuantMemManager(MemoryManager):
         cfg = {
             "version": "1.0",
             "architectures": model_arch,
-            "quant_type": "per_head",
+            "quant_type": "per_head" if get_env_start_args().enable_fa3 else "per_tensor",
             "qmin": self.qmin,
             "qmax": self.qmax,
             "num_layers": self.layer_num,

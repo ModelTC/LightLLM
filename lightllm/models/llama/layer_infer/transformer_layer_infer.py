@@ -77,19 +77,24 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                     LlamaTransformerLayerInfer._token_decode_attention_flashattention_fp8, self
                 )
                 self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_fp8kv, self)
-            elif "export_fp8kv_calibration" in self.mode or not self.mode:
+            elif "export_fp8kv_calibration" in self.mode:
                 self._context_attention_kernel = partial(
                     LlamaTransformerLayerInfer._context_attention_flashattention, self
                 )
                 self._token_attention_kernel = partial(
                     LlamaTransformerLayerInfer._token_decode_attention_flashattention, self
                 )
-                if "export_fp8kv_calibration" in self.mode:
-                    self._copy_kv_to_mem_cache = partial(
-                        LlamaTransformerLayerInfer._copy_kv_to_mem_cache_with_calibration, self
-                    )
-                else:
-                    self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+                self._copy_kv_to_mem_cache = partial(
+                    LlamaTransformerLayerInfer._copy_kv_to_mem_cache_with_calibration, self
+                )
+            elif not self.mode:
+                self._context_attention_kernel = partial(
+                    LlamaTransformerLayerInfer._context_attention_flashattention, self
+                )
+                self._token_attention_kernel = partial(
+                    LlamaTransformerLayerInfer._token_decode_attention_flashattention, self
+                )
+                self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
             else:
                 raise Exception(f"Unsupported mode for fa3 backend: {self.mode}")
             return
@@ -129,6 +134,15 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         elif "triton_int8kv" in self.mode:
             self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_int8kv, self)
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_int8kv, self)
+        elif "offline_calibration_fp8kv" in self.mode:
+            assert get_env_start_args().enable_flashinfer_prefill and get_env_start_args().enable_flashinfer_decode
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_fp8kv, self)
+            self._context_attention_kernel = partial(
+                LlamaTransformerLayerInfer._context_attention_flashinfer_kernel_fp8, self
+            )
+            self._token_attention_kernel = partial(
+                LlamaTransformerLayerInfer._token_decode_attention_flashinfer_fp8, self
+            )
         elif "triton_flashdecoding" in self.mode:
             self._token_attention_kernel = partial(
                 LlamaTransformerLayerInfer._token_decode_attention_flashdecoding, self
@@ -147,6 +161,11 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 LlamaTransformerLayerInfer._token_decode_attention_gqa_flashdecoding_vsm, self
             )
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+        elif "export_fp8kv_calibration" in self.mode:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_flashinfer, self)
+            self._copy_kv_to_mem_cache = partial(
+                LlamaTransformerLayerInfer._copy_kv_to_mem_cache_with_calibration, self
+            )
         elif not self.mode:
             if get_env_start_args().enable_flashinfer_decode:
                 self._token_attention_kernel = partial(
@@ -213,6 +232,26 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.position_sin,
         )
         return q, cache_kv
+
+    def _context_attention_flashinfer_kernel_fp8(
+        self, q, kv, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
+    ) -> torch.Tensor:
+        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv = kv.unsqueeze(1)
+        k = kv[:, :, : self.tp_k_head_num_, :].view(torch.float8_e4m3fn)
+        v = kv[:, :, self.tp_k_head_num_ :, :].view(torch.float8_e4m3fn)
+        offline_scales = infer_state.mem_manager.scales_list
+        k_descale = offline_scales[self.layer_num_][0] if offline_scales is not None else None
+        v_descale = offline_scales[self.layer_num_][1] if offline_scales is not None else None
+        infer_state.prefill_wrapper.run(
+            q.view(q.shape[0], -1, self.head_dim_),
+            (k, v),
+            k_scale=k_descale,
+            v_scale=v_descale,
+            out=o_tensor.view(q.shape[0], -1, self.head_dim_),
+        )
+        return o_tensor
 
     def _context_attention_flashinfer_kernel(
         self, q, kv, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
@@ -473,6 +512,26 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             buffer, mem_index, mem_manager.kv_buffer[self.layer_num_], mem_manager.scale_buffer[self.layer_num_]
         )
         return
+
+    def _token_decode_attention_flashinfer_fp8(self, q, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None):
+        batch_size = infer_state.batch_size
+        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
+
+        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].unsqueeze(1)
+        k = kv[:, :, : self.tp_k_head_num_, :].view(torch.float8_e4m3fn)
+        v = kv[:, :, self.tp_k_head_num_ :, :].view(torch.float8_e4m3fn)
+        offline_scales = infer_state.mem_manager.scales_list
+        k_descale = offline_scales[self.layer_num_][0] if offline_scales is not None else None
+        v_descale = offline_scales[self.layer_num_][1] if offline_scales is not None else None
+        infer_state.decode_wrapper.run(
+            q.view(calcu_shape1),
+            (k, v),
+            k_scale=k_descale,
+            v_scale=v_descale,
+            out=o_tensor.view(calcu_shape1),
+        )
+        return o_tensor
 
     def _token_decode_attention_flashinfer(self, q, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None):
         batch_size = infer_state.batch_size
