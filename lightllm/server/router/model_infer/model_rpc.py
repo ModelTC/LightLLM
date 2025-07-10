@@ -188,10 +188,6 @@ class ModelRpcServer:
             logger.info("init redundancy_expert_manager")
         else:
             self.redundancy_expert_manager = None
-
-        # 启动infer_loop_thread
-        self.infer_loop_thread = threading.Thread(target=self.backend.infer_loop, daemon=True)
-        self.infer_loop_thread.start()
         return
 
     def get_max_total_token_num(self):

@@ -2,13 +2,15 @@ import os
 import numpy as np
 import torch
 import time
+import threading
+import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -25,7 +27,7 @@ from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_
 from lightllm.distributed import dist_group_manager
 from .chuncked_prefill_state import ChunkedPrefillState
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
-import torch.distributed as dist
+from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager
 
 
 class ModeBackend:
@@ -36,6 +38,7 @@ class ModeBackend:
         # 的推理控制，具体使用方式可以参考 ChunkedPrefillBackend 类中的使用方式。如果是非
         # chuncked prefill 相关的模式，该状态变量不会生效。
         self.chunked_prefill_state = ChunkedPrefillState()
+        self.overlap_event_manager = OverlapEventManager()
         pass
 
     def init_model(self, kvargs):
@@ -157,6 +160,12 @@ class ModeBackend:
         self.init_custom()
 
         self.shm_reqs_io_buffer = ShmReqsIOBuffer()
+
+        # 启动infer_loop_thread
+        self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True)
+        self.infer_loop_thread.start()
+        self.infer_loop_thread1 = threading.Thread(target=self.infer_loop, daemon=True)
+        self.infer_loop_thread1.start()
         return
 
     def init_custom(self):
@@ -169,26 +178,7 @@ class ModeBackend:
         try:
             torch.cuda.set_device(get_current_device_id())
             while True:
-                if self.is_master_in_node:
-                    if self.shm_reqs_io_buffer.is_ready():
-                        self.node_broadcast_tensor.fill_(1)
-                    else:
-                        self.node_broadcast_tensor.fill_(0)
-                dist.broadcast(self.node_broadcast_tensor, src=0, group=self.node_nccl_group, async_op=False)
-                new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
-                if new_buffer_is_ready:
-                    cmds: List = self.shm_reqs_io_buffer.read_obj()
-                    self.shm_reqs_io_buffer.sub_state()
-                    if cmds:
-                        if isinstance(cmds[0], AbortedReqCmd):
-                            for obj in cmds:
-                                if obj.req_id in g_infer_context.requests_mapping:
-                                    req: InferReq = g_infer_context.requests_mapping[obj.req_id]
-                                    req.infer_aborted = True
-                        else:
-                            self._init_reqs(reqs=cmds, init_req_obj=False)
-                            self.chunked_prefill_state.need_prefill_count += 1
-
+                self._try_read_new_reqs()
                 self.decode()
 
                 # 没有请求时，休眠。
@@ -210,6 +200,28 @@ class ModeBackend:
             req_ids = [req_id for req_id in req_ids if req_id in g_infer_context.requests_mapping]
 
         g_infer_context.pause_reqs(req_ids)
+        return
+
+    def _try_read_new_reqs(self):
+        if self.is_master_in_node:
+            if self.shm_reqs_io_buffer.is_ready():
+                self.node_broadcast_tensor.fill_(1)
+            else:
+                self.node_broadcast_tensor.fill_(0)
+        dist.broadcast(self.node_broadcast_tensor, src=0, group=self.node_nccl_group, async_op=False)
+        new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+        if new_buffer_is_ready:
+            cmds: List = self.shm_reqs_io_buffer.read_obj()
+            self.shm_reqs_io_buffer.sub_state()
+            if cmds:
+                if isinstance(cmds[0], AbortedReqCmd):
+                    for obj in cmds:
+                        if obj.req_id in g_infer_context.requests_mapping:
+                            req: InferReq = g_infer_context.requests_mapping[obj.req_id]
+                            req.infer_aborted = True
+                else:
+                    self._init_reqs(reqs=cmds, init_req_obj=False)
+                    self.chunked_prefill_state.need_prefill_count += 1
         return
 
     # 一些可以复用的通用功能函数
@@ -292,89 +304,63 @@ class ModeBackend:
         return uinit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs
 
     # 一些可以复用的通用功能函数
-    def _post_handle(
-        self,
-        run_reqs: List[InferReq],
-        next_token_ids,
-        next_token_logprobs,
-        is_chuncked_mode: bool,
-        do_filter_finished_reqs: bool,
-        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
-    ) -> List[int]:
-        """
-        extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
-        约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
-        """
-        finished_req_ids = []
-
-        for req_obj, next_token_id, next_token_logprob in zip(run_reqs, next_token_ids, next_token_logprobs):
+    def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
+        update_func_objs: List[InferReqUpdatePack] = []
+        # 通用状态预先填充
+        is_master_in_dp = self.is_master_in_dp
+        for req_obj in run_reqs:
             req_obj: InferReq = req_obj
-            shm_req = req_obj.shm_req
-            finish_status = req_obj.finish_status
             if is_chuncked_mode:
                 new_kv_len = req_obj.get_chuncked_input_token_len()
             else:
                 new_kv_len = req_obj.get_cur_total_len()
-
             req_obj.cur_kv_len = new_kv_len
-            if self.is_master_in_dp:
-                shm_req.shm_cur_kv_len = req_obj.cur_kv_len
+            if is_master_in_dp:
+                req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
 
             # 对于没有到达需要输出 token 阶段的请求，直接略过, 说明还
             # 处于chuncked prefill kv 填充的阶段。
             if req_obj.cur_kv_len < req_obj.get_cur_total_len():
+                pack = InferReqUpdatePack(req_obj=req_obj, output_len=0)
+                update_func_objs.append(pack)
                 continue
 
             # 将生成的下一个token的信息写入到管理对象中。
-            req_obj.set_next_gen_token_id(next_token_id, next_token_logprob)
             req_obj.cur_output_len += 1
+            pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len)
+            update_func_objs.append(pack)
+        return update_func_objs
 
-            # 这里提前判定的主要作用是：
-            # 在 mtp mode 下，可以存在同一个 req 对象的多次处理，
-            # 在这种情况下， 如果前一步接收的mtp token 已经导致了请求
-            # 达到了finished 状态，后续的请求就不再进行后续的复杂流程
-            # 判断和处理，但是，因为 mtp 多请求还是导致了kv 的使用，所以
-            # 还是需要更新对应的 input_tokens 和 cur_kv_len 信息，否则
-            # 在 filter req 的时候，容易导致kv 管理的泄露和插入radix cache
-            # 的信息不完整等问题。
-            if finish_status.is_finished():
-                finished_req_ids.append(shm_req.request_id)
-                continue
-
-            # 更新判断请求的 finished 状态
-            req_obj.update_finish_status(self.eos_id)
-
-            if extra_post_req_handle_func is not None:
-                extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
-
-            # 判断是否已经满足生成结束条件。
-            if finish_status.is_finished():
-                finished_req_ids.append(shm_req.request_id)
-
-            if self.is_master_in_dp:
-                # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
-                # finish_token_index finish_status candetoken_out_len 是
-                # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
-                shm_req.shm_cur_output_len = req_obj.cur_output_len
-
-                if finish_status.is_finished():
-                    shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                    shm_req.finish_status = req_obj.finish_status
-
-                shm_req.candetoken_out_len = req_obj.cur_output_len
+    # 一些可以复用的通用功能函数
+    def _post_handle(
+        self,
+        run_reqs: List[InferReq],
+        next_token_ids: List[int],
+        next_token_logprobs: List[float],
+        run_reqs_update_packs: List[InferReqUpdatePack],
+        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
+    ):
+        """
+        extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
+        约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
+        """
+        for req_obj, next_token_id, next_token_logprob, pack in zip(
+            run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs
+        ):
+            req_obj: InferReq = req_obj
+            pack: InferReqUpdatePack = pack
+            pack.handle(
+                next_token_id=next_token_id,
+                next_token_logprob=next_token_logprob,
+                eos_ids=self.eos_id,
+                extra_post_req_handle_func=extra_post_req_handle_func,
+                is_master_in_dp=self.is_master_in_dp,
+            )
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
             req_objs=run_reqs, next_token_ids=next_token_ids
         )
-
-        # mtp_mode 模式下，因为存在重复对象，需要进行去重操作。
-        if self.args.mtp_mode is not None:
-            finished_req_ids = list(set(finished_req_ids))
-
-        if do_filter_finished_reqs:
-            g_infer_context.filter(finished_req_ids)
-
-        return finished_req_ids
+        return
 
     # 一些可以复用的通用功能函数
     def _overlap_req_init_and_filter(

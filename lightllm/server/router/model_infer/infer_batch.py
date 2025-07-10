@@ -7,7 +7,7 @@ import numpy as np
 import collections
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Union, Any
+from typing import List, Dict, Tuple, Optional, Callable, Any
 from lightllm.common.req_manager import ReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
@@ -274,6 +274,8 @@ class InferReq:
             self.shm_req.link_prompt_ids_shm_array()
             self.shm_req.link_logprobs_shm_array()
             self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
+            self.cur_kv_len = 0
+            self.cur_output_len = 0
 
             g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
@@ -285,8 +287,7 @@ class InferReq:
                 self.prefix_token_ids = []
             self.multimodal_params = self.multimodal_params.to_dict()
             self.shared_kv_node: TreeNode = None
-            self.cur_kv_len = 0
-            self.cur_output_len = 0
+
             self.finish_status = FinishStatus()
 
         if self.paused or not self.initialized:
@@ -332,10 +333,10 @@ class InferReq:
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
         return chunked_end
 
-    def set_next_gen_token_id(self, next_token_id: int, logprob: float):
-        index = self.get_cur_total_len()
-        self.shm_req.shm_prompt_ids.arr[index] = next_token_id
-        self.shm_req.shm_logprobs.arr[index] = logprob
+    def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
+        index = self.shm_req.input_len + output_len
+        self.shm_req.shm_prompt_ids.arr[index - 1] = next_token_id
+        self.shm_req.shm_logprobs.arr[index - 1] = logprob
         return
 
     def update_mtp_accepted_token_num(self, accept_token_num: int):
@@ -345,31 +346,28 @@ class InferReq:
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]
 
-    def update_finish_status(self, eos_ids):
-        if self._stop_sequences_matched():
+    def update_finish_status(self, eos_ids, output_len: int):
+        if self._stop_sequences_matched(output_len=output_len):
             self.finish_status.set_status(FinishStatus.FINISHED_STOP)
         elif (
-            self.cur_output_len > 0
-            and self.get_last_gen_token() in eos_ids
+            output_len > 0
+            and self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + output_len - 1] in eos_ids
             and self.sampling_param.shm_param.ignore_eos is False
         ):
             self.finish_status.set_status(FinishStatus.FINISHED_STOP)
-        elif self.cur_output_len >= self.sampling_param.shm_param.max_new_tokens:
+        elif output_len >= self.sampling_param.shm_param.max_new_tokens:
             self.finish_status.set_status(FinishStatus.FINISHED_LENGTH)
         return
 
     def is_finished_or_aborted(self):
         return self.finish_status.is_finished() or self.shm_req.router_aborted
 
-    def _stop_sequences_matched(self):
+    def _stop_sequences_matched(self, output_len: int):
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)
-            output_len = self.cur_output_len
             if stop_len > 0:
                 if output_len >= stop_len:
-                    input_token_ids = self.shm_req.shm_prompt_ids.arr[
-                        0 : (self.shm_req.input_len + self.cur_output_len)
-                    ]
+                    input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : (self.shm_req.input_len + output_len)]
                     if all(input_token_ids[i] == stop_token_ids[i] for i in range(-1, -(stop_len + 1), -1)):
                         return True
         return False
@@ -419,3 +417,61 @@ class InferReqGroup:
             input_len = req.get_chuncked_input_token_len()
             req_manager.req_to_token_indexs[req.req_idx][prefix_len:input_len] = cache_token_id
             assert input_len == pre_input_len
+
+
+class InferReqUpdatePack:
+    """
+    用于延迟InferReq的请求更新,主要是为了方便更高效的overlap机制实现。解耦
+    原有post_handle 中，部分不需要确认输出，部分需要确认输出的部分，通过该
+    类绑定相关处理参数，实现解耦和延迟处理。
+    """
+
+    def __init__(self, req_obj: InferReq, output_len: int):
+        self.req_obj = req_obj
+        self.output_len = output_len
+
+    def handle(
+        self,
+        next_token_id: int,
+        next_token_logprob: float,
+        eos_ids: List[int],
+        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
+        is_master_in_dp: bool,
+    ):
+        if self.output_len <= 0:
+            return
+
+        req_obj = self.req_obj
+        shm_req = req_obj.shm_req
+        finish_status = req_obj.finish_status
+        req_obj.set_next_gen_token_id(next_token_id, next_token_logprob, self.output_len)
+
+        # 这里提前判定的主要作用是：
+        # 在 mtp mode 下，可以存在同一个 req 对象的多次处理，
+        # 在这种情况下， 如果前一步接收的mtp token 已经导致了请求
+        # 达到了finished 状态，后续的请求就不再进行后续的复杂流程
+        # 判断和处理，但是，因为 mtp 多请求还是导致了kv 的使用，所以
+        # 还是需要更新对应的 input_tokens 和 cur_kv_len 信息，否则
+        # 在 filter req 的时候，容易导致kv 管理的泄露和插入radix cache
+        # 的信息不完整等问题。
+        if finish_status.is_finished():
+            return
+
+        # 更新判断请求的 finished 状态
+        req_obj.update_finish_status(eos_ids=eos_ids, output_len=self.output_len)
+
+        if extra_post_req_handle_func is not None:
+            extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
+
+        if is_master_in_dp:
+            # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
+            # finish_token_index finish_status candetoken_out_len 是
+            # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
+            shm_req.shm_cur_output_len = self.output_len
+
+            if finish_status.is_finished():
+                shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
+                shm_req.finish_status = req_obj.finish_status
+
+            shm_req.candetoken_out_len = self.output_len
+        return

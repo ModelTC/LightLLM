@@ -106,7 +106,7 @@ class ReqSamplingParamsManager:
             "LIGHTLLM_ENABLE_GPU_BUFFER_FOR_OUT_TOKEN_ID_COUNTER"
         )
         self.vocab_size = get_vocab_size(get_env_start_args().model_dir)
-
+        self.req_to_next_token_id = torch.zeros(max_request_num + 1, dtype=torch.int64, device="cuda")
         self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
@@ -138,6 +138,7 @@ class ReqSamplingParamsManager:
         req: InferReq = req
 
         shm_param = req.sampling_param.shm_param
+        self.req_to_next_token_id[req.req_idx].fill_(req.get_last_gen_token())
         self.req_to_presence_penalty[req.req_idx].fill_(shm_param.presence_penalty)
         self.req_to_frequency_penalty[req.req_idx].fill_(shm_param.frequency_penalty)
         self.req_to_repetition_penalty[req.req_idx].fill_(shm_param.repetition_penalty)
