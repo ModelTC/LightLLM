@@ -18,9 +18,15 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
 
     def init_custom(self):
         super().init_custom()
-        self.handle_prefill_loop_thread = threading.Thread(target=self._handle_prefill_loop, daemon=True)
-        self.wait_transfer_loop_thread = threading.Thread(target=self._wait_transfer_loop, daemon=True)
-        self.handle_transfer_loop_thread = threading.Thread(target=self._handle_transfer_loop, daemon=True)
+        self.handle_prefill_loop_thread = threading.Thread(target=self._start_async_loop,
+                                                           args=(self._handle_prefill_loop,),
+                                                           daemon=True)
+        self.wait_transfer_loop_thread = threading.Thread(target=self._start_async_loop,
+                                                          args=(self._wait_page_transfer_loop,),
+                                                          daemon=True)
+        self.handle_transfer_loop_thread = threading.Thread(target=self._start_async_loop,
+                                                            args=(self._handle_transfer_loop,),
+                                                            daemon=True)
 
         self.handle_prefill_loop_thread.start()
         self.handle_transfer_loop_thread.start()

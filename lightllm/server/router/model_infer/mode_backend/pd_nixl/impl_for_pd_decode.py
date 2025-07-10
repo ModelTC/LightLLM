@@ -2,6 +2,7 @@ import time
 import torch
 import torch.multiprocessing as mp
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from typing import List, Tuple, Dict
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
@@ -11,7 +12,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_pre_process import 
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.multimodal_params import MultimodalParams
 
-from .pd_remote_prefill_obj import RemotePrefillTask, RemotePrefillServerInfo, RemotePrefillRequest
+from .pd_remote_prefill_obj import RemotePrefillTask, RemotePrefillServerInfo, RemotePrefillRequest, RemoteTransferStatusType
 
 from .impl_for_pd_base import PDNIXLBackendBase
 
@@ -24,7 +25,10 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
 
     def init_custom(self):
         super().init_custom()
-        self.wait_prefill_thread = threading.Thread(target=self._prefill_wait_loop, daemon=True)
+        self.wait_prefill_thread = threading.Thread(target=self._start_async_loop,
+                                                    args=(self._prefill_wait_loop_async,),
+                                                    daemon=True)
+        self.wait_move_page_pool = ThreadPoolExecutor(max_workers=4)
         self.wait_prefill_thread.start()
         return
 
@@ -44,8 +48,14 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
             multimodal_params=MultimodalParams.from_dict(req.multimodal_params),
             local_cached_len=req.cur_kv_len,
             token_ids=mem_indexes[b_start_loc[index] : b_start_loc[index + 1]],
+            page_ids=self.page_scheduer.borrow() # get page ids for this request, blocking when not enough pages
         )
         return RemotePrefillTask(server_info=prefill_node_info, prefill_request=prefill_request)
+
+    def _trigger_remote_prefill(self, req_id: int, index: int, kwargs: Dict, req: InferReq):
+        remote_prefill_task = self._build_remote_prefill_task(index, kwargs, req)
+        self.request_to_page_ids[req_id] = remote_prefill_task.prefill_request.page_ids
+        self.to_remote_queue.put(remote_prefill_task)
 
     def prefill(self, reqs: List[Tuple]):
         self._init_reqs(reqs, init_req_obj=False)
@@ -74,9 +84,11 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
                 # since the token index are the same across TPs, we only need to trigger prefill on master
                 if self.is_master_in_dp:
                     run_req.remote_prefill_start = time.time()
-                    self.to_remote_queue.put(self._build_remote_prefill_task(idx, kwargs, run_req))
+                    # since this function may blocking the calling thread, so we do it in a thread pool
+                    self.wait_move_page_pool.submit(self._trigger_remote_prefill,
+                                                    shm_req.group_req_id, idx, kwargs, run_req)
 
-                shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)  # set in progress state
+                shm_req.set_pd_req_rank_state(self.rank_in_dp, RemoteTransferStatusType.IN_PROGRESS.value)  # set in progress state
                 run_req.in_prefill_or_transfer = True
                 self.remote_prefilled_reqs[shm_req.group_req_id] = run_req
 
