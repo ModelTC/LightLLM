@@ -2,6 +2,7 @@ from typing import List, Any
 import zmq
 import inspect
 import random
+import time
 
 import torch.multiprocessing as mp
 
@@ -19,6 +20,8 @@ from .pd_remote_prefill_obj import (
     RemotePrefillServerInfo,
     RemotePrefillTask,
     RemotePrefillStatus,
+    RemoteTransferStatusType,
+    RemoteTransferType,
     SockWithPoller,
 )
 from .nixl_kv_transporter import NixlMetadata
@@ -44,13 +47,16 @@ class PDRemotePrefillBase:
         self.local_agent_meta = None
 
     def local_init(self):
-        agent_metas = NixlMetadata(id=self.id, agent_metadatas=[], num_tokens=[], agent_mem_descs=[])
+        agent_metas = NixlMetadata(id=self.id, agent_metadatas=[], num_tokens=[], num_pages=[],
+                                   agent_mem_descs=[], agent_page_mem_descs=[], )
         for tp in range(self.dist_info.node_world_size):
-            agent_metadata, num_tokens, mem_desc = self.agent_meta_queues[tp].get(timeout=60)
+            agent_metadata, num_tokens, num_pages, mem_desc, page_mem_desc = self.agent_meta_queues[tp].get(timeout=60)
             logger.info(f"Received agent_metadata from {tp} with mem reg: {mem_desc}")
             agent_metas.num_tokens.append(num_tokens)
+            agent_metas.num_pages.append(num_pages)
             agent_metas.agent_metadatas.append(agent_metadata)
             agent_metas.agent_mem_descs.append(mem_desc)
+            agent_metas.agent_page_mem_descs.append(page_mem_desc)
 
         self.local_agent_meta = agent_metas
         logger.info("All local kv cache registered.")
@@ -166,8 +172,10 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
                 type=RemoteRequstType.REMOTE_CONNECT,
                 decode_id=self.id,
                 num_tokens=self.local_agent_meta.num_tokens,
+                num_pages=self.local_agent_meta.num_pages,
                 agent_metadatas=self.local_agent_meta.agent_metadatas,
                 agent_mem_descs=self.local_agent_meta.agent_mem_descs,
+                agent_page_mem_descs=self.local_agent_meta.agent_page_mem_descs,
             )
         )
 
@@ -208,9 +216,9 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
                     for idx in self.to_backend_queues:
                         self.to_backend_queues.put(
                             RemotePrefillStatus(
+                                transfer_type=RemoteTransferType.PAGE_TRANSFER,
                                 group_req_id=prefill_tasks.prefill_request.sampling_params.group_request_id,
-                                status=-1,
-                                chunk_id=-1,
+                                status=RemoteTransferStatusType.FAILED,
                                 is_last=True,
                             )
                         )
@@ -223,7 +231,10 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
         prefill_request.sampling_params.max_new_tokens = 1
         socket.send_pyobj(
             PrefillRequest(
-                type=RemoteRequstType.REMOTE_PREFILL, decode_id=self.id, data=prefill_request, transfer_state=None
+                type=RemoteRequstType.REMOTE_PREFILL,
+                decode_id=self.id,
+                data=prefill_request,
+                transfer_state=None
             )
         )
 

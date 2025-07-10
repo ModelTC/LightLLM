@@ -179,6 +179,10 @@ class TpPartBaseModel:
         # p d 分离的推理模式下才需要做这一步初始化
         if self.run_mode in ["prefill", "decode"]:
             self.mem_manager.alloc_kv_move_buffer(self.mem_manager.size)
+        elif self.run_mode in ["nixl_prefill", "nixl_decode"]:
+            page_num = int(os.getenv("PD_NIXL_MOVE_PAGE_NUM", 32))
+            page_size = int(os.getenv("PD_NIXL_MOVE_PAGE_SIZE", 1024))
+            self.mem_manager.alloc_paged_kv_move_buffer(page_num, page_size)
 
     def _check_mem_size(self):
         self.max_total_token_num = self.mem_manager.size

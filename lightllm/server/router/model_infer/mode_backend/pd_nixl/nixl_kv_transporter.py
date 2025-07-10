@@ -2,6 +2,8 @@ from collections import defaultdict
 from typing import Dict, List, Any
 from torch import Tensor
 from dataclasses import dataclass
+import queue
+import pickle
 import time
 
 from lightllm.utils.log_utils import init_logger
@@ -13,6 +15,11 @@ from .pd_remote_prefill_obj import (
     RemotePrefillStatus,
     ThreadSafeDict,
     KVMoveRequestState,
+    PageTransferAck,
+    RemoteTransferStatusType,
+    RemoteTransferType,
+    NotificationType,
+    Notification,
 )
 
 
@@ -32,8 +39,10 @@ except ImportError:
 class NixlMetadata:
     id: str
     num_tokens: list[int]
+    num_pages: list[int]
     agent_metadatas: list[bytes]
     agent_mem_descs: list[bytes]
+    agent_page_mem_descs: list[bytes]
 
 
 class NixlKVTransporter:
@@ -47,13 +56,19 @@ class NixlKVTransporter:
         self.num_heads = -1
         self.head_dims = -1
         self.token_len = -1
+        self.num_pages = -1
+        self.page_size = -1
+        self.page_len = -1
 
         self.reg_desc = None
         self.local_xfer_handles = None
+        self.page_reg_desc = None
+        self.page_local_xfer_handles = None
 
         self.remote_agents = defaultdict(list)
 
         self.inflight_transfers: ThreadSafeDict = ThreadSafeDict()
+        self.inflight_page_transfers: ThreadSafeDict = ThreadSafeDict()
 
     @property
     def agent_name(self) -> str:
@@ -66,6 +81,10 @@ class NixlKVTransporter:
     @property
     def local_mem_desc(self):
         return self.nixl_agent.get_serialized_descs(self.reg_desc)
+
+    @property
+    def local_page_mem_desc(self):
+        return self.nixl_agent.get_serialized_descs(self.page_reg_desc)
 
     def get_new_notifs(self):
         return self.nixl_agent.get_new_notifs()
@@ -89,23 +108,55 @@ class NixlKVTransporter:
         self.reg_desc = self.nixl_agent.register_memory(kv_buffer)
         self.local_xfer_handles = self._create_xfer_handles(self.reg_desc, self.num_tokens)
 
+    def _create_paged_xfer_handles(self, reg_desc: nixlBind.nixlRegDList, page_num: int, agent_name: str = ""):
+        base_addr, _, device_id, _ = reg_desc[0]
+        pages_data = []
+        for page_id in range(page_num):
+            pages_data.append((base_addr + page_id * self.page_len, self.page_len, device_id))
+        descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM", True)
+        return self.nixl_agent.prep_xfer_dlist(agent_name, descs, is_sorted=True)
+
+    def register_kv_move_buffer(self, kv_move_buffer: Tensor):
+        self.num_pages, self.page_size, _, _, _ = kv_move_buffer.shape
+        self.page_len = self.page_size * self.num_layers * self.token_len
+        self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)
+        self.page_local_xfer_handles = self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages)
+
     def add_remote_agent(self, remote_agent: NixlMetadata):
-        for idx, (agent_metadata, num_tokens, agent_mem_desc) in enumerate(
-            zip(remote_agent.agent_metadatas, remote_agent.num_tokens, remote_agent.agent_mem_descs)
+        for idx, (agent_metadata, num_tokens, num_pages, agent_mem_desc, agent_page_mem_desc) in enumerate(
+            zip(remote_agent.agent_metadatas, remote_agent.num_tokens, remote_agent.num_pages,
+                remote_agent.agent_mem_descs, remote_agent.agent_page_mem_descs)
         ):
             if self.tp_idx != idx:
                 self.remote_agents[remote_agent.id].append(None)
                 continue
 
             peer_name = self.nixl_agent.add_remote_agent(agent_metadata)
+            if isinstance(peer_name, bytes):
+                peer_name = peer_name.decode()
+
+            self.nixl_agent.send_notif(peer_name, Notification(type=NotificationType.REMOTE_MD, data=self.agent_metadata).to_bytes())
+
             mem_desc = self.nixl_agent.deserialize_descs(agent_mem_desc)
-            logger.info("Added remote agent %s with mem desc %s", peer_name, mem_desc)
             kv_xfer_handles = self._create_xfer_handles(mem_desc, num_tokens, agent_name=peer_name)
+
+            page_mem_desc = self.nixl_agent.deserialize_descs(agent_page_mem_desc)
+            kv_page_xfer_handles = self._create_paged_xfer_handles(page_mem_desc, num_pages, agent_name=peer_name)
+
+            logger.info("Added remote agent %s with mem desc %s", peer_name, page_mem_desc)
             self.remote_agents[remote_agent.id].append(
                 RemoteAgent(
-                    name=peer_name, kv_mem_desc=mem_desc, num_tokens=num_tokens, kv_xfer_handles=kv_xfer_handles
+                    name=peer_name,
+                    kv_mem_desc=mem_desc, num_tokens=num_tokens, kv_xfer_handles=kv_xfer_handles,
+                    kv_page_mem_desc=page_mem_desc, num_pages=num_pages, kv_page_xfer_handles=kv_page_xfer_handles
                 )
             )
+
+    def connect_to_remote(self, name: str, remote_md: bytes):
+        target = self.nixl_agent.add_remote_agent(remote_md)
+        if isinstance(target, bytes):
+            target = target.decode()
+        assert name == target, "Target name {} does not match remote name {}".format(target, name)
 
     def _get_token_desc_ids(self, token_ids: List[int], num_tokens: int):
         token_ids_len, idx = len(token_ids), 0
@@ -117,6 +168,7 @@ class NixlKVTransporter:
         return descs_ids
 
     def write_blocks(self, request: KVMoveRequest, prefill_request: PrefillRequest, is_finished: bool):
+        start = time.time()
         group_reqeust_id = request.group_req_id
         skip_kv_move_len = prefill_request.data.local_cached_len
 
@@ -135,7 +187,8 @@ class NixlKVTransporter:
         ]  # TODO one-one mapping now
 
         if len(src_token_ids) > 0:
-            assert len(src_token_ids) == len(dst_token_ids), f"{len(src_token_ids)} {len(dst_token_ids)} {kv_move_start} {kv_move_end} {skip_kv_move_len}, {len(prefill_request.data.token_ids)}"
+            assert len(src_token_ids) == len(dst_token_ids), (f"{len(src_token_ids)} {len(dst_token_ids)} {kv_move_start} "
+                                                              f"{kv_move_end} {skip_kv_move_len}, {len(prefill_request.data.token_ids)}")
             src_token_descs = self._get_token_desc_ids(src_token_ids, self.num_tokens)
             dst_token_descs = self._get_token_desc_ids(dst_token_ids, remote_agent.num_tokens)
 
@@ -152,12 +205,6 @@ class NixlKVTransporter:
             handle = self.nixl_agent.make_prepped_xfer(
                 "WRITE", src_handle, src_token_descs, dst_handle, dst_token_descs, notify_status
             )
-
-            # handle = self.nixl_agent.make_prepped_xfer_by_tokens(
-            #     "WRITE", src_handle, src_token_ids, dst_handle, dst_token_ids,
-            #     self.num_layers, self.num_tokens, remote_agent.num_tokens,
-            #     notify_status
-            # )
 
             status = self.nixl_agent.transfer(handle)
             assert status != "ERR"
@@ -176,13 +223,58 @@ class NixlKVTransporter:
 
         return None
 
-    def send_abort_notify(self, remote_id: int, group_reqeust_id):
+    def write_blocks_paged(self, remote_id: int,
+                           transfer_pages: List[int], receive_pages: List[int],
+                           notifications: List[RemotePrefillStatus]):
         remote_agent: RemoteAgent = self.remote_agents[remote_id][self.tp_idx]
-        notify_status = RemotePrefillStatus(group_req_id=group_reqeust_id, status=-1, chunk_id=-1, is_last=True)
-        self.nixl_agent.send_notif(remote_agent.name, notify_status.serialize())
+        src_handle = self.page_local_xfer_handles
+        dst_handle = remote_agent.kv_page_xfer_handles
+        notify_status = Notification(type=NotificationType.TRANSFER_NOTIFY, data=[n.serialize() for n in notifications])
+        handle = self.nixl_agent.make_prepped_xfer("WRITE", src_handle, transfer_pages, dst_handle, receive_pages, notify_status.to_bytes())
+        status = self.nixl_agent.transfer(handle)
+        assert status != "ERR", f"Transfer failed with status {status} for handle {handle}"
+        self.inflight_page_transfers[handle] = (transfer_pages, receive_pages, notifications, remote_agent)
 
-        if group_reqeust_id in self.inflight_transfers:
-            self.inflight_transfers[group_reqeust_id].abort = True
+    def send_transfer_notify(self, agent_name: str, acks: List[PageTransferAck]):
+        assert len(acks) > 0, "Acks should not be empty"
+        acks_noti = Notification(type=NotificationType.TRANSFER_NOTIFY_ACK, data=[ack.serialize() for ack in acks])
+        self.nixl_agent.send_notif(agent_name, acks_noti.to_bytes())
+
+    def send_abort_notify(self, remote_id: int, group_req_id: int):
+        remote_agent: RemoteAgent = self.remote_agents[remote_id][self.tp_idx]
+        notify_status = RemotePrefillStatus(group_req_id=group_req_id,
+                                            transfer_type=RemoteTransferType.PAGE_TRANSFER,
+                                            status=RemoteTransferStatusType.FAILED,
+                                            is_last=True)
+        self.nixl_agent.send_notif(remote_agent.name,
+                                   Notification(type=NotificationType.TRANSFER_NOTIFY,
+                                                data=[notify_status.serialize()]).to_bytes())
+
+        if group_req_id in self.inflight_transfers:
+            self.inflight_transfers[group_req_id].abort = True
+
+    async def get_done_page_transfers(self):
+        done_pages = []
+        done_requests = []
+        for handle, (transfer_pages, _, notifications, _) in self.inflight_page_transfers.items():
+            xfer_state = self.nixl_agent.check_xfer_state(handle)
+            if xfer_state == "DONE":
+                done_pages.extend(transfer_pages)
+                done_requests.extend([(x.group_req_id, RemoteTransferStatusType.SUCCESS) for x in notifications if x.is_last])
+                self.nixl_agent.release_xfer_handle(handle)
+                del self.inflight_page_transfers[handle]
+
+            elif xfer_state == "PROC":
+                continue
+            else:
+                logger.warning(f"Transfer failed with state {xfer_state} for handle {handle}")
+                done_pages.extend(transfer_pages)
+                done_requests.extend([(x.group_req_id, RemoteTransferStatusType.FAILED) for x in notifications])
+                self.nixl_agent.release_xfer_handle(handle)
+                del self.inflight_page_transfers[handle]
+
+        return done_pages, done_requests
+
 
     def get_done_tranfers(self):
         done_req_ids = []
@@ -239,7 +331,12 @@ class NixlKVTransporter:
     def shutdown(self):
         self.nixl_agent.deregister_memory(self.reg_desc)
         self.nixl_agent.release_dlist_handle(self.local_xfer_handles)
+        self.nixl_agent.release_dlist_handle(self.page_local_xfer_handles)
         for id, agents in self.remote_agents.items():
             for agent in agents:
                 self.nixl_agent.remove_remote_agent(agent.name)
-                self.nixl_agent.release_xfer_handle(agent.kv_xfer_handles)
+                self.nixl_agent.release_dlist_handle(agent.kv_xfer_handles)
+                self.nixl_agent.release_dlist_handle(agent.kv_page_xfer_handles)
+
+        for handle in self.inflight_page_transfers:
+            self.nixl_agent.release_xfer_handle(handle)

@@ -96,6 +96,14 @@ class MemoryManager:
         self.token_dim_size = self.kv_move_buffer.shape[-2] * self.kv_move_buffer.shape[-1]
         return
 
+    def alloc_paged_kv_move_buffer(self, page_num, page_size):
+        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+            raise NotImplementedError("subclass need reimpl this method")
+        self.kv_move_buffer = torch.empty(
+            (page_num, page_size, self.layer_num, 2 * self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
+        )
+        return
+
     def send_to_decode_node(
         self,
         move_tasks: List[KVMoveTask],

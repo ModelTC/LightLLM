@@ -10,7 +10,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.mode_backend.dp_backend.pre_process import padded_prepare_decode_inputs
 
-from .impl_for_pd_decode import PDNIXLBackendForDecodeNode
+from .impl_for_pd_decode import PDNIXLBackendForDecodeNode, RemoteTransferStatusType
 
 logger = init_logger(__name__)
 
@@ -55,9 +55,11 @@ class PDNIXLDPBackendForDecodeNode(PDNIXLBackendForDecodeNode):
                 # since the token index are the same across TPs, we only need to trigger prefill on master
                 if self.is_master_in_dp:
                     run_req.remote_prefill_start = time.time()
-                    self.to_remote_queue.put(self._build_remote_prefill_task(idx, kwargs, run_req))
+                    # since this function may blocking the calling thread, so we do it in a thread pool
+                    self.wait_move_page_pool.submit(self._trigger_remote_prefill,
+                                                    shm_req.group_req_id, idx, kwargs, run_req)
 
-                shm_req.set_pd_req_rank_state(self.rank_in_dp, 0)  # set in progress state
+                shm_req.set_pd_req_rank_state(self.rank_in_dp, RemoteTransferStatusType.IN_PROGRESS.value)  # set in progress state
                 run_req.in_prefill_or_transfer = True
                 self.remote_prefilled_reqs[shm_req.group_req_id] = run_req
 
