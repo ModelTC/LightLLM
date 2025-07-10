@@ -2,9 +2,10 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 import json
 from typing import List, Union, Optional, Any
-from threading import Lock
+from threading import Lock, Condition
 import pickle
 import zmq
+import threading
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.core.objs import SamplingParams
@@ -25,7 +26,6 @@ class RemoteRequstType(Enum):
     REMOTE_CONNECT = 1
     REMOTE_PREFILL = 2
 
-
 @dataclass
 class RemotePrefillRequest:
     prompt: Union[str, List[int]]
@@ -33,13 +33,12 @@ class RemotePrefillRequest:
     multimodal_params: MultimodalParams
     local_cached_len: int  # will skip transfer
     token_ids: List[int]  # mem cache indexes
-
+    page_ids: List[int] # transfer page indexes
 
 @dataclass
 class RemotePrefillTask:
     server_info: RemotePrefillServerInfo
     prefill_request: RemotePrefillRequest
-
 
 @dataclass
 class RemoteRequest:
@@ -50,15 +49,32 @@ class RemoteRequest:
 class ConnectRequest(RemoteRequest):
     decode_id: int
     num_tokens: List[int]
+    num_pages: List[int]
     agent_metadatas: List[bytes]
     agent_mem_descs: List[bytes]
+    agent_page_mem_descs: List[bytes]
 
 
 @dataclass
 class TransferState:
     start_time: float
-    current_kv_len: int
-    current_chunk_id: int
+    lock: threading.Lock
+    free_page_ids: List[int]
+
+    current_kv_len: int = 0
+    current_chunk_id: int = 0
+
+    transfered_kv_len: int = 0
+    transfered_chunk_id: int = 0
+
+    token_index: List[int] = None
+    is_finished: bool = False
+
+    next_token_id: int = None
+    next_token_logprob: float = None
+
+    def completed(self):
+        return self.is_finished and self.transfered_kv_len == self.current_kv_len
 
 
 @dataclass
@@ -72,7 +88,6 @@ class PrefillRequest(RemoteRequest):
 @dataclass
 class KVMoveRequest:
     group_req_id: int
-    token_ids: List[int]
     prev_kv_len: int
     cur_kv_len: int
 
@@ -81,8 +96,11 @@ class KVMoveRequest:
 class RemoteAgent:
     name: str
     num_tokens: int
+    num_pages: int
     kv_mem_desc: nixlBind.nixlRegDList
     kv_xfer_handles: nixl_prepped_dlist_handle
+    kv_page_mem_desc: nixlBind.nixlRegDList
+    kv_page_xfer_handles: nixl_prepped_dlist_handle
 
 
 @dataclass
@@ -94,20 +112,76 @@ class KVMoveRequestState:
     is_last_arrived: bool
 
 
-@dataclass
-class RemotePrefillStatus:
-    group_req_id: int
-    status: int
-    chunk_id: int
-    is_last: bool
+class SerializableBase:
+    def to_dict(self):
+        return asdict(self)
 
     def serialize(self):
-        return json.dumps(asdict(self)).encode()
+        return json.dumps(self.to_dict()).encode()
+
+    @classmethod
+    def from_dict(cls, dict_obj):
+        return cls(**dict_obj)
 
     @classmethod
     def deserialize(cls, data: bytes):
-        return cls(**json.loads(data.decode()))
+        return cls.from_dict(json.loads(data.decode()))
 
+class RemoteTransferType(Enum):
+    TOKEN_TRANSFER = 1
+    PAGE_TRANSFER = 2
+
+class RemoteTransferStatusType(Enum):
+    FAILED = -1
+    IN_PROGRESS = 0
+    SUCCESS = 1
+
+@dataclass
+class RemotePrefillStatus(SerializableBase):
+    transfer_type: RemoteTransferType
+    group_req_id: int
+    status: RemoteTransferStatusType
+    chunk_id: int = -1
+    is_last: bool = False
+    page_id: int = -1
+    kv_start: int = 0
+    kv_len: int = 0
+    next_token_id: int = None
+    next_token_logprob: float = None
+
+    def to_dict(self):
+        dict_obj = asdict(self)
+        dict_obj['transfer_type'] = self.transfer_type.name
+        dict_obj['status'] = self.status.name
+        return dict_obj
+
+    @classmethod
+    def from_dict(cls, dict_obj):
+        dict_obj['transfer_type'] = RemoteTransferType[dict_obj['transfer_type']]
+        dict_obj['status'] = RemoteTransferStatusType[dict_obj['status']]
+        return cls(**dict_obj)
+
+@dataclass
+class PageTransferAck(SerializableBase):
+    group_req_id: int
+    page_id: int
+
+class NotificationType(Enum):
+    REMOTE_MD = 1
+    TRANSFER_NOTIFY = 2
+    TRANSFER_NOTIFY_ACK = 3
+
+@dataclass
+class Notification:
+    type: NotificationType
+    data: Union[bytes, List[bytes]]
+
+    def to_bytes(self):
+        return pickle.dumps(self)
+
+    @classmethod
+    def from_bytes(cls, data):
+        return pickle.loads(data)
 
 class ThreadSafeDict:
     def __init__(self):
@@ -188,3 +262,29 @@ class SockWithPoller:
 
     def connect(self, addr: str):
         return self.sock.connect(addr)
+
+class SafePageIndexScheduler:
+    def __init__(self, num_pages: int):
+        self.num_pages = num_pages
+        self.items = list(range(num_pages))
+        self.lock = Lock()
+        self.cond = Condition(self.lock)
+
+    def borrow(self, num_pages: int = 2) -> List[int]:
+        if num_pages > self.num_pages:
+            raise ValueError(f"Cannot borrow {num_pages} pages, only {self.num_pages} available.")
+
+        with self.cond:
+            while len(self.items) < num_pages:
+                self.cond.wait()
+            ret, self.items = self.items[:num_pages], self.items[num_pages:]
+            return ret
+
+    def return_(self, items: List[int]):
+        with self.cond:
+            self.items.extend(items)
+            self.cond.notify_all()
+
+    def current_size(self) -> int:
+        with self.lock:
+            return len(self.items)
