@@ -24,6 +24,7 @@ from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, ge
 from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
 from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from .chuncked_prefill_state import ChunkedPrefillState
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
@@ -46,6 +47,9 @@ class ModeBackend:
         self.decode_mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None
         # extra_post_req_handle_func 用于添加请求InferReq的状态变化中添加额外的后处理信息，主要是状态机相关的调整等。
         self.extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None
+
+        self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
+        self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
         pass
 
     def init_model(self, kvargs):
@@ -165,8 +169,11 @@ class ModeBackend:
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
         self.init_custom()
-
         self.shm_reqs_io_buffer = ShmReqsIOBuffer()
+
+        # 开启 mtp 模式，需要完成mtp model的初始化
+        if self.args.mtp_mode:
+            self.init_mtp_draft_model(kvargs)
 
         # 启动infer_loop_thread
         self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True)
@@ -189,6 +196,9 @@ class ModeBackend:
 
     def decode(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         raise NotImplementedError()
+
+    def init_mtp_draft_model(self, kvargs: dict):
+        pass
 
     def _try_read_new_reqs(self):
         if self.is_master_in_node:
