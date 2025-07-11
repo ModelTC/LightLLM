@@ -1,12 +1,9 @@
 import threading
-import torch
 import torch.multiprocessing as mp
 from typing import List, Tuple
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.router.model_infer.mode_backend.generic_pre_process import prepare_prefill_inputs
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
 from .impl_for_pd_base import PDNIXLBackendBase
 
 logger = init_logger(__name__)
@@ -49,25 +46,10 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
         assert len(decode_reqs) == 0
 
         self._prefill_abort_remote(aborted_reqs)
-        self._filter_reqs(aborted_reqs + ok_finished_reqs)
+        self._filter_reqs(aborted_reqs)
 
         if prefill_reqs:
-            kwargs, run_reqs = prepare_prefill_inputs(
-                prefill_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
-            )
-
-            logits = self.model.forward(**kwargs)
-            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
-
-            self._post_handle(
-                run_reqs,
-                next_token_ids,
-                next_token_logprobs,
-                is_chuncked_mode=True,
-                do_filter_finished_reqs=False,
-                extra_post_req_handle_chunk_func=self._handle_chunked_transfer,
-            )
+            ContinuesBatchBackend.normal_prefill_reqs(
+                self, prefill_reqs=prefill_reqs, uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs,
+                extra_post_req_handle_func=self._handle_chunked_transfer, call_post_handle_for_chunk=True)
         return
