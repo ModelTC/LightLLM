@@ -62,15 +62,19 @@ class PDNIXLBackendBase(ModeBackend):
         self.page_scheduer = SafePageIndexScheduler(self.nixl_agent.num_pages)
 
         self.nixl_meta_queue.put(
-            (self.nixl_agent.agent_metadata, self.nixl_agent.num_tokens, self.nixl_agent.num_pages,
-             self.nixl_agent.local_mem_desc, self.nixl_agent.local_page_mem_desc)
+            (
+                self.nixl_agent.agent_metadata,
+                self.nixl_agent.num_tokens,
+                self.nixl_agent.num_pages,
+                self.nixl_agent.local_mem_desc,
+                self.nixl_agent.local_page_mem_desc,
+            )
         )
 
     def _start_async_loop(self, async_loop_func):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(async_loop_func())
-
 
     async def _handle_remote_prefill(self, req_status: RemotePrefillStatus):
         group_req_id = req_status.group_req_id
@@ -80,29 +84,36 @@ class PDNIXLBackendBase(ModeBackend):
 
         ret = None
         if run_req := self.remote_prefilled_reqs.get(group_req_id, None):
-            if req_status.transfer_type == RemoteTransferType.PAGE_TRANSFER and status == RemoteTransferStatusType.SUCCESS:
+            if (
+                req_status.transfer_type == RemoteTransferType.PAGE_TRANSFER
+                and status == RemoteTransferStatusType.SUCCESS
+            ):
                 kv_start, kv_len = req_status.kv_start, req_status.kv_len
-                token_ids = g_infer_context.req_manager.req_to_token_indexs[run_req.req_idx][kv_start: kv_start + kv_len] # gpu tensor
-                self.model.mem_manager.kv_buffer[:, token_ids, :, :] = self.model.mem_manager.kv_move_buffer[req_status.page_id][:kv_len].transpose(0, 1)
+                token_ids = g_infer_context.req_manager.req_to_token_indexs[run_req.req_idx][
+                    kv_start : kv_start + kv_len
+                ]  # gpu tensor
+                self.model.mem_manager.kv_buffer[:, token_ids, :, :] = self.model.mem_manager.kv_move_buffer[
+                    req_status.page_id
+                ][:kv_len].transpose(0, 1)
                 ret = PageTransferAck(group_req_id=group_req_id, page_id=req_status.page_id)
 
             if req_status.is_last or status != RemoteTransferStatusType.SUCCESS:
-                    shm_req: PDNIXLChunkedPrefillReq = run_req.shm_req
-                    shm_req.set_pd_req_rank_state(self.rank_in_dp, status.value)
-                    self.remote_prefilled_reqs.pop(group_req_id)
-                    self.request_to_first_token[group_req_id] = (req_status.next_token_id, req_status.next_token_logprob)
+                shm_req: PDNIXLChunkedPrefillReq = run_req.shm_req
+                shm_req.set_pd_req_rank_state(self.rank_in_dp, status.value)
+                self.remote_prefilled_reqs.pop(group_req_id)
+                self.request_to_first_token[group_req_id] = (req_status.next_token_id, req_status.next_token_logprob)
 
-                    if self.is_master_in_dp:
-                        # return page ids
-                        if group_req_id in self.request_to_page_ids:
-                            self.page_scheduer.return_(self.request_to_page_ids[group_req_id])
-                            del self.request_to_page_ids[group_req_id]
+                if self.is_master_in_dp:
+                    # return page ids
+                    if group_req_id in self.request_to_page_ids:
+                        self.page_scheduer.return_(self.request_to_page_ids[group_req_id])
+                        del self.request_to_page_ids[group_req_id]
 
-                        logger.info(
-                            f"remote prefill reqeust: {group_req_id} done with status: {status} "
-                            f"took: {time.time() - run_req.remote_prefill_start} seconds"
-                        )
-                    ret = None
+                    logger.info(
+                        f"remote prefill reqeust: {group_req_id} done with status: {status} "
+                        f"took: {time.time() - run_req.remote_prefill_start} seconds"
+                    )
+                ret = None
 
         else:
             if self.is_master_in_dp:
@@ -112,7 +123,7 @@ class PDNIXLBackendBase(ModeBackend):
 
     async def _prefill_wait_loop_async(self):
         while True:
-             # from local
+            # from local
             try:
                 req_status = self.from_remote_queue.get_nowait()
                 await self._handle_remote_prefill(req_status)
@@ -141,7 +152,7 @@ class PDNIXLBackendBase(ModeBackend):
 
             await asyncio.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
 
-    def _handle_chunked_transfer(self, req: InferReq, next_token_id: int=None, next_token_logprob: float=None):
+    def _handle_chunked_transfer(self, req: InferReq, next_token_id: int = None, next_token_logprob: float = None):
         if next_token_id:
             next_token_id = int(next_token_id)
             next_token_logprob = float(next_token_logprob)
@@ -164,7 +175,7 @@ class PDNIXLBackendBase(ModeBackend):
                 free_page_ids=remote_request.data.page_ids.copy(),
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,
-                lock=threading.Lock()
+                lock=threading.Lock(),
             )
             shm_req.set_pd_req_rank_state(self.rank_in_dp, RemoteTransferStatusType.IN_PROGRESS.value)
             req.in_prefill_or_transfer = True
@@ -178,7 +189,6 @@ class PDNIXLBackendBase(ModeBackend):
                 if next_token_id:
                     transfer_state.next_token_id = next_token_id
                     transfer_state.next_token_logprob = next_token_logprob
-
 
     async def _transfer_kv_to_remote_paged_batch(self, transfer_reqs: List[KVMoveRequest]):
         start = time.time()
@@ -198,26 +208,30 @@ class PDNIXLBackendBase(ModeBackend):
 
                 start_kv_len = transfer_state.transfered_kv_len
                 trans_kv_len = min(trans_req.cur_kv_len - trans_req.prev_kv_len, self.nixl_agent.page_size)
-                trans_kv_index = transfer_state.token_index[start_kv_len: start_kv_len + trans_kv_len]
-                self.model.mem_manager.kv_move_buffer[page_index][:trans_kv_len] = self.model.mem_manager.kv_buffer[:,trans_kv_index, :, : ].transpose(0, 1)
+                trans_kv_index = transfer_state.token_index[start_kv_len : start_kv_len + trans_kv_len]
+                self.model.mem_manager.kv_move_buffer[page_index][:trans_kv_len] = self.model.mem_manager.kv_buffer[
+                    :, trans_kv_index, :, :
+                ].transpose(0, 1)
 
                 receive_page = transfer_state.free_page_ids.pop(0)
                 requests_by_agents[decode_id][0].append(page_index)
                 requests_by_agents[decode_id][1].append(receive_page)
-                is_last = (transfer_state.is_finished and start_kv_len + trans_kv_len == transfer_state.current_kv_len)
+                is_last = transfer_state.is_finished and start_kv_len + trans_kv_len == transfer_state.current_kv_len
 
-                requests_by_agents[decode_id][2].append(RemotePrefillStatus(
-                    transfer_type=RemoteTransferType.PAGE_TRANSFER,
-                    group_req_id=group_req_id,
-                    status=RemoteTransferStatusType.SUCCESS,
-                    chunk_id=transfer_state.current_chunk_id,
-                    is_last=is_last,
-                    page_id=receive_page,
-                    kv_start=start_kv_len,
-                    kv_len=trans_kv_len,
-                    next_token_id=transfer_state.next_token_id,
-                    next_token_logprob=transfer_state.next_token_logprob
-                ))
+                requests_by_agents[decode_id][2].append(
+                    RemotePrefillStatus(
+                        transfer_type=RemoteTransferType.PAGE_TRANSFER,
+                        group_req_id=group_req_id,
+                        status=RemoteTransferStatusType.SUCCESS,
+                        chunk_id=transfer_state.current_chunk_id,
+                        is_last=is_last,
+                        page_id=receive_page,
+                        kv_start=start_kv_len,
+                        kv_len=trans_kv_len,
+                        next_token_id=transfer_state.next_token_id,
+                        next_token_logprob=transfer_state.next_token_logprob,
+                    )
+                )
                 transfer_state.transfered_kv_len += trans_kv_len
 
         # wait copy done
@@ -227,11 +241,7 @@ class PDNIXLBackendBase(ModeBackend):
             # transfer
             self.nixl_agent.write_blocks_paged(decode_id, transfer_pages, receive_pages, notifications)
 
-
-        logger.info(
-            f"transfer kv to remote paged batch: {len(transfer_reqs)} "
-            f"took: {time.time() - start} seconds"
-        )
+        logger.info(f"transfer kv to remote paged batch: {len(transfer_reqs)} " f"took: {time.time() - start} seconds")
 
     async def _handle_transfer_loop(self):
         while True:
@@ -312,7 +322,6 @@ class PDNIXLBackendBase(ModeBackend):
 
             await asyncio.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
 
-
     async def _wait_transfer_loop(self):
         while True:
             done_req_ids = self.nixl_agent.get_done_tranfers()
@@ -375,7 +384,7 @@ class PDNIXLBackendBase(ModeBackend):
 
         kv_transfer_req = KVMoveRequest(
             group_req_id=group_req_id,
-            token_ids=token_index[: cur_kv_len].tolist(),
+            token_ids=token_index[:cur_kv_len].tolist(),
             prev_kv_len=transfer_state.current_kv_len,
             cur_kv_len=cur_kv_len,
         )
@@ -403,11 +412,11 @@ class PDNIXLBackendBase(ModeBackend):
         if self.is_master_in_dp:
             req.shm_req.shm_cur_kv_len = req.cur_kv_len
 
+        group_req_id = req.shm_req.group_req_id
         if not success:
             self.request_to_first_token.pop(group_req_id, None)
             return
 
-        group_req_id = req.shm_req.group_req_id
         assert group_req_id in self.request_to_first_token
         token_id, token_logprob = self.request_to_first_token.pop(group_req_id)
 
@@ -520,14 +529,13 @@ class PDNIXLBackendBase(ModeBackend):
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
         mem_indexes = g_infer_context.req_manager.mem_manager.alloc(input_ids.shape[0])
 
-
         req_to_token_indexs = g_infer_context.req_manager.req_to_token_indexs
         for idx, req_idx in enumerate(nopad_b_req_idx):
             cur_kv_len = req_objs[idx].cur_kv_len
             seq_len = nopad_b_seq_len[idx]
             mem_start = nopad_b_start_loc[idx]
-            mem_end = nopad_b_start_loc[idx+1]
-            req_to_token_indexs[req_idx, cur_kv_len:nopad_b_seq_len[idx]] = mem_indexes[mem_start:mem_end]
+            mem_end = nopad_b_start_loc[idx + 1]
+            req_to_token_indexs[req_idx, cur_kv_len : nopad_b_seq_len[idx]] = mem_indexes[mem_start:mem_end]
 
         kwargs = {
             "batch_size": len(run_reqs),
