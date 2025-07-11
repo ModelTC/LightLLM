@@ -46,7 +46,7 @@ class ContinuesBatchBackend(ModeBackend):
         ok_finished_reqs: List[InferReq],
         mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None,
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
-        call_post_handle_for_chunk: bool = False
+        call_post_handle_for_chunk: bool = False,
     ):
         model_input, run_reqs = prepare_prefill_inputs(
             prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal

@@ -26,6 +26,7 @@ class RemoteRequstType(Enum):
     REMOTE_CONNECT = 1
     REMOTE_PREFILL = 2
 
+
 @dataclass
 class RemotePrefillRequest:
     prompt: Union[str, List[int]]
@@ -33,12 +34,14 @@ class RemotePrefillRequest:
     multimodal_params: MultimodalParams
     local_cached_len: int  # will skip transfer
     token_ids: List[int]  # mem cache indexes
-    page_ids: List[int] # transfer page indexes
+    page_ids: List[int]  # transfer page indexes
+
 
 @dataclass
 class RemotePrefillTask:
     server_info: RemotePrefillServerInfo
     prefill_request: RemotePrefillRequest
+
 
 @dataclass
 class RemoteRequest:
@@ -127,14 +130,17 @@ class SerializableBase:
     def deserialize(cls, data: bytes):
         return cls.from_dict(json.loads(data.decode()))
 
+
 class RemoteTransferType(Enum):
     TOKEN_TRANSFER = 1
     PAGE_TRANSFER = 2
+
 
 class RemoteTransferStatusType(Enum):
     FAILED = -1
     IN_PROGRESS = 0
     SUCCESS = 1
+
 
 @dataclass
 class RemotePrefillStatus(SerializableBase):
@@ -151,25 +157,28 @@ class RemotePrefillStatus(SerializableBase):
 
     def to_dict(self):
         dict_obj = asdict(self)
-        dict_obj['transfer_type'] = self.transfer_type.name
-        dict_obj['status'] = self.status.name
+        dict_obj["transfer_type"] = self.transfer_type.name
+        dict_obj["status"] = self.status.name
         return dict_obj
 
     @classmethod
     def from_dict(cls, dict_obj):
-        dict_obj['transfer_type'] = RemoteTransferType[dict_obj['transfer_type']]
-        dict_obj['status'] = RemoteTransferStatusType[dict_obj['status']]
+        dict_obj["transfer_type"] = RemoteTransferType[dict_obj["transfer_type"]]
+        dict_obj["status"] = RemoteTransferStatusType[dict_obj["status"]]
         return cls(**dict_obj)
+
 
 @dataclass
 class PageTransferAck(SerializableBase):
     group_req_id: int
     page_id: int
 
+
 class NotificationType(Enum):
     REMOTE_MD = 1
     TRANSFER_NOTIFY = 2
     TRANSFER_NOTIFY_ACK = 3
+
 
 @dataclass
 class Notification:
@@ -182,6 +191,7 @@ class Notification:
     @classmethod
     def from_bytes(cls, data):
         return pickle.loads(data)
+
 
 class ThreadSafeDict:
     def __init__(self):
@@ -262,6 +272,7 @@ class SockWithPoller:
 
     def connect(self, addr: str):
         return self.sock.connect(addr)
+
 
 class SafePageIndexScheduler:
     def __init__(self, num_pages: int):

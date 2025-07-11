@@ -53,10 +53,13 @@ class PDNIXLDPBackendForDecodeNode(PDNIXLBackendForDecodeNode):
                 if self.is_master_in_dp:
                     run_req.remote_prefill_start = time.time()
                     # since this function may blocking the calling thread, so we do it in a thread pool
-                    self.wait_move_page_pool.submit(self._trigger_remote_prefill,
-                                                    shm_req.group_req_id, idx, kwargs, run_req)
+                    self.wait_move_page_pool.submit(
+                        self._trigger_remote_prefill, shm_req.group_req_id, idx, kwargs, run_req
+                    )
 
-                shm_req.set_pd_req_rank_state(self.rank_in_dp, RemoteTransferStatusType.IN_PROGRESS.value)  # set in progress state
+                shm_req.set_pd_req_rank_state(
+                    self.rank_in_dp, RemoteTransferStatusType.IN_PROGRESS.value
+                )  # set in progress state
                 run_req.in_prefill_or_transfer = True
                 self.remote_prefilled_reqs[shm_req.group_req_id] = run_req
 
@@ -69,4 +72,3 @@ class PDNIXLDPBackendForDecodeNode(PDNIXLBackendForDecodeNode):
 
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         return
-

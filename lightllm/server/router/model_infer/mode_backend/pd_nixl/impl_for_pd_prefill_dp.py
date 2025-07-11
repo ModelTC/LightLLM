@@ -34,18 +34,28 @@ class PDNIXLDPBackendForPrefillNode(PDNIXLBackendForPrefillNode):
         self._prefill_abort_remote(aborted_reqs)
         self._filter_reqs(aborted_reqs)
 
-          # 进行 chuncked prefill
+        # 进行 chuncked prefill
         dp_prefill_req_nums, max_prefill_num = self._dp_all_gather_prefill_req_num(prefill_reqs=prefill_reqs)
         if self.chunked_prefill_state.dp_need_prefill(prefill_reqs, decode_reqs, dp_prefill_req_nums, max_prefill_num):
             if not self.enable_prefill_microbatch_overlap:
                 DPChunkedPrefillBackend.normal_prefill_reqs(
-                    self, prefill_reqs, max_prefill_num, uinit_reqs, ok_finished_reqs,
-                    extra_post_req_handle_func=self._handle_chunked_transfer, call_post_handle_for_chunk=True
+                    self,
+                    prefill_reqs,
+                    max_prefill_num,
+                    uinit_reqs,
+                    ok_finished_reqs,
+                    extra_post_req_handle_func=self._handle_chunked_transfer,
+                    call_post_handle_for_chunk=True,
                 )
             else:
                 DPChunkedPrefillBackend.overlap_prefill_reqs(
-                    self, prefill_reqs, max_prefill_num, uinit_reqs, ok_finished_reqs,
-                    extra_post_req_handle_func=self._handle_chunked_transfer, call_post_handle_for_chunk=True
+                    self,
+                    prefill_reqs,
+                    max_prefill_num,
+                    uinit_reqs,
+                    ok_finished_reqs,
+                    extra_post_req_handle_func=self._handle_chunked_transfer,
+                    call_post_handle_for_chunk=True,
                 )
 
         self._overlap_req_init_and_filter(uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
