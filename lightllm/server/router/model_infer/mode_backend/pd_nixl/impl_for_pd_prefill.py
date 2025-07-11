@@ -15,15 +15,15 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
 
     def init_custom(self):
         super().init_custom()
-        self.handle_prefill_loop_thread = threading.Thread(target=self._start_async_loop,
-                                                           args=(self._handle_prefill_loop,),
-                                                           daemon=True)
-        self.wait_transfer_loop_thread = threading.Thread(target=self._start_async_loop,
-                                                          args=(self._wait_page_transfer_loop,),
-                                                          daemon=True)
-        self.handle_transfer_loop_thread = threading.Thread(target=self._start_async_loop,
-                                                            args=(self._handle_transfer_loop,),
-                                                            daemon=True)
+        self.handle_prefill_loop_thread = threading.Thread(
+            target=self._start_async_loop, args=(self._handle_prefill_loop,), daemon=True
+        )
+        self.wait_transfer_loop_thread = threading.Thread(
+            target=self._start_async_loop, args=(self._wait_page_transfer_loop,), daemon=True
+        )
+        self.handle_transfer_loop_thread = threading.Thread(
+            target=self._start_async_loop, args=(self._handle_transfer_loop,), daemon=True
+        )
 
         self.handle_prefill_loop_thread.start()
         self.handle_transfer_loop_thread.start()
@@ -50,6 +50,11 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
 
         if prefill_reqs:
             ContinuesBatchBackend.normal_prefill_reqs(
-                self, prefill_reqs=prefill_reqs, uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs,
-                extra_post_req_handle_func=self._handle_chunked_transfer, call_post_handle_for_chunk=True)
+                self,
+                prefill_reqs=prefill_reqs,
+                uninit_reqs=uinit_reqs,
+                ok_finished_reqs=ok_finished_reqs,
+                extra_post_req_handle_func=self._handle_chunked_transfer,
+                call_post_handle_for_chunk=True,
+            )
         return

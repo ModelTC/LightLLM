@@ -47,8 +47,14 @@ class PDRemotePrefillBase:
         self.local_agent_meta = None
 
     def local_init(self):
-        agent_metas = NixlMetadata(id=self.id, agent_metadatas=[], num_tokens=[], num_pages=[],
-                                   agent_mem_descs=[], agent_page_mem_descs=[], )
+        agent_metas = NixlMetadata(
+            id=self.id,
+            agent_metadatas=[],
+            num_tokens=[],
+            num_pages=[],
+            agent_mem_descs=[],
+            agent_page_mem_descs=[],
+        )
         for tp in range(self.dist_info.node_world_size):
             agent_metadata, num_tokens, num_pages, mem_desc, page_mem_desc = self.agent_meta_queues[tp].get(timeout=60)
             logger.info(f"Received agent_metadata from {tp} with mem reg: {mem_desc}")
@@ -231,10 +237,7 @@ class PDRemotePrefillClient(PDRemotePrefillBase):
         prefill_request.sampling_params.max_new_tokens = 1
         socket.send_pyobj(
             PrefillRequest(
-                type=RemoteRequstType.REMOTE_PREFILL,
-                decode_id=self.id,
-                data=prefill_request,
-                transfer_state=None
+                type=RemoteRequstType.REMOTE_PREFILL, decode_id=self.id, data=prefill_request, transfer_state=None
             )
         )
 
