@@ -23,8 +23,6 @@ class ChunkedPrefillBackend(ModeBackend):
         self,
         event_pack: OverlapEventPack,
         prefill_reqs: List[InferReq],
-        uninit_reqs: List[InferReq],
-        ok_finished_reqs: List[InferReq],
         mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None,
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
     ):
@@ -34,8 +32,6 @@ class ChunkedPrefillBackend(ModeBackend):
         )
         model_output = self.model.forward(model_input)
         logits = model_output.logits
-
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
 
         if mask_func is not None:
             mask_func(run_reqs, logits)
@@ -73,16 +69,12 @@ class ChunkedPrefillBackend(ModeBackend):
         self,
         event_pack: OverlapEventPack,
         decode_reqs: List[InferReq],
-        uninit_reqs: List[InferReq],
-        ok_finished_reqs: List[InferReq],
         mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None,
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         model_output = self.model.forward(model_input)
         logits = model_output.logits
-
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
 
         if mask_func is not None:
             mask_func(run_reqs, logits)
@@ -124,46 +116,25 @@ class ChunkedPrefillBackend(ModeBackend):
                 event_pack.wait_to_forward()
 
                 self._try_read_new_reqs()
-                logger.info("wzj sb 111")
-                uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-                    g_infer_context.infer_req_ids
-                )
 
-                if aborted_reqs:
-                    g_infer_context.filter_reqs(aborted_reqs)
-
-                logger.info("wzj sb 222")
-
+                prefill_reqs, decode_reqs = self._get_classed_reqs()
                 if prefill_reqs:
                     self.normal_prefill_reqs(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,
-                        uninit_reqs=uninit_reqs,
-                        ok_finished_reqs=ok_finished_reqs,
                     )
-                    logger.info("wzj sb 333")
                     continue
 
                 if decode_reqs:
                     self.normal_decode(
                         event_pack=event_pack,
                         decode_reqs=decode_reqs,
-                        uninit_reqs=uninit_reqs,
-                        ok_finished_reqs=ok_finished_reqs,
                     )
-                    logger.info("wzj sb 444")
                     continue
 
-                logger.info("wzj sb xxxx")
-                self._overlap_req_init_and_filter(
-                    uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
-                )
                 event_pack.notify_post_handle_and_wait_pre_post_handle()
-                logger.info("wzj sb 7777")
                 event_pack.notify_forward_and_wait_post_handle()
-                logger.info("wzj sb 8888")
                 event_pack.notify_pre_post_handle()
-                logger.info("wzj sb 555")
                 continue
         except BaseException as e:
             self.logger.exception(str(e))

@@ -195,13 +195,6 @@ class ModeBackend:
         """This method can be overridden in subclasses."""
         raise NotImplementedError()
 
-    def pause_reqs(self, req_ids):
-        if self.dp_size_in_node != 1:
-            req_ids = [req_id for req_id in req_ids if req_id in g_infer_context.requests_mapping]
-
-        g_infer_context.pause_reqs(req_ids)
-        return
-
     def _try_read_new_reqs(self):
         if self.is_master_in_node:
             if self.shm_reqs_io_buffer.is_ready():
@@ -220,12 +213,12 @@ class ModeBackend:
                             req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                             req.infer_aborted = True
                 else:
-                    self._init_reqs(reqs=cmds, init_req_obj=False)
+                    self._init_reqs(reqs=cmds)
                     self.chunked_prefill_state.need_prefill_count += 1
         return
 
     # 一些可以复用的通用功能函数
-    def _init_reqs(self, reqs: List[Tuple], init_req_obj=True):
+    def _init_reqs(self, reqs: List[Tuple]):
         """
         init_req_obj 参数用于控制是否对请求对象的进行全量初始化，如果设置为True
         在 g_infer_context.add_reqs 函数中，会进行全量初始化，包括其 kv 信息等，
@@ -238,13 +231,19 @@ class ModeBackend:
             reqs = [req for req in reqs if req[3] == dp_rank_in_node]
 
         g_infer_state_lock.acquire()
-        g_infer_context.add_reqs(reqs, init_req_obj=init_req_obj)
+        g_infer_context.add_reqs(reqs)
         g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
         return req_ids
 
     # 一些可以复用的通用功能函数
-    def _get_classed_reqs(self, req_ids: List[int], no_decode: bool = False, strict_prefill: bool = False):
+    def _get_classed_reqs(
+        self,
+        req_ids: List[int] = None,
+        no_decode: bool = False,
+        strict_prefill: bool = False,
+        recover_paused: bool = False,
+    ):
         """
         当将参数 no_decode 设置为True后，返回的 decode_reqs 永远为空list，主要是
         PD 分离的某些backend需要用这个参数进行控制，因为P节点永远只进行Prefill,
@@ -257,51 +256,88 @@ class ModeBackend:
         使用时，其他模式目前不使用。
 
         将请求分类返回:
-        1. unit reqs 还未完整初始化的请求
-        2. aborted_reqs aborted 的请求
-        3. ok_finished_reqs 正常推理完但是还没有释放的请求
+        1. wait_pause_reqs 因为推理资源不够，等待被暂停的请求。
+        2. paused_reqs 已经被暂停的请求，可能会被恢复。
+        3. finished_reqs 需要释放的请求
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
         """
-        uinit_reqs = []
-        aborted_reqs = []
-        ok_finished_reqs = []
+
+        if req_ids is None:
+            req_ids = g_infer_context.infer_req_ids
+
+        wait_pause_reqs = []
+        paused_reqs = []
+        finished_reqs = []
         prefill_reqs = []
         decode_reqs = []
+
+        # 一次性最多暂停请求的数量, 防止盲目暂停大量请求
+        # 因为部分请求释放占用的token容量后，就会使推理可以正常进行。
+        # 如果因为一次推理容量不足，就以当前token容量的判断暂停了大量
+        # 请求，其逻辑是不适合的。
+        pause_max_req_num = 2
+        wait_pause_count = 0
+
+        # 因为会使用到 radix cache 和 mem_manager 的计数信息
+        # 所以需要加锁保护。
+        g_infer_state_lock.acquire()
+        can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
 
-            if req_obj.is_uninitialized():
-                uinit_reqs.append(req_obj)
+            if req_obj.filter_mark:
+                finished_reqs.append(req_obj)
                 continue
 
-            if req_obj.infer_aborted:
-                aborted_reqs.append(req_obj)
+            if req_obj.wait_pause:
+                wait_pause_reqs.append(req_obj)
                 continue
 
-            if req_obj.finish_status.is_finished():
-                ok_finished_reqs.append(req_obj)
+            if req_obj.paused:
+                paused_reqs.append(req_obj)
+                continue
+
+            if req_obj.infer_aborted or req_obj.finish_status.is_finished():
+                req_obj.filter_mark = True
                 continue
 
             if no_decode:
-                prefill_reqs.append(req_obj)
-                continue
-
-            is_decode = req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
-
-            if not is_decode:
-                prefill_reqs.append(req_obj)
+                is_decode = False
             else:
-                if strict_prefill:
-                    if req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len:
-                        prefill_reqs.append(req_obj)
-                    else:
-                        decode_reqs.append(req_obj)
-                else:
-                    decode_reqs.append(req_obj)
+                is_decode = req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
+                if is_decode and strict_prefill and req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len:
+                    is_decode = False
 
-        return uinit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs
+            if is_decode:
+                token_num = req_obj.decode_need_token_num()
+                if token_num <= can_alloc_token_num:
+                    decode_reqs.append(req_obj)
+                    can_alloc_token_num -= token_num
+                else:
+                    if wait_pause_count < pause_max_req_num:
+                        req_obj.wait_pause = True
+                        wait_pause_count += 1
+            else:
+                token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+                if token_num <= can_alloc_token_num:
+                    prefill_reqs.append(req_obj)
+                    can_alloc_token_num -= token_num
+                else:
+                    if wait_pause_count < pause_max_req_num:
+                        req_obj.wait_pause = True
+                        wait_pause_count += 1
+
+        g_infer_state_lock.release()
+
+        g_infer_context.filter_reqs(finished_reqs=finished_reqs)
+        g_infer_context.pause_reqs(wait_pause_reqs)
+
+        if recover_paused:
+            g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs)
+
+        return prefill_reqs, decode_reqs
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
@@ -385,16 +421,6 @@ class ModeBackend:
                 uninit_reqs.clear()
                 ok_finished_reqs.clear()
 
-        return
-
-    # 一些可以复用的通用功能函数
-    def _post_init_reqs(self, uninit_reqs: List[InferReq]):
-        """
-        如req对象在调用 _init_reqs 函数时， init_req_obj 为 False，则在适当的时机调用
-        _post_init_reqs 重新完成req对象的完整初始化
-        """
-        for req in uninit_reqs:
-            req.init_all()
         return
 
     # 一些可以复用的通用功能函数
