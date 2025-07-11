@@ -27,7 +27,7 @@ from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_
 from lightllm.distributed import dist_group_manager
 from .chuncked_prefill_state import ChunkedPrefillState
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
-from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager
+from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 
 
 class ModeBackend:
@@ -182,24 +182,12 @@ class ModeBackend:
         return self.model.mem_manager.size
 
     def infer_loop(self):
-        try:
-            torch.cuda.set_device(get_current_device_id())
-            while True:
-                self._try_read_new_reqs()
-                self.decode()
+        raise NotImplementedError()
 
-                # 没有请求时，休眠。
-                if len(g_infer_context.requests_mapping) == 0:
-                    time.sleep(0.005)
+    def prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+        raise NotImplementedError()
 
-        except BaseException as e:
-            self.logger.exception(str(e))
-            raise e
-        return
-
-    # @calculate_time(show=True, min_cost_ms=200)
-    def decode(self):
-        """This method can be overridden in subclasses."""
+    def decode(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         raise NotImplementedError()
 
     def _try_read_new_reqs(self):

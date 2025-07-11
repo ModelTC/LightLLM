@@ -19,7 +19,7 @@ class ChunkedPrefillBackend(ModeBackend):
     def __init__(self) -> None:
         super().__init__()
 
-    def normal_prefill_reqs(
+    def prefill(
         self,
         event_pack: OverlapEventPack,
         prefill_reqs: List[InferReq],
@@ -59,7 +59,7 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_pre_post_handle()
         return
 
-    def normal_decode(
+    def decode(
         self,
         event_pack: OverlapEventPack,
         decode_reqs: List[InferReq],
@@ -108,14 +108,14 @@ class ChunkedPrefillBackend(ModeBackend):
 
                 prefill_reqs, decode_reqs = self._get_classed_reqs()
                 if prefill_reqs:
-                    self.normal_prefill_reqs(
+                    self.prefill(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,
                     )
                     continue
 
                 if decode_reqs:
-                    self.normal_decode(
+                    self.decode(
                         event_pack=event_pack,
                         decode_reqs=decode_reqs,
                     )
@@ -127,3 +127,4 @@ class ChunkedPrefillBackend(ModeBackend):
                 continue
         except BaseException as e:
             self.logger.exception(str(e))
+            raise e
