@@ -86,7 +86,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
-        update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
 
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()

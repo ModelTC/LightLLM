@@ -399,31 +399,6 @@ class ModeBackend:
         return
 
     # 一些可以复用的通用功能函数
-    def _overlap_req_init_and_filter(
-        self, uninit_reqs: List[InferReq], ok_finished_reqs: List[InferReq], clear_list=False
-    ):
-        if uninit_reqs or ok_finished_reqs:
-            # 利用推理的时间，延迟折叠下一个请求的初始化和退出操作
-            with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-                if ok_finished_reqs:
-                    g_infer_state_lock.acquire()
-                    g_infer_context.filter_reqs(ok_finished_reqs)
-                    g_infer_state_lock.release()
-
-                if uninit_reqs:
-                    g_infer_state_lock.acquire()
-                    self._post_init_reqs(uninit_reqs)
-                    g_infer_state_lock.release()
-
-            torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
-
-            if clear_list:
-                uninit_reqs.clear()
-                ok_finished_reqs.clear()
-
-        return
-
-    # 一些可以复用的通用功能函数
     def _filter_reqs(self, reqs: List[InferReq]):
         if reqs:
             g_infer_state_lock.acquire()
