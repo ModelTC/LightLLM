@@ -1,15 +1,12 @@
 import time
-import torch
 import torch.multiprocessing as mp
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
 from typing import List, Tuple, Dict
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.core.objs.req import PDNIXLChunkedPrefillReq
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.router.model_infer.mode_backend.generic_pre_process import prepare_decode_inputs
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.multimodal_params import MultimodalParams
 
 from .pd_remote_prefill_obj import RemotePrefillTask, RemotePrefillServerInfo, RemotePrefillRequest, RemoteTransferStatusType
@@ -93,21 +90,8 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
                 self.remote_prefilled_reqs[shm_req.group_req_id] = run_req
 
         if decode_reqs:
-            kwargs, run_reqs = prepare_decode_inputs(decode_reqs)
-            logits = self.model.forward(**kwargs)
-
-            self._overlap_req_init_and_filter(
-                uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
-            )
-
-            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
-            self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=False, do_filter_finished_reqs=False
-            )
+            ContinuesBatchBackend.normal_decode(
+                self, decode_reqs=decode_reqs, uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs)
 
         self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
-
         return
