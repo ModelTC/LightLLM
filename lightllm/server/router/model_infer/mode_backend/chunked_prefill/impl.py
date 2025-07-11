@@ -23,8 +23,6 @@ class ChunkedPrefillBackend(ModeBackend):
         self,
         event_pack: OverlapEventPack,
         prefill_reqs: List[InferReq],
-        mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None,
-        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
     ):
         # 第一阶段
         model_input, run_reqs = prepare_prefill_inputs(
@@ -33,8 +31,8 @@ class ChunkedPrefillBackend(ModeBackend):
         model_output = self.model.forward(model_input)
         logits = model_output.logits
 
-        if mask_func is not None:
-            mask_func(run_reqs, logits)
+        if self.prefill_mask_func is not None:
+            self.prefill_mask_func(run_reqs, logits)
 
         next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
         next_token_logprobs = torch.log(next_token_probs)
@@ -55,12 +53,8 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ids=next_token_ids,
             next_token_logprobs=next_token_logprobs,
             run_reqs_update_packs=update_packs,
-            extra_post_req_handle_func=extra_post_req_handle_func,
+            extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
-        g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
-            req_objs=run_reqs, next_token_ids=next_token_ids
-        )
-
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -69,15 +63,13 @@ class ChunkedPrefillBackend(ModeBackend):
         self,
         event_pack: OverlapEventPack,
         decode_reqs: List[InferReq],
-        mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None,
-        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         model_output = self.model.forward(model_input)
         logits = model_output.logits
 
-        if mask_func is not None:
-            mask_func(run_reqs, logits)
+        if self.decode_mask_func is not None:
+            self.decode_mask_func(run_reqs, logits)
 
         next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
         next_token_logprobs = torch.log(next_token_probs)
@@ -98,10 +90,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ids=next_token_ids,
             next_token_logprobs=next_token_logprobs,
             run_reqs_update_packs=update_packs,
-            extra_post_req_handle_func=extra_post_req_handle_func,
-        )
-        g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
-            req_objs=run_reqs, next_token_ids=next_token_ids
+            extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
         # 第四阶段

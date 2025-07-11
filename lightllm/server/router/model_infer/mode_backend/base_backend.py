@@ -39,6 +39,13 @@ class ModeBackend:
         # chuncked prefill 相关的模式，该状态变量不会生效。
         self.chunked_prefill_state = ChunkedPrefillState()
         self.overlap_event_manager = OverlapEventManager()
+
+        # prefill_mask_func 和 decode_mask_func 用于控制在采样输出前，通过对logics的调整，改变输出的选择空间，
+        # 主要是为约束输出模式进行定制的操作
+        self.prefill_mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None
+        self.decode_mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None
+        # extra_post_req_handle_func 用于添加请求InferReq的状态变化中添加额外的后处理信息，主要是状态机相关的调整等。
+        self.extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None
         pass
 
     def init_model(self, kvargs):

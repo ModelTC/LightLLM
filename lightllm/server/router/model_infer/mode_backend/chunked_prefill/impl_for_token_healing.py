@@ -12,6 +12,9 @@ logger = init_logger(__name__)
 class TokenHealingBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
+        self.prefill_mask_func = self._prefill_mask_callback
+        self.decode_mask_func = self._decode_mask_callback
+        self.extra_post_req_handle_func = self._update_tokenhealing_req_prefix_str
 
     def init_custom(self):
         """
@@ -34,39 +37,6 @@ class TokenHealingBackend(ChunkedPrefillBackend):
             [(token_str, token_id) for token_str, token_id in vob_dict.items()], key=lambda x: x[0]
         )
         self.token_indexes = torch.tensor([e[1] for e in self.sorted_tokens], dtype=torch.int64, device="cuda")
-        return
-
-    def decode(self):
-        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids
-        )
-
-        if aborted_reqs:
-            g_infer_context.filter_reqs(aborted_reqs)
-
-        # 先 decode
-        if decode_reqs:
-            ContinuesBatchBackend.normal_decode(
-                self,
-                decode_reqs=decode_reqs,
-                uninit_reqs=uninit_reqs,
-                ok_finished_reqs=ok_finished_reqs,
-                mask_func=self._decode_mask_callback,
-                extra_post_req_handle_func=self._update_tokenhealing_req_prefix_str,
-            )
-
-        # 再 prefill
-        if self.chunked_prefill_state.need_prefill(prefill_reqs=prefill_reqs, decode_reqs=decode_reqs):
-            ContinuesBatchBackend.normal_prefill_reqs(
-                self,
-                prefill_reqs=prefill_reqs,
-                uninit_reqs=uninit_reqs,
-                ok_finished_reqs=ok_finished_reqs,
-                mask_func=self._prefill_mask_callback,
-                extra_post_req_handle_func=self._update_tokenhealing_req_prefix_str,
-            )
-
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         return
 
     def _decode_mask_callback(self, run_reqs: List[InferReq], logits: torch.Tensor):

@@ -15,6 +15,9 @@ logger = init_logger(__name__)
 class XgrammarBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
+        self.prefill_mask_func = self._prefill_mask_callback
+        self.decode_mask_func = self._decode_mask_callback
+        self.extra_post_req_handle_func = self._update_xgrammer_fsm
 
     def init_custom(self):
         import xgrammar as xgr
@@ -42,41 +45,6 @@ class XgrammarBackend(ChunkedPrefillBackend):
                 raise
 
         self.get_cached_grammar = get_cached_grammar
-        return
-
-    @calculate_time(show=False, min_cost_ms=300)
-    def decode(self):
-
-        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids
-        )
-
-        if aborted_reqs:
-            g_infer_context.filter_reqs(aborted_reqs)
-
-        # 先 decode
-        if decode_reqs:
-            ContinuesBatchBackend.normal_decode(
-                self,
-                decode_reqs=decode_reqs,
-                uninit_reqs=uninit_reqs,
-                ok_finished_reqs=ok_finished_reqs,
-                mask_func=self._decode_mask_callback,
-                extra_post_req_handle_func=self._update_xgrammer_fsm,
-            )
-
-        # 再 prefill
-        if self.chunked_prefill_state.need_prefill(prefill_reqs=prefill_reqs, decode_reqs=decode_reqs):
-            ContinuesBatchBackend.normal_prefill_reqs(
-                self,
-                prefill_reqs=prefill_reqs,
-                uninit_reqs=uninit_reqs,
-                ok_finished_reqs=ok_finished_reqs,
-                mask_func=self._prefill_mask_callback,
-                extra_post_req_handle_func=self._update_xgrammer_fsm,
-            )
-
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         return
 
     def _decode_mask_callback(self, run_reqs: List[InferReq], logits: torch.Tensor):
