@@ -277,6 +277,7 @@ class InferReq:
             g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
             self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
+            self.stop_sequences_str = self.sampling_param.shm_param.stop_sequences.to_string()
             # token healing mode 才被使用的管理对象
             if self.shm_req.prefix_token_ids.size != 0:
                 self.prefix_token_ids = self.shm_req.prefix_token_ids.get_token_ids()
@@ -344,8 +345,8 @@ class InferReq:
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]
 
-    def update_finish_status(self, eos_ids):
-        if self._stop_sequences_matched():
+    def update_finish_status(self, eos_ids, tokenizer=None):
+        if self._stop_sequences_matched() or self._stop_sequences_str_matched(tokenizer):
             self.finish_status.set_status(FinishStatus.FINISHED_STOP)
         elif (
             self.cur_output_len > 0
@@ -371,6 +372,28 @@ class InferReq:
                     ]
                     if all(input_token_ids[i] == stop_token_ids[i] for i in range(-1, -(stop_len + 1), -1)):
                         return True
+        return False
+
+    def _stop_sequences_str_matched(self, tokenizer):
+        if not self.stop_sequences_str or tokenizer is None:
+            return False
+
+        max_stop_str_len = max(len(stop_str) for stop_str in self.stop_sequences_str) if self.stop_sequences_str else 0
+        if max_stop_str_len == 0:
+            return False
+
+        tail_token_len = min(self.cur_output_len, max_stop_str_len + 10)  # +10 for safety
+        if tail_token_len > 0:
+            tail_token_ids = self.shm_req.shm_prompt_ids.arr[
+                (self.shm_req.input_len + self.cur_output_len - tail_token_len) : (
+                    self.shm_req.input_len + self.cur_output_len
+                )
+            ]
+            tail_str = tokenizer.decode(tail_token_ids, skip_special_tokens=False)
+            for stop_str in self.stop_sequences_str:
+                if stop_str in tail_str:
+                    logger.info(f"Found stop sequence in tail: stop_str='{stop_str}', tail_str='{tail_str}'")
+                    return True
         return False
 
 
