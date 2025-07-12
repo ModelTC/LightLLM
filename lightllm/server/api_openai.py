@@ -426,7 +426,9 @@ async def _process_prompts_completion(
             prompt, individual_sampling_params, multimodal_params, request=raw_request
         )
 
-        return await _collect_generation_results(generator, request, prompt_str, prompt_index)
+        return await _collect_generation_results(
+            generator, request, prompt_str, prompt_index, individual_sampling_params
+        )
 
     tasks = [asyncio.create_task(process_single_prompt(prompt, i)) for i, prompt in enumerate(prompts)]
 
@@ -485,7 +487,9 @@ async def _handle_streaming_completion(
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
-async def _collect_generation_results(generator, request: CompletionRequest, prompt: str, prompt_index: int):
+async def _collect_generation_results(
+    generator, request: CompletionRequest, prompt: str, prompt_index: int, sampling_params: SamplingParams
+):
     final_output = []
     count_output_tokens = 0
     finish_reason = None
@@ -516,9 +520,30 @@ async def _collect_generation_results(generator, request: CompletionRequest, pro
             finish_reason = finish_status.get_finish_reason()
             prompt_tokens = metadata["prompt_tokens"]
 
+    # 处理停止序列剔除
+    final_text = "".join(final_output)
+    if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
+        stop_strings = sampling_params.stop_sequences.to_string()
+        valid_stop_strings = [s for s in stop_strings if s]
+        if valid_stop_strings:
+            max_stop_len = len(valid_stop_strings[0])
+            search_len = min(len(final_text), max_stop_len + 20)  # 搜索长度为最长停止序列长度加20
+            tail_text = final_text[-search_len:] if search_len > 0 else final_text
+            tail_start_pos = len(final_text) - search_len
+            earliest_stop_index = len(final_text)
+            for stop_str in valid_stop_strings:
+                stop_index = tail_text.find(stop_str)
+                if stop_index != -1:
+                    actual_stop_index = tail_start_pos + stop_index
+                    if actual_stop_index < earliest_stop_index:
+                        earliest_stop_index = actual_stop_index
+
+            if earliest_stop_index < len(final_text):
+                final_text = final_text[:earliest_stop_index]
+
     return {
         "index": prompt_index,
-        "text": "".join(final_output),
+        "text": final_text,
         "finish_reason": finish_reason,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": count_output_tokens,
