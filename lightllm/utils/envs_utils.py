@@ -69,6 +69,11 @@ def get_lightllm_gunicorn_keep_alive():
 
 
 @lru_cache(maxsize=None)
+def enable_stop_string_match():
+    return os.getenv("ENABLE_STOP_STRING_MATCH", "False").upper() in ["ON", "TRUE", "1"]
+
+
+@lru_cache(maxsize=None)
 def get_lightllm_websocket_max_message_size():
     """
     Get the maximum size of the WebSocket message.

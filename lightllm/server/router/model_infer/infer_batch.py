@@ -319,6 +319,7 @@ class InferReq:
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
+        self.stop_sequences_str = self.sampling_param.shm_param.stop_sequences.to_string()
         # token healing mode 才被使用的管理对象
         if self.shm_req.prefix_token_ids.size != 0:
             self.prefix_token_ids = self.shm_req.prefix_token_ids.get_token_ids()
@@ -379,8 +380,10 @@ class InferReq:
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]
 
-    def update_finish_status(self, eos_ids, output_len: int):
-        if self._stop_sequences_matched(output_len=output_len):
+    def update_finish_status(self, eos_ids, output_len: int, tokenizer=None):
+        if self._stop_sequences_matched(output_len=output_len) or self._stop_sequences_str_matched(
+            tokenizer, output_len
+        ):
             self.finish_status.set_status(FinishStatus.FINISHED_STOP)
         elif (
             output_len > 0
@@ -403,6 +406,26 @@ class InferReq:
                     input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : (self.shm_req.input_len + output_len)]
                     if all(input_token_ids[i] == stop_token_ids[i] for i in range(-1, -(stop_len + 1), -1)):
                         return True
+        return False
+
+    def _stop_sequences_str_matched(self, tokenizer, output_len):
+        if not self.stop_sequences_str or tokenizer is None:
+            return False
+
+        max_stop_str_len = max(len(stop_str) for stop_str in self.stop_sequences_str) if self.stop_sequences_str else 0
+        if max_stop_str_len == 0:
+            return False
+
+        tail_token_len = min(self.shm_req.input_len + output_len, max_stop_str_len + 10)  # +10 for safety
+        if tail_token_len > 0:
+            tail_token_ids = self.shm_req.shm_prompt_ids.arr[
+                (self.shm_req.input_len + output_len - tail_token_len) : (self.shm_req.input_len + output_len)
+            ]
+            tail_str = tokenizer.decode(tail_token_ids, skip_special_tokens=False)
+            for stop_str in self.stop_sequences_str:
+                if stop_str in tail_str:
+                    logger.info(f"Found stop sequence in tail: stop_str='{stop_str}', tail_str='{tail_str}'")
+                    return True
         return False
 
     def prefill_need_token_num(self, is_chuncked_prefill: bool):
@@ -483,6 +506,7 @@ class InferReqUpdatePack:
         eos_ids: List[int],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
         is_master_in_dp: bool,
+        tokenizer=None,
     ):
         if self.output_len <= 0:
             return
@@ -504,7 +528,7 @@ class InferReqUpdatePack:
             return
 
         # 更新判断请求的 finished 状态
-        req_obj.update_finish_status(eos_ids=eos_ids, output_len=self.output_len)
+        req_obj.update_finish_status(eos_ids=eos_ids, output_len=self.output_len, tokenizer=tokenizer)
 
         if extra_post_req_handle_func is not None:
             extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
