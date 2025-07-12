@@ -17,6 +17,7 @@ from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
+from .control_state import ControlState
 
 logger = init_logger(__name__)
 
@@ -24,6 +25,9 @@ logger = init_logger(__name__)
 class ChunkedPrefillBackend(ModeBackend):
     def __init__(self) -> None:
         super().__init__()
+        
+        # 用于控制每一步是执行prefill 和 decode 还是跳过
+        self.control_state_machine = ControlState()
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
@@ -43,25 +47,29 @@ class ChunkedPrefillBackend(ModeBackend):
 
                 self._try_read_new_reqs()
 
-                prefill_reqs, decode_reqs = self._get_classed_reqs()
-                if prefill_reqs:
+                prefill_reqs, decode_reqs = self._get_classed_reqs(recover_paused=self.control_state_machine.try_recover_paused_reqs())
+                
+                run_way = self.control_state_machine.select_run_way(prefill_reqs=prefill_reqs,
+                                                             decode_reqs=decode_reqs)
+                
+                if run_way.is_prefill():
                     self.prefill(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,
                     )
                     continue
-
-                if decode_reqs:
+                elif run_way.is_decode():
                     self.decode(
                         event_pack=event_pack,
                         decode_reqs=decode_reqs,
                     )
                     continue
-
-                event_pack.notify_post_handle_and_wait_pre_post_handle()
-                event_pack.notify_forward_and_wait_post_handle()
-                event_pack.notify_pre_post_handle()
-                continue
+                elif run_way.is_pass():
+                    event_pack.notify_post_handle_and_wait_pre_post_handle()
+                    event_pack.notify_forward_and_wait_post_handle()
+                    event_pack.notify_pre_post_handle()
+                    continue
+                
         except BaseException as e:
             self.logger.exception(str(e))
             raise e
