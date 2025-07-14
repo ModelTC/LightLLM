@@ -57,4 +57,5 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
                 extra_post_req_handle_func=self._handle_chunked_transfer,
                 call_post_handle_for_chunk=True,
             )
+        self._overlap_req_init_and_filter(uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         return
