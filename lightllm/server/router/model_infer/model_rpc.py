@@ -7,26 +7,19 @@ import inspect
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from lightllm.server.router.model_infer.mode_backend import (
-    ContinuesBatchBackend,
-    ReturnPromptLogProbBackend,
     ChunkedPrefillBackend,
-    DiversehBackend,
+    FirstTokenConstraintBackend,
+    OutlinesConstraintBackend,
+    ReturnPromptLogProbBackend,
     RewardModelBackend,
     TokenHealingBackend,
-    OutlinesConstraintBackend,
     XgrammarBackend,
-    FirstTokenConstraintBackend,
     DPChunkedPrefillBackend,
-    ContinuesBatchBackendForDecodeNode,
+    DiversehBackend,
+    DecodeNode,
     DPForDecodeNode,
     ChunckedPrefillForPrefillNode,
     DPChunkedForPrefillNode,
-    ContinuesBatchWithMTPBackend,
-    DPChunkedPrefillWithMTPBackend,
-    DPForMtpDecodeNode,
-    ContinuesBatchBackendForMtpDecodeNode,
-    ChunckedPrefillForMtpPrefillNode,
-    DPChunkedForMtpPrefillNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.core.objs import RpcShmParams, RpcShmResults, ShmSyncStatusArray
@@ -112,7 +105,6 @@ class ModelRpcServer:
         # 填充真正的 rank_id 参数
         kvargs["rank_id"] = self.rank
         self.world_size = kvargs["world_size"]
-        disable_chunked_prefill = self.args.disable_chunked_prefill
         return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
         use_reward_model = self.args.use_reward_model
         diverse_mode = self.args.diverse_mode
@@ -125,35 +117,18 @@ class ModelRpcServer:
         is_prefill_node = self.args.run_mode == "prefill"
         is_decode_node = self.args.run_mode == "decode"
 
-        enable_mtp = self.args.mtp_mode is not None
-
         if is_prefill_node:
-            if enable_mtp:
-                if self.args.dp > 1:
-                    self.backend = DPChunkedForMtpPrefillNode(self.info_queue, self.mem_queue)
-                else:
-                    self.backend = ChunckedPrefillForMtpPrefillNode(self.info_queue, self.mem_queue)
+            if self.args.dp > 1:
+                self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
             else:
-                if self.args.dp > 1:
-                    self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
-                else:
-                    self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
+                self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
         elif is_decode_node:
-            if enable_mtp:
-                if self.args.dp > 1:
-                    self.backend = DPForMtpDecodeNode(self.info_queue, self.mem_queue)
-                else:
-                    self.backend = ContinuesBatchBackendForMtpDecodeNode(self.info_queue, self.mem_queue)
+            if self.args.dp > 1:
+                self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
             else:
-                if self.args.dp > 1:
-                    self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
-                else:
-                    self.backend = ContinuesBatchBackendForDecodeNode(self.info_queue, self.mem_queue)
+                self.backend = DecodeNode(self.info_queue, self.mem_queue)
         elif self.args.dp > 1:
-            if enable_mtp:
-                self.backend = DPChunkedPrefillWithMTPBackend()
-            else:
-                self.backend = DPChunkedPrefillBackend()
+            self.backend = DPChunkedPrefillBackend()
         elif use_reward_model:
             self.backend = RewardModelBackend()
         elif return_all_prompt_logprobs:
@@ -168,16 +143,8 @@ class ModelRpcServer:
             self.backend = XgrammarBackend()
         elif is_first_token_constraint_mode:
             self.backend = FirstTokenConstraintBackend()
-        elif disable_chunked_prefill:
-            if enable_mtp:
-                self.backend = ContinuesBatchWithMTPBackend()
-            else:
-                self.backend = ContinuesBatchBackend()
         else:
-            if enable_mtp:
-                self.backend = ContinuesBatchWithMTPBackend()
-            else:
-                self.backend = ChunkedPrefillBackend()
+            self.backend = ChunkedPrefillBackend()
 
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
