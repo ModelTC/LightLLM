@@ -13,6 +13,7 @@ class DPChunkedForPrefillNode(DPChunkedPrefillBackend):
         super().__init__()
         self.info_queue: mp.Queue = info_queue
         self.mem_queue: mp.Queue = mem_queue
+        self.classed_req_no_decode = True
 
     def init_custom(self):
         ChunckedPrefillForPrefillNode.init_custom(self)

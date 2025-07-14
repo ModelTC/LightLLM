@@ -46,6 +46,10 @@ class ModeBackend:
 
         self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
+
+        # 控制分类的参数变量
+        self.classed_req_no_decode = False
+        self.classed_req_strict_prefill = False
         pass
 
     def init_model(self, kvargs):

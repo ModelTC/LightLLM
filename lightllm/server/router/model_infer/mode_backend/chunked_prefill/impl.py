@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 class ChunkedPrefillBackend(ModeBackend):
     def __init__(self) -> None:
         super().__init__()
-        
+
         # 用于控制每一步是执行prefill 和 decode 还是跳过
         self.control_state_machine = ControlState()
 
@@ -47,11 +47,14 @@ class ChunkedPrefillBackend(ModeBackend):
 
                 self._try_read_new_reqs()
 
-                prefill_reqs, decode_reqs = self._get_classed_reqs(recover_paused=self.control_state_machine.try_recover_paused_reqs())
-                
-                run_way = self.control_state_machine.select_run_way(prefill_reqs=prefill_reqs,
-                                                             decode_reqs=decode_reqs)
-                
+                prefill_reqs, decode_reqs = self._get_classed_reqs(
+                    no_decode=self.classed_req_no_decode,
+                    strict_prefill=self.classed_req_strict_prefill,
+                    recover_paused=self.control_state_machine.try_recover_paused_reqs(),
+                )
+
+                run_way = self.control_state_machine.select_run_way(prefill_reqs=prefill_reqs, decode_reqs=decode_reqs)
+
                 if run_way.is_prefill():
                     self.prefill(
                         event_pack=event_pack,
@@ -69,7 +72,7 @@ class ChunkedPrefillBackend(ModeBackend):
                     event_pack.notify_forward_and_wait_post_handle()
                     event_pack.notify_pre_post_handle()
                     continue
-                
+
         except BaseException as e:
             self.logger.exception(str(e))
             raise e
