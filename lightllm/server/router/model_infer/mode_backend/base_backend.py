@@ -26,7 +26,6 @@ from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in
 from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
-from .chuncked_prefill_state import ChunkedPrefillState
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
@@ -36,10 +35,6 @@ class ModeBackend:
     def __init__(self) -> None:
         self.shm_req_manager = ShmReqManager()
 
-        # 当子类处于chuncked prefill 相关模式时，会使用该管理变量进行一些 chuncked prefill
-        # 的推理控制，具体使用方式可以参考 ChunkedPrefillBackend 类中的使用方式。如果是非
-        # chuncked prefill 相关的模式，该状态变量不会生效。
-        self.chunked_prefill_state = ChunkedPrefillState()
         self.overlap_event_manager = OverlapEventManager()
 
         # prefill_mask_func 和 decode_mask_func 用于控制在采样输出前，通过对logics的调整，改变输出的选择空间，
