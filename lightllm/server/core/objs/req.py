@@ -250,36 +250,6 @@ class Req(ctypes.Structure):
 ADDED_OUTPUT_LEN = 16
 
 
-class NormalReq(Req):
-    _pack_ = 4
-
-    def get_tuple_tokens(self, is_busy, router_max_new_token_len):
-        has_out_len = self.shm_cur_output_len
-        if self.sample_params.ignore_eos:
-            cur_max_new_token_len = self.sample_params.max_new_tokens
-        elif is_busy:
-            cur_max_new_token_len = self.sample_params.max_new_tokens
-        else:
-            # 用当前输出长度的 1.1 倍作为预估输出长度的另一个参考量，用于更新估计的最大输出长度量
-            # 后续会更新为更合理的统计条件概率估计方式 to do
-            cur_max_new_token_len = min(
-                self.sample_params.max_new_tokens, max(int(1.1 * has_out_len), router_max_new_token_len)
-            )
-
-        a_len = max(self.input_len + has_out_len + 1, self.shm_cur_kv_len + 1)
-        b_len = max(0, cur_max_new_token_len - has_out_len - 1) + ADDED_OUTPUT_LEN
-
-        return (a_len, b_len)
-
-    def get_decode_need_tokens(self):
-        # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
-        return self._mtp_step + 1
-
-    def get_first_router_need_tokens(self):
-
-        return self.input_len + self.shm_cur_output_len
-
-
 class ChunkedPrefillReq(Req):
     _pack_ = 4
 
