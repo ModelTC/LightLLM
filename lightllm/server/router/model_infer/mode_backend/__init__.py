@@ -2,6 +2,7 @@ from .continues_batch.impl import ContinuesBatchBackend
 from .continues_batch.impl_for_return_all_prompt_logprobs import ReturnPromptLogProbBackend
 from .continues_batch.impl_for_reward_model import RewardModelBackend
 from .chunked_prefill.impl import ChunkedPrefillBackend
+from .chunked_prefill.impl_for_hiradix_cache import ChunkedPrefillBackendHiCache
 from .diverse_backend.impl import DiversehBackend
 from .chunked_prefill.impl_for_token_healing import TokenHealingBackend
 from .chunked_prefill.impl_for_outlines_constraint_mode import OutlinesConstraintBackend

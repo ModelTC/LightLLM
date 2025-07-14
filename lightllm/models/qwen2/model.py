@@ -41,12 +41,34 @@ class Qwen2TpPartModel(LlamaTpPartModel):
         head_dim_ = self.config["hidden_size"] // self.config["num_attention_heads"]
         head_dim_ = self.config.get("head_dim", head_dim_)
         tp_k_head_num_ = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
+
+        max_radix_token_num = 10000
         self.mem_manager = select_mem_manager_class(self.mode)(
-            self.max_total_token_num,
+            self.max_total_token_num - max_radix_token_num,
             dtype=self.data_type,
             head_num=tp_k_head_num_,
             head_dim=head_dim_,
             layer_num=self.config["num_hidden_layers"],
             mem_fraction=self.mem_fraction,
         )
+
+        if self.enable_hiradix_cache:
+            from lightllm.common.radixmem_buffer import RadixMemoryBuffer, init_shared_data, get_shared_data, MemPropties
+            mem_propties = MemPropties(
+                max_radix_token_num,
+                dtype=self.data_type,
+                head_num=2 * tp_k_head_num_,
+                head_dim=head_dim_,
+                layer_num=self.config["num_hidden_layers"],
+            )
+            init_shared_data(
+                mem_propties=mem_propties
+            )
+            self.radix_mem_buffer = RadixMemoryBuffer(
+                mem_propties,
+                shared_data=get_shared_data(),
+                lock=self.radix_lock
+            )
+            self.mem_propties = mem_propties
+            self.shared_mem_data = get_shared_data()
         return

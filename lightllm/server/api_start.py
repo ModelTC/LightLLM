@@ -174,6 +174,7 @@ def normal_or_p_d_start(args):
         ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size"
 
     # if use_hi_dynamic_prompt_cache, then use_dynamic_prompt_cache must be True
+    hiradix_cache_port_num = 0
     if args.use_hi_dynamic_prompt_cache:
         assert not args.disable_dynamic_prompt_cache, "use_hi_dynamic_prompt_cache must be used with use_dynamic_prompt_cache"
 
@@ -205,8 +206,11 @@ def normal_or_p_d_start(args):
     ports_locker.lock_port()
 
     node_world_size = args.tp // args.nnodes
+
+    if args.use_hi_dynamic_prompt_cache:
+        hiradix_cache_port_num = node_world_size
     can_use_ports = alloc_can_use_network_port(
-        num=7 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=7 + node_world_size + args.visual_dp * args.visual_tp + hiradix_cache_port_num, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -234,6 +238,9 @@ def normal_or_p_d_start(args):
     args.audio_port = audio_port
     args.cache_port = cache_port
     args.metric_port = metric_port
+    if args.use_hi_dynamic_prompt_cache:
+        args.hiradix_cache_ports = can_use_ports[0:node_world_size]
+        can_use_ports = can_use_ports[node_world_size:]
 
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]

@@ -74,6 +74,8 @@ class TpPartBaseModel:
         self.quant_type = kvargs.get("quant_type", "none")
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
+        self.enable_hiradix_cache = kvargs.get("use_hiradix_cache", False)
+        self.radix_lock = kvargs.get("radix_lock", None)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
@@ -162,14 +164,35 @@ class TpPartBaseModel:
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
+        max_radix_token_num = 10000
         self.mem_manager = MemoryManager(
-            self.max_total_token_num,
+            self.max_total_token_num - max_radix_token_num,
             dtype=self.data_type,
             head_num=self.config["num_attention_heads"] // self.tp_world_size_,
             head_dim=self.config["n_embed"] // self.config["num_attention_heads"],
             layer_num=self.config["n_layer"],
             mem_fraction=self.mem_fraction,
         )
+
+        if self.enable_hiradix_cache:
+            from lightllm.common.radixmem_buffer import RadixMemoryBuffer, init_shared_data, get_shared_data, MemPropties
+            mem_propties = MemPropties(
+                max_radix_token_num,
+                dtype=self.data_type,
+                head_num=self.config["num_attention_heads"] // self.tp_world_size_,
+                head_dim=self.config["n_embed"] // self.config["num_attention_heads"],
+                layer_num=self.config["n_layer"]
+            )
+            init_shared_data(
+                mem_propties=mem_propties
+            )
+            self.radix_mem_buffer = RadixMemoryBuffer(
+                mem_propties,
+                shared_data=get_shared_data(),
+                lock=self.radix_lock
+            )
+            self.mem_propties = mem_propties
+            self.shared_mem_data = get_shared_data()
         return
 
     def _init_kv_move_buffer(self):

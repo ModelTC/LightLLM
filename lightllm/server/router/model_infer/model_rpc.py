@@ -10,6 +10,7 @@ from lightllm.server.router.model_infer.mode_backend import (
     ContinuesBatchBackend,
     ReturnPromptLogProbBackend,
     ChunkedPrefillBackend,
+    ChunkedPrefillBackendHiCache,
     DiversehBackend,
     RewardModelBackend,
     TokenHealingBackend,
@@ -49,12 +50,18 @@ class ModelRpcServer:
         rpc_finished_event: multiprocessing.Event,
         info_queue: mp.Queue,
         mem_queue: mp.Queue,
+        radix_mem_queue: mp.Queue = None,
+        radix_info_queue: mp.Queue = None,
+        radix_lock: mp.Lock = None
     ):
         super().__init__()
         self.args: StartArgs = args
         self.node_world_size = node_world_size
         self.info_queue = info_queue
         self.mem_queue = mem_queue
+        self.radix_mem_queue = radix_mem_queue
+        self.radix_info_queue = radix_info_queue
+        self.radix_lock = radix_lock
         self.rpc_event = rpc_event
         self.rpc_finished_event = rpc_finished_event
 
@@ -124,6 +131,12 @@ class ModelRpcServer:
         assert not (is_outlines_constraint_mode and is_xgrammar_constraint_mode), "only one constraint mode can be true"
         is_prefill_node = self.args.run_mode == "prefill"
         is_decode_node = self.args.run_mode == "decode"
+        use_hiradix_cache = self.args.use_hi_dynamic_prompt_cache and not self.args.disable_dynamic_prompt_cache
+        kvargs.update({
+            "use_hiradix_cache": use_hiradix_cache,
+            "radix_info_queue": self.radix_info_queue,
+            "radix_lock": self.radix_lock
+        })
 
         enable_mtp = self.args.mtp_mode is not None
 
@@ -177,7 +190,10 @@ class ModelRpcServer:
             if enable_mtp:
                 self.backend = ContinuesBatchWithMTPBackend()
             else:
-                self.backend = ChunkedPrefillBackend()
+                if use_hiradix_cache:
+                    self.backend = ChunkedPrefillBackendHiCache(self.radix_mem_queue)
+                else:
+                    self.backend = ChunkedPrefillBackend()
 
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
@@ -287,6 +303,9 @@ def _init_env(
     rpc_event: mp.Event,
     rpc_finished_event: mp.Event,
     success_event: mp.Event,
+    radix_mem_queue: mp.Queue = None,
+    radix_info_queue: mp.Queue = None,
+    radix_lock: mp.Lock = None
 ):
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -300,7 +319,8 @@ def _init_env(
     g_router_lock.obj = router_lock
 
     model_rpc_server = ModelRpcServer(
-        args, rank, rank_in_node, node_world_size, rpc_event, rpc_finished_event, info_queue, mem_queue
+        args, rank, rank_in_node, node_world_size, rpc_event, rpc_finished_event, info_queue, mem_queue,
+        radix_mem_queue, radix_info_queue, radix_lock
     )
     success_event.set()
 
@@ -318,6 +338,9 @@ async def start_model_process(
     info_queue: mp.Queue,
     mem_queue: mp.Queue,
     router_lock: mp.Queue,
+    radix_mem_queue: mp.Queue = None,
+    radix_info_queue: mp.Queue = None,
+    radix_lock: mp.Lock = None
 ):
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -335,6 +358,9 @@ async def start_model_process(
             rpc_event,
             rpc_finished_event,
             success_event,
+            radix_mem_queue,
+            radix_info_queue,
+            radix_lock
         ),
     )
     proc.start()

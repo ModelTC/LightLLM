@@ -102,15 +102,35 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         added_mtp_layer_num = 0
         if get_env_start_args().mtp_mode == "deepseekv3":
             added_mtp_layer_num += get_env_start_args().mtp_step
-
+        
+        max_radix_token_num = 300000
         self.mem_manager = manager_class(
-            self.max_total_token_num,
+            self.max_total_token_num - max_radix_token_num,
             dtype=self.data_type,
             head_num=1,
             head_dim=self.config["kv_lora_rank"] + self.config["qk_rope_head_dim"],
             layer_num=self.config["num_hidden_layers"] + added_mtp_layer_num,
             mem_fraction=self.mem_fraction,
         )
+        if self.enable_hiradix_cache:
+            from lightllm.common.radixmem_buffer import RadixMemoryBuffer, init_shared_data, get_shared_data, MemPropties
+            mem_propties = MemPropties(
+                max_radix_token_num,
+                dtype=self.data_type,
+                head_num=1,
+                head_dim=self.config["kv_lora_rank"] + self.config["qk_rope_head_dim"],
+                layer_num=self.config["num_hidden_layers"] + added_mtp_layer_num,
+            )
+            init_shared_data(
+                mem_propties=mem_propties
+            )
+            self.radix_mem_buffer = RadixMemoryBuffer(
+                mem_propties,
+                shared_data=get_shared_data(),
+                lock=self.radix_lock
+            )
+            self.mem_propties = mem_propties
+            self.shared_mem_data = get_shared_data()
         return
 
     def _init_weights(self):

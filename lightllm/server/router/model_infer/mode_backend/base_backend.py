@@ -59,6 +59,8 @@ class ModeBackend:
         self.use_hi_dynamic_prompt_cache = self.args.use_hi_dynamic_prompt_cache
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
         self.disable_cudagraph = self.args.disable_cudagraph
+        self.use_hiradix_cache = kvargs.get("use_hiradix_cache", False)
+        self.radix_lock = kvargs.get("radix_lock", None)
 
         self.logger = init_logger(__name__)
 
@@ -116,6 +118,8 @@ class ModeBackend:
             "quant_type": kvargs.get("quant_type", None),
             "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
+            "use_hiradix_cache": self.use_hiradix_cache,
+            "radix_lock": self.radix_lock
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
@@ -126,14 +130,15 @@ class ModeBackend:
                 self.model.mem_manager.size,
                 self.rank_in_node,
                 mem_manager=self.model.mem_manager,
-                max_seq_length=kvargs.get("max_seq_length", 1024 * 5),
+                mem_buffer=self.model.radix_mem_buffer,
+                radix_info_queue=kvargs.get("radix_info_queue", None)
             )
-            if self.use_dynamic_prompt_cache and self.use_hi_dynamic_prompt_cache
+            if self.use_hiradix_cache
             else RadixCache(
                 get_unique_server_name(),
                 self.model.mem_manager.size,
                 self.rank_in_node,
-                mem_manager=self.model.mem_manager,
+                mem_manager=self.model.mem_manager
             )
             if self.use_dynamic_prompt_cache
             else None
@@ -149,6 +154,7 @@ class ModeBackend:
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
+            backend=self
         )
 
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
@@ -161,6 +167,12 @@ class ModeBackend:
 
         self.init_custom()
         return
+    
+    def is_radix_ready(self, req):
+        dp_rank_list = range(self.dp_rank_in_node * self.dp_world_size, (self.dp_rank_in_node + 1) * self.dp_world_size)
+        if req.radix_status.is_no_need_cache(self.rank_in_node) or req.radix_status.is_read_ready(self.rank_in_node) :
+            return True
+        return False
 
     def init_custom(self):
         pass

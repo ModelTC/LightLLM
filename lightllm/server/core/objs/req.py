@@ -54,6 +54,96 @@ class PrefixTokenIdsStruct(ctypes.Structure):
     def get_token_ids(self):
         return list(self.data[: self.size])
 
+# class RadixStatus(ctypes.Structure):
+#     _pack_ = 4
+#     _fields_ = [("status", ctypes.c_int * 32)]
+
+#     NOCACHE = -2
+#     NOT_READY = -1
+#     READ_READY = 1
+#     WRITE_READY = 2
+
+#     def __init__(self, init_state=NOT_READY):
+#         self.status = init_state
+
+#     def set_status(self, new_status: int):
+#         assert new_status in (self.NOCACHE, self.NOT_READY, self.READ_READY, self.WRITE_READY)
+#         self.status = new_status
+
+#     def get_status(self) -> int:
+#         return self.status
+
+#     def no_need_cache(self) -> bool:
+#         return self.status == self.NOCACHE
+
+#     def is_read_ready(self) -> bool:
+#         return self.status == self.READ_READY
+
+#     def is_write_ready(self) -> bool:
+#         return self.status == self.WRITE_READY
+
+#     def is_not_ready(self) -> bool:
+#         return self.status == self.NOT_READY
+class RadixStatus(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [("status", ctypes.c_int * 32)]
+
+    NOCACHE = -2
+    NOT_READY = -1
+    READ_READY = 1
+    WRITE_READY = 2
+
+    def __init__(self, init_state=NOT_READY):
+        for i in range(32):
+            self.status[i] = init_state
+
+    def set_status(self, idx: int, new_status: int):
+        assert 0 <= idx < 32, f"Index out of range: {idx}"
+        assert new_status in (self.NOCACHE, self.NOT_READY, self.READ_READY, self.WRITE_READY)
+        self.status[idx] = new_status
+
+    def get_status(self, idx: int) -> int:
+        assert 0 <= idx < 32, f"Index out of range: {idx}"
+        return self.status[idx]
+
+    def is_no_need_cache(self, idx: int) -> bool:
+        return self.get_status(idx) == self.NOCACHE
+
+    def is_read_ready(self, idx: int) -> bool:
+        return self.get_status(idx) == self.READ_READY
+
+    def is_write_ready(self, idx: int) -> bool:
+        return self.get_status(idx) == self.WRITE_READY
+
+    def is_not_ready(self, idx: int) -> bool:
+        return self.get_status(idx) == self.NOT_READY
+
+    # def all_dp_read_ready_or_nocache(self, indexs: List[int]) -> bool:
+    #     for i in indexs:
+    #         if self.status[i] not in (self.READ_READY, self.NOCACHE):
+    #             return False
+    #     return True
+    def all_dp_read_ready_or_nocache(self, indexs: List[int]) -> bool:
+        # return np.all(self.status == self.READ_READY)
+        # for i in indexs:
+        #     if self.status[i] not in (self.READ_READY, self.NOCACHE):
+        #         return False
+        # return True
+        return np.all(np.array(self.status[indexs]) == self.READ_READY) or np.all(np.array(self.status[indexs]) == self.NOCACHE)
+
+    # def all_read_ready_or_nocache(self) -> bool:
+    #     for i in range(32):
+    #         if self.status[i] not in (self.READ_READY, self.NOCACHE):
+    #             return False
+    #     return True
+    def all_read_ready_or_nocache(self) -> bool:
+        return np.all(np.array(self.status) == self.READ_READY) or np.all(np.array(self.status) == self.NOCACHE)
+
+    # def all_read_ready(self) -> bool:
+    #     return np.all(self.status == self.READ_READY)
+
+    # def all_no_need_cache(self) -> bool:
+    #     return np.all(self.status == self.NOCACHE)
 
 class Req(ctypes.Structure):
     _pack_ = 4
@@ -98,6 +188,8 @@ class Req(ctypes.Structure):
         ("mtp_accepted_token_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
+        # 用于标记当前请求的radix状态
+        ("radix_status", RadixStatus),
     ]
 
     def get_str(self):
@@ -151,6 +243,7 @@ class Req(ctypes.Structure):
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
         self.mtp_accepted_token_num = 0
         self._mtp_step = get_env_start_args().mtp_step
+        self.radix_status = RadixStatus(RadixStatus.NOT_READY)
 
         self.post_init()
 

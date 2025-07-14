@@ -33,9 +33,10 @@ class InferenceContext:
     vocab_size = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
+    backend = None
 
     def register(
-        self, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int
+        self, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int, backend
     ):
         self.req_manager = req_manager
         self.radix_cache = radix_cache
@@ -46,6 +47,7 @@ class InferenceContext:
         self.infer_req_ids = []
 
         self.vocab_size = vocab_size
+        self.backend = backend
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:
@@ -95,7 +97,13 @@ class InferenceContext:
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
 
             if is_group_finished:
-                prefix_len = self.radix_cache.insert(key, value)
+                if hasattr(self.radix_cache, "is_hi_radix_cache") and getattr(self.radix_cache, "is_hi_radix_cache"):
+                    prefix_len = self.radix_cache.insert(
+                        key, value,
+                        req=req.shm_req
+                    )
+                else:
+                    prefix_len = self.radix_cache.insert(key, value)
                 old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
                 free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
                 if req.shared_kv_node is not None:
@@ -267,10 +275,12 @@ class InferReq:
         # 当开启后，mtp_gen_token_ids 保存多生成的多余的token_id,但是在后面的
         # 步骤中需要重新进行校验。
         self.mtp_gen_token_ids: List[int] = []
+        self.shm_req = None
 
     def init_all(self):
         if self.initialized is False:
-            self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
+            if self.shm_req is None:
+                self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
             self.shm_req.link_prompt_ids_shm_array()
             self.shm_req.link_logprobs_shm_array()
             self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
@@ -295,7 +305,10 @@ class InferReq:
                 input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
                 key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
                 key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-                share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+                if hasattr(g_infer_context.radix_cache, "is_hi_radix_cache") and getattr(g_infer_context.radix_cache, "is_hi_radix_cache"):
+                    share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(self.shm_req, key, update_refs=True)
+                else:
+                    share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
                 if share_node is not None:
                     self.shared_kv_node = share_node
                     ready_cache_len = share_node.node_prefix_total_len
@@ -312,6 +325,11 @@ class InferReq:
 
     def is_uninitialized(self):
         return not self.initialized or self.paused
+
+    def is_radix_ready(self):
+        if self.shm_req is None:
+            self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
+        return g_infer_context.backend.is_radix_ready(self.shm_req)
 
     def get_output_len(self):
         return self.cur_output_len

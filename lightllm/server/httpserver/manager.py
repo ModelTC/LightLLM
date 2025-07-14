@@ -51,7 +51,10 @@ class HttpServerManager:
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
-
+        if self.args.use_hi_dynamic_prompt_cache:
+            context_hiradix = zmq.asyncio.Context()
+            self.send_to_hiradix = context_hiradix.socket(zmq.PUSH)
+            self.send_to_hiradix.bind(f"{args.zmq_mode}127.0.0.1:55555")
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
         self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 1)
@@ -476,10 +479,17 @@ class HttpServerManager:
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
             else:
-                self.send_to_router.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
+                if self.args.use_hi_dynamic_prompt_cache:
+                    logger.info(f"send_to_hiradix {group_req_objs.to_group_req_index()}")
+                    self.send_to_hiradix.send_pyobj(
+                            group_req_objs.to_group_req_index(),
+                            protocol=pickle.HIGHEST_PROTOCOL
+                    )
+                else:
+                    self.send_to_router.send_pyobj(
+                        group_req_objs.to_group_req_index(),
+                        protocol=pickle.HIGHEST_PROTOCOL,
+                    )
             return
 
         assert False, "dead code path"
