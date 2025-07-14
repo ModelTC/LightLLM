@@ -19,9 +19,11 @@ class DPChunkedForPrefillNode(DPChunkedPrefillBackend):
         return
 
     def _pre_handle_finished_reqs(self, finished_reqs):
-        self._prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(run_reqs=finished_reqs)
+        self._prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(finished_reqs=finished_reqs)
         return
 
-    def _prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, run_reqs: List[InferReq]):
-        DPChunkedForPrefillNode._prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, run_reqs=run_reqs)
+    def _prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, finished_reqs: List[InferReq]):
+        ChunckedPrefillForPrefillNode._prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(
+            self, finished_reqs=finished_reqs
+        )
         return

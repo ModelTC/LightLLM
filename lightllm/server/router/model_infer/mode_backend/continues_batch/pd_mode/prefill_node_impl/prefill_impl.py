@@ -49,17 +49,17 @@ class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         return
 
     def _pre_handle_finished_reqs(self, finished_reqs):
-        self._prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(run_reqs=finished_reqs)
+        self._prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(finished_reqs=finished_reqs)
         return
 
-    def _prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, run_reqs: List[InferReq]):
+    def _prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, finished_reqs: List[InferReq]):
         # 提前在radix cache中回收相关的信息，并添加引用进行锁定，方便传输进程传输kv。
         if self.is_master_in_dp:
             logger.info("prefill_req_handle_and_frozen_tokens")
 
         g_infer_state_lock.acquire()
         try:
-            for req in run_reqs:
+            for req in finished_reqs:
 
                 # 区分abort 和 正常结束的请求，正常结束的请求才发起kv传输任务。
                 if not req.finish_status.is_finished():
