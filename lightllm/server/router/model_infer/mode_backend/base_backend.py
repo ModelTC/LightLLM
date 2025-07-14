@@ -523,7 +523,9 @@ class ModeBackend:
             req.mtp_gen_token_ids.append(token_id)
         return
 
-    def _dp_all_gather_prefill_req_num(self, prefill_reqs: List[InferReq]) -> Tuple[np.ndarray, int]:
+    def _dp_all_gather_prefill_and_decode_req_num(
+        self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Gather the number of prefill requests across all DP ranks.
         """
@@ -531,8 +533,13 @@ class ModeBackend:
         self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
         dist.all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
         dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
-        max_prefill_num = np.max(dp_prefill_req_nums)
-        return dp_prefill_req_nums, max_prefill_num
+
+        current_dp_decode_num = len(decode_reqs)
+        self.dp_gather_item_tensor.fill_(current_dp_decode_num)
+        dist.all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
+        dp_decode_req_nums = self.dp_all_gather_tensor.cpu().numpy()
+
+        return dp_prefill_req_nums, dp_decode_req_nums
 
     def _dp_all_reduce_decode_req_num(self, decode_reqs: List[InferReq]) -> int:
         """
