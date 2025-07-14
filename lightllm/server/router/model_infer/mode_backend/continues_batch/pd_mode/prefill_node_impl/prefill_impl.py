@@ -5,22 +5,21 @@ import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from typing import List, Tuple
-from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import KVMoveTask, DecodeNodeInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.infer_lock import g_router_lock, g_infer_state_lock
-from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
 from rpyc.utils.server import ThreadedServer
 from .prefill_task_cache import g_kv_move_task_cache
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
+from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 
 logger = init_logger(__name__)
 
 
-class ChunckedPrefillForPrefillNode(ModeBackend):
+class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
         super().__init__()
         self.info_queue: mp.Queue = info_queue
@@ -49,36 +48,23 @@ class ChunckedPrefillForPrefillNode(ModeBackend):
 
         return
 
-    def decode(self):
-        uinit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids,
-            no_decode=True,
-        )
-        assert len(decode_reqs) == 0
-
-        if aborted_reqs:
-            self._filter_reqs(aborted_reqs)
-
-        if ok_finished_reqs:
-            self.prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(ok_finished_reqs)
-            self._filter_reqs(ok_finished_reqs)
-            ok_finished_reqs.clear()
-
-        if prefill_reqs:
-            ContinuesBatchBackend.normal_prefill_reqs(
-                self, prefill_reqs=prefill_reqs, uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs
-            )
-
-        self._overlap_req_init_and_filter(uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
+    def _pre_handle_finished_reqs(self, finished_reqs):
+        self._prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(run_reqs=finished_reqs)
         return
 
-    def prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, run_reqs: List[InferReq]):
-        # 提前在radix cache中回收相关的信息，并添加引用信息
+    def _prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, run_reqs: List[InferReq]):
+        # 提前在radix cache中回收相关的信息，并添加引用进行锁定，方便传输进程传输kv。
         if self.is_master_in_dp:
             logger.info("prefill_req_handle_and_frozen_tokens")
+
         g_infer_state_lock.acquire()
         try:
             for req in run_reqs:
+
+                # 区分abort 和 正常结束的请求，正常结束的请求才发起kv传输任务。
+                if not req.finish_status.is_finished():
+                    continue
+
                 req: InferReq = req
                 key = req.get_input_token_ids()[0 : req.cur_kv_len]
                 key = torch.tensor(key, dtype=torch.int64, device="cpu")

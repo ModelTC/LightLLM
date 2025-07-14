@@ -296,7 +296,7 @@ class ModeBackend:
         将请求分类返回:
         1. wait_pause_reqs 因为推理资源不够，等待被暂停的请求。
         2. paused_reqs 已经被暂停的请求，可能会被恢复。
-        3. finished_reqs 需要释放的请求
+        3. finished_reqs 需要释放的请求, 包含正常结束和aborted退出的请求。
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
         """
@@ -369,13 +369,21 @@ class ModeBackend:
 
         g_infer_state_lock.release()
 
+        self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
         g_infer_context.filter_reqs(finished_reqs=finished_reqs)
+
         g_infer_context.pause_reqs(wait_pause_reqs)
 
         if recover_paused:
             g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs)
 
         return prefill_reqs, decode_reqs
+
+    def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
+        """
+        给 PD 分离模式下，prefill node 使用的继承钩子函数，用于发起 kv 传输任务。
+        """
+        pass
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
