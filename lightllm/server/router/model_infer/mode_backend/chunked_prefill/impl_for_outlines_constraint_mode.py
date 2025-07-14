@@ -6,7 +6,6 @@ import functools
 from .impl import ChunkedPrefillBackend
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
-from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
 from lightllm.server.tokenizer import get_tokenizer
 from typing import List, Tuple
 from lightllm.utils.log_utils import init_logger
