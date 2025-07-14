@@ -53,7 +53,8 @@ class InferenceContext:
             self.overlap_stream = torch.cuda.Stream()
         return self.overlap_stream
 
-    def add_reqs(self, requests: List[Tuple[int, int, Any, int]]):
+    def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
+        req_objs = []
         request_ids = []
         for r in requests:
             r_id, r_index, multimodal_params, _ = r
@@ -64,12 +65,14 @@ class InferenceContext:
                 shm_index=r_index,
                 multimodal_params=multimodal_params,
                 vocab_size=self.vocab_size,
+                init_prefix_cache=init_prefix_cache,
             )
             self.requests_mapping[r_id] = r_obj
             request_ids.append(r_id)
+            req_objs.append(r_obj)
 
         self.infer_req_ids.extend(request_ids)
-        return
+        return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq", is_group_finished: bool):
         if self.radix_cache is None:
@@ -261,6 +264,7 @@ class InferReq:
         shm_index: int,
         multimodal_params=None,
         vocab_size: int = -1,
+        init_prefix_cache: bool = True,
     ):
         self.req_id = req_id
         self.req_idx = req_idx
@@ -285,7 +289,8 @@ class InferReq:
         self.mtp_gen_token_ids: List[int] = []
 
         self._init_all_state()
-        self._match_radix_cache()
+        if init_prefix_cache:
+            self._match_radix_cache()
         return
 
     def _init_all_state(self):

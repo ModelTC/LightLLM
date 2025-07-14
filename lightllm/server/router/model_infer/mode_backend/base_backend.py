@@ -252,7 +252,6 @@ class ModeBackend:
                             req.infer_aborted = True
                 else:
                     self._init_reqs(reqs=cmds)
-                    self.chunked_prefill_state.need_prefill_count += 1
         return
 
     # 一些可以复用的通用功能函数
