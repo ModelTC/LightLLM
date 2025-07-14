@@ -2,7 +2,7 @@ import os
 import ctypes
 from typing import Tuple
 
-LIGHTLLM_TOKEN_MAX_BYTES = int(os.getenv("LIGHTLLM_TOKEN_MAX_BYTES", 128))
+LIGHTLLM_TOKEN_MAX_BYTES = int(os.getenv("LIGHTLLM_TOKEN_MAX_BYTES", 696))
 LIGHTLLM_OUT_TOKEN_QUEUE_SIZE = int(os.getenv("LIGHTLLM_OUT_TOKEN_QUEUE_SIZE", 8))
 
 
@@ -24,7 +24,9 @@ class QueueItem(ctypes.Structure):
 
     def set(self, token_str: str, src_index: int, special: bool, count_output_tokens: int):
         str_bytes = token_str.encode("utf-8")
-        assert len(str_bytes) <= LIGHTLLM_TOKEN_MAX_BYTES
+        assert (
+            len(str_bytes) <= LIGHTLLM_TOKEN_MAX_BYTES
+        ), f"Token string {len(str_bytes)} exceeds maximum length of {LIGHTLLM_TOKEN_MAX_BYTES} bytes."
         ctypes.memmove(self.data, str_bytes, len(str_bytes))
         self.data_len = len(str_bytes)
         self.src_index = src_index

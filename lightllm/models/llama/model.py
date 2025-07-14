@@ -41,7 +41,7 @@ class LlamaFlashInferStateExtraInfo:
             ),
         ]
         self.q_data_type = model.data_type
-        self.kv_data_type = model.data_type
+        self.kv_data_type = torch.float8_e4m3fn if "offline_calibration_fp8kv" in model.mode else model.data_type
 
 
 @ModelRegistry("llama")

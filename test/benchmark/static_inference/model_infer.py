@@ -41,6 +41,7 @@ def test_model_inference(args):
             "run_mode": "normal",
             "max_seq_length": args.max_req_total_len,
             "disable_cudagraph": args.disable_cudagraph,
+            "mode": args.mode,
         }
         proc = multiprocessing.Process(
             target=tppart_model_infer,
@@ -213,10 +214,12 @@ def torch_profile(fn, log_dir=None):
     ) as prof:
         fn()
     if get_current_rank_in_dp() == 0:
-        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
 
 
-def run_forward_once(model_kvargs, input_len, output_len, batch_size, model_part, enable_overlap, torch_profile=False):
+def run_forward_once(
+    model_kvargs, input_len, output_len, batch_size, model_part, enable_overlap, enable_torch_profile=False
+):
     test_data = np.vstack([np.random.randint(0, 50256, input_len) for _ in range(batch_size)])
     test_data = test_data.reshape(-1)
     test_data = torch.from_numpy(test_data).cuda()
@@ -274,7 +277,7 @@ def run_forward_once(model_kvargs, input_len, output_len, batch_size, model_part
             f"prefill throughput: {dp_size * batch_size * input_len / (time.time() - prefill_start_time)} tokens/s"
         )
 
-    if torch_profile:
+    if enable_torch_profile:
         print("Profile Prefill")
         try:
             torch_profile(
@@ -312,7 +315,7 @@ def run_forward_once(model_kvargs, input_len, output_len, batch_size, model_part
             b_seq_len,
             total_token_num,
         )
-        if torch_profile:
+        if enable_torch_profile and i == output_len - 1:
             try:
                 torch_profile(
                     lambda: decode_fn(
@@ -391,7 +394,7 @@ def tppart_model_infer(args, model_kvargs, batch_size, input_len, output_len, an
             batch_size=b,
             model_part=model_part,
             enable_overlap=enable_overlap,
-            torch_profile=False,
+            enable_torch_profile=False,
         )
 
         # test
@@ -402,7 +405,7 @@ def tppart_model_infer(args, model_kvargs, batch_size, input_len, output_len, an
             batch_size=b,
             model_part=model_part,
             enable_overlap=enable_overlap,
-            torch_profile=False,
+            enable_torch_profile=args.torch_profile,
         )
         if rank_id == 0:
             print("=" * 50)

@@ -23,6 +23,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed.communication_op import CustomProcessGroup, dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
+from lightllm.utils.envs_utils import set_model_init_status
 
 
 logger = init_logger(__name__)
@@ -103,6 +104,7 @@ class TpPartBaseModel:
         self._init_cudagraph()
         self._check_max_len_infer()
         torch.cuda.empty_cache()
+        set_model_init_status(True)
         return
 
     def _init_config(self):
