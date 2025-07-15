@@ -82,7 +82,7 @@ class HttpServerManager:
 
         self.enable_multimodal = enable_multimodal
         if self.enable_multimodal:
-            self.cache_client = rpyc.connect("localhost", cache_port)
+            self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
             self.send_to_visual = context.socket(zmq.PUSH)
             self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
 
@@ -114,33 +114,53 @@ class HttpServerManager:
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
 
-    # connect cache server, calculate md5, alloc resource, return uuid
-    async def _alloc_resource(self, item: Union[ImageItem, AudioItem]):
-        if isinstance(item, ImageItem):
-            data = item.read()
-            # must after init_imageitem_extral_params
-            num_tokens = self.tokenizer.get_image_token_length(item)
-        elif isinstance(item, AudioItem):
-            data = item.read()
-            num_tokens = self.tokenizer.get_audio_token_length(item)
-        else:
-            raise ValueError(f"unexpected item type {type(item)}")
-
-        md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(item.extra_params)))
+    async def _alloc_resource(self, items, md5sums, tokens_nums, datas):
         wait_time = 1
-        while True:
-            record = self.cache_client.root.alloc(md5sum, num_tokens)
-            # hit or new
-            if record:
-                uid = record["id"]
-                if not self.cache_client.root.get_item_data(uid):
-                    create_shm(get_shm_name_data(uid), data)
-                    self.cache_client.root.set_item_data(uid)
-                return record
-            # cache full
-            else:
+        pending_idx = list(range(len(items)))
+        while pending_idx:
+            sub_md5sum = [md5sums[i] for i in pending_idx]
+            sub_tokens_num = [tokens_nums[i] for i in pending_idx]
+
+            records = self.cache_client.root.alloc(sub_md5sum, sub_tokens_num)
+
+            if all(record is None for record in records):
                 await asyncio.sleep(wait_time)
                 wait_time = min(wait_time + 2, 9)
+                continue
+
+            next_pending = []  # record为None，安排在下一轮
+            uids_to_check = []  # record存在，本轮处理
+            uid_to_idx = {}  # uid → 原items下标
+
+            for local_pos, record in enumerate(records):
+                global_pos = pending_idx[local_pos]
+
+                if record is None:
+                    next_pending.append(global_pos)
+                    continue
+
+                uid = record["id"]
+                uid_to_idx[uid] = global_pos
+                uids_to_check.append(uid)
+
+                item = items[global_pos]
+                item.uuid = uid
+                item.token_id = record["token_id"]
+                item.token_num = record["token_num"]
+
+            if uids_to_check:
+                ready_flags = self.cache_client.root.get_items_data(uids_to_check)
+                need_write = []
+
+                for uid, ready in zip(uids_to_check, ready_flags):
+                    if not ready:
+                        idx = uid_to_idx[uid]
+                        create_shm(get_shm_name_data(uid), datas[idx])
+                        need_write.append(uid)
+                if need_write:
+                    self.cache_client.root.set_items_data(need_write)
+            pending_idx = next_pending
+        return
 
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
@@ -149,38 +169,51 @@ class HttpServerManager:
             # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
             # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
             async with self._resource_lock:
+                items, md5sums, tokens_nums, datas = [], [], [], []
                 for img in multimodal_params.images:
                     self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
-                    record = await self._alloc_resource(img)
-                    img.uuid = record["id"]
-                    img.token_id = record["token_id"]
-                    img.token_num = record["token_num"]
+                    data = img.read()
+                    # must after init_imageitem_extral_params
+                    tokens_num = self.tokenizer.get_image_token_length(img)
+                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
+                    md5sums.append(md5sum)
+                    tokens_nums.append(tokens_num)
+                    datas.append(data)
+                    items.append(img)
                 for audio in multimodal_params.audios:
                     self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
-                    record = await self._alloc_resource(audio)
-                    audio.uuid = record["id"]
-                    audio.token_id = record["token_id"]
-                    audio.token_num = record["token_num"]
-            return
+                    data = audio.read()
+                    tokens_num = self.tokenizer.get_audio_token_length(audio)
+                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
+                    md5sums.append(md5sum)
+                    tokens_nums.append(tokens_num)
+                    datas.append(data)
+                    items.append(audio)
+
+                await self._alloc_resource(items, md5sums, tokens_nums, datas)
+        return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             if multimodal_params is not None:
+                ids_to_release = []
                 for img in multimodal_params.images:
                     if img.uuid is not None:
-                        self.cache_client.root.release(img.uuid)
+                        ids_to_release.append(img.uuid)
                         # 将 uuid 等 赋值为 None, 防止因为abort等异常情况造成重复释放异常
                         img.uuid = None
                         img.token_id = None
                         img.token_num = None
                 for audio in multimodal_params.audios:
                     if audio.uuid is not None:
-                        self.cache_client.root.release(audio.uuid)
+                        ids_to_release.append(audio.uuid)
                         # 将 uuid 等 赋值为 None, 防止因为abort等异常情况造成重复释放异常
                         audio.uuid = None
                         audio.token_id = None
                         audio.token_num = None
+                if ids_to_release:
+                    self.cache_client.root.release(ids_to_release)
         return
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):

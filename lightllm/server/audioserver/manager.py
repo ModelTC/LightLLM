@@ -33,7 +33,7 @@ class AudioManager:
 
         self.recv_from_visualserver = context.socket(zmq.PULL)
         self.recv_from_visualserver.bind(f"{args.zmq_mode}127.0.0.1:{audio_port}")
-        self.cache_client = rpyc.connect("localhost", cache_port)
+        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
         self.cache_port = cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
@@ -94,8 +94,11 @@ class AudioManager:
 
                     multimodal_params = group_req_indexes.multimodal_params
 
-                    for audio in multimodal_params.audios:
-                        if not self.cache_client.root.get_item_embed(audio.uuid):
+                    audio_uuids = [audio.uuid for audio in multimodal_params.audios]
+                    ready_audio = self.cache_client.root.get_items_embed(audio_uuids)
+
+                    for audio, ready in zip(multimodal_params.audios, ready_audio):
+                        if not ready:
                             audios_need_infer.append(audio)
 
                         if len(audios_need_infer) == self.infer_batch_size:

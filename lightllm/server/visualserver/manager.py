@@ -35,7 +35,7 @@ class VisualManager:
 
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
-        self.cache_client = rpyc.connect("localhost", cache_port)
+        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
         self.cache_port = cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
@@ -120,8 +120,11 @@ class VisualManager:
 
                     multimodal_params = group_req_indexes.multimodal_params
 
-                    for img in multimodal_params.images:
-                        if not self.cache_client.root.get_item_embed(img.uuid):
+                    img_uuids = [img.uuid for img in multimodal_params.images]
+                    ready_image = self.cache_client.root.get_items_embed(img_uuids)
+
+                    for img, ready in zip(multimodal_params.images, ready_image):
+                        if not ready:
                             images_need_infer.append(img)
 
                         if len(images_need_infer) == self.infer_batch_size:

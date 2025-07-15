@@ -2,7 +2,6 @@ import uuid
 import threading
 import dataclasses
 import requests
-from ..interface import CacheManager, CacheManagerFactory
 from typing import Union
 import torch
 import time
@@ -27,8 +26,7 @@ class Record(object):
     token_num: int
 
 
-@CacheManagerFactory.register("naive")
-class InMemoryCache(CacheManager):
+class InMemoryCache:
     def __init__(self, args) -> None:
         self.args = args
         self._records = dict()
@@ -89,57 +87,58 @@ class InMemoryCache(CacheManager):
                 if deleted >= max_delete:
                     break
 
-    def alloc(self, md5sum: str, token_num: int) -> dict:
+    def alloc(self, md5sum_list: list[str], token_num_list: list[int]) -> list[dict]:
+        results = []
         with self.lock:
-            t = time.time()
-            # add new record
-            if md5sum not in self._md5_to_record:
-
-                # full, need to clear some unused items
-                if self.occupied >= self.capacity:
-                    self._clear()
+            for md5sum, token_num in zip(md5sum_list, token_num_list):
+                t = time.time()
+                if md5sum not in self._md5_to_record:
                     if self.occupied >= self.capacity:
-                        return None
+                        self._clear()
+                        if self.occupied >= self.capacity:
+                            results.append(None)
+                            continue
+                    id = uuid.uuid1()
+                    id = id.int
+                    self._check_and_set_new_id_range(token_num)
+                    record = Record(
+                        id=id,
+                        md5sum=md5sum,
+                        ref=1,
+                        data=False,
+                        embed=False,
+                        createtime=t,
+                        visittime=t,
+                        token_id=self.token_id_range_start,
+                        token_num=token_num,
+                    )
+                    self.token_id_range_start += token_num
+                    self._records[id] = record
+                    self._md5_to_record[md5sum] = record
+                    self.occupied += 1
+                # cache hit
+                else:
+                    record = self._md5_to_record[md5sum]
+                    record.visittime = t
+                    record.ref += 1
+                results.append({"id": record.id, "token_id": record.token_id, "token_num": record.token_num})
+        return results
 
-                id = uuid.uuid1()
-                id = id.int
-                self._check_and_set_new_id_range(token_num)
-                record = Record(
-                    id=id,
-                    md5sum=md5sum,
-                    ref=1,
-                    data=False,
-                    embed=False,
-                    createtime=t,
-                    visittime=t,
-                    token_id=self.token_id_range_start,
-                    token_num=token_num,
-                )
-                self.token_id_range_start += token_num
-                self._records[id] = record
-                self._md5_to_record[md5sum] = record
-                self.occupied += 1
-
-            # cache hit
-            else:
-                record = self._md5_to_record[md5sum]
-                record.visittime = t
-                record.ref += 1
-
-            return {"id": record.id, "token_id": record.token_id, "token_num": record.token_num}
-
-    def release(self, id: int) -> None:
+    def release(self, ids: list[int]) -> None:
         with self.lock:
-            self._records[id].ref -= 1
+            for id in ids:
+                self._records[id].ref -= 1
 
-    def set_item_data(self, id: int) -> None:
-        self._records[id].data = True
+    def set_items_data(self, ids: list[int]) -> None:
+        for id in ids:
+            self._records[id].data = True
 
-    def get_item_data(self, id: int) -> bool:
-        return self._records[id].data
+    def get_items_data(self, ids: list[int]) -> list[bool]:
+        return [self._records.get(i).data if i in self._records else False for i in ids]
 
-    def set_item_embed(self, id: int) -> None:
-        self._records[id].embed = True
+    def set_items_embed(self, ids: list[int]) -> None:
+        for id in ids:
+            self._records[id].embed = True
 
-    def get_item_embed(self, id: int) -> bool:
-        return self._records[id].embed
+    def get_items_embed(self, ids: list[int]) -> list[bool]:
+        return [self._records.get(i).embed if i in self._records else False for i in ids]
