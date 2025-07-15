@@ -18,7 +18,6 @@ from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
-from .stats import Stats
 from .shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad

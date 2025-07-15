@@ -47,7 +47,7 @@ class ModeBackend:
         self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
 
-        # 控制分类的参数变量
+        # 控制 _get_classed_reqs 分类的参数变量，不同的 backend 具有可能需要不同的分类运行条件。
         self.classed_req_no_decode = False
         self.classed_req_strict_prefill = False
         pass
@@ -73,6 +73,7 @@ class ModeBackend:
         self.use_dynamic_prompt_cache = not self.args.disable_dynamic_prompt_cache
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
         self.disable_cudagraph = self.args.disable_cudagraph
+        self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
 
         self.logger = init_logger(__name__)
 
@@ -165,8 +166,19 @@ class ModeBackend:
                 [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
             )
 
+        # 用于协同读取 ShmReqsIOBuffer 中的请求信息的通信tensor和通信组对象。
         self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
         self.node_nccl_group = create_new_group_for_current_node("nccl")
+
+        # 用于在多节点tp模式下协同读取 ShmReqsIOBuffer 中的请求信息的通信tensor和通信组对象。
+        if self.is_multinode_tp:
+            self.multinode_tp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda")
+            self.multinode_tp_all_gather_tensor = torch.tensor(
+                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+            )
+            self.multinode_tp_nccl_group = dist.new_group(
+                [rank for rank in range(self.global_world_size)], backend="nccl"
+            )
 
         self.init_custom()
         self.shm_reqs_io_buffer = ShmReqsIOBuffer()
@@ -175,7 +187,8 @@ class ModeBackend:
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
 
-        # 启动infer_loop_thread
+        # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
+        # 可以降低 cpu overhead，大幅提升gpu得使用率。
         self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True)
         self.infer_loop_thread.start()
         self.infer_loop_thread1 = threading.Thread(target=self.infer_loop, daemon=True)
@@ -238,6 +251,13 @@ class ModeBackend:
         return
 
     def _try_read_new_reqs(self):
+        if self.is_multinode_tp:
+            self._try_read_new_reqs_multinode_tp()
+        else:
+            self._try_read_new_reqs_normal()
+        return
+
+    def _try_read_new_reqs_normal(self):
         if self.is_master_in_node:
             if self.shm_reqs_io_buffer.is_ready():
                 self.node_broadcast_tensor.fill_(1)
@@ -246,16 +266,42 @@ class ModeBackend:
         dist.broadcast(self.node_broadcast_tensor, src=0, group=self.node_nccl_group, async_op=False)
         new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
         if new_buffer_is_ready:
-            cmds: List = self.shm_reqs_io_buffer.read_obj()
-            self.shm_reqs_io_buffer.sub_state()
-            if cmds:
-                if isinstance(cmds[0], AbortedReqCmd):
-                    for obj in cmds:
-                        if obj.req_id in g_infer_context.requests_mapping:
-                            req: InferReq = g_infer_context.requests_mapping[obj.req_id]
-                            req.infer_aborted = True
-                else:
-                    self._init_reqs(reqs=cmds)
+            self._read_reqs_buffer_and_init_reqs()
+        return
+
+    def _try_read_new_reqs_multinode_tp(self):
+        """
+        多节点tp模式下,需要协调所有rank的行为同步。
+        """
+        if self.shm_reqs_io_buffer.is_ready():
+            self.multinode_tp_gather_item_tensor.fill_(1)
+        else:
+            self.multinode_tp_gather_item_tensor.fill_(0)
+        dist.all_gather_into_tensor(
+            self.multinode_tp_all_gather_tensor,
+            self.multinode_tp_gather_item_tensor,
+            group=self.multinode_tp_nccl_group,
+            async_op=False,
+        )
+        new_buffer_is_readys = self.multinode_tp_all_gather_tensor.detach().cpu().numpy()
+        new_buffer_is_ready = np.all(new_buffer_is_readys == 1)
+
+        if new_buffer_is_ready:
+            self._read_reqs_buffer_and_init_reqs()
+        return
+
+    def _read_reqs_buffer_and_init_reqs(self):
+        cmds: List = self.shm_reqs_io_buffer.read_obj()
+        self.shm_reqs_io_buffer.sub_state()
+        if cmds:
+            if isinstance(cmds[0], AbortedReqCmd):
+                for obj in cmds:
+                    obj: AbortedReqCmd = obj
+                    if obj.req_id in g_infer_context.requests_mapping:
+                        req: InferReq = g_infer_context.requests_mapping[obj.req_id]
+                        req.infer_aborted = True
+            else:
+                self._init_reqs(reqs=cmds)
         return
 
     # 一些可以复用的通用功能函数
