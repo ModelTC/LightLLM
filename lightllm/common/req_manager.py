@@ -110,6 +110,12 @@ class ReqSamplingParamsManager:
         self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
+        self.req_to_next_token_ids_cpu = torch.zeros(
+            max_request_num + 1, dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        self.req_to_next_token_probs_cpu = torch.zeros(
+            max_request_num + 1, dtype=torch.float32, device="cpu", pin_memory=True
+        )
         self.req_to_exponential_decay_length_penalty = torch.zeros(
             max_request_num + 1, dtype=torch.float32, device="cuda"
         )

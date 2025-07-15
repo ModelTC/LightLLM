@@ -24,6 +24,15 @@ class ModelInput:
     # 的 draft 模型的输入
     deepseekv3_mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    def to_cuda(self):
+        if self.input_ids is not None:
+            self.input_ids = self.input_ids.cuda(non_blocking=True)
+        self.mem_indexes = self.mem_indexes.cuda(non_blocking=True)
+        self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
+        self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
+        if self.b_ready_cache_len is not None:
+            self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
+
 
 @dataclass
 class ModelOutput:

@@ -1,5 +1,6 @@
 import torch
 from typing import List
+from queue import Queue
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -49,7 +50,6 @@ class ChunkedPrefillBackend(ModeBackend):
 
                 prefill_reqs, decode_reqs = self._get_classed_reqs(
                     no_decode=self.classed_req_no_decode,
-                    strict_prefill=self.classed_req_strict_prefill,
                     recover_paused=self.control_state_machine.try_recover_paused_reqs(),
                 )
 
@@ -86,16 +86,16 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_prefill_inputs(
             prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
         )
-        model_output = self.model.forward(model_input)
-        logits = model_output.logits
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            model_output = self.model.forward(model_input)
+            logits = model_output.logits
 
-        if self.prefill_mask_func is not None:
-            self.prefill_mask_func(run_reqs, logits)
+            if self.prefill_mask_func is not None:
+                self.prefill_mask_func(run_reqs, logits)
 
-        next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-        next_token_logprobs = torch.log(next_token_probs)
-        sync_event = torch.cuda.Event()
-        sync_event.record()
+            sample(logits, run_reqs, self.eos_id)
+            sync_event = torch.cuda.Event()
+            sync_event.record()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
@@ -104,12 +104,8 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
-        next_token_ids = next_token_ids.detach().cpu().numpy()
-        next_token_logprobs = next_token_logprobs.detach().cpu().numpy()
         self._post_handle(
             run_reqs=run_reqs,
-            next_token_ids=next_token_ids,
-            next_token_logprobs=next_token_logprobs,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
@@ -123,16 +119,15 @@ class ChunkedPrefillBackend(ModeBackend):
         decode_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-        model_output = self.model.forward(model_input)
-        logits = model_output.logits
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            model_output = self.model.forward(model_input)
+            logits = model_output.logits
 
-        if self.decode_mask_func is not None:
-            self.decode_mask_func(run_reqs, logits)
-
-        next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-        next_token_logprobs = torch.log(next_token_probs)
-        sync_event = torch.cuda.Event()
-        sync_event.record()
+            if self.decode_mask_func is not None:
+                self.decode_mask_func(run_reqs, logits)
+            sample(logits, run_reqs, self.eos_id)
+            sync_event = torch.cuda.Event()
+            sync_event.record()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
@@ -141,12 +136,8 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
-        next_token_ids = next_token_ids.detach().cpu().numpy()
-        next_token_logprobs = next_token_logprobs.detach().cpu().numpy()
         self._post_handle(
             run_reqs=run_reqs,
-            next_token_ids=next_token_ids,
-            next_token_logprobs=next_token_logprobs,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
