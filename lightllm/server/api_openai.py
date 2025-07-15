@@ -80,11 +80,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     multimodal_params_dict = {"images": []}
     for message in request.messages:
         if isinstance(message.content, list):
-            texts = []
             for content in message.content:
-                if content.type == "text" and content.text:
-                    texts.append(content.text)
-                elif content.type == "image_url" and content.image_url is not None:
+                if content.type == "image_url" and content.image_url is not None:
                     img = content.image_url.url
                     if img.startswith("http://") or img.startswith("https://"):
                         multimodal_params_dict["images"].append({"type": "url", "data": img})
