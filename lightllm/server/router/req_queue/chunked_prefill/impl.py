@@ -54,7 +54,7 @@ class ChunkedPrefillQueue(BaseQueue):
                 return False, new_batch_first_router_need_tokens
 
     # @calculate_time(show=True, min_cost_ms=10)
-    def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
+    def generate_new_batch(self, current_batch: Batch):
         if len(self.waiting_req_list) == 0:
             return None
 
@@ -75,10 +75,7 @@ class ChunkedPrefillQueue(BaseQueue):
         abort_req_list = []
         aborted_count = 0
 
-        if limit_router_queue_length is None:
-            waiting_queue = self.waiting_req_list
-        else:
-            waiting_queue = self.waiting_req_list[:limit_router_queue_length]
+        waiting_queue = self.waiting_req_list
 
         for req in waiting_queue:
             if req.is_aborted:
