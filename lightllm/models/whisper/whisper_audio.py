@@ -193,11 +193,10 @@ class WhisperAudioModel:
         ready_audio = self.cache_client.root.get_items_data(uuids)
         ids_to_set = []
         for i, ready in enumerate(ready_audio):
-            if ready:
-                continue
-            uid = uuids[i]
-            cur_embed_bytes = tensor2bytes(audios[i][: audio_token_num[i]])
-            create_shm(get_shm_name_data(uid), cur_embed_bytes)
-            ids_to_set.append(uid)
+            if not ready:
+                uid = uuids[i]
+                cur_embed_bytes = tensor2bytes(audios[i][: audio_token_num[i]])
+                create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                ids_to_set.append(uid)
         if ids_to_set:
             self.cache_client.root.set_items_data(ids=ids_to_set)
