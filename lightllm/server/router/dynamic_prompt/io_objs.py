@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from lightllm.server.core.objs import Req
 from typing import List
 
 @dataclass
@@ -15,7 +14,7 @@ class ShmReqInfo:
 
     @staticmethod
     def from_dict(d):
-        return GroupReqInfo(
+        return ShmReqInfo(
             request_id=d["request_id"],
             shm_req_index=d["shm_req_index"]
         )

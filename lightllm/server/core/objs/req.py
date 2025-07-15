@@ -54,57 +54,54 @@ class PrefixTokenIdsStruct(ctypes.Structure):
     def get_token_ids(self):
         return list(self.data[: self.size])
 
-# class RadixStatus(ctypes.Structure):
-#     _pack_ = 4
-#     _fields_ = [("status", ctypes.c_int * 32)]
+class ReqRankStatus(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [("dp_rank_in_node", ctypes.c_int), ("dp_world_size", ctypes.c_int)]
 
-#     NOCACHE = -2
-#     NOT_READY = -1
-#     READ_READY = 1
-#     WRITE_READY = 2
+    def __init__(self):
+        self.dp_rank_in_node = 0
+        self.dp_world_size = 8
+    
+    def set_status(self, dp_rank_in_node: int, dp_world_size: int):
+        self.dp_rank_in_node = dp_rank_in_node
+        self.dp_world_size = dp_world_size
 
-#     def __init__(self, init_state=NOT_READY):
-#         self.status = init_state
-
-#     def set_status(self, new_status: int):
-#         assert new_status in (self.NOCACHE, self.NOT_READY, self.READ_READY, self.WRITE_READY)
-#         self.status = new_status
-
-#     def get_status(self) -> int:
-#         return self.status
-
-#     def no_need_cache(self) -> bool:
-#         return self.status == self.NOCACHE
-
-#     def is_read_ready(self) -> bool:
-#         return self.status == self.READ_READY
-
-#     def is_write_ready(self) -> bool:
-#         return self.status == self.WRITE_READY
-
-#     def is_not_ready(self) -> bool:
-#         return self.status == self.NOT_READY
 class RadixStatus(ctypes.Structure):
     _pack_ = 4
-    _fields_ = [("status", ctypes.c_int * 32)]
+    _fields_ = [("status", ctypes.c_int * 32), ("rank_status", ReqRankStatus), ("finished", ctypes.c_int)]
 
     NOCACHE = -2
     NOT_READY = -1
     READ_READY = 1
     WRITE_READY = 2
+    WRITE_DONE = 3
 
     def __init__(self, init_state=NOT_READY):
         for i in range(32):
             self.status[i] = init_state
+        self.rank_status = ReqRankStatus()
+        self.finished = 0
 
     def set_status(self, idx: int, new_status: int):
         assert 0 <= idx < 32, f"Index out of range: {idx}"
-        assert new_status in (self.NOCACHE, self.NOT_READY, self.READ_READY, self.WRITE_READY)
+        assert new_status in (self.NOCACHE, self.NOT_READY, self.READ_READY, self.WRITE_READY, self.WRITE_DONE)
         self.status[idx] = new_status
+    
+    def set_finished(self):
+        self.finished = 1
+
+    def is_finished(self):
+        self.finished == 1
 
     def get_status(self, idx: int) -> int:
         assert 0 <= idx < 32, f"Index out of range: {idx}"
         return self.status[idx]
+    
+    def is_write_done(self):
+        dp_index = self.rank_status.dp_rank_in_node
+        dp_size = self.rank_status.dp_world_size
+        rank_list = range(dp_index * dp_size, (dp_index + 1) * dp_size)
+        return np.all(np.array(self.status)[rank_list] == self.WRITE_DONE)
 
     def is_no_need_cache(self, idx: int) -> bool:
         return self.get_status(idx) == self.NOCACHE
@@ -118,32 +115,12 @@ class RadixStatus(ctypes.Structure):
     def is_not_ready(self, idx: int) -> bool:
         return self.get_status(idx) == self.NOT_READY
 
-    # def all_dp_read_ready_or_nocache(self, indexs: List[int]) -> bool:
-    #     for i in indexs:
-    #         if self.status[i] not in (self.READ_READY, self.NOCACHE):
-    #             return False
-    #     return True
     def all_dp_read_ready_or_nocache(self, indexs: List[int]) -> bool:
-        # return np.all(self.status == self.READ_READY)
-        # for i in indexs:
-        #     if self.status[i] not in (self.READ_READY, self.NOCACHE):
-        #         return False
-        # return True
-        return np.all(np.array(self.status[indexs]) == self.READ_READY) or np.all(np.array(self.status[indexs]) == self.NOCACHE)
+        return np.all(np.array(self.status)[indexs] == self.READ_READY) or np.all(np.array(self.status)[indexs] == self.NOCACHE)
 
-    # def all_read_ready_or_nocache(self) -> bool:
-    #     for i in range(32):
-    #         if self.status[i] not in (self.READ_READY, self.NOCACHE):
-    #             return False
-    #     return True
     def all_read_ready_or_nocache(self) -> bool:
         return np.all(np.array(self.status) == self.READ_READY) or np.all(np.array(self.status) == self.NOCACHE)
 
-    # def all_read_ready(self) -> bool:
-    #     return np.all(self.status == self.READ_READY)
-
-    # def all_no_need_cache(self) -> bool:
-    #     return np.all(self.status == self.NOCACHE)
 
 class Req(ctypes.Structure):
     _pack_ = 4
@@ -297,7 +274,6 @@ class Req(ctypes.Structure):
         # 只有管理节点有一个引用
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
-
         if self.is_aborted and can_released_mark and ref_count_ok:
             return True
 

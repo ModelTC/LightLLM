@@ -208,7 +208,7 @@ def normal_or_p_d_start(args):
     node_world_size = args.tp // args.nnodes
 
     if args.use_hi_dynamic_prompt_cache:
-        hiradix_cache_port_num = node_world_size
+        hiradix_cache_port_num = node_world_size + 2
     can_use_ports = alloc_can_use_network_port(
         num=7 + node_world_size + args.visual_dp * args.visual_tp + hiradix_cache_port_num, used_nccl_ports=already_uesd_ports
     )
@@ -240,7 +240,8 @@ def normal_or_p_d_start(args):
     args.metric_port = metric_port
     if args.use_hi_dynamic_prompt_cache:
         args.hiradix_cache_ports = can_use_ports[0:node_world_size]
-        can_use_ports = can_use_ports[node_world_size:]
+        args.hiradix_server_ports = can_use_ports[node_world_size: node_world_size + 2]
+        can_use_ports = can_use_ports[node_world_size + 2:]
 
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]

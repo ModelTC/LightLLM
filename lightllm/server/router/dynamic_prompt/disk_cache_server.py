@@ -103,7 +103,7 @@ class DiskCacheService(rpyc.Service):
         logger.info(f"_push_task_loop receive task keys {len(keys)} values {len(values)}")
         self.remote_cache_manager.insert(keys, index)
         self.mem_manager.free_req_index(req.request_id)
-        self.set_reqs_radix_status([req], RadixStatus.NOT_READY)
+        self.set_reqs_radix_status([req], RadixStatus.WRITE_DONE)
         self.shm_req_manager.put_back_req_obj(req)
         return {"status": "ok"}
 
@@ -128,6 +128,7 @@ class DiskCacheService(rpyc.Service):
         query_len = self.remote_cache_manager.query(tokens=keys)
         if query_len == 0:
             self.set_reqs_radix_status(reqs, RadixStatus.NOCACHE)
+            self.put_back_req_objs(reqs)
             return {"query_len": 0, "kv_indices": []}
         index = self.mem_manager.alloc(query_len)
         self.remote_cache_manager.read(tokens=keys[:query_len], kv_page_indexer=index)
@@ -164,9 +165,9 @@ class DiskCacheClient:
 
     async def push(self, req_info: ShmReqInfo):
         if self.use_rpc:
-            return await self._insert(req_info)
+            return await self._push(req_info)
         else:
-            return self._insert(req_info)
+            return self._push(req_info)
 
     async def pull(self, group_req: GroupReqInfo):
         if self.use_rpc:

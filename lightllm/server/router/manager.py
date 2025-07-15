@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Union
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
+from lightllm.server.router.dynamic_prompt.io_objs import ShmReqInfo
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
@@ -75,16 +76,18 @@ class RouterManager:
         self.max_wait_tokens = args.router_max_wait_tokens
         context = zmq.Context(2)
         self.recv_from_httpserver = context.socket(zmq.PULL)
-        logger.info(f"recv_from_httpserver {args.zmq_mode}127.0.0.1:{router_port} ")
         self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{router_port}")
 
         self.send_to_detokenization = context.socket(zmq.PUSH)
         self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
 
         self.router_port = router_port
-        context_to_radix = zmq.asyncio.Context()
-        self.send_to_hiradix_server = context_to_radix.socket(zmq.PUSH)
-        self.send_to_hiradix_server.connect(f"{args.zmq_mode}127.0.0.1:{66666}")
+        if self.use_hiradix_cache:
+            hiradix_port = self.args.hiradix_server_ports[1]
+            context_radix = zmq.asyncio.Context()
+            self.send_to_hiradix_server = context_radix.socket(zmq.PUSH)
+            self.send_to_hiradix_server.connect(f"{args.zmq_mode}127.0.0.1:{hiradix_port}")
+            logger.info(f"send_to_hiradix_server {args.zmq_mode}127.0.0.1:{hiradix_port}")
 
         if self.is_multinode_tp:
             self.mulitnode_group = dist.init_process_group(
@@ -398,7 +401,12 @@ class RouterManager:
         if not self.use_hiradix_cache:
             return
         for req in reqs:
-            await self.send_to_hiradix_server.send_pyobj(req, protocol=pickle.HIGHEST_PROTOCOL)
+            req_info = ShmReqInfo(
+                req.request_id,
+                req.index_in_shm_mem
+            )
+            await self.send_to_hiradix_server.send_pyobj(req_info, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.info(f"_send_hiradix_manager  {req_info}")
         return
 
     def _send_detokenization_pack(self):

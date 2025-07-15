@@ -12,7 +12,9 @@ from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.utils.graceful_utils import graceful_registry
 from .disk_cache_server import DiskCacheClient
+from lightllm.server.core.objs import ShmReqManager
 from .io_objs import ShmReqInfo, GroupReqInfo
+from lightllm.server.core.objs import Req
 
 logger = init_logger(__name__)
 
@@ -26,15 +28,17 @@ class HiRadixCacheManagerServer:
         self.disk_cache_processes = []
         self.ports = args.hiradix_cache_ports
         self.cache_server_client = []
-        context = zmq.asyncio.Context(2)
+        context = zmq.asyncio.Context(3)
         self.recv_from_httpserver = context.socket(zmq.PULL)
-        self.recv_from_httpserver.connect(f"{args.zmq_mode}127.0.0.1:55555")
+        recv_from_http_port, recv_from_router_port = self.args.hiradix_server_ports
+        self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{recv_from_http_port}")
         self.clients: List[DiskCacheClient] = []
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
-        logger.info(f"send_to_router {args.zmq_mode}127.0.0.1:{router_port} ")
         self.recv_from_router = context.socket(zmq.PULL)
-        self.recv_from_router.connect(f"{args.zmq_mode}127.0.0.1:66666")
+        self.recv_from_router.bind(f"{args.zmq_mode}127.0.0.1:{recv_from_router_port}")
+        self.shm_req_manager = ShmReqManager()
+
     
     async def asyn_init(self):
         self.pull_queue = asyncio.Queue()
@@ -65,7 +69,6 @@ class HiRadixCacheManagerServer:
         all_results = await asyncio.gather(*tasks)
         logger.info(f"pull cache results {all_results}")
         await self.send_to_router.send_pyobj(group_req, protocol=pickle.HIGHEST_PROTOCOL)
-        logger.info(f"send to router pyobj {group_req}")
 
     async def push_cache(self, req_info):
         tasks = []
@@ -73,17 +76,20 @@ class HiRadixCacheManagerServer:
             task = client.push(req_info)
             tasks.append(task)
         all_results = await asyncio.gather(*tasks)
+        req: Req = self.shm_req_manager.get_req_obj_by_index(req_info["shm_req_index"])
+        assert req.radix_status.is_write_done()
+        req.radix_status.set_finished()
         logger.info(f"push cache results {all_results}")
 
     async def pull_woker(self):
         while True:
-            req: ShmReqInfo = await self.pull_queue.get()
+            req: GroupReqInfo = await self.pull_queue.get()
             await self.pull_cache(req)
             await asyncio.sleep(0.01)
 
     async def push_woker(self):
         while True:
-            req: GroupReqInfo = await self.push_queue.get()
+            req: ShmReqInfo = await self.push_queue.get()
             await self.push_cache(req.to_dict())
             await asyncio.sleep(0.01)
 
@@ -99,8 +105,9 @@ class HiRadixCacheManagerServer:
     async def loop_for_netio_req_to_push(self):
         while True:
             recv_req: ShmReqInfo = await self.recv_from_router.recv_pyobj()
+            logger.info(f"loop_for_netio_req_to_push --> recv req {recv_req}")
             if isinstance(recv_req, ShmReqInfo):
-                await self.push_queue.put()
+                await self.push_queue.put(recv_req)
             else:
                 raise ValueError(f"Invalid request: {recv_req}")
 

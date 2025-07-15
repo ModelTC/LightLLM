@@ -168,10 +168,11 @@ class ModeBackend:
         self.init_custom()
         return
     
-    def is_radix_ready(self, req):
-        dp_rank_list = range(self.dp_rank_in_node * self.dp_world_size, (self.dp_rank_in_node + 1) * self.dp_world_size)
-        if req.radix_status.is_no_need_cache(self.rank_in_node) or req.radix_status.is_read_ready(self.rank_in_node) :
-            return True
+    def set_radix_status(self, req):
+        if not self.use_hiradix_cache:
+            return
+        if self.is_master_in_dp:
+            req.radix_status.rank_status.set_status(self.dp_rank_in_node, self.dp_world_size)
         return False
 
     def init_custom(self):

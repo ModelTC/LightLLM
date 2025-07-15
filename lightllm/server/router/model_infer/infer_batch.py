@@ -279,8 +279,7 @@ class InferReq:
 
     def init_all(self):
         if self.initialized is False:
-            if self.shm_req is None:
-                self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
+            self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
             self.shm_req.link_prompt_ids_shm_array()
             self.shm_req.link_logprobs_shm_array()
             self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
@@ -319,6 +318,7 @@ class InferReq:
 
             self.shm_req.shm_cur_kv_len = self.cur_kv_len
 
+        self.init_radix_status()
         self.initialized = True
         self.paused = False
         return
@@ -326,10 +326,8 @@ class InferReq:
     def is_uninitialized(self):
         return not self.initialized or self.paused
 
-    def is_radix_ready(self):
-        if self.shm_req is None:
-            self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
-        return g_infer_context.backend.is_radix_ready(self.shm_req)
+    def init_radix_status(self):
+        return g_infer_context.backend.set_radix_status(self.shm_req)
 
     def get_output_len(self):
         return self.cur_output_len

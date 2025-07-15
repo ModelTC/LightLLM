@@ -34,15 +34,21 @@ class LocalCacheManager:
         self.rank_in_node = rank_in_node
 
     def insert(self, req: Req, key: torch.Tensor, value=None):
-        index = self.mem_buffer.alloc(len(value))
         pre_index = self.mem_buffer.get_req_mem_index(req.request_id)
-        self.mem_buffer.set_req_mem_index(
-            req.request_id, index.tolist()
-        )
-        if len(pre_index) != 0:
-            logger.info(f"pre index {pre_index}, index {index}")
-            index = index[len(pre_index):]
+        if len(pre_index) != 0 and len(value) > len(pre_index):
+            logger.info(f"pre index req {req.request_id} {pre_index}")
+            alloc_len = len(value) - len(pre_index)
+            index = self.mem_buffer.alloc(alloc_len)
             value = value[len(pre_index):]
+            self.mem_buffer.set_req_mem_index(
+                req.request_id, pre_index + index.tolist()
+            )
+            logger.info(f"udpate index req {req.request_id} {pre_index + index.tolist()}")
+        else:
+            index = self.mem_buffer.alloc(len(value))
+            self.mem_buffer.set_req_mem_index(
+                req.request_id, index.tolist()
+            )
         dst_kv_buffer = self.mem_buffer.get_kv_buffer(index)
         src_kv_buffer = self.mem_manager.get_index_kv_buffer(value)["kv_buffer"]
         logger.info(f"insert mem_buffer shape {dst_kv_buffer.shape}, manager buffer shape {src_kv_buffer.shape}")
@@ -58,6 +64,7 @@ class LocalCacheManager:
             logger.info(f"len mem src index and dst index {len(index), len(dst_index)} read mem_buffer shape {src_kv_buffer.shape}, manager buffer shape {dst_kv_buffer.shape}")
             assert len(src_kv_buffer) == len(dst_kv_buffer), f"src kv buffer len {len(src_kv_buffer)} != dst kv buffer len {len(dst_kv_buffer)}"
             self.copy_kv_from_cpu_to_gpu(src_kv_buffer, dst_kv_buffer)
+            #TODO no free
             self.mem_buffer.free_req_index(req.group_req_id)
         except Exception as e:
             logger.error(f"Local cache read from radix mem_buffer error {e}")
@@ -66,9 +73,11 @@ class LocalCacheManager:
 
     def query(self, req: Req):
         if req.radix_status.is_no_need_cache(self.rank_in_node):
+            logger.info(f"query no need cache {self.rank_in_node} {req.radix_status.get_status(self.rank_in_node)}")
             return 0
         if req.radix_status.is_read_ready(self.rank_in_node):
             index = self.mem_buffer.get_req_mem_index(req.group_req_id)
+            logger.info(f"query find cache {self.rank_in_node} {req.radix_status.get_status(self.rank_in_node)} len {len(index)}")
             return len(index)
         return 0
     
@@ -118,7 +127,7 @@ class HiRadixCache(RadixCache):
         max_len = 0
         if tree_node.node_prefix_total_len < len(key):
             max_len = self.local_cache_manager.query(req)
-        logger.debug(f"HiCache rank_in_node={self.rank_in_node} current match radix len {tree_node.node_prefix_total_len}, max len {max_len}")
+        logger.debug(f"HiCache rank_in_node={self.rank_in_node} current key len {len(key)} match radix len {tree_node.node_prefix_total_len}, max len {max_len}")
         if max_len > tree_node.node_prefix_total_len:
             pull_len = max_len - tree_node.node_prefix_total_len
             self.disk_cache_match_count.arr[0] += 1
@@ -136,4 +145,5 @@ class HiRadixCache(RadixCache):
                 super().insert(key[:max_len], buffers)
             else:
                 self.mem_manager.free(buffers[tree_node.node_prefix_total_len:])
+            
         return super().match_prefix(key, update_refs=update_refs)
