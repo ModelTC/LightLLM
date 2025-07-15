@@ -98,9 +98,10 @@ class ImageItem:
             else:
                 raise ValueError(f"cannot read image which type is {self._type}!")
 
-            # check if valid image bytes
-            image = Image.open(BytesIO(img_data))
-            self.image_w, self.image_h = image.size
+            with Image.open(BytesIO(img_data)) as image:
+                self.image_w, self.image_h = image.size
+                image.verify()  # verify后会失效
+
             self._preload_data = img_data
             return
 
