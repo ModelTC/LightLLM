@@ -2,6 +2,7 @@ import uuid
 import numpy as np
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
+from lightllm.common.basemodel.infer_lock import g_router_lock
 
 
 class ChunkedPrefillQueue(BaseQueue):
@@ -25,31 +26,32 @@ class ChunkedPrefillQueue(BaseQueue):
         self.cache_len_list.sort(key=lambda x: -x[1])
 
         left_out_len_array = np.array([e[1] for e in self.cache_len_list])
-        # assert left_out_len_array.min() >= 0
         has_run_len_array = np.array([e[0] for e in self.cache_len_list])
         cum_run_len_array = np.cumsum(has_run_len_array)
         size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
 
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
-        ok_token_num = (
-            need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)
-            < self.max_total_tokens
-        )
-
-        ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
-        new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
-        ok_prefill = new_batch_first_router_need_tokens <= self.batch_max_tokens
-
-        if ok_token_num and ok_req_num and ok_prefill:
-            self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
-            self.router.shared_token_load.set_dynamic_max_load(
-                (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
-                / self.max_total_tokens,
-                self.dp_index,
+        with g_router_lock.obj:
+            ok_token_num = (
+                need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)
+                < self.max_total_tokens
             )
-            return True, new_batch_first_router_need_tokens
-        else:
-            return False, new_batch_first_router_need_tokens
+
+            ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
+
+            new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
+            ok_prefill = new_batch_first_router_need_tokens <= self.batch_max_tokens
+
+            if ok_token_num and ok_req_num and ok_prefill:
+                self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
+                self.router.shared_token_load.set_dynamic_max_load(
+                    (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
+                    / self.max_total_tokens,
+                    self.dp_index,
+                )
+                return True, new_batch_first_router_need_tokens
+            else:
+                return False, new_batch_first_router_need_tokens
 
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
@@ -114,8 +116,10 @@ class ChunkedPrefillQueue(BaseQueue):
             need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
         else:
             need_max_token_num = 0
-        return (
-            need_max_token_num,
-            (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
-            / self.max_total_tokens,
-        )
+
+        with g_router_lock.obj:
+            return (
+                need_max_token_num,
+                (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
+                / self.max_total_tokens,
+            )
