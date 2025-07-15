@@ -24,7 +24,7 @@ class QueueForPDDecode(BaseQueue):
         return
 
     # @calculate_time(show=True, min_cost_ms=10)
-    def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
+    def generate_new_batch(self, current_batch: Batch):
         if len(self.waiting_req_list) == 0:
             return None
 

@@ -18,7 +18,6 @@ from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
-from .stats import Stats
 from .shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
@@ -45,6 +44,8 @@ class RouterManager:
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
         self.is_multinode_tp = args.nnodes > 1 and args.dp == 1
+        self.is_multinode_tp_master = self.is_multinode_tp and args.node_rank == 0
+        self.is_multinode_tp_slave = self.is_multinode_tp and args.node_rank != 0
         self.is_multinode_and_multidp = args.nnodes > 1 and args.dp > 1
         # 判断是否是保守调度，保守调度不会发生暂停 req 的情况，但是有些场景可能影响吞吐
         self.is_safe_schedule = args.router_token_ratio == 0.0
@@ -254,6 +255,8 @@ class RouterManager:
         """
         事件处理循环
         """
+        # 接受新请求，并尝试调度
+        await self._recv_new_reqs_and_schedule()
         # 判断是否有新请求加入推理
         # 激进调度满足，有新的推理batch就需要进行加入。
         # 或者延迟step的步数满足了当前条件，也需要进行新的推理batch的加入。
@@ -357,44 +360,96 @@ class RouterManager:
         return
 
     def _generate_new_batch(self):
-        limit_router_queue_length = None
-        if self.is_multinode_tp:
-            # 使用 all_reduce 获取最小值
-            limit_router_queue_length = len(self.req_queue.waiting_req_list)
-            limit_router_queue_length_tensor = torch.tensor(limit_router_queue_length, dtype=torch.int32, device="cpu")
-            dist.all_reduce(limit_router_queue_length_tensor, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-            limit_router_queue_length = limit_router_queue_length_tensor.item()
-
         # 调度的时候需要考虑当前运行的batch，和调度了但是暂时还没有推理的部分请求。
         new_batch = self.req_queue.generate_new_batch(
-            Batch.merge_two_batch(self.running_batch, self.schedule_new_batch), limit_router_queue_length
+            Batch.merge_two_batch(self.running_batch, self.schedule_new_batch)
         )
         self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
         return
 
-    async def loop_for_netio_req(self):
-        recv_max_count = 64
+    def _multinode_tp_generate_new_batch(self):
+        dist.barrier(group=self.mulitnode_group)
 
-        while True:
-            try:
-                # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
-                for _ in range(recv_max_count):
-                    recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
-                    if isinstance(recv_req, GroupReqIndexes):
-                        self._add_req(recv_req)
-                    else:
-                        assert False, f"Error Req Inf {recv_req}"
+        # 调度的时候需要考虑当前运行的batch，和调度了但是暂时还没有推理的部分请求。
+        if self.is_multinode_tp_master:
+            new_batch = self.req_queue.generate_new_batch(
+                Batch.merge_two_batch(self.running_batch, self.schedule_new_batch)
+            )
+            if new_batch is not None:
+                req_ids = [req.request_id for req in new_batch.reqs]
+            else:
+                req_ids = []
+            dist.broadcast_object_list([len(req_ids)], src=0, group=self.mulitnode_group)
+            dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
+            req_id_select_mark = [1 for _ in range(len(req_ids))]
+            req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
+            dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
+            back_req_list = []
+            for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
+                if select == 0:
+                    req = new_batch.pop_req(req_id)
+                    back_req_list.append(req)
+            self.req_queue.waiting_req_list = back_req_list + self.req_queue.waiting_req_list
+            if new_batch.is_clear():
+                new_batch = None
+        else:
+            req_nums = [None]
+            dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
+            req_num = req_nums[0]
+            req_ids = [None for _ in range(req_num)]
+            dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
+            all_req_id_set = set([req.request_id for req in self.req_queue.waiting_req_list])
+            req_id_select_mark = []
+            for req_id in req_ids:
+                req_id_select_mark.append(1 if req_id in all_req_id_set else 0)
+            req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
+            dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
+            select_req_ids = []
+            for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
+                if select == 1:
+                    select_req_ids.append(req_id)
 
-                # 当队列中存在较多的请求时，将一次接受的数量上调
-                recv_max_count = min(int(recv_max_count * 1.3), 256)
+            select_reqs = []
+            for req_id in select_req_ids:
+                for req in self.req_queue.waiting_req_list:
+                    if req.request_id == req_id:
+                        select_reqs.append(req)
 
-            except zmq.ZMQError:
-                # 当队列已经开始清空的时候，将一次接受的数量下调
-                recv_max_count = 64
+            for req in select_reqs:
+                self.req_queue.waiting_req_list.remove(req)
+            if select_reqs:
+                new_batch = Batch(-1, reqs=select_reqs, dp_size_in_node=self.dp_size_in_node)
+            else:
+                new_batch = None
 
-            await asyncio.sleep(0.02)
+        self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
 
-            # 只有当推理侧没有发生暂停的时候，才执行新的调度
+        dist.barrier(group=self.mulitnode_group)
+        return
+
+    async def _recv_new_reqs_and_schedule(self):
+        if not hasattr(self, "recv_max_count"):
+            self.recv_max_count = 64
+
+        try:
+            # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
+            for _ in range(self.recv_max_count):
+                recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+                if isinstance(recv_req, GroupReqIndexes):
+                    self._add_req(recv_req)
+                else:
+                    assert False, f"Error Req Inf {recv_req}"
+
+            # 当队列中存在较多的请求时，将一次接受的数量上调
+            self.recv_max_count = min(int(self.recv_max_count * 1.3), 256)
+
+        except zmq.ZMQError:
+            # 当队列已经开始清空的时候，将一次接受的数量下调
+            self.recv_max_count = 64
+
+        if self.is_multinode_tp:
+            self._multinode_tp_generate_new_batch()
+        else:
             if self._get_paused_req_num() == 0:
                 self._generate_new_batch()
         return
@@ -436,6 +491,5 @@ def start_router_process(args, router_port, detokenization_port, metric_port, pi
         raise
 
     pipe_writer.send("init ok")
-    loop.create_task(router.loop_for_fwd())
-    loop.run_until_complete(router.loop_for_netio_req())
+    loop.run_until_complete(router.loop_for_fwd())
     return
