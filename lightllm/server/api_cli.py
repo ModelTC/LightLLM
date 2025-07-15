@@ -175,7 +175,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
                         export_fp8kv_calibration record and export kv cache quant calibration results to a json file.
                         It can be used for llama and qwen model.
                         Calibration need to disable cudagraph and use fa3 or flashinfer backend.
-                        Tp size must no more than head num when calibration.
                         ppl_int8kv mode use int8 to store kv cache, and use ppl fast kernel;
                         ppl_fp16 mode use ppl fast fp16 decode attention kernel;
                         you need to read source code to make sure the supported detail mode for all models""",
