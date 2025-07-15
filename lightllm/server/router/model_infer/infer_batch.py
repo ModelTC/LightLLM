@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Union, Any
 from lightllm.common.req_manager import ReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
-from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
+from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager, PDNIXLChunkedPrefillReq
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
@@ -119,7 +119,7 @@ class InferenceContext:
         https://arxiv.org/abs/2403.01241
         """
         prompt_cache_token_id = list(self.radix_cache.root_node.children.values())[0].token_id_key
-        print(f"prompt_cache_token_id : {prompt_cache_token_id}")
+        # print(f"prompt_cache_token_id : {prompt_cache_token_id}")
         index = range(len(prompt_cache_token_id))
         prompt_cache_kv_buffer = self.radix_cache.mem_manager.get_index_kv_buffer(index)
         torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
@@ -266,12 +266,14 @@ class InferReq:
         # 当开启后，mtp_gen_token_ids 保存多生成的多余的token_id,但是在后面的
         # 步骤中需要重新进行校验。
         self.mtp_gen_token_ids: List[int] = []
+        self.in_prefill_or_transfer = False
 
     def init_all(self):
         if self.initialized is False:
             self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
             self.shm_req.link_prompt_ids_shm_array()
             self.shm_req.link_logprobs_shm_array()
+
             self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
 
             g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
@@ -307,6 +309,7 @@ class InferReq:
 
         self.initialized = True
         self.paused = False
+        self.in_prefill_or_transfer = False
         return
 
     def is_uninitialized(self):

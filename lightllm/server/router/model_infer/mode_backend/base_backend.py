@@ -261,6 +261,7 @@ class ModeBackend:
         is_chuncked_mode: bool,
         do_filter_finished_reqs: bool,
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
+        call_post_handle_for_chunk: bool = False,
     ) -> List[int]:
         """
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
@@ -284,6 +285,10 @@ class ModeBackend:
             # 对于没有到达需要输出 token 阶段的请求，直接略过, 说明还
             # 处于chuncked prefill kv 填充的阶段。
             if req_obj.cur_kv_len < req_obj.get_cur_total_len():
+                # chunk transfer
+                if call_post_handle_for_chunk and extra_post_req_handle_func:
+                    extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
+
                 continue
 
             # 将生成的下一个token的信息写入到管理对象中。

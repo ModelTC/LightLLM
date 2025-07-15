@@ -27,6 +27,10 @@ from lightllm.server.router.model_infer.mode_backend import (
     ContinuesBatchBackendForMtpDecodeNode,
     ChunckedPrefillForMtpPrefillNode,
     DPChunkedForMtpPrefillNode,
+    PDNIXLBackendForPrefillNode,
+    PDNIXLBackendForDecodeNode,
+    PDNIXLDPBackendForPrefillNode,
+    PDNIXLDPBackendForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.core.objs import RpcShmParams, RpcShmResults, ShmSyncStatusArray
@@ -48,12 +52,14 @@ class ModelRpcServer:
         rpc_event: multiprocessing.Event,
         rpc_finished_event: multiprocessing.Event,
         info_queue: mp.Queue,
+        result_queue: mp.Queue,
         mem_queue: mp.Queue,
     ):
         super().__init__()
         self.args: StartArgs = args
         self.node_world_size = node_world_size
         self.info_queue = info_queue
+        self.result_queue = result_queue
         self.mem_queue = mem_queue
         self.rpc_event = rpc_event
         self.rpc_finished_event = rpc_finished_event
@@ -124,6 +130,8 @@ class ModelRpcServer:
         assert not (is_outlines_constraint_mode and is_xgrammar_constraint_mode), "only one constraint mode can be true"
         is_prefill_node = self.args.run_mode == "prefill"
         is_decode_node = self.args.run_mode == "decode"
+        is_nixl_prefill_node = self.args.run_mode == "nixl_prefill"
+        is_nixl_decode_node = self.args.run_mode == "nixl_decode"
 
         enable_mtp = self.args.mtp_mode is not None
 
@@ -138,6 +146,14 @@ class ModelRpcServer:
                     self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
                 else:
                     self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
+
+        elif is_nixl_prefill_node:
+            assert not enable_mtp, "nixl pd does not support mtp now."
+            if self.args.dp > 1:
+                self.backend = PDNIXLDPBackendForPrefillNode(self.info_queue, self.result_queue, self.mem_queue)
+            else:
+                self.backend = PDNIXLBackendForPrefillNode(self.info_queue, self.result_queue, self.mem_queue)
+
         elif is_decode_node:
             if enable_mtp:
                 if self.args.dp > 1:
@@ -149,11 +165,20 @@ class ModelRpcServer:
                     self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
                 else:
                     self.backend = ContinuesBatchBackendForDecodeNode(self.info_queue, self.mem_queue)
+
+        elif is_nixl_decode_node:
+            assert not enable_mtp, "nixl pd does not support mtp now."
+            if self.args.dp > 1:
+                self.backend = PDNIXLDPBackendForDecodeNode(self.info_queue, self.result_queue, self.mem_queue)
+            else:
+                self.backend = PDNIXLBackendForDecodeNode(self.info_queue, self.result_queue, self.mem_queue)
+
         elif self.args.dp > 1:
             if enable_mtp:
                 self.backend = DPChunkedPrefillWithMTPBackend()
             else:
-                self.backend = DPChunkedPrefillBackend()
+                self.backend = ContinuesBatchBackendForDecodeNode(self.info_queue, self.mem_queue)
+
         elif use_reward_model:
             self.backend = RewardModelBackend()
         elif return_all_prompt_logprobs:
@@ -282,6 +307,7 @@ def _init_env(
     rank_in_node,
     node_world_size,
     info_queue,
+    result_queue,
     mem_queue,
     router_lock,
     rpc_event: mp.Event,
@@ -300,7 +326,7 @@ def _init_env(
     g_router_lock.obj = router_lock
 
     model_rpc_server = ModelRpcServer(
-        args, rank, rank_in_node, node_world_size, rpc_event, rpc_finished_event, info_queue, mem_queue
+        args, rank, rank_in_node, node_world_size, rpc_event, rpc_finished_event, info_queue, result_queue, mem_queue
     )
     success_event.set()
 
@@ -316,6 +342,7 @@ async def start_model_process(
     rpc_event,
     rpc_finished_event,
     info_queue: mp.Queue,
+    result_queue: mp.Queue,
     mem_queue: mp.Queue,
     router_lock: mp.Queue,
 ):
@@ -330,6 +357,7 @@ async def start_model_process(
             rank_in_node,
             node_world_size,
             info_queue,
+            result_queue,
             mem_queue,
             router_lock,
             rpc_event,

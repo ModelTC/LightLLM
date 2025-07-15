@@ -20,3 +20,7 @@ from .continues_batch.pd_mode.decode_node_impl.decode_impl_mtp_for_dp import DPF
 from .continues_batch.pd_mode.decode_node_impl.decode_impl_mtp import ContinuesBatchBackendForMtpDecodeNode
 from .continues_batch.pd_mode.prefill_node_impl.prefill_impl_mtp import ChunckedPrefillForMtpPrefillNode
 from .continues_batch.pd_mode.prefill_node_impl.prefill_impl_mtp_for_dp_chuncked import DPChunkedForMtpPrefillNode
+from .pd_nixl.impl_for_pd_prefill import PDNIXLBackendForPrefillNode
+from .pd_nixl.impl_for_pd_decode import PDNIXLBackendForDecodeNode
+from .pd_nixl.impl_for_pd_decode_dp import PDNIXLDPBackendForDecodeNode
+from .pd_nixl.impl_for_pd_prefill_dp import PDNIXLDPBackendForPrefillNode

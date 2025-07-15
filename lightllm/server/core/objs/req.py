@@ -106,6 +106,7 @@ class Req(ctypes.Structure):
             f"shm_cur_kv_len:{self.shm_cur_kv_len},"
             f"shm_cur_output_len:{self.shm_cur_output_len},"
             f"finish_status:{self.finish_status.is_finished()}"
+            f"group_id: {self.group_req_id}"
         )
 
     def init(
@@ -354,3 +355,55 @@ class TokenHealingReq(ChunkedPrefillReq):
         # 错误问题。
         self.sample_params.max_new_tokens = self.sample_params.max_new_tokens + self.prefix_token_ids.size + 6
         return
+
+
+class PdNixlReqState(ctypes.Structure):
+    _pack_ = 4
+    _MAX_TP_SIZE = 32
+    _fields_ = [("dp_world_size", ctypes.c_int), ("state", ctypes.c_int * _MAX_TP_SIZE)]
+
+    def __init__(self):
+        self.dp_world_size = 0
+        self.state = (ctypes.c_int * self._MAX_TP_SIZE)(*([0] * self._MAX_TP_SIZE))
+
+    def set_dp_world_size(self, size: int):
+        self.dp_world_size = size
+
+    def set_tp_state(self, tp_id: int, state: int):
+        assert (
+            self.dp_world_size > 0 and tp_id >= 0 and tp_id < self.dp_world_size
+        ), f"tp_id {tp_id} out of range [0, {self.dp_world_size})"
+        self.state[tp_id] = state
+
+    def set_state(self):
+        assert self.dp_world_size > 0, "dp_world_size should be set before calling this"
+        unique_state = np.unique(self.state[: self.dp_world_size])
+        self.state[self.dp_world_size] = unique_state[0]
+
+    def get_state(self):
+        assert self.dp_world_size > 0, "dp_world_size should be set before calling this"
+        return self.state[self.dp_world_size]
+
+
+class PDNIXLChunkedPrefillReq(ChunkedPrefillReq):
+    _pack_ = 4
+    _fields_ = ChunkedPrefillReq._fields_ + [
+        # 用于pd nixl状态同步
+        ("pd_nixl_req_state", PdNixlReqState)
+    ]
+
+    def set_dp_world_size(self, dp_world_size):
+        self.pd_nixl_req_state.dp_world_size = dp_world_size
+
+    # called by each tp rank, no contention
+    def set_pd_req_rank_state(self, tp_id: int, state: int):
+        self.pd_nixl_req_state.set_tp_state(tp_id, state)
+
+    # state: -1 for failed, 0 for in progress, 1 for success
+    # set by router
+    def set_pd_req_state(self):
+        self.pd_nixl_req_state.set_state()
+
+    # read by all rank
+    def get_pd_req_state(self):
+        return self.pd_nixl_req_state.get_state()
