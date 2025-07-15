@@ -101,8 +101,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
                         )
 
-            message.content = "\n".join(texts)
-
     tools = None
     if request.tools and request.tool_choice != "none":
         # request.skip_special_tokens = False

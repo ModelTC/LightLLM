@@ -10,7 +10,8 @@ def init_tokenizer(args):
 
 async def build_prompt(request, tools) -> str:
     global tokenizer
-    messages = request.messages
+    # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
+    messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
     kwargs = {"conversation": messages}
     if request.character_settings:
         kwargs["character_settings"] = request.character_settings
