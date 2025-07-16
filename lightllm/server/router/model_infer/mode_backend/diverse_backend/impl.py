@@ -14,9 +14,10 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from ..chunked_prefill.impl import ChunkedPrefillBackend
 
 
-class DiversehBackend(ModeBackend):
+class DiversehBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
         self.prefill = self.beam_prefill
