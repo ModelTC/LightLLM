@@ -2,13 +2,13 @@ import os
 import torch
 import copy
 import bisect
+from collections import OrderedDict
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .infer_struct import InferStateInfo
-
 
 logger = init_logger(__name__)
 
@@ -17,12 +17,14 @@ class CudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
     def __init__(self, max_batch_size=8, max_len_in_batch=8192):
-        self.graph = {}
+        self.graph = OrderedDict()  # for LRU
+
         self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
         self.max_batch_size = max_batch_size
         self.graph_max_len_in_batch = max_len_in_batch
         self.args = get_env_start_args()
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
+        self.max_graph_pool_size = self.args.max_graph_pool_size
 
         # gen cuda graph batch_sizes
         # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
@@ -47,12 +49,21 @@ class CudaGraph:
     def can_run(self, batch_size, max_len_in_batch):
         return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
 
-    def need_capture(self, batch_size):
-        find_batch_size = self.find_closest_graph_batch_size(batch_size)
-        if find_batch_size is not None:
-            return find_batch_size not in self.graph
+    def get_graph(self, batch_size):
+        # We assume batch_size has already been adjusted to the closest supported graph batch size
+        # If the graph already exists, get it and move it to the most recently used position.
+        if batch_size in self.graph:
+            find_graph = self.graph.pop(batch_size)  # Dequeue the graph
+            self.graph[batch_size] = find_graph  # Enqueue the graph for LRU
+            return find_graph
         else:
-            assert False, "dead code"
+            return None
+
+    def evict_oldest_graph(self):
+        if self.graph:
+            oldest_batch_size, oldest_graph = self.graph.popitem(last=False)
+            del oldest_graph
+            logger.info(f"Evicted CUDA graph for batch size: {oldest_batch_size}")
 
     def find_closest_graph_batch_size(self, batch_size):
         index = bisect.bisect_left(self.cuda_graph_batch_sizes, batch_size)
@@ -64,6 +75,9 @@ class CudaGraph:
 
     def _capture_decode(self, decode_func, input_ids: torch.Tensor, infer_state: InferStateInfo):
         dist_group: CustomProcessGroup = infer_state.dist_group
+        if len(self.graph) >= self.max_graph_pool_size:
+            self.evict_oldest_graph()
+
         graph_obj = torch.cuda.CUDAGraph()
         batch_size = input_ids.shape[0]
         infer_state.max_len_in_batch = self.graph_max_len_in_batch
@@ -84,6 +98,7 @@ class CudaGraph:
         with lightllm_capture_graph(dist_group):
             with torch.cuda.graph(graph_obj, pool=self.mempool):
                 model_output = decode_func(input_ids, infer_state)
+        # We assume batch_size has already been adjusted to the closest supported graph batch size
         self.graph[batch_size] = (graph_obj, input_ids, infer_state, model_output)
         graph_obj.replay()
         return model_output
@@ -97,6 +112,9 @@ class CudaGraph:
         infer_state1: InferStateInfo,
     ):
         dist_group: CustomProcessGroup = infer_state.dist_group
+        if len(self.graph) >= self.max_graph_pool_size:
+            self.evict_oldest_graph()
+
         dist_group1 = infer_state1.dist_group
         graph_obj = torch.cuda.CUDAGraph()
         batch_size = input_ids.shape[0]
@@ -113,6 +131,7 @@ class CudaGraph:
             with lightllm_capture_graph(dist_group):
                 with torch.cuda.graph(graph_obj, pool=self.mempool):
                     model_output, model_output1 = decode_func(input_ids, infer_state, input_ids1, infer_state1)
+        # We assume batch_size has already been adjusted to the closest supported graph batch size
         self.graph[batch_size] = (
             graph_obj,
             input_ids,
