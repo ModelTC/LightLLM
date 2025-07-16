@@ -104,14 +104,9 @@ class ChunkedPrefillBackend(ModeBackend):
                 model_input.b_req_idx,
                 model_input.b_mtp_index,
             )
-            next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
-                "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype
+            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
+                next_token_ids, next_token_logprobs
             )
-            next_token_logprobs_cpu = g_pin_mem_manager.alloc_pin_tensor(
-                "next_token_logprobs", next_token_logprobs.shape[0], next_token_logprobs.dtype
-            )
-            next_token_ids_cpu.copy_(next_token_ids, non_blocking=True)
-            next_token_logprobs_cpu.copy_(next_token_logprobs, non_blocking=True)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -152,14 +147,9 @@ class ChunkedPrefillBackend(ModeBackend):
                 model_input.b_req_idx,
                 model_input.b_mtp_index,
             )
-            next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
-                "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype
+            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
+                next_token_ids, next_token_logprobs
             )
-            next_token_logprobs_cpu = g_pin_mem_manager.alloc_pin_tensor(
-                "next_token_logprobs", next_token_logprobs.shape[0], next_token_logprobs.dtype
-            )
-            next_token_ids_cpu.copy_(next_token_ids, non_blocking=True)
-            next_token_logprobs_cpu.copy_(next_token_logprobs, non_blocking=True)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -190,13 +180,44 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_prefill_inputs(
             prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
         )
-        model_output = self.model.forward(model_input)
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            model_output = self.model.forward(model_input)
+            next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
 
-        next_token_ids_gpu, next_token_probs = sample(model_output.logits, run_reqs, self.eos_id)
-        next_token_ids_cpu = next_token_ids_gpu.detach().cpu().numpy()
-        next_token_logprobs_cpu = torch.log(next_token_probs).detach().cpu().numpy()
+            scatter_token(
+                next_token_ids,
+                self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                model_input.b_req_idx,
+                model_input.b_mtp_index,
+            )
+            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
+                next_token_ids, next_token_logprobs
+            )
+            # mtp kv fill
+            draft_next_token_ids_gpu = next_token_ids
+            draft_model_output = model_output
+            draft_model_input = model_input
+            # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
+            for draft_model_idx in range(self.mtp_step):
+                draft_model_input = prepare_mtp_prefill_inputs(
+                    model_input=draft_model_input,
+                    b_next_token_ids=draft_next_token_ids_gpu,
+                    deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
+                )
+                draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
+                draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
 
+            sync_event = torch.cuda.Event()
+            sync_event.record()
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+
+        # 第三阶段
+        event_pack.notify_forward_and_wait_post_handle()
+        sync_event.synchronize()
+
         self._post_handle(
             run_reqs=run_reqs,
             next_token_ids=next_token_ids_cpu,
@@ -205,20 +226,8 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
-        # mtp kv fill
-        draft_next_token_ids_gpu = next_token_ids_gpu
-        draft_model_output = model_output
-        draft_model_input = model_input
-        # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
-        for draft_model_idx in range(self.mtp_step):
-            draft_model_input = prepare_mtp_prefill_inputs(
-                model_input=draft_model_input,
-                b_next_token_ids=draft_next_token_ids_gpu,
-                deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
-            )
-
-            draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
-            draft_next_token_ids_gpu, draft_next_token_ids_cpu = self._gen_argmax_token_ids(draft_model_output)
+        # 第四阶段
+        event_pack.notify_pre_post_handle()
         return
 
     def decode_mtp(
@@ -227,19 +236,57 @@ class ChunkedPrefillBackend(ModeBackend):
         decode_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-        model_output = self.model.forward(model_input)
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            model_output = self.model.forward(model_input)
 
-        next_token_ids_gpu, next_token_probs = sample(model_output.logits, run_reqs, self.eos_id)
-        next_token_ids_cpu = next_token_ids_gpu.detach().cpu().numpy()
-        next_token_logprobs_cpu = torch.log(next_token_probs).detach().cpu().numpy()
+            next_token_ids, next_token_probs = sample(model_output.logits, run_reqs, self.eos_id)
+            scatter_token(
+                next_token_ids,
+                self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                model_input.b_req_idx,
+                model_input.b_mtp_index,
+            )
+            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
+                next_token_ids, next_token_probs
+            )
 
-        # verify
-        mem_indexes_cpu = model_input.mem_indexes.detach().cpu().numpy()
-        verify_ok_reqs, verify_ok_req_indexes, verify_ok_req_last_indexes, need_free_mem_indexes = self._verify_mtp(
-            run_reqs, next_token_ids_cpu, mem_indexes_cpu
-        )
+            # verify
+            mem_indexes_cpu = model_input.mem_indexes.detach().cpu().numpy()
+            verify_ok_reqs, verify_ok_req_indexes, verify_ok_req_last_indexes, need_free_mem_indexes = self._verify_mtp(
+                run_reqs, next_token_ids_cpu, mem_indexes_cpu
+            )
 
+            # share some inference info with the main model
+            draft_model_input = model_input
+            draft_model_output = model_output
+            draft_next_token_ids = next_token_ids
+            # process the draft model output
+            for draft_model_idx in range(self.mtp_step):
+
+                draft_model_input.input_ids = draft_next_token_ids
+                draft_model_input.deepseekv3_mtp_draft_input_hiddens = (
+                    draft_model_output.deepseekv3_mtp_main_output_hiddens
+                )
+                # spec decode: MTP
+                draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
+                draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
+
+                unique_reqs = [run_reqs[index] for index in verify_ok_req_last_indexes]
+                draft_next_token_ids_cpu = draft_next_token_ids.detach().cpu().numpy()
+                self._update_reqs_mtp_gen_token_ids(
+                    reqs=unique_reqs, mtp_draft_next_token_ids=draft_next_token_ids_cpu[verify_ok_req_last_indexes]
+                )
+            sync_event = torch.cuda.Event()
+            sync_event.record()
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
+
+        # 第三阶段
+        event_pack.notify_forward_and_wait_post_handle()
+        sync_event.synchronize()
+
         self._post_handle(
             run_reqs=verify_ok_reqs,
             next_token_ids=next_token_ids_cpu[verify_ok_req_indexes],
@@ -247,27 +294,11 @@ class ChunkedPrefillBackend(ModeBackend):
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
-
-        # share some inference info with the main model
-        draft_model_input = model_input
-        draft_model_output = model_output
-        draft_next_token_ids = next_token_ids_gpu
-        # process the draft model output
-        for draft_model_idx in range(self.mtp_step):
-
-            draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
-            # spec decode: MTP
-            draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
-            draft_next_token_ids, draft_next_token_ids_cpu = self._gen_argmax_token_ids(draft_model_output)
-
-            unique_reqs = [run_reqs[index] for index in verify_ok_req_last_indexes]
-            self._update_reqs_mtp_gen_token_ids(
-                reqs=unique_reqs, mtp_draft_next_token_ids=draft_next_token_ids_cpu[verify_ok_req_last_indexes]
-            )
-
         if need_free_mem_indexes:
             g_infer_state_lock.acquire()
             g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
             g_infer_state_lock.release()
+
+        # 第四阶段
+        event_pack.notify_pre_post_handle()
         return

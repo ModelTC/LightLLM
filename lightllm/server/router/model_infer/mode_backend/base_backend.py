@@ -20,6 +20,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
 from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
@@ -249,6 +250,21 @@ class ModeBackend:
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
+
+    def _save_next_token_ids_and_logprobs(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
+        """
+        这个函数会把next token id和logprobs保存到pinned memory中，并返回一个同步事件。
+        这样可以保障post_handle 函数可以读取到正常的输出结果。
+        """
+        next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
+            "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype
+        )
+        next_token_logprobs_cpu = g_pin_mem_manager.alloc_pin_tensor(
+            "next_token_logprobs", next_token_logprobs.shape[0], next_token_logprobs.dtype
+        )
+        next_token_ids_cpu.copy_(next_token_ids, non_blocking=True)
+        next_token_logprobs_cpu.copy_(next_token_logprobs, non_blocking=True)
+        return next_token_ids_cpu, next_token_logprobs_cpu
 
     def _try_read_new_reqs(self):
         if self.is_multinode_tp:
@@ -568,7 +584,7 @@ class ModeBackend:
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
-        return draft_next_token_ids_gpu, draft_next_token_ids_gpu.detach().cpu().numpy()
+        return draft_next_token_ids_gpu
 
     def _update_reqs_mtp_gen_token_ids(self, reqs: List[InferReq], mtp_draft_next_token_ids: np.ndarray):
         for req, token_id in zip(reqs, mtp_draft_next_token_ids):
