@@ -4,7 +4,6 @@ import torch
 import time
 import threading
 import torch.distributed as dist
-from queue import Queue
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
@@ -329,6 +328,7 @@ class ModeBackend:
         self,
         req_ids: List[int] = None,
         no_decode: bool = False,
+        strict_prefill: bool = False,
         recover_paused: bool = False,
     ):
         """
@@ -336,6 +336,11 @@ class ModeBackend:
         PD 分离的某些backend需要用这个参数进行控制，因为P节点永远只进行Prefill,
         避免一些特殊情况，如 radix cache 命中后，只有1token需要prefill，这个判断
         条件和decode请求的分类条件相同。所以添加一个参数进行区分。
+
+        strict_prefill参数用于控制当 cur_kv_len + 1 == input_len 时，是否将请求
+        分为 prefill,当 strict_prefill 设置为True时，表示需要将这个请求分为 prefill,
+        为 False 时，将这个请求分为decode。 strict_prefill 主要是用于diverse mode
+        使用时，其他模式目前不使用。
 
         将请求分类返回:
         1. wait_pause_reqs 因为推理资源不够，等待被暂停的请求。
@@ -389,7 +394,7 @@ class ModeBackend:
                 is_decode = False
             else:
                 is_decode = req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
-                if is_decode and req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len:
+                if is_decode and strict_prefill and req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len:
                     is_decode = False
 
             if is_decode:
@@ -461,6 +466,8 @@ class ModeBackend:
     def _post_handle(
         self,
         run_reqs: List[InferReq],
+        next_token_ids: List[int],
+        next_token_logprobs: List[float],
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
     ):
@@ -468,14 +475,9 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
-        next_token_ids = []
-        for req_obj, pack in zip(run_reqs, run_reqs_update_packs):
-            next_token_id = g_infer_context.req_manager.req_sampling_params_manager.req_to_next_token_ids_cpu[
-                req_obj.req_idx
-            ]
-            next_token_logprob = g_infer_context.req_manager.req_sampling_params_manager.req_to_next_token_probs_cpu[
-                req_obj.req_idx
-            ]
+        for req_obj, next_token_id, next_token_logprob, pack in zip(
+            run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs
+        ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
             pack.handle(
@@ -485,7 +487,6 @@ class ModeBackend:
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 is_master_in_dp=self.is_master_in_dp,
             )
-            next_token_ids.append(next_token_id)
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
             req_objs=run_reqs, next_token_ids=next_token_ids
