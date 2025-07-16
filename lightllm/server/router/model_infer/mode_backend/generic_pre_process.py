@@ -18,6 +18,8 @@ def prepare_prefill_inputs(
     batch_multimodal_params = []
     b_ready_cache_len = []
     b_mtp_index = []
+    b_prefill_has_output = []
+
     for req in req_objs:
         run_reqs.append(req)
         batch_multimodal_params.append(req.multimodal_params)
@@ -27,6 +29,8 @@ def prepare_prefill_inputs(
             input_token_ids = req.get_chuncked_input_token_ids()
         else:
             input_token_ids = req.get_input_token_ids()
+
+        b_prefill_has_output.append(False if len(input_token_ids) < req.get_cur_total_len() else True)
 
         seq_len = len(input_token_ids)
         input_token_len = seq_len - req.cur_kv_len
@@ -66,6 +70,7 @@ def prepare_prefill_inputs(
         b_seq_len=b_seq_len,
         b_ready_cache_len=b_ready_cache_len,
         is_prefill=True,
+        b_prefill_has_output_cpu=b_prefill_has_output,
     )
     if is_multimodal:
         model_input.multimodal_params = batch_multimodal_params

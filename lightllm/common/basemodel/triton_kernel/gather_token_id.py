@@ -76,14 +76,28 @@ def _fwd_kernel_scatter(
     req_to_next_token_ids,
     b_req_idx,
     b_mtp_index,
+    b_has_out,
     req_to_next_token_ids_stride,
     req_to_next_token_ids_stride_1,
+    HAS_OUT_IS_NONE: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
     cur_req_idx = tl.load(b_req_idx + cur_index)
     cur_mtp_index = tl.load(b_mtp_index + cur_index)
     cur_next_token_id = tl.load(next_token_ids + cur_index)
-    tl.store(req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + cur_mtp_index, cur_next_token_id)
+
+    if not HAS_OUT_IS_NONE:
+        cur_has_out = tl.load(b_has_out + cur_index)
+
+    if not HAS_OUT_IS_NONE:
+        tl.store(
+            req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + cur_mtp_index,
+            cur_next_token_id,
+            mask=cur_has_out,
+        )
+    else:
+        tl.store(req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + cur_mtp_index, cur_next_token_id)
+
     return
 
 
@@ -93,6 +107,7 @@ def scatter_token(
     req_to_next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
     b_mtp_index: torch.Tensor,
+    b_has_out: torch.Tensor = None,
 ):
     """
     This function is used to scatter the token_info(GPU tensor) to the req_to_token_info(CPU tensor).
@@ -112,8 +127,10 @@ def scatter_token(
         req_to_next_token_ids,
         b_req_idx,
         b_mtp_index,
+        b_has_out,
         req_to_next_token_ids.stride(0),
         req_to_next_token_ids.stride(1),
+        HAS_OUT_IS_NONE=b_has_out is None,
         num_warps=num_warps,
         num_stages=1,
     )

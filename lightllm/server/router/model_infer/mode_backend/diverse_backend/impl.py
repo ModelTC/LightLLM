@@ -12,6 +12,8 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
 )
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
+from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
 class DiversehBackend(ModeBackend):
@@ -20,7 +22,7 @@ class DiversehBackend(ModeBackend):
         self.prefill = self.beam_prefill
         self.classed_req_strict_prefill = True
 
-    def diverse_copy(self, groups: List[InferReqGroup]):
+    def diverse_copy(self, groups: List[InferReqGroup]) -> Tuple[List[int], List[InferReq]]:
         batch_idx = []
         run_reqs = []
         for i in range(len(groups)):
@@ -35,6 +37,7 @@ class DiversehBackend(ModeBackend):
         return batch_idx, run_reqs
 
     def beam_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+        # 第一阶段
         group_reqs = [
             g_infer_context.requests_mapping[req.req_id]
             for req in prefill_reqs
@@ -45,20 +48,56 @@ class DiversehBackend(ModeBackend):
             for req in prefill_reqs
             if convert_sub_id_to_group_id(req.req_id) == req.req_id
         ]
-        model_input, group_run_reqs = prepare_prefill_inputs(
-            group_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
-        )
-        model_output = self.model.forward(model_input)
-        logits = model_output.logits
 
-        batch_idx, run_reqs = self.diverse_copy(groups)
-        logits = logits[batch_idx]
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            model_input, group_run_reqs = prepare_prefill_inputs(
+                group_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
+            )
+            model_output = self.model.forward(model_input)
+            logits = model_output.logits
 
-        next_token_ids_gpu, next_token_probs_gpu = sample(model_output.logits, run_reqs, self.eos_id)
-        next_token_ids_cpu = next_token_ids_gpu.detach().cpu().numpy()
-        next_token_logprobs_cpu = torch.log(next_token_probs_gpu).detach().cpu().numpy()
+            batch_idx, run_reqs = self.diverse_copy(groups)
+            b_req_idx = [req.req_idx for req in run_reqs]
+            b_has_out = [model_input.b_prefill_has_output_cpu[i] for i in batch_idx]
 
+            batch_idx = torch.tensor(batch_idx, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
+                non_blocking=True
+            )
+            b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu", pin_memory=True).cuda(
+                non_blocking=True
+            )
+            b_has_out = torch.tensor(b_has_out, dtype=torch.bool, device="cpu", pin_memory=True).cuda(non_blocking=True)
+            logits = logits[batch_idx]
+            b_mtp_index = model_input.b_mtp_index[batch_idx]
+
+            next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+
+            scatter_token(
+                next_token_ids=next_token_ids,
+                req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                b_req_idx=b_req_idx,
+                b_mtp_index=b_mtp_index,
+                b_has_out=b_has_out,
+            )
+
+            next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
+                "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype
+            )
+            next_token_logprobs_cpu = g_pin_mem_manager.alloc_pin_tensor(
+                "next_token_logprobs", next_token_logprobs.shape[0], next_token_logprobs.dtype
+            )
+            next_token_ids_cpu.copy_(next_token_ids, non_blocking=True)
+            next_token_logprobs_cpu.copy_(next_token_logprobs, non_blocking=True)
+            sync_event = torch.cuda.Event()
+            sync_event.record()
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+
+        # 第三阶段
+        event_pack.notify_forward_and_wait_post_handle()
+        sync_event.synchronize()
         self._post_handle(
             run_reqs=run_reqs,
             next_token_ids=next_token_ids_cpu,
@@ -66,4 +105,6 @@ class DiversehBackend(ModeBackend):
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
+        # 第四阶段
+        event_pack.notify_pre_post_handle()
         return
