@@ -78,6 +78,16 @@ class InferenceContext:
             req_objs.append(r_obj)
 
         self.infer_req_ids.extend(request_ids)
+
+        # 多输出模式下需要将请求添加到各自的组对象 InferReqGroup 中
+        if get_env_start_args().diverse_mode:
+            for r_id in request_ids:
+                req: InferReq = g_infer_context.requests_mapping[r_id]
+                group_req_id = req.shm_req.group_req_id
+                if group_req_id not in g_infer_context.group_mapping:
+                    g_infer_context.group_mapping[group_req_id] = InferReqGroup(group_req_id=group_req_id)
+                g_infer_context.group_mapping[group_req_id].add_req(r_id)
+
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq", is_group_finished: bool):
