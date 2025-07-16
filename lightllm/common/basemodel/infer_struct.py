@@ -65,7 +65,7 @@ class InferStateInfo:
         # 的输入会用到，其他模型和场景都不会用到
         self.deepseekv3_mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
-    def init_some_extra_state(self, model, model_input: ModelInput):
+    def init_some_extra_state(self, model, input_ids: torch.Tensor):
         if self.is_prefill:
             (
                 self.b_q_seq_len,
@@ -76,7 +76,7 @@ class InferStateInfo:
                 self.max_q_seq_len,
                 self.max_kv_seq_len,
             ) = gen_prefill_params(
-                input_token_num=model_input.input_ids.shape[0],
+                input_token_num=input_ids.shape[0],
                 b_ready_cache_len=self.b_ready_cache_len,
                 b_seq_len=self.b_seq_len,
             )
@@ -88,10 +88,10 @@ class InferStateInfo:
                 self.b_kv_seq_len,
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
+                self.max_q_seq_len,
+                self.max_kv_seq_len,
             ) = gen_decode_params(self.b_seq_len)
             self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
-            self.max_q_seq_len = 1
-            self.max_kv_seq_len = model_input.max_len_in_batch
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():

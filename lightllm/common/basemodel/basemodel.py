@@ -341,7 +341,7 @@ class TpPartBaseModel:
             infer_state.mem_index,
         )
 
-        infer_state.init_some_extra_state(self, model_input)
+        infer_state.init_some_extra_state(self, model_input.input_ids)
         return self._context_forward(model_input.input_ids, infer_state)
 
     def _decode(
@@ -365,7 +365,7 @@ class TpPartBaseModel:
                 infer_state.b_seq_len,
                 infer_state.mem_index,
             )
-            infer_state.init_some_extra_state(self, padded_model_input)
+            infer_state.init_some_extra_state(self, padded_model_input.input_ids)
 
             if self.graph.need_capture(find_graph_batch_size):
                 infer_state.is_cuda_graph = True
@@ -386,7 +386,7 @@ class TpPartBaseModel:
                 infer_state.b_seq_len,
                 infer_state.mem_index,
             )
-            infer_state.init_some_extra_state(self, model_input)
+            infer_state.init_some_extra_state(self, model_input.input_ids)
             model_output = self._token_forward(model_input.input_ids, infer_state)
 
         return model_output
