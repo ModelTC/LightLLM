@@ -85,7 +85,7 @@ def _fwd_kernel_scatter(
 
 
 @torch.no_grad()
-def scatter_token_to_cpu(token_info: torch.Tensor, req_to_token_info: torch.Tensor, b_req_idx: torch.Tensor):
+def scatter_token(token_info: torch.Tensor, req_to_token_info: torch.Tensor, b_req_idx: torch.Tensor):
     """
     This function is used to scatter the token_info(GPU tensor) to the req_to_token_info(CPU tensor).
     Args:
@@ -112,21 +112,22 @@ def scatter_token_to_cpu(token_info: torch.Tensor, req_to_token_info: torch.Tens
 @triton.jit
 def _fwd_kernel_gather(
     req_to_token_info,
+    req_to_token_info_stride,
     output,
     b_req_idx,
 ):
     cur_index = tl.program_id(0)
     cur_req_idx = tl.load(b_req_idx + cur_index)
-    cur_token_info = tl.load(req_to_token_info + cur_req_idx)
+    cur_token_info = tl.load(req_to_token_info + cur_req_idx * req_to_token_info_stride)
     tl.store(output + cur_index, cur_token_info)
     return
 
 
-def gather_token_from_cpu(req_to_token_info: torch.Tensor, b_req_idx: torch.Tensor):
+def gather_token(req_to_token_info: torch.Tensor, b_req_idx: torch.Tensor):
     """
     This function is used to gather the token_info(CPU tensor) to the token_info(GPU tensor).
     Args:
-        req_to_token_info: (max_req_num,)
+        req_to_token_info: (max_req_num, max_mtp_step)
         b_req_idx: (batch_size,)
     Returns:
         output: (batch_size,)
@@ -137,6 +138,7 @@ def gather_token_from_cpu(req_to_token_info: torch.Tensor, b_req_idx: torch.Tens
     num_warps = 1
     _fwd_kernel_gather[grid](
         req_to_token_info,
+        req_to_token_info.stride(0),
         output,
         b_req_idx,
         num_warps=num_warps,
@@ -185,25 +187,25 @@ def test_scatter_token_to_cpu():
     req_to_token_info = torch.zeros((1000,), dtype=torch.float32, pin_memory=True)
     token_info = torch.randn((batch_size,)).cuda()
     req_ids = torch.arange(20, 20 + batch_size, dtype=torch.int32).cuda()
-    scatter_token_to_cpu(token_info, req_to_token_info, req_ids)
+    scatter_token(token_info, req_to_token_info, req_ids)
     diff = (req_to_token_info[20 : 20 + batch_size].cuda() - token_info).abs().max()
     assert diff < 1e-6
     print("test_scatter_token_to_cpu passed")
 
 
-def test_gather_token_from_cpu():
+def test_gather_token():
     batch_size = 30
     req_to_token_info = torch.zeros((1000,), dtype=torch.int32, pin_memory=True)
     token_info = torch.randn((batch_size,)).cuda()
     req_ids = torch.arange(20, 20 + batch_size, dtype=torch.int32).cuda()
-    scatter_token_to_cpu(token_info, req_to_token_info, req_ids)
-    output = gather_token_from_cpu(req_to_token_info, req_ids)
+    scatter_token(token_info, req_to_token_info, req_ids)
+    output = gather_token(req_to_token_info, req_ids)
     diff = (token_info - output).abs().max()
     assert diff < 1e-6
-    print("test_gather_token_from_cpu passed")
+    print("test_gather_token passed")
 
 
 if __name__ == "__main__":
     test_gather_and_scatter_token_to_cpu()
     test_scatter_token_to_cpu()
-    test_gather_token_from_cpu()
+    test_gather_token()

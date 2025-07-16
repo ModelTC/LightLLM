@@ -17,7 +17,7 @@ from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.quantization import Quantcfg
-from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token_from_cpu
+from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args
@@ -350,8 +350,8 @@ class TpPartBaseModel:
     ) -> ModelOutput:
         # for overlap mode
         if model_input.input_ids is None:
-            model_input.input_ids = gather_token_from_cpu(
-                self.req_manager.req_sampling_params_manager.req_to_next_token_ids_cpu,
+            model_input.input_ids = gather_token(
+                self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
                 model_input.b_req_idx,
             )
 

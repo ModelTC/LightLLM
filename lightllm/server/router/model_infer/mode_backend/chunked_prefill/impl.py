@@ -13,8 +13,10 @@ from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
 )
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelOutput
+from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
@@ -94,7 +96,21 @@ class ChunkedPrefillBackend(ModeBackend):
             if self.prefill_mask_func is not None:
                 self.prefill_mask_func(run_reqs, logits)
 
-            sample(logits, run_reqs, self.eos_id)
+            next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+
+            scatter_token(
+                next_token_ids,
+                self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                model_input.b_req_idx,
+            )
+            next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
+                "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype
+            )
+            next_token_logprobs_cpu = g_pin_mem_manager.alloc_pin_tensor(
+                "next_token_logprobs", next_token_logprobs.shape[0], next_token_logprobs.dtype
+            )
+            next_token_ids_cpu.copy_(next_token_ids, non_blocking=True)
+            next_token_logprobs_cpu.copy_(next_token_logprobs, non_blocking=True)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -107,6 +123,8 @@ class ChunkedPrefillBackend(ModeBackend):
         sync_event.synchronize()
         self._post_handle(
             run_reqs=run_reqs,
+            next_token_ids=next_token_ids_cpu,
+            next_token_logprobs=next_token_logprobs_cpu,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
@@ -126,7 +144,20 @@ class ChunkedPrefillBackend(ModeBackend):
 
             if self.decode_mask_func is not None:
                 self.decode_mask_func(run_reqs, logits)
-            sample(logits, run_reqs, self.eos_id)
+            next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+            scatter_token(
+                next_token_ids,
+                self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                model_input.b_req_idx,
+            )
+            next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
+                "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype
+            )
+            next_token_logprobs_cpu = g_pin_mem_manager.alloc_pin_tensor(
+                "next_token_logprobs", next_token_logprobs.shape[0], next_token_logprobs.dtype
+            )
+            next_token_ids_cpu.copy_(next_token_ids, non_blocking=True)
+            next_token_logprobs_cpu.copy_(next_token_logprobs, non_blocking=True)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -139,6 +170,8 @@ class ChunkedPrefillBackend(ModeBackend):
         sync_event.synchronize()
         self._post_handle(
             run_reqs=run_reqs,
+            next_token_ids=next_token_ids_cpu,
+            next_token_logprobs=next_token_logprobs_cpu,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )

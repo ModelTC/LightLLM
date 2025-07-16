@@ -2,10 +2,6 @@ import torch
 from typing import List
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.apply_penalty_gpu_cache import apply_penalty_gpu_cache
-from lightllm.common.basemodel.triton_kernel.gather_token_id import (
-    gather_and_scatter_token_to_cpu,
-    scatter_token_to_cpu,
-)
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -69,15 +65,9 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
     if get_env_start_args().sampling_backend == "triton":
         probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
         sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
-        gather_and_scatter_token_to_cpu(
-            probs_idx,
-            probs_sort,
-            sampling_params_manager.req_to_next_token_ids_cpu,
-            sampling_params_manager.req_to_next_token_probs_cpu,
-            sampled_index,
-            b_req_idx,
-        )
-        return
+        next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
+        next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
+        return next_token_ids.view(-1), next_token_logprobs.view(-1)
 
     elif get_env_start_args().sampling_backend == "sglang_kernel":
         from sgl_kernel import top_k_top_p_sampling_from_probs
@@ -91,12 +81,9 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         )
         int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
         int64_batch_next_token_ids[:] = batch_next_token_ids
+        batch_next_token_ids = int64_batch_next_token_ids.cuda(non_blocking=True)
         batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
-        scatter_token_to_cpu(batch_next_token_ids, sampling_params_manager.req_to_next_token_ids_cpu, b_req_idx)
-        scatter_token_to_cpu(
-            torch.log(batch_next_token_probs), sampling_params_manager.req_to_next_token_probs_cpu, b_req_idx
-        )
-        return
+        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
     else:
         assert False, "dead path"
 
