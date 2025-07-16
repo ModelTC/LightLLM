@@ -102,6 +102,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_ids,
                 self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
                 model_input.b_req_idx,
+                model_input.b_mtp_index,
             )
             next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
                 "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype
@@ -149,6 +150,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_ids,
                 self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
                 model_input.b_req_idx,
+                model_input.b_mtp_index,
             )
             next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
                 "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype

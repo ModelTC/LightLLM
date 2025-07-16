@@ -12,6 +12,7 @@ class ModelInput:
     input_ids: torch.Tensor
     mem_indexes: torch.Tensor
     b_req_idx: torch.Tensor
+    b_mtp_index: torch.Tensor
     b_seq_len: torch.Tensor
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
@@ -30,6 +31,7 @@ class ModelInput:
         self.mem_indexes = self.mem_indexes.cuda(non_blocking=True)
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
+        self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
         if self.b_ready_cache_len is not None:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
 
