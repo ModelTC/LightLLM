@@ -13,6 +13,7 @@ class DPForDecodeNode(DPChunkedPrefillBackend):
         super().__init__()
         self.info_queue: mp.Queue = info_queue
         self.mem_queue: mp.Queue = mem_queue
+        self.classed_req_strict_prefill = False
         return
 
     def init_custom(self):

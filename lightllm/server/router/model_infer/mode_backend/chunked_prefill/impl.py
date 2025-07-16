@@ -50,6 +50,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
                 prefill_reqs, decode_reqs = self._get_classed_reqs(
                     no_decode=self.classed_req_no_decode,
+                    strict_prefill=self.classed_req_strict_prefill,
                     recover_paused=self.control_state_machine.try_recover_paused_reqs(),
                 )
 

@@ -49,7 +49,7 @@ class ModeBackend:
 
         # 控制 _get_classed_reqs 分类的参数变量，不同的 backend 具有可能需要不同的分类运行条件。
         self.classed_req_no_decode = False
-        self.classed_req_strict_prefill = False
+        self.classed_req_strict_prefill = True
         pass
 
     def init_model(self, kvargs):

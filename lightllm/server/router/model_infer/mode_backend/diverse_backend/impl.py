@@ -18,6 +18,7 @@ class DiversehBackend(ModeBackend):
     def __init__(self) -> None:
         super().__init__()
         self.prefill = self.beam_prefill
+        self.classed_req_strict_prefill = True
 
     def diverse_copy(self, groups: List[InferReqGroup]):
         batch_idx = []
