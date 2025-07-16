@@ -1,7 +1,7 @@
 import rpyc
 import uuid
 import inspect
-from typing import Union
+from typing import Union, Optional
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.embed_cache.impl.naive_memory_cache import InMemoryCache
 from rpyc.utils.classic import obtain
@@ -22,7 +22,7 @@ class CacheServer(rpyc.Service):
         # (to finalize the service, if needed)
         pass
 
-    def exposed_alloc(self, md5sum_list: list[str], token_num_list: list[int]) -> dict:
+    def exposed_alloc(self, md5sum_list: list[str], token_num_list: list[int]) -> Optional[list[dict]]:
         md5sum_list = obtain(md5sum_list)
         token_num_list = obtain(token_num_list)
         record = self._impl.alloc(md5sum_list, token_num_list)

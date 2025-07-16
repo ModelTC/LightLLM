@@ -2,7 +2,7 @@ import uuid
 import threading
 import dataclasses
 import requests
-from typing import Union
+from typing import Union, Optional
 import torch
 import time
 from collections import deque
@@ -87,41 +87,42 @@ class InMemoryCache:
                 if deleted >= max_delete:
                     break
 
-    def alloc(self, md5sum_list: list[str], token_num_list: list[int]) -> list[dict]:
-        results = []
+    def alloc(self, md5sum_list: list[str], token_num_list: list[int]) -> Optional[list[dict]]:
+        now = time.time()
         with self.lock:
+            new_md5s = [m for m in md5sum_list if m not in self._md5_to_record]
+            new_needed = len(new_md5s)
+
+            if self.occupied + new_needed > self.capacity:
+                self._clear()
+            if self.occupied + new_needed > self.capacity:
+                return None
+
+            results: list[dict] = []
             for md5sum, token_num in zip(md5sum_list, token_num_list):
-                t = time.time()
-                if md5sum not in self._md5_to_record:
-                    if self.occupied >= self.capacity:
-                        self._clear()
-                        if self.occupied >= self.capacity:
-                            results.append(None)
-                            continue
-                    id = uuid.uuid1()
-                    id = id.int
+                if md5sum in self._md5_to_record:
+                    rec = self._md5_to_record[md5sum]
+                    rec.visittime = now
+                    rec.ref += 1
+                else:
+                    uid_int = uuid.uuid1().int
                     self._check_and_set_new_id_range(token_num)
-                    record = Record(
-                        id=id,
+                    rec = Record(
+                        id=uid_int,
                         md5sum=md5sum,
                         ref=1,
                         data=False,
                         embed=False,
-                        createtime=t,
-                        visittime=t,
+                        createtime=now,
+                        visittime=now,
                         token_id=self.token_id_range_start,
                         token_num=token_num,
                     )
                     self.token_id_range_start += token_num
-                    self._records[id] = record
-                    self._md5_to_record[md5sum] = record
+                    self._records[uid_int] = rec
+                    self._md5_to_record[md5sum] = rec
                     self.occupied += 1
-                # cache hit
-                else:
-                    record = self._md5_to_record[md5sum]
-                    record.visittime = t
-                    record.ref += 1
-                results.append({"id": record.id, "token_id": record.token_id, "token_num": record.token_num})
+                results.append({"id": rec.id, "token_id": rec.token_id, "token_num": rec.token_num})
         return results
 
     def release(self, ids: list[int]) -> None:

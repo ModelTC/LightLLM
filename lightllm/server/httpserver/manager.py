@@ -114,53 +114,34 @@ class HttpServerManager:
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
 
-    async def _alloc_resource(self, items, md5sums, tokens_nums, datas):
+    async def _alloc_resource(self, items, md5sums, token_nums, datas):
         wait_time = 1
-        pending_idx = list(range(len(items)))
-        while pending_idx:
-            sub_md5sum = [md5sums[i] for i in pending_idx]
-            sub_tokens_num = [tokens_nums[i] for i in pending_idx]
+        while True:
+            records = self.cache_client.root.alloc(md5sums, token_nums)
 
-            records = self.cache_client.root.alloc(sub_md5sum, sub_tokens_num)
-
-            if all(record is None for record in records):
+            if records is None:
                 await asyncio.sleep(wait_time)
                 wait_time = min(wait_time + 2, 9)
                 continue
 
-            next_pending = []  # record为None，安排在下一轮
-            uids_to_check = []  # record存在，本轮处理
-            uid_to_idx = {}  # uid → 原items下标
+            uid_list = []
+            for item, rec in zip(items, records):
+                item.uuid = rec["id"]
+                item.token_id = rec["token_id"]
+                item.token_num = rec["token_num"]
+                uid_list.append(rec["id"])
 
-            for local_pos, record in enumerate(records):
-                global_pos = pending_idx[local_pos]
+            ready_flags = self.cache_client.root.get_items_data(uid_list)
+            need_write = []
 
-                if record is None:
-                    next_pending.append(global_pos)
-                    continue
+            for uid, ready, data in zip(uid_list, ready_flags, datas):
+                if not ready:
+                    create_shm(get_shm_name_data(uid), data)
+                    need_write.append(uid)
 
-                uid = record["id"]
-                uid_to_idx[uid] = global_pos
-                uids_to_check.append(uid)
-
-                item = items[global_pos]
-                item.uuid = uid
-                item.token_id = record["token_id"]
-                item.token_num = record["token_num"]
-
-            if uids_to_check:
-                ready_flags = self.cache_client.root.get_items_data(uids_to_check)
-                need_write = []
-
-                for uid, ready in zip(uids_to_check, ready_flags):
-                    if not ready:
-                        idx = uid_to_idx[uid]
-                        create_shm(get_shm_name_data(uid), datas[idx])
-                        need_write.append(uid)
-                if need_write:
-                    self.cache_client.root.set_items_data(need_write)
-            pending_idx = next_pending
-        return
+            if need_write:
+                self.cache_client.root.set_items_data(need_write)
+            return
 
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
