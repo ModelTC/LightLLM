@@ -104,7 +104,9 @@ def get_contrasting_background(image):
 
 
 def get_image_token(image_w, image_h, patch_size=14, downsample_ratio=0.5):
-    image_w, image_h = smart_resize(image_w, image_h)
+    image_w, image_h = smart_resize(
+        image_w, image_h, downsample_ratio=0.5, min_pixels=256 * 28 * 28, max_pixels=3328 * 28 * 28
+    )
     num_image_token = int(image_w * image_h // patch_size ** 2 * downsample_ratio ** 2)
     return num_image_token
 
