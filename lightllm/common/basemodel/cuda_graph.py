@@ -196,12 +196,12 @@ class CudaGraph:
             total_token_num = batch_size * seq_len
             max_len_in_batch = self.graph_max_len_in_batch
             input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
-            mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
             b_req_idx = torch.tensor(
                 [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
             )
             b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
             b_seq_len.fill_(seq_len)
+            mem_indexes = model.mem_manager.alloc(len(input_ids), b_req_idx, b_seq_len, None, False).cuda()
 
             model_input = ModelInput(
                 batch_size=batch_size,
@@ -250,12 +250,12 @@ class CudaGraph:
                 total_token_num = batch_size * seq_len
                 max_len_in_batch = self.graph_max_len_in_batch
                 input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
-                mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
                 b_req_idx = torch.tensor(
                     [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
                 )
                 b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
                 b_seq_len.fill_(seq_len)
+                mem_indexes = model.mem_manager.alloc(len(input_ids), b_req_idx, b_seq_len, None, False).cuda()
 
                 micro_batch = ModelInput(
                     is_prefill=False,
