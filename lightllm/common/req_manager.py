@@ -62,6 +62,7 @@ class ReqManager:
         self.req_to_token_indexs = torch.zeros(
             (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
         )
+        mem_manager.req_to_token_indexs = self.req_to_token_indexs
         self.mem_manager = mem_manager
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num

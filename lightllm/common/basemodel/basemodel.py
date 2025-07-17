@@ -12,9 +12,7 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
-from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.quantization import Quantcfg
@@ -333,14 +331,6 @@ class TpPartBaseModel:
         model_input: ModelInput,
     ):
         infer_state = self._create_inferstate(model_input)
-        init_req_to_token_indexes(
-            self.req_manager.req_to_token_indexs,
-            model_input.b_req_idx,
-            model_input.b_seq_len,
-            infer_state.b_ready_cache_len,
-            model_input.max_len_in_batch,
-            infer_state.mem_index,
-        )
 
         infer_state.init_some_extra_state(self, model_input.input_ids)
         return self._context_forward(model_input.input_ids, infer_state)
@@ -361,12 +351,6 @@ class TpPartBaseModel:
             find_graph_batch_size = self.graph.find_closest_graph_batch_size(model_input.batch_size)
             padded_model_input = self._create_padded_decode_model_input(model_input, find_graph_batch_size)
             infer_state = self._create_inferstate(padded_model_input)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state.b_req_idx,
-                infer_state.b_seq_len,
-                infer_state.mem_index,
-            )
             infer_state.init_some_extra_state(self, padded_model_input.input_ids)
 
             if self.graph.need_capture(find_graph_batch_size):
@@ -382,12 +366,6 @@ class TpPartBaseModel:
             )
         else:
             infer_state = self._create_inferstate(model_input)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state.b_req_idx,
-                infer_state.b_seq_len,
-                infer_state.mem_index,
-            )
             infer_state.init_some_extra_state(self, model_input.input_ids)
             model_output = self._token_forward(model_input.input_ids, infer_state)
 
@@ -472,25 +450,9 @@ class TpPartBaseModel:
         input_ids0, input_ids1 = model_input0.input_ids, model_input1.input_ids
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        init_req_to_token_indexes(
-            self.req_manager.req_to_token_indexs,
-            model_input0.b_req_idx,
-            model_input0.b_seq_len,
-            infer_state0.b_ready_cache_len,
-            model_input0.max_len_in_batch,
-            infer_state0.mem_index,
-        )
         infer_state0.init_some_extra_state(self, input_ids0)
 
         infer_state1 = self._create_inferstate(model_input1, 1)
-        init_req_to_token_indexes(
-            self.req_manager.req_to_token_indexs,
-            model_input1.b_req_idx,
-            model_input1.b_seq_len,
-            infer_state1.b_ready_cache_len,
-            model_input1.max_len_in_batch,
-            infer_state1.mem_index,
-        )
         infer_state1.init_some_extra_state(self, input_ids1)
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(
@@ -532,20 +494,8 @@ class TpPartBaseModel:
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, find_graph_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, find_graph_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state0.b_req_idx,
-                infer_state0.b_seq_len,
-                infer_state0.mem_index,
-            )
             infer_state0.init_some_extra_state(self, padded_model_input0.input_ids)
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state1.b_req_idx,
-                infer_state1.b_seq_len,
-                infer_state1.mem_index,
-            )
             infer_state1.init_some_extra_state(self, padded_model_input1.input_ids)
 
             if self.graph.need_capture(find_graph_batch_size):
@@ -570,20 +520,8 @@ class TpPartBaseModel:
             model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
         else:
             infer_state0 = self._create_inferstate(model_input0, 0)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state0.b_req_idx,
-                infer_state0.b_seq_len,
-                infer_state0.mem_index,
-            )
             infer_state0.init_some_extra_state(self, model_input0.input_ids)
             infer_state1 = self._create_inferstate(model_input1, 1)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state1.b_req_idx,
-                infer_state1.b_seq_len,
-                infer_state1.mem_index,
-            )
             infer_state1.init_some_extra_state(self, model_input1.input_ids)
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(
@@ -684,10 +622,12 @@ class TpPartBaseModel:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int32, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-            mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+            mem_indexes = self.mem_manager.alloc(
+                len(dummy_input_ids), b_req_idx, b_seq_len, b_ready_cache_len, True
+            ).cuda()
             total_token_num = self.batch_max_tokens
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
             model_input = ModelInput(

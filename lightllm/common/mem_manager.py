@@ -12,6 +12,8 @@ from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.common.infer_utils import init_req_to_token_indexes
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 
 logger = init_logger(__name__)
 
@@ -52,6 +54,7 @@ class MemoryManager:
             layer_num,
         )
         self.HOLD_TOKEN_MEMINDEX = self.size
+        self.req_to_token_indexs = None
 
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
@@ -243,7 +246,9 @@ class MemoryManager:
     def _free_buffers(self):
         self.kv_buffer = None
 
-    def alloc(self, need_size) -> torch.Tensor:
+    def alloc(
+        self, need_size, b_req_idx=None, b_seq_len=None, b_ready_cache_len=None, is_prefill=False
+    ) -> torch.Tensor:
         if need_size > self.mark_end - self.mark_start:
             logger.error(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
             assert False, "error alloc state"
@@ -255,7 +260,28 @@ class MemoryManager:
 
         self.can_use_mem_size -= need_size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+
+        if self.req_to_token_indexs is not None:
+            assert b_req_idx is not None and b_seq_len is not None, "b_req_idx and b_seq_len must be provided"
+            if is_prefill:
+                init_req_to_token_indexes(
+                    self.req_to_token_indexs,
+                    b_req_idx,
+                    b_seq_len,
+                    b_ready_cache_len,
+                    ans,
+                )
+            else:
+                copy_kv_index_to_req(
+                    self.req_to_token_indexs,
+                    b_req_idx.cuda(),
+                    b_seq_len.cuda(),
+                    ans.cuda(),
+                )
         return ans
+
+    def set_prefix_cache_to_req(self, req_idx: int, start: int, end: int, values: torch.Tensor):
+        self.req_to_token_indexs[req_idx, start:end] = values
 
     def free(self, free_index: Union[torch.Tensor, List[int]]):
         """_summary_
