@@ -421,10 +421,10 @@ class ModeBackend:
         self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
         g_infer_context.filter_reqs(finished_reqs=finished_reqs)
 
-        g_infer_context.pause_reqs(wait_pause_reqs)
+        g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
         if recover_paused:
-            g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs)
+            g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp)
 
         return prefill_reqs, decode_reqs
 
