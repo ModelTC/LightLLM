@@ -50,10 +50,12 @@ class DiversehBackend(ChunkedPrefillBackend):
             if convert_sub_id_to_group_id(req.req_id) == req.req_id
         ]
 
+        model_input, group_run_reqs = prepare_prefill_inputs(
+            group_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
+        )
+
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            model_input, group_run_reqs = prepare_prefill_inputs(
-                group_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
-            )
+
             model_output = self.model.forward(model_input)
             logits = model_output.logits
 
