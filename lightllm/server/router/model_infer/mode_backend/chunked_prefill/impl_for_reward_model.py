@@ -5,6 +5,7 @@ from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.model_infer.mode_backend.pre import prepare_prefill_inputs
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 
+
 class RewardModelBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
@@ -12,10 +13,8 @@ class RewardModelBackend(ChunkedPrefillBackend):
         self.prefill = self.reward_prefill
         return
 
-    def reward_prefill(self,
-                       event_pack: OverlapEventPack,
-                       prefill_reqs: List[InferReq]):
-        
+    def reward_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+
         assert self.disable_chunked_prefill is True
         model_input, run_reqs = prepare_prefill_inputs(
             prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
@@ -32,7 +31,7 @@ class RewardModelBackend(ChunkedPrefillBackend):
             # prefill and decode is same
             req_obj: InferReq = req_obj
             req_obj.cur_kv_len = req_obj.get_cur_total_len()
-            
+
             req_obj.cur_output_len += 1
             req_obj.set_next_gen_token_id(next_token_id, next_token_logprob, output_len=req_obj.cur_output_len)
             req_obj.update_finish_status(self.eos_id, output_len=req_obj.cur_output_len)
@@ -52,4 +51,8 @@ class RewardModelBackend(ChunkedPrefillBackend):
                     req_obj.shm_req.finish_status = req_obj.finish_status
 
                 req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
+
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+        event_pack.notify_forward_and_wait_post_handle()
+        event_pack.notify_pre_post_handle()
         return

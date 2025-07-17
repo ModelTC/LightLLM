@@ -70,3 +70,27 @@ class OverlapEventPack:
     def notify_pre_post_handle(self):
         self.notify_pre_post_handle_event.set()
         return
+
+    def _close_overlap(self):
+        """
+        通过调整事件接口的调用内容，关闭主流程中的overlap功能。
+        """
+
+        def pass_():
+            pass
+
+        self.notify_post_handle_and_wait_pre_post_handle = pass_
+        self.notify_forward_and_wait_post_handle = pass_
+
+        def finished():
+            # notify_post_handle_and_wait_pre_post_handle
+            self.notify_post_handle_event.set()
+            self.wait_pre_post_handle_event.wait()
+            # notify_forward_and_wait_post_handle
+            self.notify_forward_event.set()
+            self.wait_post_handle_event.wait()
+            # notify_pre_post_handle
+            self.notify_pre_post_handle_event.set()
+
+        self.notify_pre_post_handle = finished
+        return

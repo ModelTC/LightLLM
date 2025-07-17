@@ -36,6 +36,8 @@ class ModeBackend:
         self.shm_req_manager = ShmReqManager()
 
         self.overlap_event_manager = OverlapEventManager()
+        # 标识是否支持 overlap 功能，很多子类模式如 xgrammar 和 outlines 当前不支持 overlap 高性能模式
+        self.support_overlap = True
 
         # prefill_mask_func 和 decode_mask_func 用于控制在采样输出前，通过对logics的调整，改变输出的选择空间，
         # 主要是为约束输出模式进行定制的操作
