@@ -88,6 +88,9 @@ class StartArgs:
     enable_flashinfer_prefill: bool = field(default=False)
     enable_flashinfer_decode: bool = field(default=False)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
+    penalty_counter_mode: str = field(
+        default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
+    )
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
     mtp_mode: Optional[str] = field(default=None)
