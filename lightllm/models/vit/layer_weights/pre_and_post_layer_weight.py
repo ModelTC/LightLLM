@@ -4,6 +4,7 @@ import numpy as np
 import torch.nn.functional as F
 from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.utils.dist_utils import get_current_device_id
+from torch import nn
 
 
 class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
@@ -43,9 +44,19 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
             self.class_embedding = self._cuda(
                 weights["vision_model.embeddings.class_embedding"][:, :, split_start:split_end]
             )
+        else:
+            self.class_embedding = self._cuda(
+                nn.Parameter(
+                    torch.randn(1, 1, self.embed_dim),
+                )
+            )
         if "vision_model.embeddings.position_embedding" in weights:
             self.position_embedding = self._cuda(
                 weights["vision_model.embeddings.position_embedding"][:, :, split_start:split_end]
+            )
+        else:
+            self.position_embedding = self._cuda(
+                nn.Parameter(torch.randn(1, (((self.image_size // self.patch_size) ** 2) + 1), self.embed_dim))
             )
         if "vision_model.embeddings.patch_embedding.weight" in weights:
             self.patch_embedding_weight_ = self._cuda(

@@ -1,7 +1,6 @@
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
-
-
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
@@ -89,33 +88,60 @@ class ViTTransformerLayerInfer:
         return q_norm, k_norm
 
     def _get_qkv(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
-        batch_size = input.shape[0]
-        seq_len = input.shape[1]
-        qkv = layer_weight.qkv_proj.mm(input.view(-1, self.embed_dim_), use_custom_tensor_mananger=True)
-        qkv = qkv.view(batch_size, seq_len, 3, -1, self.head_dim_)
-        q, k, v = qkv.unbind(2)
-        return q, k, v
+        print(f"input.shape is {input.shape}")
+        if input.dim() == 2:
+            seq_len, _ = input.shape
+            qkv = layer_weight.qkv_proj.mm(input, use_custom_tensor_mananger=True)
+            qkv = qkv.view(seq_len, 3, -1, self.head_dim_)
+            q, k, v = qkv.unbind(1)
+            return q, k, v
+        else:
+            batch_size = input.shape[0]
+            seq_len = input.shape[1]
+            qkv = layer_weight.qkv_proj.mm(input.view(-1, self.embed_dim_), use_custom_tensor_mananger=True)
+            qkv = qkv.view(batch_size, seq_len, 3, -1, self.head_dim_)
+            q, k, v = qkv.unbind(2)
+            return q, k, v
 
-    def _context_attention_kernel(self, q, k, v) -> torch.Tensor:
+    def _context_attention_kernel(self, q, k, v, cu_seqlens=None) -> torch.Tensor:
         out = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
-        batch_size, seq_len, head_num, head_dim = q.shape
-        total_len = batch_size * seq_len
-        reshape = lambda t: t.view(total_len, head_num, head_dim)
-        q, k, v, out = map(reshape, (q, k, v, out))
-        cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device) * seq_len
-        max_seqlen = seq_len
-        flash_attention_fwd(q, k, v, out, cu_seqlens, max_seqlen)
-        return out.reshape(batch_size, seq_len, -1)
+        print(f"q.shape is {q.shape}")
+        print(f"k.shape is {k.shape}")
+        print(f"v.shape is {v.shape}")
+        if q.dim() == k.dim() == v.dim() == 3 and cu_seqlens is not None:
+            totoal_len, head_num, head_dim = q.shape
+            cu_seqlens = cu_seqlens.to(q.device)
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+            flash_attention_fwd(q, k, v, out, cu_seqlens, max_seqlen)
+            return out.reshape(totoal_len, -1)
+        else:
+            batch_size, seq_len, head_num, head_dim = q.shape
+            total_len = batch_size * seq_len
+            reshape = lambda t: t.view(total_len, head_num, head_dim)
+            q, k, v, out = map(reshape, (q, k, v, out))
+            cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device) * seq_len
+            max_seqlen = seq_len
+            flash_attention_fwd(q, k, v, out, cu_seqlens, max_seqlen)
+            return out.reshape(batch_size, seq_len, -1)
 
     def _get_o(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
-        batch_size = input.shape[0]
-        seq_len = input.shape[1]
-        o_tensor = layer_weight.o_proj.mm(
-            input.view(-1, self.tp_padding_head_num * self.head_dim_), use_custom_tensor_mananger=True
-        )
-        if layer_weight.use_ls:
-            o_tensor.mul_(layer_weight.ls1)
-        return o_tensor.reshape((batch_size, seq_len, -1))
+        if input.dim() == 2:
+            seq_len, _ = input.shape
+            o_tensor = layer_weight.o_proj.mm(
+                input.view(-1, self.tp_padding_head_num * self.head_dim_), use_custom_tensor_mananger=True
+            )
+            if layer_weight.use_ls:
+                o_tensor.mul_(layer_weight.ls1)
+            return o_tensor
+        else:
+            batch_size = input.shape[0]
+            seq_len = input.shape[1]
+            o_tensor = layer_weight.o_proj.mm(
+                input.view(-1, self.tp_padding_head_num * self.head_dim_), use_custom_tensor_mananger=True
+            )
+            if layer_weight.use_ls:
+                o_tensor.mul_(layer_weight.ls1)
+            return o_tensor.reshape((batch_size, seq_len, -1))
 
     def _ffn(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
         fc1 = layer_weight.ffn_1_proj_.mm(input.view(-1, self.embed_dim_), use_custom_tensor_mananger=True)
@@ -128,13 +154,13 @@ class ViTTransformerLayerInfer:
             ffn2_out.mul_(layer_weight.ls2)
         return ffn2_out.reshape(input_shape)
 
-    def _context_attention(self, input_embding, layer_weight):
+    def _context_attention(self, input_embding, layer_weight, cu_seqlens=None):
         input1 = self._att_norm(input_embding, layer_weight)
         q, k, v = self._get_qkv(input1, layer_weight)
         input1 = None
         if layer_weight.qk_norm:
             q, k = self._qk_norm(q, k, layer_weight)
-        o = self._context_attention_kernel(q, k, v)
+        o = self._context_attention_kernel(q, k, v, cu_seqlens=cu_seqlens)
         q = None
         k = None
         v = None
@@ -153,7 +179,12 @@ class ViTTransformerLayerInfer:
         input_embdings.add_(ffn_out)
         return
 
-    def forward(self, input_embdings, layer_weight):
-        self._context_attention(input_embdings, layer_weight=layer_weight)
+    def forward(self, input_embdings, layer_weight, grid_hw):
+        cu_seqlens = None
+        if grid_hw is not None:
+            cu_seqlens = (grid_hw[:, 0] * grid_hw[:, 1]).cumsum(dim=0, dtype=torch.int32)
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+
+        self._context_attention(input_embdings, layer_weight, cu_seqlens)
         self._context_ffn(input_embdings, layer_weight)
-        return input_embdings
+        return input_embdings, cu_seqlens

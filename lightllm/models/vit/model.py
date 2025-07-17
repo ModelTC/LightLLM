@@ -6,6 +6,7 @@ from lightllm.models.vit.layer_infer.post_layer_infer import ViTPostLayerInfer
 from lightllm.models.vit.layer_infer.transformer_layer_infer import ViTTransformerLayerInfer
 from lightllm.models.vit.layer_weights.pre_and_post_layer_weight import ViTPreAndPostLayerWeight
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
+from lightllm.models.internvl.naive_process import load_image_naive
 from lightllm.models.vit.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.common.build_utils import repair_config
@@ -91,6 +92,11 @@ class VisionTransformer:
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         self.layers_num = self.config["num_hidden_layers"]
+        self.dynamic_image_size = self.config.get("dynamic_image_size", False)
+        self.patch_size = self.config.get("patch_size", 14)
+        self.downsample_ratio = self.config.get("downsample_ratio", 0.5)
+        self.min_pixels = self.config.get("min_pixels", 256 * 28 * 28)
+        self.max_pixels = self.config.get("max_pixels", 3328 * 28 * 28)
 
         # infer info
         self.IMAGE_H = int(os.getenv("IMAGE_H", 448))
@@ -160,12 +166,17 @@ class VisionTransformer:
             raise ValueError(f"Unsupport datatype {self.data_type}!")
 
     @torch.no_grad()
-    def forward(self, pixel_values):
+    def forward(self, pixel_values, grid_hw=None):
         g_cache_manager.cache_env_in()
-        input_embs = self.pre_infer.forward(pixel_values, self.pre_post_weight)
+        input_embs = self.pre_infer.forward(pixel_values, self.pre_post_weight, grid_hw)
+        print(f"input_embs.shape is {input_embs.shape}")
         for i in range(self.layers_num + self.select_layer + 1):
-            input_embs = self.layers_infer[i].forward(input_embs, self.trans_layers_weight[i])
-        input_embs = self.post_infer.forward(input_embs[:, 1:, :], self.pre_post_weight)
+            input_embs, cu_seqlens = self.layers_infer[i].forward(input_embs, self.trans_layers_weight[i], grid_hw)
+        print(f"after attention, input_embs,shape is {input_embs.shape}")
+        if grid_hw is not None:
+            input_embs = self.post_infer.forward(input_embs, self.pre_post_weight, cu_seqlens, grid_hw)
+        else:
+            input_embs = self.post_infer.forward(input_embs[:, 1:, :], self.pre_post_weight)
         g_cache_manager.cache_env_out()
         return input_embs
 
@@ -180,7 +191,15 @@ class VisionTransformer:
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
-                t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
+                if self.dynamic_image_size:
+                    t, grid_hw = load_image_naive(
+                        image_data, self.patch_size, self.downsample_ratio, self.min_pixels, self.max_pixels
+                    )
+                    print(f"pixel_values is{t},pixel_values.shape is {t.shape}")
+                    print(f"grid_hw is {grid_hw}")
+                else:
+                    t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
+                    grid_hw = None
                 img_tensors.append(t)
             else:
                 raise Exception("Unsupport input types: {} for {}".format(type(img), img))
@@ -194,7 +213,7 @@ class VisionTransformer:
 
         imgs = torch.cat(img_tensors, dim=0)
         pixel_values = imgs.cuda().to(dtype=self.data_type)
-        all_img_embeds = self.forward(pixel_values)
+        all_img_embeds = self.forward(pixel_values, grid_hw)
         return all_img_embeds, uuids, valid_ids
 
     def cuda(self):

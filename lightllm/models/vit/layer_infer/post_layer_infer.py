@@ -29,11 +29,39 @@ class ViTPostLayerInfer:
         x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
-    def forward(self, vit_embeds, layer_weight: ViTPreAndPostLayerWeight):
-        batch_size = vit_embeds.shape[0]
-        h = w = int(vit_embeds.shape[1] ** 0.5)
-        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
-        vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
+    def pixel_shuffle_from_cu_seqlens(self, x, cu_seqlens, grid_hw):
+        """
+        Args:
+            x: (N_total, C)
+            cu_seqlens: (B + 1,)
+            grid_hw: (B, 2), each row is (Hᵢ, Wᵢ)
+        """
+        _, C = x.shape
+        patches_list = []
+        for i in range(len(cu_seqlens) - 1):
+            start_idx, end_idx = cu_seqlens[i], cu_seqlens[i + 1]
+            h, w = grid_hw[i]
+            patches_per_img = x[start_idx:end_idx].view(h, w, -1)
+            patches_per_img = patches_per_img.unsqueeze(0)  # (1, Hᵢ, Wᵢ, C)
+            patches_per_img = self.pixel_shuffle(patches_per_img, scale_factor=self.downsample_ratio)
+            patches_per_img = patches_per_img.view(-1, patches_per_img.shape[-1])
+            patches_list.append(patches_per_img)
+
+        x = torch.cat(patches_list, dim=0)  # (N_total, C)
+        assert x.shape[-1] == int(
+            C / self.downsample_ratio ** 2
+        ), f"Expected {int(C / self.downsample_ratio**2)} channels, but got {x.shape[-1]} channels after pixel shuffle."
+        print(f"x.shape is {x.shape}")
+        return x
+
+    def forward(self, vit_embeds, layer_weight: ViTPreAndPostLayerWeight, cu_seqlens, grid_hw):
+        if grid_hw is not None:
+            vit_embeds = self.pixel_shuffle_from_cu_seqlens(vit_embeds, cu_seqlens, grid_hw)
+        else:
+            batch_size = vit_embeds.shape[0]
+            h = w = int(vit_embeds.shape[1] ** 0.5)
+            vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+            vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
         vit_embeds_norm = torch.nn.functional.layer_norm(
             vit_embeds,
             (vit_embeds.shape[-1],),
@@ -55,7 +83,10 @@ class ViTPostLayerInfer:
         )
 
         if self.tp_world_size_ == 1:
-            return vit_embeds_out.view(batch_size, -1, self.llm_hidden_size)
+            if grid_hw is not None:
+                return vit_embeds_out.view(-1, self.llm_hidden_size)
+            else:
+                return vit_embeds_out.view(batch_size, -1, self.llm_hidden_size)
 
         dist.all_reduce(vit_embeds_out, op=dist.ReduceOp.SUM, async_op=False)
         return vit_embeds_out.view(batch_size, -1, self.llm_hidden_size)

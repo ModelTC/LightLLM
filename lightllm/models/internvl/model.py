@@ -17,6 +17,7 @@ from lightllm.models.internvl.layer_weights.pre_and_post_layer_weight import (
     InternVLLlamaPreAndPostLayerWeight,
     InternVLPhi3PreAndPostLayerWeight,
 )
+from lightllm.models.internvl.naive_process import get_image_token
 from lightllm.models.internvl.layer_weights.pre_and_post_layer_weight import InternVLInternlm2PreAndPostLayerWeight
 from lightllm.models.vit import get_image_patch_func
 
@@ -32,6 +33,9 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
     def __init__(self, tokenizer, model_cfg, **kwargs):
         super().__init__(tokenizer)
         self.llm_model_type = model_cfg.get("llm_config").get("model_type")
+        self.dynamic_image_size = model_cfg.get("vision_config").get("dynamic_image_size", False)
+        self.patch_size = model_cfg.get("vision_config").get("patch_size", 14)
+        self.downsample_ratio = model_cfg.get("vision_config").get("downsample_ratio", 0.5)
         self.image_length = int(os.environ.get("INTERNVL_IMAGE_LENGTH", 256))
 
         self.image_start_tag = IMG_START_TOKEN
@@ -72,12 +76,17 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
         return
 
     def get_image_token_length(self, img: ImageItem):
-        return (
-            self.get_image_patch_func(
-                img.image_w, img.image_h, max_num=img.extra_params["image_patch_max_num"], use_thumbnail=True
+        if self.dynamic_image_size:
+            print(f"image_token is {get_image_token(img.image_w, img.image_h, self.patch_size, self.downsample_ratio)}")
+            return get_image_token(img.image_w, img.image_h, self.patch_size, self.downsample_ratio)
+        else:
+            print("errorrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr")
+            return (
+                self.get_image_patch_func(
+                    img.image_w, img.image_h, max_num=img.extra_params["image_patch_max_num"], use_thumbnail=True
+                )
+                * self.image_length
             )
-            * self.image_length
-        )
 
     def get_audio_token_length(self, audio: AudioItem):
         L = audio.audio_length
