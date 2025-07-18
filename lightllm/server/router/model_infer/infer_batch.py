@@ -9,6 +9,7 @@ import collections
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Union, Any
 from lightllm.common.req_manager import ReqManager
+from lightllm.common.image_cache_manager import image_cache_manager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
@@ -131,6 +132,7 @@ class InferenceContext:
 
         free_req_index = []
         free_token_index = []
+        image_uuid_list = []
         for request_id in finished_request_ids:
             req: InferReq = self.requests_mapping.pop(request_id)
             group_req_id = convert_sub_id_to_group_id(req.shm_req.request_id)
@@ -145,6 +147,10 @@ class InferenceContext:
             # logger.info(f"infer release req id {req.shm_req.request_id}")
             req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
+            if req.multimodal_params is not None and get_env_start_args().disable_extra_process_for_multimodal:
+                for img in req.multimodal_params["images"]:
+                    image_uuid_list.append(img["uuid"])
+                image_cache_manager.filter(image_uuid_list)
 
         free_token_index = custom_cat(free_token_index)
         self.req_manager.free(free_req_index, free_token_index)

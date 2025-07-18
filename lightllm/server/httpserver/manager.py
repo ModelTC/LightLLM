@@ -81,10 +81,12 @@ class HttpServerManager:
                 )
 
         self.enable_multimodal = enable_multimodal
+        self.disable_extra_process_for_multimodal = args.disable_extra_process_for_multimodal
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", cache_port)
-            self.send_to_visual = context.socket(zmq.PUSH)
-            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
+            if not self.disable_extra_process_for_multimodal:
+                self.send_to_visual = context.socket(zmq.PUSH)
+                self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
 
         self.shm_req_manager = ShmReqManager()
 
@@ -449,7 +451,7 @@ class HttpServerManager:
     ):
 
         if self.pd_mode == NodeRole.P:
-            if self.enable_multimodal:
+            if self.enable_multimodal and not self.disable_extra_process_for_multimodal:
                 self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
@@ -470,7 +472,7 @@ class HttpServerManager:
             return
 
         if self.pd_mode == NodeRole.NORMAL:
-            if self.enable_multimodal:
+            if self.enable_multimodal and not self.disable_extra_process_for_multimodal:
                 self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
