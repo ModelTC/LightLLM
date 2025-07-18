@@ -76,6 +76,7 @@ class StartArgs:
     visual_dp: int = field(default=1)
     visual_nccl_ports: List[int] = field(default_factory=lambda: [29500])
     enable_monitor_auth: bool = field(default=False)
+    enable_ep_fake_balance: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
     graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)
