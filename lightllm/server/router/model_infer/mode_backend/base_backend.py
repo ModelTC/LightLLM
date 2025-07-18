@@ -254,7 +254,7 @@ class ModeBackend:
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
 
-    def _save_next_token_ids_and_logprobs(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
+    def _async_copy_next_token_infos_to_pin_mem(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
         """
         这个函数会把next token id和logprobs保存到pinned memory中
         这样可以保障post_handle 函数可以读取到正常的输出结果。

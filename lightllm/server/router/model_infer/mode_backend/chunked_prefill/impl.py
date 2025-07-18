@@ -102,17 +102,18 @@ class ChunkedPrefillBackend(ModeBackend):
                 self.prefill_mask_func(run_reqs, logits)
 
             next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+            b_has_out = g_pin_mem_manager.gen_from_list(
+                key="b_has_out", data=model_input.b_prefill_has_output_cpu, dtype=torch.bool
+            ).cuda(non_blocking=True)
 
             scatter_token(
                 next_token_ids=next_token_ids,
                 req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
-                b_has_out=g_pin_mem_manager.gen_from_list(
-                    key="b_has_out", data=model_input.b_prefill_has_output_cpu, dtype=torch.bool
-                ).cuda(non_blocking=True),
+                b_has_out=b_has_out,
             )
-            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
+            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids, next_token_logprobs
             )
             sync_event = torch.cuda.Event()
@@ -155,7 +156,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 model_input.b_req_idx,
                 model_input.b_mtp_index,
             )
-            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
+            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids, next_token_logprobs
             )
             sync_event = torch.cuda.Event()
@@ -198,7 +199,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 model_input.b_req_idx,
                 model_input.b_mtp_index,
             )
-            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
+            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids, next_token_logprobs
             )
             # mtp kv fill
@@ -295,7 +296,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_mtp_index=model_input.b_mtp_index,
                 mtp_accept_len=mtp_accept_len,
             )
-            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
+            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids, next_token_logprobs
             )
             sync_event = torch.cuda.Event()

@@ -86,14 +86,10 @@ class DiversehBackend(ChunkedPrefillBackend):
                 b_has_out=b_has_out,
             )
 
-            next_token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                key="next_token_ids",
-                gpu_tensor=next_token_ids,
+            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
+                next_token_ids=next_token_ids, next_token_logprobs=next_token_logprobs
             )
-            next_token_logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                key="next_token_logprobs",
-                gpu_tensor=next_token_logprobs,
-            )
+
             sync_event = torch.cuda.Event()
             sync_event.record()
 
