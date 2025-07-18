@@ -83,7 +83,7 @@ frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
 gunicorn==23.0.0
-vllm==0.8.5
+# vllm==0.8.5
 flashinfer-python==0.2.4
 sgl-kernel==0.1.4
 httpx==0.28.1

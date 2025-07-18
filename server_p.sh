@@ -1,0 +1,11 @@
+CUDA_VISIBLE_DEVICES=0 KV_TRANS_USE_P2P=1 LOADWORKER=1 python3 -m lightllm.server.api_server \
+  --model_dir /mtc/bianzhuohang/models/Qwen/Qwen2.5-14B \
+  --run_mode "prefill" \
+  --host 127.0.1.1 \
+  --port 8079 \
+  --tp 1 \
+  --nccl_port 2769 \
+  --tokenizer_mode fast \
+  --pd_master_ip 127.0.0.1 \
+  --pd_master_port 60011 \
+  --disable_cudagraph
