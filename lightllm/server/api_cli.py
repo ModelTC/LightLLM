@@ -220,7 +220,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable_dynamic_prompt_cache", action="store_true", help="disable dynamic prompt cache")
 
     parser.add_argument("--chunked_prefill_size", type=int, default=4096, help="chunked prefill size")
-    parser.add_argument("--use_hi_dynamic_prompt_cache", action="store_true", help="enable hierachy prompt cache")
+    parser.add_argument("--use_hiradix_cache", action="store_true", help="enable hierachy prompt cache")
+    parser.add_argument("--hiradix_cache_gpu", action="store_true", help="enable hierachy prompt cache gpu")
+    parser.add_argument("--hiradix_cache_token_num", type=int, default=None , help="set the number of tokens to use hierachy prompt cache")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")

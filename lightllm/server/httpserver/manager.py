@@ -51,8 +51,8 @@ class HttpServerManager:
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
-        self.use_hi_dynamic_prompt_cache = args.use_hi_dynamic_prompt_cache
-        if self.use_hi_dynamic_prompt_cache:
+        self.use_hiradix_cache = args.use_hiradix_cache
+        if self.use_hiradix_cache:
             context_hiradix = zmq.asyncio.Context()
             self.send_to_hiradix = context_hiradix.socket(zmq.PUSH)
             self.send_to_hiradix.connect(f"{args.zmq_mode}127.0.0.1:{self.args.hiradix_server_ports[0]}")
@@ -306,7 +306,7 @@ class HttpServerManager:
                 )
                 req_objs.append(req_obj)
 
-            req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time, self.use_hi_dynamic_prompt_cache)
+            req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time, self.use_hiradix_cache)
             self.req_id_to_out_inf[group_request_id] = req_status
 
             await self.transfer_to_next_module_or_node(
@@ -480,7 +480,7 @@ class HttpServerManager:
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
             else:
-                if self.use_hi_dynamic_prompt_cache:
+                if self.use_hiradix_cache:
                     self.send_to_hiradix.send_pyobj(
                             group_req_objs.to_group_req_index(),
                             protocol=pickle.HIGHEST_PROTOCOL
@@ -705,8 +705,8 @@ class HttpServerManager:
 
 
 class ReqStatus:
-    def __init__(self, group_request_id, multimodal_params, req_objs: List[Req], start_time, use_hi_dynamic_prompt_cache) -> None:
-        self.use_hi_dynamic_prompt_cache = use_hi_dynamic_prompt_cache
+    def __init__(self, group_request_id, multimodal_params, req_objs: List[Req], start_time, use_hiradix_cache) -> None:
+        self.use_hiradix_cache = use_hiradix_cache
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
         self.group_req_objs = GroupReqObjs(
@@ -719,7 +719,7 @@ class ReqStatus:
 
     def can_release(self):
         for req in self.group_req_objs.shm_req_objs:
-            if self.use_hi_dynamic_prompt_cache:
+            if self.use_hiradix_cache:
                 if req.can_release() and req.radix_status.is_finished():
 
                     return True

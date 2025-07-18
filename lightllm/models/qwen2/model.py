@@ -42,9 +42,9 @@ class Qwen2TpPartModel(LlamaTpPartModel):
         head_dim_ = self.config.get("head_dim", head_dim_)
         tp_k_head_num_ = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
-        max_radix_token_num = 10000
+        max_total_token_num = self.max_total_token_num - self.hiradix_cache_token_num if self.hiradix_cache_gpu else self.max_total_token_num
         self.mem_manager = select_mem_manager_class(self.mode)(
-            self.max_total_token_num - max_radix_token_num,
+            max_total_token_num,
             dtype=self.data_type,
             head_num=tp_k_head_num_,
             head_dim=head_dim_,
@@ -54,21 +54,27 @@ class Qwen2TpPartModel(LlamaTpPartModel):
 
         if self.enable_hiradix_cache:
             from lightllm.common.radixmem_buffer import RadixMemoryBuffer, init_shared_data, get_shared_data, MemPropties
+            from lightllm.common.radixmem_manager import RadixBufferManager
             mem_propties = MemPropties(
-                max_radix_token_num,
+                self.hiradix_cache_token_num,
                 dtype=self.data_type,
                 head_num=2 * tp_k_head_num_,
                 head_dim=head_dim_,
                 layer_num=self.config["num_hidden_layers"],
             )
             init_shared_data(
-                mem_propties=mem_propties
+                mem_propties=mem_propties,
+                device="cpu" if not self.hiradix_cache_gpu else "cuda"
             )
-            self.radix_mem_buffer = RadixMemoryBuffer(
+            radix_mem_buffer = RadixMemoryBuffer(
                 mem_propties,
                 shared_data=get_shared_data(),
-                lock=self.radix_lock
+                lock=self.radix_lock,
+                device="cpu" if not self.hiradix_cache_gpu else "cuda"
             )
+            self.radix_manager = RadixBufferManager(radix_buffer=radix_mem_buffer, 
+                                            radix_mem_data=get_shared_data(),
+                                            lock=self.radix_lock)
             self.mem_propties = mem_propties
             self.shared_mem_data = get_shared_data()
         return

@@ -7,7 +7,7 @@ from typing import List, Union
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
-from multiprocessing.managers import DictProxy
+from multiprocessing.managers import DictProxy, ListProxy
 from multiprocessing import Manager
 
 
@@ -18,7 +18,7 @@ class SharedRadixMemoryData:
     kv_buffer: torch.Tensor
     mem_state: torch.Tensor
     req_mem_index: DictProxy
-
+    lru_queue: ListProxy
 
 @dataclass
 class MemPropties:
@@ -29,6 +29,7 @@ class MemPropties:
     layer_num: int
 
 shared_mem_data: SharedRadixMemoryData = None
+
 
 def init_shared_data(mem_propties: MemPropties, device="cuda"):
     size, dtype, head_num, head_dim, layer_num = mem_propties.size, mem_propties.dtype, \
@@ -49,13 +50,15 @@ def init_shared_data(mem_propties: MemPropties, device="cuda"):
         ).share_memory_()
 
     mem_state = torch.arange(size, dtype=torch.int32).share_memory_()
-
     manager = Manager()
     req_mem_index = manager.dict()
+    lru_queue = manager.list()
+    
     shared_mem_data = SharedRadixMemoryData(
         kv_buffer=kv_buffer,
         mem_state=mem_state,
-        req_mem_index=req_mem_index
+        req_mem_index=req_mem_index,
+        lru_queue=lru_queue
     )
 
 def get_shared_data() -> SharedRadixMemoryData:
@@ -70,29 +73,12 @@ class RadixMemoryBuffer:
                  rank_in_node=None):
         size, dtype, head_num, head_dim, layer_num = mem_propties.size, mem_propties.dtype, \
             mem_propties.head_num, mem_propties.head_dim, mem_propties.layer_num
-        if shared_data is not None:
-            self.kv_buffer = shared_data.kv_buffer
-            self.mem_state = shared_data.mem_state
-            self.req_mem_index = shared_data.req_mem_index
-        else:
-            # CPU 上分配 key 和 value（共 2 * head_num）
-            if device == "cuda":
-                self.kv_buffer = torch.empty(
-                    (layer_num, size, 2 * head_num, head_dim),
-                    dtype=dtype,
-                    device="cuda"
-                )
-            else:
-                self.kv_buffer = torch.empty(
-                    (layer_num, size, 2 * head_num, head_dim),
-                    dtype=dtype,
-                    device="cpu"
-                ).share_memory_()
-            self.mem_state = torch.arange(
-                0, size, dtype=torch.int32
-            ).share_memory_()
-            self.req_mem_index = mp.Manager().dict()
+
+        self.kv_buffer = shared_data.kv_buffer
+        self.mem_state = shared_data.mem_state
+        self.req_mem_index = shared_data.req_mem_index
         self.lock = lock if lock is not None else mp.Lock()
+
         #TODO profile size
         self.size = size  # token slot 个数
         self.head_num = head_num

@@ -57,7 +57,7 @@ class RouterManager:
         self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
-        self.use_hiradix_cache = args.use_hi_dynamic_prompt_cache and not args.disable_dynamic_prompt_cache
+        self.use_hiradix_cache = args.use_hiradix_cache and not args.disable_dynamic_prompt_cache
         self.mtp_step = args.mtp_step
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
@@ -179,7 +179,7 @@ class RouterManager:
             "return_all_prompt_logprobs": self.args.return_all_prompt_logprobs,
             "use_reward_model": self.args.use_reward_model,
             "disable_dynamic_prompt_cache": self.args.disable_dynamic_prompt_cache,
-            "use_hi_dynamic_prompt_cache": self.args.use_hi_dynamic_prompt_cache,
+            "use_hiradix_cache": self.args.use_hiradix_cache,
             "data_type": self.args.data_type,
             "eos_id": self.eos_id,
             "diverse_mode": self.args.diverse_mode,

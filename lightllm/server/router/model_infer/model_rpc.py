@@ -131,11 +131,13 @@ class ModelRpcServer:
         assert not (is_outlines_constraint_mode and is_xgrammar_constraint_mode), "only one constraint mode can be true"
         is_prefill_node = self.args.run_mode == "prefill"
         is_decode_node = self.args.run_mode == "decode"
-        use_hiradix_cache = self.args.use_hi_dynamic_prompt_cache and not self.args.disable_dynamic_prompt_cache
+        use_hiradix_cache = self.args.use_hiradix_cache and not self.args.disable_dynamic_prompt_cache
         kvargs.update({
             "use_hiradix_cache": use_hiradix_cache,
+            "hiradix_cache_gpu": self.args.hiradix_cache_gpu,
             "radix_info_queue": self.radix_info_queue,
-            "radix_lock": self.radix_lock
+            "radix_lock": self.radix_lock,
+            "hiradix_cache_token_num": self.args.hiradix_cache_token_num
         })
 
         enable_mtp = self.args.mtp_mode is not None

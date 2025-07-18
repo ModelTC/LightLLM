@@ -105,7 +105,6 @@ class HiRadixCacheManagerServer:
     async def loop_for_netio_req_to_push(self):
         while True:
             recv_req: ShmReqInfo = await self.recv_from_router.recv_pyobj()
-            logger.info(f"loop_for_netio_req_to_push --> recv req {recv_req}")
             if isinstance(recv_req, ShmReqInfo):
                 await self.push_queue.put(recv_req)
             else:

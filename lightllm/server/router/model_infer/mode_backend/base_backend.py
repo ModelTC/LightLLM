@@ -56,7 +56,6 @@ class ModeBackend:
         self.chunked_prefill_size = self.args.chunked_prefill_size
         self.return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
         self.use_dynamic_prompt_cache = not self.args.disable_dynamic_prompt_cache
-        self.use_hi_dynamic_prompt_cache = self.args.use_hi_dynamic_prompt_cache
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
         self.disable_cudagraph = self.args.disable_cudagraph
         self.use_hiradix_cache = kvargs.get("use_hiradix_cache", False)
@@ -119,6 +118,9 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
             "use_hiradix_cache": self.use_hiradix_cache,
+            "radix_lock": self.radix_lock,
+            "hiradix_cache_gpu": kvargs.get("hiradix_cache_gpu", False),
+            "hiradix_cache_token_num": kvargs.get("hiradix_cache_token_num", False),
             "radix_lock": self.radix_lock
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
@@ -130,7 +132,7 @@ class ModeBackend:
                 self.model.mem_manager.size,
                 self.rank_in_node,
                 mem_manager=self.model.mem_manager,
-                mem_buffer=self.model.radix_mem_buffer,
+                radix_manager=self.model.radix_manager,
                 radix_info_queue=kvargs.get("radix_info_queue", None)
             )
             if self.use_hiradix_cache

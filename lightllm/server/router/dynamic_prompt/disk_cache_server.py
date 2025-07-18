@@ -15,11 +15,12 @@ from typing import Tuple, Dict, Set, List
 from lightllm.utils.log_utils import init_logger
 from enum import Enum
 from .shared_arr import SharedArray
-from .io_objs import ShmReqInfo, GroupReqInfo
+from .io_objs import ShmReqInfo, GroupReqInfo, HitSate, PullState, PushState, CacheTask
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.common.radixmem_buffer import RadixMemoryBuffer
+from lightllm.common.radixmem_manager import RadixBufferManager
 from lightllm.server.core.objs import Req, RadixStatus
 
 logger = init_logger(__name__)
@@ -39,8 +40,8 @@ class RemoteCacheManager:
         self.cache_file = join(tmp_dir, "cache_file")
         all_buffers = mem_manager.kv_buffer
         all_buffers = all_buffers.view(all_buffers.shape[0], all_buffers.shape[1], -1)
-        from kvcache.python.jit import PyLocalCacheService
 
+        from kvcache.python.jit import PyLocalCacheService
         self.py_cache_service = PyLocalCacheService(
             file=self.cache_file,
             storage_size=128 * (1024 ** 3),  # 128GB
@@ -49,33 +50,44 @@ class RemoteCacheManager:
             num_worker=8
         )
 
-    def insert(self, tokens, kv_page_indexer, start_pos=0):
+    def insert(self, cache_task: CacheTask):
+        assert cache_task.mode == 'w', "Cache task mode must be 'w' for insert"
+
         t = self.py_cache_service.create(
-                tokens=tokens, 
-                kv_page_indexer=kv_page_indexer, 
-                mode="w",
-                start_pos=start_pos)
+                tokens=cache_task.tokens, 
+                kv_page_indexer=cache_task.kv_page_indexer, 
+                mode=cache_task.mode,
+                start_pos=cache_task.start_pos)
         res = wait_until_ready(t)
+
         if not res:
             self.py_cache_service.az5(t)
+            return False
 
-    def read(self, tokens, kv_page_indexer, start_pos=0):
+        return True
+
+    def read(self, cache_task: CacheTask):
+        assert cache_task.mode == 'r', "Cache task mode must be 'r' for read"
+
         t = self.py_cache_service.create(
-                tokens=tokens, 
-                kv_page_indexer=kv_page_indexer, 
-                mode="r",
-                start_pos=start_pos)
+                tokens=cache_task.tokens, 
+                kv_page_indexer=cache_task.kv_page_indexer, 
+                mode=cache_task.mode,
+                start_pos=cache_task.start_pos)
+
         res = wait_until_ready(t)
         return res
 
-    def query(self, tokens):
-        query_result = self.py_cache_service.query(tokens)
+    def query(self, cache_task: CacheTask):
+        query_result = self.py_cache_service.query(cache_task.tokens)
+
         max_len = 0
         for result in query_result:
             if result:
                 max_len += 1
             else:
                 break
+
         return max_len * self.block_size
 
     @property
@@ -84,9 +96,9 @@ class RemoteCacheManager:
 
 
 class DiskCacheService(rpyc.Service):
-    def __init__(self, mem_manager=None, remote_cache_manager=None, shm_req_manager=None, rank_in_node=None):
+    def __init__(self, radix_manager=None, remote_cache_manager=None, shm_req_manager=None, rank_in_node=None):
         super().__init__()
-        self.mem_manager = mem_manager
+        self.radix_manager = radix_manager
         self.remote_cache_manager = remote_cache_manager
         self.shm_req_manager = shm_req_manager
         self.rank_in_node = rank_in_node
@@ -95,22 +107,32 @@ class DiskCacheService(rpyc.Service):
         req_info: ShmReqInfo = ShmReqInfo.from_dict(req_info)
         req: Req = self.shm_req_manager.get_req_obj_by_index(req_info.shm_req_index)
         req.link_prompt_ids_shm_array()
-        assert req.radix_status.is_write_ready(self.rank_in_node), "radix cache is not ready" 
-        input_token_ids = req.shm_prompt_ids.arr[0 : req.shm_cur_kv_len]
-        keys = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
-        values = self.mem_manager.get_req_mem_index(req_info.request_id)
-        index = torch.tensor(values, device="cpu", dtype=torch.int32)
-        logger.info(f"_push_task_loop receive task keys {len(keys)} values {len(values)}")
-        self.remote_cache_manager.insert(keys, index)
-        self.mem_manager.free_req_index(req.request_id)
-        self.set_reqs_radix_status([req], RadixStatus.WRITE_DONE)
-        self.shm_req_manager.put_back_req_obj(req)
-        return {"status": "ok"}
+
+        if not req.radix_status.is_write_ready(self.rank_in_node):
+            raise RuntimeError("Radix cache is not ready for write.")
+
+        token_ids = req.shm_prompt_ids.arr[0 : req.shm_cur_kv_len]
+        keys = torch.tensor(token_ids, dtype=torch.int64, device="cpu")
+
+        _, index_list = self.radix_manager.query_cache(tokens=token_ids.tolist())
+        index_tensor = torch.tensor(index_list, device="cpu", dtype=torch.int32)
+        assert len(keys) == len(index_tensor), f"keys length {len(keys)} != index length {len(index_list)}"
+
+        if len(keys) != len(index_tensor):
+            raise ValueError(f"Mismatch in keys and index size: {len(keys)} != {len(index_tensor)}")
+
+        insert_task = CacheTask(tokens=keys, kv_page_indexer=index_tensor, mode='w')
+        result = self.remote_cache_manager.insert(insert_task)
+
+        reqs = [req]
+        self.set_reqs_radix_status(reqs, RadixStatus.WRITE_DONE)
+        self.put_back_req_objs(reqs)
+
+        return PushState(state=result).to_dict()
 
     def set_reqs_radix_status(self, reqs: List[Req], status: int):
         for req in reqs:
             req.radix_status.set_status(self.rank_in_node, status)
-            logger.info(f"-->pull loop rank_in_node={self.rank_in_node} set req {req.group_req_id, req.request_id} radix status {req.radix_status.get_status(self.rank_in_node)}")
 
     def put_back_req_objs(self, reqs: List[Req]):
         for req in reqs:
@@ -122,22 +144,41 @@ class DiskCacheService(rpyc.Service):
         for shm_req_index in group_req.shm_req_indexes:
             req: Req = self.shm_req_manager.get_req_obj_by_index(shm_req_index)
             reqs.append(req)
+
         req = reqs[0]
         req.link_prompt_ids_shm_array()
         keys = req.get_prompt_ids()
-        query_len = self.remote_cache_manager.query(tokens=keys)
-        if query_len == 0:
-            self.set_reqs_radix_status(reqs, RadixStatus.NOCACHE)
-            self.put_back_req_objs(reqs)
-            return {"query_len": 0, "kv_indices": []}
-        index = self.mem_manager.alloc(query_len)
-        self.remote_cache_manager.read(tokens=keys[:query_len], kv_page_indexer=index)
-        self.mem_manager.set_req_mem_index(
-            group_req.group_req_id, index.tolist()
-        )
-        self.set_reqs_radix_status(reqs, RadixStatus.READ_READY)
+
+        query_len, _ = self.radix_manager.query_cache(tokens=keys)
+        if query_len > 0:
+            radix_state = RadixStatus.READ_READY
+            cache_state = PullState(query_len, HitSate.MEM)
+        else:
+            query_task = CacheTask(tokens=keys)
+            query_len = self.remote_cache_manager.query(query_task)
+    
+            if query_len > 0:
+                self.radix_manager.free_space(query_len)
+                index = self.radix_manager.radix_buffer.alloc(query_len)
+                read_task = CacheTask(
+                    tokens=keys[:query_len],
+                    kv_page_indexer=index,
+                    mode='r'
+                )
+                self.remote_cache_manager.read(read_task)
+
+                self.radix_manager.write(keys=keys[:query_len], values=index.tolist())
+
+                radix_state = RadixStatus.READ_READY
+                cache_state = PullState(query_len, HitSate.DISK)
+            else:
+                radix_state = RadixStatus.NOCACHE
+                cache_state = PullState(0, HitSate.NONE)
+
+        self.set_reqs_radix_status(reqs, radix_state)
         self.put_back_req_objs(reqs)
-        return {"query_len": query_len, "kv_indices": index.tolist()}
+
+        return cache_state.to_dict()
 
 
 class DiskCacheClient:
@@ -176,10 +217,10 @@ class DiskCacheClient:
             return self._pull(group_req)
 
 
-def start_cache_server(mem_manager, remote_cache_manager, shm_req_manager, rank_in_node, port, init_event):
+def start_cache_server(radix_manager, remote_cache_manager, shm_req_manager, rank_in_node, port, init_event):
     class CustomService(DiskCacheService):
         def __init__(self):
-            super().__init__(mem_manager, remote_cache_manager, shm_req_manager, rank_in_node)
+            super().__init__(radix_manager, remote_cache_manager, shm_req_manager, rank_in_node)
 
     def start():
         try:
@@ -220,10 +261,14 @@ def _init_server(
         rank_in_node=device_id,
         mem_manager=mem_manager,
     )
+    radix_manager = RadixBufferManager(radix_buffer=mem_manager, 
+                                              radix_mem_data=shared_mem_data,
+                                              lock=radix_lock)
+
     shm_req_manager = ShmReqManager()
 
     t = start_cache_server(
-        mem_manager=mem_manager,
+        radix_manager=radix_manager,
         remote_cache_manager=remote_cache_manager,
         shm_req_manager=shm_req_manager,
         rank_in_node=device_id,
@@ -247,7 +292,7 @@ async def start_disk_cache_server_process(
     from lightllm.utils.envs_utils import get_unique_server_name
     if node_word_size == 1:
         mem_proties, shared_mem_data = mem_queue.get()
-        mem_manager = RadixMemoryBuffer(
+        mem_buffer = RadixMemoryBuffer(
             mem_propties=mem_proties,
             shared_data=shared_mem_data,
             lock=radix_lock,
@@ -256,10 +301,14 @@ async def start_disk_cache_server_process(
         remote_cache_manager = RemoteCacheManager(
             unique_name=get_unique_server_name(),
             rank_in_node=device_id,
-            mem_manager=mem_manager,
+            mem_manager=mem_buffer,
         )
         shm_req_manager = ShmReqManager()
-        service = DiskCacheService(mem_manager, remote_cache_manager, shm_req_manager)
+
+        radix_manager = RadixBufferManager(radix_buffer=mem_buffer, 
+                                                radix_mem_data=shared_mem_data,
+                                                lock=radix_lock)
+        service = DiskCacheService(radix_manager, remote_cache_manager, shm_req_manager)
         client = DiskCacheClient(
             service=service,
             rank_in_node=0, 
