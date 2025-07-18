@@ -14,8 +14,10 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import enable_stop_string_match
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
 from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
@@ -303,7 +305,14 @@ class ModeBackend:
                 continue
 
             # 更新判断请求的 finished 状态
-            req_obj.update_finish_status(self.eos_id)
+            if enable_stop_string_match():
+                if not hasattr(self, "tokenizer"):
+                    self.tokenizer = get_tokenizer(
+                        self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
+                    )
+                req_obj.update_finish_status(self.eos_id, self.tokenizer)
+            else:
+                req_obj.update_finish_status(self.eos_id)
 
             if extra_post_req_handle_func is not None:
                 extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
