@@ -11,7 +11,7 @@ class PinMemTensorManager:
         self.key_to_alloc_index: Dict[str, int] = {}
         self.buffer_size = 4
 
-    def alloc_pin_tensor(self, key: str, size: int, dtype: torch.dtype):
+    def alloc_pin_tensor(self, key: str, size: int, dtype: torch.dtype) -> torch.Tensor:
         """
         利用 buffer_size buffer的 pin mem的cache，加速对pin mem的申请和释放操作。
         """
@@ -33,6 +33,18 @@ class PinMemTensorManager:
                 buff_tensor = self.key_to_tensor_list[key][alloc_index]
             self.key_to_alloc_index[key] = (alloc_index + 1) % self.buffer_size
             return buff_tensor[0:size]
+
+    def gen_from_list(self, key: str, data: List, dtype: torch.dtype) -> torch.Tensor:
+        size = len(data)
+        pin_mem = self.alloc_pin_tensor(key, size=size, dtype=dtype)
+        pin_mem.numpy()[:] = data
+        return pin_mem
+
+    def async_copy_from_gpu_tensor(self, key: str, gpu_tensor: torch.Tensor) -> torch.Tensor:
+        size = gpu_tensor.numel()
+        pin_mem = self.alloc_pin_tensor(key, size=size, dtype=gpu_tensor.dtype)
+        pin_mem.copy_(gpu_tensor.view(-1), non_blocking=True)
+        return pin_mem.view(gpu_tensor.shape)
 
 
 g_pin_mem_manager = PinMemTensorManager()

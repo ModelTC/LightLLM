@@ -63,13 +63,16 @@ class DiversehBackend(ChunkedPrefillBackend):
             b_req_idx = [req.req_idx for req in run_reqs]
             b_has_out = [model_input.b_prefill_has_output_cpu[i] for i in batch_idx]
 
-            batch_idx = torch.tensor(batch_idx, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
+            batch_idx = g_pin_mem_manager.gen_from_list(key="batch_idx_", data=batch_idx, dtype=torch.int64).cuda(
                 non_blocking=True
             )
-            b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu", pin_memory=True).cuda(
+            b_req_idx = g_pin_mem_manager.gen_from_list(key="b_req_idx_", data=b_req_idx, dtype=torch.int32).cuda(
                 non_blocking=True
             )
-            b_has_out = torch.tensor(b_has_out, dtype=torch.bool, device="cpu", pin_memory=True).cuda(non_blocking=True)
+            b_has_out = g_pin_mem_manager.gen_from_list(key="b_has_out_", data=b_has_out, dtype=torch.bool).cuda(
+                non_blocking=True
+            )
+
             logits = logits[batch_idx]
             b_mtp_index = model_input.b_mtp_index[batch_idx]
 
@@ -83,14 +86,14 @@ class DiversehBackend(ChunkedPrefillBackend):
                 b_has_out=b_has_out,
             )
 
-            next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
-                "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype
+            next_token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="next_token_ids",
+                gpu_tensor=next_token_ids,
             )
-            next_token_logprobs_cpu = g_pin_mem_manager.alloc_pin_tensor(
-                "next_token_logprobs", next_token_logprobs.shape[0], next_token_logprobs.dtype
+            next_token_logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="next_token_logprobs",
+                gpu_tensor=next_token_logprobs,
             )
-            next_token_ids_cpu.copy_(next_token_ids, non_blocking=True)
-            next_token_logprobs_cpu.copy_(next_token_logprobs, non_blocking=True)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
