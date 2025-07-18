@@ -329,7 +329,7 @@ class ChunkedPrefillBackend(ModeBackend):
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
-        if need_free_mem_indexes:
+        if len(need_free_mem_indexes) > 0:
             g_infer_state_lock.acquire()
             g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
             g_infer_state_lock.release()
