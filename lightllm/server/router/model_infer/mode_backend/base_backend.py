@@ -355,6 +355,8 @@ class ModeBackend:
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
 
+        support_overlap = self.support_overlap
+
         wait_pause_reqs = []
         paused_reqs = []
         finished_reqs = []
@@ -389,8 +391,13 @@ class ModeBackend:
                 continue
 
             if req_obj.infer_aborted or req_obj.finish_status.is_finished():
-                req_obj.filter_mark = True
-                continue
+                if support_overlap:
+                    # 延迟处理
+                    req_obj.filter_mark = True
+                    continue
+                else:
+                    finished_reqs.append(req_obj)
+                    continue
 
             if no_decode:
                 is_decode = False
