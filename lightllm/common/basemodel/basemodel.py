@@ -17,10 +17,11 @@ from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.quantization import Quantcfg
+from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed.communication_op import CustomProcessGroup, dist_group_manager
+from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status
@@ -237,6 +238,7 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
+        model_input.to_cuda()
         assert model_input.mem_indexes.is_cuda
 
         if model_input.is_prefill:
@@ -346,6 +348,14 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ) -> ModelOutput:
+        # for overlap mode
+        if model_input.input_ids is None:
+            model_input.input_ids = gather_token(
+                self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                model_input.b_req_idx,
+                model_input.b_mtp_index,
+            )
+
         if self.graph is not None and self.graph.can_run(model_input.batch_size, model_input.max_len_in_batch):
             find_graph_batch_size = self.graph.find_closest_graph_batch_size(model_input.batch_size)
             padded_model_input = self._create_padded_decode_model_input(model_input, find_graph_batch_size)
@@ -659,6 +669,7 @@ class TpPartBaseModel:
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
             total_token_num = self.batch_max_tokens
+            b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
             model_input = ModelInput(
                 batch_size=1,
                 total_token_num=total_token_num,
@@ -667,6 +678,7 @@ class TpPartBaseModel:
                 mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
+                b_mtp_index=b_mtp_index,
                 is_prefill=True,
                 b_ready_cache_len=b_ready_cache_len,
             )
@@ -714,6 +726,7 @@ class TpPartBaseModel:
         b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
         b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         total_token_num = prefill_input_len * batch_size
+        b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         model_input = ModelInput(
             batch_size=batch_size,
             total_token_num=total_token_num,
@@ -721,6 +734,7 @@ class TpPartBaseModel:
             input_ids=dummy_input_ids,
             mem_indexes=mem_indexes,
             b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
             b_seq_len=b_seq_len,
             b_ready_cache_len=b_ready_cache_len,
             is_prefill=True,

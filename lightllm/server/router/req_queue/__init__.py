@@ -1,6 +1,4 @@
-from .continues_batch.impl import ContinuesBatchQueue
-from .continues_batch.impl_for_pd_decode import QueueForPDDecode
-from .chunked_prefill.impl_for_pd_prefill import QueueForPDChunkedPrefill
+from .chunked_prefill.impl_for_pd_decode import QueueForPDDecode
 from .chunked_prefill.impl import ChunkedPrefillQueue
 from .chunked_prefill.beam_impl import ChunkedBeamContinuesBatchQueue
 from .dp_base_queue import DpQueue
@@ -18,10 +16,12 @@ def _get_req_queue_class(args, router, dp_size_in_node: int):
     if args.run_mode == "decode":
         return QueueForPDDecode
     if args.run_mode == "prefill":
-        return QueueForPDChunkedPrefill
+        return ChunkedPrefillQueue
 
     if args.disable_chunked_prefill:
-        return ContinuesBatchQueue
+        # 虽然也使用chuncked prefill queue 但是由于 args.chunked_prefill_size = args.max_req_total_len
+        # 所以调度的实际行为类似过去的 continues batch 调度，所以将两种调度的实现统一为一种实现，减少代码重复。
+        return ChunkedPrefillQueue
     else:
         return ChunkedPrefillQueue
 

@@ -26,3 +26,8 @@ class GroupReqObjs:
             shm_req_indexes=[req.index_in_shm_mem for req in self.shm_req_objs],
             time_mark=self.time_mark,
         )
+
+
+@dataclass
+class AbortedReqCmd:
+    req_id: int

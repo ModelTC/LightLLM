@@ -6,7 +6,6 @@ import functools
 from .impl import ChunkedPrefillBackend
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
-from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
 from lightllm.server.tokenizer import get_tokenizer
 from typing import List, Tuple
 from lightllm.utils.log_utils import init_logger
@@ -18,6 +17,10 @@ logger = init_logger(__name__)
 class OutlinesConstraintBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
+        self.support_overlap = False
+        self.prefill_mask_func = self._prefill_mask_callback
+        self.decode_mask_func = self._decode_mask_callback
+        self.extra_post_req_handle_func = self._update_state_fsm
 
     def init_custom(self):
         # remove outlines cache
@@ -50,39 +53,6 @@ class OutlinesConstraintBackend(ChunkedPrefillBackend):
             return RegexGuide.from_regex(regex, self.tokenizer)
 
         self.get_cached_regex_guide = get_cached_regex_guide
-        return
-
-    def decode(self):
-        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids
-        )
-
-        if aborted_reqs:
-            g_infer_context.filter_reqs(aborted_reqs)
-
-        # 先 decode
-        if decode_reqs:
-            ContinuesBatchBackend.normal_decode(
-                self,
-                decode_reqs=decode_reqs,
-                uninit_reqs=uninit_reqs,
-                ok_finished_reqs=ok_finished_reqs,
-                mask_func=self._decode_mask_callback,
-                extra_post_req_handle_func=self._update_state_fsm,
-            )
-
-        # 再 prefill
-        if self.chunked_prefill_state.need_prefill(prefill_reqs=prefill_reqs, decode_reqs=decode_reqs):
-            ContinuesBatchBackend.normal_prefill_reqs(
-                self,
-                prefill_reqs=prefill_reqs,
-                uninit_reqs=uninit_reqs,
-                ok_finished_reqs=ok_finished_reqs,
-                mask_func=self._prefill_mask_callback,
-                extra_post_req_handle_func=self._update_state_fsm,
-            )
-
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         return
 
     def _decode_mask_callback(self, run_reqs: List[InferReq], logits: torch.Tensor):

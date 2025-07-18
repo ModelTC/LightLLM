@@ -6,6 +6,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 class FlashAttentionStateInfo(LlamaInferStateInfo):
@@ -50,7 +51,8 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
                 )
 
             self.page_table[:, :max_seq_len_k].copy_(
-                model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k]
+                model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k],
+                non_blocking=True,
             )
             self.page_table[:, max_seq_len_k:].fill_(0)
 
