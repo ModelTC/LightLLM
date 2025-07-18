@@ -534,104 +534,29 @@ class ModeBackend:
     def _verify_mtp_v2(
         self, new_next_token_ids: torch.Tensor, model_input: ModelInput, b_req_mtp_start_loc: torch.Tensor
     ):
-        b_mtp_index = model_input.b_mtp_index
         mtp_accept_len, accepted_index = mtp_verify(
             req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             new_next_token_ids=new_next_token_ids,
             b_req_idx=model_input.b_req_idx,
-            b_mtp_index=b_mtp_index,
         )
         return mtp_accept_len, accepted_index
 
-    def _get_need_free_mem_indexes(
+    def _update_mtp_accept_ratio(
         self,
-        run_reqs: List[InferReq],
-        accepted_index_cpu: torch.Tensor,
+        decode_reqs: List[InferReq],
         mtp_accept_len_cpu: torch.Tensor,
-        mem_indexes_cpu: torch.Tensor,
-    ) -> Tuple[List[InferReq], torch.Tensor]:
-        need_free_mem_indexes = []
-        start_idx = 0
-        for i in range(mtp_accept_len_cpu.shape[0]):
-            req = run_reqs[start_idx]
-            accept_len = mtp_accept_len_cpu[i]
-            end_idx = start_idx + req.mtp_step + 1
-            need_free_mem_indexes.extend(mem_indexes_cpu[start_idx + accept_len + 1 : end_idx])
-            start_idx = end_idx
-            if self.is_master_in_dp:
-                req.update_mtp_accepted_token_num(accept_token_num=accept_len)
-        return need_free_mem_indexes
-
-    # 对mtp 运行模式下的请求进行校验和过滤，保留校验成功的请求对象，并释放不再使用的kv 的 mem_index
-    def _verify_mtp(self, run_reqs: List[InferReq], next_token_ids_cpu: np.ndarray, input_mem_indexes_cpu: np.ndarray):
-        verify_ok_reqs = []
-        verify_ok_req_indexes = []
-        verify_ok_req_last_indexes = []
-        need_free_mem_indexes = []
-        grouped_reqs = self._group_mtp_run_reqs(run_reqs, next_token_ids_cpu, input_mem_indexes_cpu)
-        for req_group in grouped_reqs:
-            pre_req, pre_out_token_id, _, pre_index = req_group[0]
-            verify_ok_reqs.append(pre_req)
-            verify_ok_req_indexes.append(pre_index)
-            need_verify = True
-            verify_ok_count = 0
-            for i in range(1, len(req_group)):
-                cur_req, cur_out_token_id, cur_mem_index, cur_index = req_group[i]
-                cur_req: InferReq = cur_req
-                # cur_req 的输入，等于pre_req 的输出，表示校验成功
-                if need_verify and cur_req.mtp_gen_token_ids[i - 1] == pre_out_token_id:
-                    verify_ok_reqs.append(cur_req)
-                    verify_ok_req_indexes.append(cur_index)
-                    pre_req, pre_out_token_id, _, pre_index = (
-                        cur_req,
-                        cur_out_token_id,
-                        cur_mem_index,
-                        cur_index,
-                    )
-                    verify_ok_count += 1
-                    continue
-
-                need_verify = False
-                need_free_mem_indexes.append(cur_mem_index)
-
-            verify_ok_req_last_indexes.append(verify_ok_req_indexes[-1])
-
-            # 清理每个请求上的 mtp_gen_token_ids, 并更新接受率信息
-            pre_req.mtp_gen_token_ids = []
-            if self.is_master_in_dp:
-                pre_req.update_mtp_accepted_token_num(accept_token_num=verify_ok_count)
-
-        return verify_ok_reqs, verify_ok_req_indexes, verify_ok_req_last_indexes, need_free_mem_indexes
-
-    def _group_mtp_run_reqs(self, reqs: List[InferReq], next_token_ids_cpu: np.ndarray, input_mem_indexes: np.ndarray):
-        if not reqs:
-            return []
-
-        grouped_reqs = []
-        current_group = [(reqs[0], next_token_ids_cpu[0], input_mem_indexes[0], 0)]
-
-        for i in range(1, len(reqs)):
-            req = reqs[i]
-            if req.req_id == current_group[-1][0].req_id:
-                current_group.append((req, next_token_ids_cpu[i], input_mem_indexes[i], i))
-            else:
-                grouped_reqs.append(current_group)
-                current_group = [(req, next_token_ids_cpu[i], input_mem_indexes[i], i)]
-
-        grouped_reqs.append(current_group)
-        return grouped_reqs
+    ):
+        if self.is_master_in_dp:
+            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
+                req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
+        return
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
         return draft_next_token_ids_gpu
-
-    def _update_reqs_mtp_gen_token_ids(self, reqs: List[InferReq], mtp_draft_next_token_ids: np.ndarray):
-        for req, token_id in zip(reqs, mtp_draft_next_token_ids):
-            req.mtp_gen_token_ids.append(token_id)
-        return
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]

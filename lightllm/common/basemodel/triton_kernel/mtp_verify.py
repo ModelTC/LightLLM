@@ -11,32 +11,33 @@ def _fwd_kernel_mtp_verify(
     mtp_accept_len,
     b_req_mtp_start_loc,
     b_req_idx,
-    b_mtp_index,
     accepted_index,
-    batch_size: tl.constexpr,
+    req_mtp_all_num,
     BLOCK_SIZE: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
+    req_nums = tl.num_programs(axis=0)
+
     req_start_loc = tl.load(b_req_mtp_start_loc + cur_index)
+    req_start_end = tl.load(b_req_mtp_start_loc + cur_index + 1, mask=cur_index + 1 < req_nums, other=req_mtp_all_num)
+    req_mtp_num = req_start_end - req_start_loc
     cur_req_idx = tl.load(b_req_idx + req_start_loc)
+
     offset = tl.arange(0, BLOCK_SIZE)
     req_offset = req_start_loc + offset
-    cur_mtp_index = tl.load(b_mtp_index + req_offset, mask=req_offset < batch_size)
-
-    mask = cur_mtp_index == offset
 
     cur_next_token_id = tl.load(
-        req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + offset + 1, mask=mask, other=-1
+        req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + offset + 1,
+        mask=offset + 1 < req_mtp_num,
+        other=-1,
     )
-    cur_new_next_token_id = tl.load(new_next_token_ids + req_offset, mask=mask, other=-2)
+    cur_new_next_token_id = tl.load(new_next_token_ids + req_offset, mask=offset + 1 < req_mtp_num, other=-2)
 
     match_mask = cur_next_token_id == cur_new_next_token_id
-
-    first_false = tl.where(~match_mask, offset, BLOCK_SIZE - 1)
-    accept_len = tl.min(first_false)
+    accept_len = tl.sum(tl.where(match_mask, 1, 0)) + 1
     tl.store(mtp_accept_len + cur_index, accept_len)
-    accpeted_index = tl.where((offset < accept_len + 1), 1, 0)
-    tl.store(accepted_index + req_offset, accpeted_index, mask=mask)
+    accpeted_index = tl.where((offset < accept_len), 1, 0)
+    tl.store(accepted_index + req_offset, accpeted_index, mask=offset < req_mtp_num)
     return
 
 
@@ -45,7 +46,6 @@ def mtp_verify(
     b_req_mtp_start_loc: torch.Tensor,
     new_next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
-    b_mtp_index: torch.Tensor,
 ):
     """
     This function is used to verify the accept_len.
@@ -54,7 +54,6 @@ def mtp_verify(
         b_req_mtp_start_loc: (num_reqs,)
         new_next_token_ids: (batch_size,)
         b_req_idx: (batch_size,)
-        b_mtp_index: (batch_size,)
     Returns:
         mtp_accept_len: (num_reqs,)
         accepted_index: (batch_size,)
@@ -64,23 +63,22 @@ def mtp_verify(
     BLOCK_SIZE = 16
     assert max_mtp_step <= BLOCK_SIZE, f"max_mtp_step must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
-    batch_size = b_req_idx.shape[0]
+    req_mtp_all_num = b_req_idx.shape[0]
     mtp_accept_len = torch.empty((num_reqs,), dtype=torch.int32, device=req_to_next_token_ids.device)
-    accepted_index = torch.empty((batch_size,), dtype=torch.int32, device=req_to_next_token_ids.device)
+    accepted_index = torch.empty((req_mtp_all_num,), dtype=torch.int32, device=req_to_next_token_ids.device)
 
     grid = (num_reqs,)
     num_warps = 1
     _fwd_kernel_mtp_verify[grid](
-        req_to_next_token_ids,
-        req_to_next_token_ids.stride(0),
-        new_next_token_ids,
-        mtp_accept_len,
-        b_req_mtp_start_loc,
-        b_req_idx,
-        b_mtp_index,
-        accepted_index,
-        batch_size,
-        BLOCK_SIZE,
+        req_to_next_token_ids=req_to_next_token_ids,
+        req_to_next_token_ids_stride=req_to_next_token_ids.stride(0),
+        new_next_token_ids=new_next_token_ids,
+        mtp_accept_len=mtp_accept_len,
+        b_req_mtp_start_loc=b_req_mtp_start_loc,
+        b_req_idx=b_req_idx,
+        accepted_index=accepted_index,
+        req_mtp_all_num=req_mtp_all_num,
+        BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
         num_stages=1,
     )
@@ -96,9 +94,7 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     mtp_accept_len,
     b_req_mtp_start_loc,
     b_req_idx,
-    b_mtp_index,
-    mtp_step: tl.constexpr,
-    batch_size: tl.constexpr,
+    mtp_step,
     BLOCK_SIZE: tl.constexpr,
 ):
 
@@ -107,16 +103,12 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     accept_len = tl.load(mtp_accept_len + cur_index)
     cur_req_idx = tl.load(b_req_idx + req_start_loc)
     offset = tl.arange(0, BLOCK_SIZE)
-    req_offset = req_start_loc + offset
-    cur_mtp_index = tl.load(b_mtp_index + req_offset, mask=req_offset < batch_size)
 
-    mask = cur_mtp_index == offset
     scatter_next_token_ids = tl.load(
-        all_next_token_ids + (req_start_loc + accept_len) * all_next_token_ids_stride + offset,
+        all_next_token_ids + (req_start_loc + accept_len - 1) * all_next_token_ids_stride + offset,
         mask=offset < mtp_step,
         other=0,
     )
-    scatter_next_token_ids = tl.where(mask, scatter_next_token_ids, -1)
     tl.store(
         req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + offset,
         scatter_next_token_ids,
@@ -130,29 +122,25 @@ def mtp_scatter_next_token_ids(
     b_req_mtp_start_loc: torch.Tensor,
     all_next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
-    b_mtp_index: torch.Tensor,
     mtp_accept_len: torch.Tensor,
 ):
     max_mtp_step = req_to_next_token_ids.shape[1]
     BLOCK_SIZE = 16
     assert max_mtp_step <= BLOCK_SIZE, f"max_mtp_step must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
-    batch_size = b_req_idx.shape[0]
     mtp_step = all_next_token_ids.shape[1]
     grid = (num_reqs,)
     num_warps = 1
     _fwd_kernel_mtp_scatter_next_token_ids[grid](
-        req_to_next_token_ids,
-        req_to_next_token_ids.stride(0),
-        all_next_token_ids,
-        all_next_token_ids.stride(0),
-        mtp_accept_len,
-        b_req_mtp_start_loc,
-        b_req_idx,
-        b_mtp_index,
-        mtp_step,
-        batch_size,
-        BLOCK_SIZE,
+        req_to_next_token_ids=req_to_next_token_ids,
+        req_to_next_token_ids_stride=req_to_next_token_ids.stride(0),
+        all_next_token_ids=all_next_token_ids,
+        all_next_token_ids_stride=all_next_token_ids.stride(0),
+        mtp_accept_len=mtp_accept_len,
+        b_req_mtp_start_loc=b_req_mtp_start_loc,
+        b_req_idx=b_req_idx,
+        mtp_step=mtp_step,
+        BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
         num_stages=1,
     )
