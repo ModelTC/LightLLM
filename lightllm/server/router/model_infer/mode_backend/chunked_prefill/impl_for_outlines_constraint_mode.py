@@ -17,6 +17,7 @@ logger = init_logger(__name__)
 class OutlinesConstraintBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
+        self.support_overlap = False
         self.prefill_mask_func = self._prefill_mask_callback
         self.decode_mask_func = self._decode_mask_callback
         self.extra_post_req_handle_func = self._update_state_fsm

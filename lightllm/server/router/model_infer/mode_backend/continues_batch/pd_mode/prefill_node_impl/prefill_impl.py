@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
         super().__init__()
+        self.support_overlap = False
         self.info_queue: mp.Queue = info_queue
         self.mem_queue: mp.Queue = mem_queue
         self.classed_req_no_decode = True

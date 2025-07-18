@@ -19,8 +19,9 @@ def custom_cat(tensors):
 
     start_loc = 0
     for t, size in zip(tensors, sizes):
-        out_tensor[start_loc : (start_loc + size)].copy_(t)
+        out_tensor[start_loc : (start_loc + size)].copy_(t, non_blocking=True)
         start_loc += size
+    torch.cuda.current_stream().synchronize()
 
     return out_tensor
 

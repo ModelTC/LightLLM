@@ -13,10 +13,7 @@ class ReturnPromptLogProbBackend(ChunkedPrefillBackend):
         self.prefill = self.return_all_prompt_logprobs_prefill
         return
 
-    def return_all_prompt_logprobs_prefill(
-        self,
-        event_pack: OverlapEventPack,
-        prefill_reqs: List[InferReq]):
+    def return_all_prompt_logprobs_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
 
         # 在 return all_prompt_logprobs 的模式下，不能启用 dynamic prompt cache
         assert self.radix_cache is None
@@ -48,7 +45,8 @@ class ReturnPromptLogProbBackend(ChunkedPrefillBackend):
             cur_logprobs = torch.gather(cur_logprobs, dim=1, index=cur_ids[1:].view(-1, 1)).detach().cpu().numpy()
 
             if req_obj.shm_req.input_len > 1:
-                req_obj.shm_req.shm_logprobs.arr[1 : req_obj.shm_req.input_len] = cur_logprobs.flatten()
+                if self.is_master_in_dp:
+                    req_obj.shm_req.shm_logprobs.arr[1 : req_obj.shm_req.input_len] = cur_logprobs.flatten()
 
         if self.prefill_mask_func is not None:
             self.prefill_mask_func(run_reqs, logits)
@@ -65,4 +63,8 @@ class ReturnPromptLogProbBackend(ChunkedPrefillBackend):
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
+
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+        event_pack.notify_forward_and_wait_post_handle()
+        event_pack.notify_pre_post_handle()
         return

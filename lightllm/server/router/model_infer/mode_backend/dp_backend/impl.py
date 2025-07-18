@@ -54,6 +54,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         try:
             while True:
                 event_pack = self.overlap_event_manager.get_overlap_event_pack()
+                if not self.support_overlap:
+                    event_pack._close_overlap()
+
                 event_pack.wait_to_forward()
 
                 self._try_read_new_reqs()

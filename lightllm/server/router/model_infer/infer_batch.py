@@ -179,7 +179,7 @@ class InferenceContext:
         return
 
     @torch.no_grad()
-    def pause_reqs(self, pause_reqs: List["InferReq"]):
+    def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
             g_infer_state_lock.acquire()
 
@@ -192,6 +192,8 @@ class InferenceContext:
                 assert req.wait_pause is True
                 req.wait_pause = False
                 req.paused = True
+                if is_master_in_dp:
+                    req.shm_req.is_paused = True
 
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
@@ -200,7 +202,7 @@ class InferenceContext:
             g_infer_state_lock.release()
         return self
 
-    def recover_paused_reqs(self, paused_reqs: List["InferReq"]):
+    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
         if paused_reqs:
             g_infer_state_lock.acquire()
 
@@ -208,6 +210,8 @@ class InferenceContext:
                 req._match_radix_cache()
                 assert req.paused is True
                 req.paused = False
+                if is_master_in_dp:
+                    req.shm_req.is_paused = False
 
             g_infer_state_lock.release()
         return

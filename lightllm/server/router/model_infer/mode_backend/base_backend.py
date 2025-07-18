@@ -38,6 +38,8 @@ class ModeBackend:
         self.shm_req_manager = ShmReqManager()
 
         self.overlap_event_manager = OverlapEventManager()
+        # 标识是否支持 overlap 功能，很多子类模式如 xgrammar 和 outlines 当前不支持 overlap 高性能模式
+        self.support_overlap = True
 
         # prefill_mask_func 和 decode_mask_func 用于控制在采样输出前，通过对logics的调整，改变输出的选择空间，
         # 主要是为约束输出模式进行定制的操作
@@ -257,14 +259,14 @@ class ModeBackend:
         这个函数会把next token id和logprobs保存到pinned memory中
         这样可以保障post_handle 函数可以读取到正常的输出结果。
         """
-        next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
-            "next_token_ids", next_token_ids.shape[0], next_token_ids.dtype
+        next_token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+            key="next_token_ids",
+            gpu_tensor=next_token_ids,
         )
-        next_token_logprobs_cpu = g_pin_mem_manager.alloc_pin_tensor(
-            "next_token_logprobs", next_token_logprobs.shape[0], next_token_logprobs.dtype
+        next_token_logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+            key="next_token_logprobs",
+            gpu_tensor=next_token_logprobs,
         )
-        next_token_ids_cpu.copy_(next_token_ids, non_blocking=True)
-        next_token_logprobs_cpu.copy_(next_token_logprobs, non_blocking=True)
         return next_token_ids_cpu, next_token_logprobs_cpu
 
     def _try_read_new_reqs(self):
@@ -370,6 +372,8 @@ class ModeBackend:
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
 
+        support_overlap = self.support_overlap
+
         wait_pause_reqs = []
         paused_reqs = []
         finished_reqs = []
@@ -404,8 +408,13 @@ class ModeBackend:
                 continue
 
             if req_obj.infer_aborted or req_obj.finish_status.is_finished():
-                req_obj.filter_mark = True
-                continue
+                if support_overlap:
+                    # 延迟处理
+                    req_obj.filter_mark = True
+                    continue
+                else:
+                    finished_reqs.append(req_obj)
+                    continue
 
             if no_decode:
                 is_decode = False
@@ -438,10 +447,10 @@ class ModeBackend:
         self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
         g_infer_context.filter_reqs(finished_reqs=finished_reqs)
 
-        g_infer_context.pause_reqs(wait_pause_reqs)
+        g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
         if recover_paused:
-            g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs)
+            g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp)
 
         return prefill_reqs, decode_reqs
 

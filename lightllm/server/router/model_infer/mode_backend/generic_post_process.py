@@ -29,10 +29,9 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
     # 然后在直接使用 triton kernel 在对应的logits上进行相应的惩罚操作，这种方法的特点是，处理速度快，但是需要预先
     # 分配较大的显存空间用于token的计数，如果以常见的词表大小 vocab_size = 500000, 预分配1000个请求的cuda tensor，
     # 使用int32类型进行计数大概需要600M的空间，这也不是一笔不菲的开销。
-    # 所以需要根据具体的显卡，使用场景，来判断使用那种方式，默认情况下 enable_gpu_buffer_for_out_token_id_counter
-    # = False， 当设置环境变量 LIGHTLLM_ENABLE_GPU_BUFFER_FOR_OUT_TOKEN_ID_COUNTER=True时，会切换到使用gpu buffer
-    # 的方式。
-    if not sampling_params_manager.enable_gpu_buffer_for_out_token_id_counter:
+    # 所以需要根据具体的显卡，使用场景，来判断使用那种方式，默认情况下 为gpu模式，可以调整args.penalty_counter_mode
+    # 参数来控制使用方式。
+    if sampling_params_manager.penalty_counter_mode == "cpu_counter":
         (
             p_token_ids,
             p_token_counts,

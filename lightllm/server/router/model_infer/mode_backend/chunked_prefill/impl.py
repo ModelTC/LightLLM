@@ -47,6 +47,10 @@ class ChunkedPrefillBackend(ModeBackend):
         try:
             while True:
                 event_pack = self.overlap_event_manager.get_overlap_event_pack()
+                # 关闭overlap 模式
+                if not self.support_overlap:
+                    event_pack._close_overlap()
+
                 event_pack.wait_to_forward()
 
                 self._try_read_new_reqs()
@@ -100,10 +104,13 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
 
             scatter_token(
-                next_token_ids,
-                self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                model_input.b_req_idx,
-                model_input.b_mtp_index,
+                next_token_ids=next_token_ids,
+                req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                b_req_idx=model_input.b_req_idx,
+                b_mtp_index=model_input.b_mtp_index,
+                b_has_out=g_pin_mem_manager.gen_from_list(
+                    key="b_has_out", data=model_input.b_prefill_has_output_cpu, dtype=torch.bool
+                ).cuda(non_blocking=True),
             )
             next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
                 next_token_ids, next_token_logprobs
@@ -252,15 +259,14 @@ class ChunkedPrefillBackend(ModeBackend):
                 model_input=model_input,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
             )
-            accepted_index_cpu = g_pin_mem_manager.alloc_pin_tensor(
-                "accepted_index", accepted_index.shape[0], accepted_index.dtype
+            accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="accepted_index",
+                gpu_tensor=accepted_index,
             )
-            accepted_index_cpu.copy_(accepted_index, non_blocking=True)
-            mtp_accept_len_cpu = g_pin_mem_manager.alloc_pin_tensor(
-                "mtp_accept_len", mtp_accept_len.shape[0], mtp_accept_len.dtype
+            mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="mtp_accept_len",
+                gpu_tensor=mtp_accept_len,
             )
-            mtp_accept_len_cpu.copy_(mtp_accept_len, non_blocking=True)
-
             verify_event = torch.cuda.Event()
             verify_event.record()
 

@@ -416,6 +416,26 @@ def make_argument_parser() -> argparse.ArgumentParser:
         sglang_kernel use sglang_kernel impl""",
     )
     parser.add_argument(
+        "--penalty_counter_mode",
+        type=str,
+        choices=["cpu_counter", "pin_mem_counter", "gpu_counter"],
+        default="gpu_counter",
+        help=(
+            "During inference with large models, it is necessary to track the frequency of input token_ids."
+            " Three recording modes are currently supported:\n"
+            "- **cpu_counter**: This mode does not consume GPU memory"
+            " and is suitable for short outputs and low concurrency scenarios."
+            " However, for long outputs or high concurrency, it may introduce"
+            " significant CPU overhead, leading to severe performance degradation.\n"
+            "- **pin_mem_counter**: This mode allocates a large batch of pinned memory"
+            " to manage the counter and interacts with some CUDA kernels."
+            " While it does not consume GPU memory, it may introduce a certain performance bottleneck.\n"
+            "- **gpu_counter**: This mode achieves operations by allocating a large GPU buffer, providing"
+            " the highest performance but consuming a significant amount of GPU memory."
+            " Therefore, it is recommended to set this parameter according to actual needs."
+        ),
+    )
+    parser.add_argument(
         "--ep_redundancy_expert_config_path",
         type=str,
         default=None,
