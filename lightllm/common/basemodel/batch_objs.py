@@ -10,13 +10,16 @@ class ModelInput:
     total_token_num: int
     max_len_in_batch: int
     input_ids: torch.Tensor
-    mem_indexes: torch.Tensor
     b_req_idx: torch.Tensor
     b_mtp_index: torch.Tensor
     b_seq_len: torch.Tensor
+    mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
     multimodal_params: list = field(default_factory=list)
+
+    # cpu 变量
+    mem_indexes_cpu: torch.Tensor = None
 
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输入变量。只在特殊的模型模式下才会具体使用和生效。
@@ -28,7 +31,8 @@ class ModelInput:
     def to_cuda(self):
         if self.input_ids is not None:
             self.input_ids = self.input_ids.cuda(non_blocking=True)
-        self.mem_indexes = self.mem_indexes.cuda(non_blocking=True)
+        if self.mem_indexes is None:
+            self.mem_indexes = self.mem_indexes_cpu.cuda(non_blocking=True)
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)

@@ -298,11 +298,9 @@ class InferReq:
         self.need_out_token_id_statistics = True
         self.out_token_id_count: Dict[int, int] = None
 
-        # mtp_gen_token_ids 用于处理一个请求可以通过mtp进行很多token的预先生成
-        # 的技术，在没有开启 mtp 功能的时候，这个成员变量不会有任何的实际实用意义。
-        # 当开启后，mtp_gen_token_ids 保存多生成的多余的token_id,但是在后面的
-        # 步骤中需要重新进行校验。
-        self.mtp_gen_token_ids: List[int] = []
+        # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
+        # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
+        self.mtp_step: int = get_env_start_args().mtp_step
 
         self._init_all_state()
         if init_prefix_cache:
@@ -417,7 +415,7 @@ class InferReq:
         return input_token_len
 
     def decode_need_token_num(self):
-        return 1 + len(self.mtp_gen_token_ids)
+        return 1 + self.mtp_step
 
 
 class InferReqGroup:

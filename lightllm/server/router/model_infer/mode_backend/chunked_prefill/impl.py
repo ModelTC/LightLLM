@@ -17,6 +17,7 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
+from lightllm.common.basemodel.triton_kernel.mtp_verify import mtp_scatter_next_token_ids, gen_b_req_mtp_start_loc
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
@@ -238,23 +239,30 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
+            all_next_token_ids = []
+            next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
+            all_next_token_ids.append(next_token_ids)
+            # verify the next_token_ids
+            b_req_mtp_start_loc = gen_b_req_mtp_start_loc(
+                b_mtp_index=model_input.b_mtp_index,
+                num_reqs=len(decode_reqs),
+            )
+            mtp_accept_len, accepted_index = self._verify_mtp_v2(
+                new_next_token_ids=next_token_ids,
+                model_input=model_input,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+            )
+            accepted_index_cpu = g_pin_mem_manager.alloc_pin_tensor(
+                "accepted_index", accepted_index.shape[0], accepted_index.dtype
+            )
+            accepted_index_cpu.copy_(accepted_index, non_blocking=True)
+            mtp_accept_len_cpu = g_pin_mem_manager.alloc_pin_tensor(
+                "mtp_accept_len", mtp_accept_len.shape[0], mtp_accept_len.dtype
+            )
+            mtp_accept_len_cpu.copy_(mtp_accept_len, non_blocking=True)
 
-            next_token_ids, next_token_probs = sample(model_output.logits, run_reqs, self.eos_id)
-            scatter_token(
-                next_token_ids,
-                self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                model_input.b_req_idx,
-                model_input.b_mtp_index,
-            )
-            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
-                next_token_ids, next_token_probs
-            )
-
-            # verify
-            mem_indexes_cpu = model_input.mem_indexes.detach().cpu().numpy()
-            verify_ok_reqs, verify_ok_req_indexes, verify_ok_req_last_indexes, need_free_mem_indexes = self._verify_mtp(
-                run_reqs, next_token_ids_cpu, mem_indexes_cpu
-            )
+            verify_event = torch.cuda.Event()
+            verify_event.record()
 
             # share some inference info with the main model
             draft_model_input = model_input
@@ -270,27 +278,43 @@ class ChunkedPrefillBackend(ModeBackend):
                 # spec decode: MTP
                 draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
                 draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
+                all_next_token_ids.append(draft_next_token_ids)
 
-                unique_reqs = [run_reqs[index] for index in verify_ok_req_last_indexes]
-                draft_next_token_ids_cpu = draft_next_token_ids.detach().cpu().numpy()
-                self._update_reqs_mtp_gen_token_ids(
-                    reqs=unique_reqs, mtp_draft_next_token_ids=draft_next_token_ids_cpu[verify_ok_req_last_indexes]
-                )
+            all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
+            mtp_scatter_next_token_ids(
+                req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                all_next_token_ids=all_next_token_ids,
+                b_req_idx=model_input.b_req_idx,
+                b_mtp_index=model_input.b_mtp_index,
+                mtp_accept_len=mtp_accept_len,
+            )
+            next_token_ids_cpu, next_token_logprobs_cpu = self._save_next_token_ids_and_logprobs(
+                next_token_ids, next_token_logprobs
+            )
             sync_event = torch.cuda.Event()
             sync_event.record()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
+        verify_event.synchronize()
+        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
-
+        need_free_mem_indexes = self._get_need_free_mem_indexes(
+            run_reqs=run_reqs,
+            accepted_index_cpu=accepted_index_cpu,
+            mtp_accept_len_cpu=mtp_accept_len_cpu,
+            mem_indexes_cpu=model_input.mem_indexes_cpu,
+        )
+        select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
         self._post_handle(
             run_reqs=verify_ok_reqs,
-            next_token_ids=next_token_ids_cpu[verify_ok_req_indexes],
-            next_token_logprobs=next_token_logprobs_cpu[verify_ok_req_indexes],
+            next_token_ids=next_token_ids_cpu[select_mask],
+            next_token_logprobs=next_token_logprobs_cpu[select_mask],
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )

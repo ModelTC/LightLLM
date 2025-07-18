@@ -60,7 +60,7 @@ def prepare_prefill_inputs(
         total_token_num=total_token_num,
         max_len_in_batch=max_len_in_batch,
         input_ids=input_ids,
-        mem_indexes=mem_indexes,
+        mem_indexes_cpu=mem_indexes,
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
@@ -90,7 +90,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         max_len_in_batch = max(max_len_in_batch, seq_len)
         b_mtp_index.append(0)
         # process the draft tokens.
-        for step in range(len(req.mtp_gen_token_ids)):
+        for step in range(req.mtp_step):
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
             seq_len += 1
@@ -115,7 +115,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         total_token_num=total_token_num,
         max_len_in_batch=max_len_in_batch,
         input_ids=None,
-        mem_indexes=mem_indexes,
+        mem_indexes_cpu=mem_indexes,
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,

@@ -14,7 +14,8 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.batch_objs import ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
+from lightllm.common.basemodel.triton_kernel.mtp_verify import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -253,7 +254,7 @@ class ModeBackend:
 
     def _save_next_token_ids_and_logprobs(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
         """
-        这个函数会把next token id和logprobs保存到pinned memory中，并返回一个同步事件。
+        这个函数会把next token id和logprobs保存到pinned memory中
         这样可以保障post_handle 函数可以读取到正常的输出结果。
         """
         next_token_ids_cpu = g_pin_mem_manager.alloc_pin_tensor(
@@ -520,6 +521,38 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _trans_req_ids_to_req_objs(self, req_ids: List[int]) -> List[InferReq]:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
+
+    def _verify_mtp_v2(
+        self, new_next_token_ids: torch.Tensor, model_input: ModelInput, b_req_mtp_start_loc: torch.Tensor
+    ):
+        b_mtp_index = model_input.b_mtp_index
+        mtp_accept_len, accepted_index = mtp_verify(
+            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            new_next_token_ids=new_next_token_ids,
+            b_req_idx=model_input.b_req_idx,
+            b_mtp_index=b_mtp_index,
+        )
+        return mtp_accept_len, accepted_index
+
+    def _get_need_free_mem_indexes(
+        self,
+        run_reqs: List[InferReq],
+        accepted_index_cpu: torch.Tensor,
+        mtp_accept_len_cpu: torch.Tensor,
+        mem_indexes_cpu: torch.Tensor,
+    ) -> Tuple[List[InferReq], torch.Tensor]:
+        need_free_mem_indexes = []
+        start_idx = 0
+        for i in range(mtp_accept_len_cpu.shape[0]):
+            req = run_reqs[start_idx]
+            accept_len = mtp_accept_len_cpu[i]
+            end_idx = start_idx + req.mtp_step + 1
+            need_free_mem_indexes.extend(mem_indexes_cpu[start_idx + accept_len + 1 : end_idx])
+            start_idx = end_idx
+            if self.is_master_in_dp:
+                req.update_mtp_accepted_token_num(accept_token_num=accept_len)
+        return need_free_mem_indexes
 
     # 对mtp 运行模式下的请求进行校验和过滤，保留校验成功的请求对象，并释放不再使用的kv 的 mem_index
     def _verify_mtp(self, run_reqs: List[InferReq], next_token_ids_cpu: np.ndarray, input_mem_indexes_cpu: np.ndarray):
