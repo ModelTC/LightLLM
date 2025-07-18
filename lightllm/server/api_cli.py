@@ -164,11 +164,18 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=[],
         nargs="+",
         help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_fp16 | triton_flashdecoding
-                        | triton_gqa_attention | triton_gqa_flashdecoding | triton_fp8kv,
+                        | triton_gqa_attention | triton_gqa_flashdecoding | triton_fp8kv | offline_calibration_fp8kv
+                        | export_fp8kv_calibration
                         triton_flashdecoding mode is for long context, current support llama llama2 qwen;
                         triton_gqa_attention and triton_gqa_flashdecoding is fast kernel for model which use GQA;
                         triton_int8kv mode use int8 to store kv cache, can increase token capacity, use triton kernel;
                         triton_fp8kv mode use float8 to store kv cache, currently only for deepseek2;
+                        offline_calibration_fp8kv mode use float8 to store kv cache, need fa3 or flashinfer backend,
+                        currently only for llama and qwen model;
+                        export_fp8kv_calibration record and export kv cache quant calibration results to a json file.
+                        It can be used for llama and qwen model.
+                        Calibration need to disable cudagraph and use fa3 or flashinfer backend.
+                        Tp size must no more than head num when calibration.
                         ppl_int8kv mode use int8 to store kv cache, and use ppl fast kernel;
                         ppl_fp16 mode use ppl fast fp16 decode attention kernel;
                         you need to read source code to make sure the supported detail mode for all models""",
@@ -446,5 +453,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         Increasing this value allows for more predictions,
         but ensure that the model is compatible with the specified step count.
         currently, deepseekv3 model only support 1 step""",
+    )
+    parser.add_argument(
+        "--kv_quant_calibration_config_path",
+        type=str,
+        default=None,
+        help="""Path of the kv quant calibration config. It can be used for llama and qwen model.""",
     )
     return parser

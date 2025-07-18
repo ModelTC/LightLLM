@@ -43,7 +43,7 @@ class DpQueue:
         merged_batch: Batch = None
         for iter_batch in dp_batches:
             if merged_batch is not None:
-                merged_batch.dp_merge(iter_batch)
+                merged_batch.merge(iter_batch)
             else:
                 merged_batch = iter_batch
         return merged_batch

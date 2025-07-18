@@ -81,7 +81,7 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                     self.req_manager.req_to_token_indexs,
                     self.b_req_idx,
                     self.b_seq_len,
-                    self.b_start_loc,
+                    kv_starts,
                     self.max_len_in_batch,
                     kv_indices,
                 )
