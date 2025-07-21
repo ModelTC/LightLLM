@@ -26,7 +26,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         super().__init__()
 
         # 用于控制每一步是执行prefill 和 decode 还是跳过
-        self.control_state_machine = DPControlState()
+        self.control_state_machine = DPControlState(backend=self)
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
