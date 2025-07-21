@@ -265,7 +265,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
             mtp_accept_len, accepted_index = self._verify_mtp_v2(
                 new_next_token_ids=next_token_ids,
-                model_input=model_input,
+                b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
             )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(

@@ -532,13 +532,13 @@ class ModeBackend:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
 
     def _verify_mtp_v2(
-        self, new_next_token_ids: torch.Tensor, model_input: ModelInput, b_req_mtp_start_loc: torch.Tensor
+        self, new_next_token_ids: torch.Tensor, b_req_idx: torch.Tensor, b_req_mtp_start_loc: torch.Tensor
     ):
         mtp_accept_len, accepted_index = mtp_verify(
             req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             new_next_token_ids=new_next_token_ids,
-            b_req_idx=model_input.b_req_idx,
+            b_req_idx=b_req_idx,
         )
         return mtp_accept_len, accepted_index
 
