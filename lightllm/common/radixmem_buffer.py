@@ -143,7 +143,9 @@ class RadixMemoryBuffer:
     def alloc(self, need_size) -> torch.Tensor:
         with self.lock:
             if need_size > self.mark_end.get_value() - self.mark_start.get_value():
-                logger.error(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size.get_value()}")
+                logger.error(
+                    f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size.get_value()}"
+                )
                 raise RuntimeError(f"Not enough memory to allocate {need_size} tokens.")
 
             start = self.mark_start.get_value()

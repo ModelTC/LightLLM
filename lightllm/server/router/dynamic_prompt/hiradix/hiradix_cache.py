@@ -137,7 +137,8 @@ class HiRadixCache(RadixCache):
             max_len, query_index = self.local_cache_manager.query(req, key)
 
         logger.debug(
-            f"HiCache rank_in_node={self.rank_in_node} current key len {len(key)} match radix len {tree_node.node_prefix_total_len}, max len {max_len}"
+            f"HiCache rank_in_node={self.rank_in_node} current key len {len(key)} match radix len "
+            f"{tree_node.node_prefix_total_len}, max len {max_len}"
         )
         if max_len > tree_node.node_prefix_total_len:
             pull_len = max_len - tree_node.node_prefix_total_len
@@ -148,7 +149,8 @@ class HiRadixCache(RadixCache):
             if ans_value is not None:
                 buffers = torch.concat([ans_value, buffers])
             logger.debug(
-                f"HiCache current match ratio {self.disk_cache_match_ratio.arr[0]}, pulled cache len {pull_len} from disk"
+                f"HiCache current match ratio {self.disk_cache_match_ratio.arr[0]},"
+                f"pulled cache len {pull_len} from disk"
             )
             res = self.local_cache_manager.read(key[:max_len], buffers, query_index, alloc_len=pull_len)
             if res:
