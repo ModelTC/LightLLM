@@ -266,12 +266,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第三阶段
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = next_token_logprobs.detach().cpu().numpy()
+
             self._post_handle(
                 run_reqs=run_reqs,
-                next_token_ids=next_token_ids,
-                next_token_logprobs=next_token_logprobs,
+                next_token_ids=next_token_ids_cpu,
+                next_token_logprobs=next_token_logprobs_cpu,
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
