@@ -36,7 +36,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 self.prefill = self.prefill_overlap_mtp
             else:
                 self.prefill = self.prefill_mtp
-
             if self.enable_decode_microbatch_overlap:
                 self.decode = self.decode_overlap_mtp
             else:
@@ -543,7 +542,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             run_reqs1,
             padded_req_num1,
         ) = padded_overlap_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
-        print(micro_input0, micro_input1)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             micro_output0, micro_output1 = self.model.microbatch_overlap_prefill(micro_input0, micro_input1)
             logits0 = micro_output0.logits
@@ -622,7 +620,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            print(next_token_ids_cpu)
 
             self._post_handle(
                 run_reqs=run_reqs,
@@ -767,6 +764,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 g_infer_state_lock.acquire()
                 g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
                 g_infer_state_lock.release()
+            event_pack.notify_pre_post_handle()
         else:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
