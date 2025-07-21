@@ -71,7 +71,6 @@ def _fwd_kernel_ep_scatter_2(
 
     offset_in_s = tl.arange(0, SCALE_HIDDEN_SIZE_PAD)
     mask_s = offset_in_s < SCALE_HIDDEN_SIZE
-
     for token_id in range(start_token_id, total_token_num, grid_num):
         to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
         to_copy_s = tl.load(recv_x_scale + token_id * recv_x_scale_stride0 + offset_in_s, mask=mask_s)
@@ -80,6 +79,7 @@ def _fwd_kernel_ep_scatter_2(
             expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
             if expert_id >= 0:
                 dest_token_index = tl.atomic_add(expert_start_loc + expert_id, 1)
+                dest_token_index = dest_token_index.to(tl.int64)
                 tl.store(output_index + token_id * output_index_stride0 + topk_index, dest_token_index)
                 output_tensor_ptr = output_tensor + dest_token_index * output_tensor_stride0
                 output_tensor_scale_ptr = output_tensor_scale + dest_token_index * output_tensor_scale_stride0

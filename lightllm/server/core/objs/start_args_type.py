@@ -42,7 +42,7 @@ class StartArgs:
     log_stats_interval: int = field(default=10)
     router_token_ratio: float = field(default=0.0)
     router_max_new_token_len: int = field(default=1024)
-    router_max_wait_tokens: int = field(default=6)
+    router_max_wait_tokens: int = field(default=1)
     dp_prefill_wait_step: int = field(default=0)
     disable_aggressive_schedule: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
@@ -88,6 +88,9 @@ class StartArgs:
     enable_flashinfer_prefill: bool = field(default=False)
     enable_flashinfer_decode: bool = field(default=False)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
+    penalty_counter_mode: str = field(
+        default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
+    )
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
     mtp_mode: Optional[str] = field(default=None)

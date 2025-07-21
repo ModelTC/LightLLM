@@ -203,6 +203,21 @@ def create_new_group_for_current_dp(backend):
     return ans_group
 
 
+def create_new_group_for_current_node(backend):
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    args = get_env_start_args()
+    ans_group = None
+    nnodes = args.nnodes
+    node_world_size = args.tp // nnodes
+    for iter_node_rank in range(nnodes):
+        ranks = list(i + iter_node_rank * node_world_size for i in range(node_world_size))
+        device_group = dist.new_group(ranks, backend=backend)
+        if args.node_rank == iter_node_rank:
+            ans_group = device_group
+    return ans_group
+
+
 def _init_nccl_env():
     from lightllm.utils.envs_utils import get_env_start_args
 

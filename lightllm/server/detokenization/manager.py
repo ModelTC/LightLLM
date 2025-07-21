@@ -3,7 +3,6 @@ import asyncio
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
-import zmq.asyncio
 import inspect
 from lightllm.server.core.objs import ShmReqManager
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
@@ -32,7 +31,7 @@ class DeTokenizationManager:
         trust_remote_code,
     ):
         self.args = args
-        context = zmq.asyncio.Context(2)
+        context = zmq.Context(2)
         self.recv_from_router = context.socket(zmq.PULL)
         self.recv_from_router.bind(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
 
@@ -51,62 +50,56 @@ class DeTokenizationManager:
         self.token_id_to_token = {token_id: token for token, token_id in self.tokenizer.get_vocab().items()}
         return
 
-    async def handle_loop(self):
+    def _add_new_group_req_index(self, recv_obj: GroupReqIndexes):
+        for req_index in recv_obj.shm_req_indexes:
+            req = self.shm_req_manager.get_req_obj_by_index(req_index)
+            req.link_prompt_ids_shm_array()
+            req.link_logprobs_shm_array()
 
-        asyncio.create_task(self.timer_to_detoken())
+            logger.info(
+                f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
+            )
 
-        while True:
-            try:
-                recv_obj: Union[None, GroupReqIndexes] = await self.recv_from_router.recv_pyobj()
+            # p d 分离模式，decode节点的解码需要做一些特殊的修复。
+            decode_req = DecodeReq(req, self.is_pd_decode_mode)
+            if self.is_pd_decode_mode:
+                decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
+            # token_healing mode 的特殊初始化
+            if self.args.token_healing_mode:
+                decode_req.init_token_healing_prefix_str(self.token_id_to_token, self.tokenizer)
 
-                if isinstance(recv_obj, GroupReqIndexes):
-                    for req_index in recv_obj.shm_req_indexes:
-                        req = self.shm_req_manager.get_req_obj_by_index(req_index)
-                        req.link_prompt_ids_shm_array()
-                        req.link_logprobs_shm_array()
+            self.req_id_to_out[req.request_id] = decode_req
+        return
 
-                        logger.info(
-                            f"detokenization recv req id {req.request_id} "
-                            f"cost time {time.time() - recv_obj.time_mark} s"
-                        )
+    def handle_loop(self):
+        try:
+            recv_max_count = 128
+            while True:
+                try:
+                    # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
+                    for _ in range(recv_max_count):
+                        recv_obj: GroupReqIndexes = self.recv_from_router.recv_pyobj(zmq.NOBLOCK)
+                        assert isinstance(recv_obj, GroupReqIndexes)
+                        self._add_new_group_req_index(recv_obj=recv_obj)
 
-                        # p d 分离模式，decode节点的解码需要做一些特殊的修复。
-                        decode_req = DecodeReq(req, self.is_pd_decode_mode)
-                        if self.is_pd_decode_mode:
-                            decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
-                        # token_healing mode 的特殊初始化
-                        if self.args.token_healing_mode:
-                            decode_req.init_token_healing_prefix_str(self.token_id_to_token, self.tokenizer)
+                    # 当队列中存在较多的请求时，将一次接受的数量上调
+                    recv_max_count = min(int(recv_max_count * 1.3), 256)
+                except zmq.ZMQError:
+                    # 当队列已经开始清空的时候，将一次接受的数量下调
+                    recv_max_count = 128
 
-                        self.req_id_to_out[req.request_id] = decode_req
-
-                if recv_obj is None:
-                    start_time = time.time()
-                    self.gen_token_out()
-                    cost_time = (time.time() - start_time) * 1000
-                    if cost_time > 50:
-                        logger.info(f"detokenize batch cost time {cost_time} ms")
-
-            except Exception as e:
-                logger.exception(f"detoken process has exception {str(e)}")
-
-    async def timer_to_detoken(self):
-        """
-        这个函数是定时去执行 get_token_out() 的定时执行机制，主要是为了在CHUNCK PREFILL的时候，
-        有特别长和特别短的请求合并到了一起进行PREFILL，部分请求已经推理出了首个token后，不用等到
-        所有的请求都推理出首个token。通过这种定制执行的机制，将写入到shm req中的输出首token将其
-        detoken出来，不然需要等待触发detoken的 None 数据包发送过来。这样对首包延迟是及其不友好的。
-        """
-        while True:
-            try:
                 start_time = time.time()
-                self.gen_token_out()
+                exist_need_detoken = self.gen_token_out()
                 cost_time = (time.time() - start_time) * 1000
                 if cost_time > 50:
-                    logger.info(f"timer detokenize batch cost time {cost_time} ms")
-                await asyncio.sleep(0.05)
-            except BaseException as e:
-                logger.exception(str(e))
+                    logger.info(f"detokenize batch cost time {cost_time} ms")
+
+                if not exist_need_detoken:
+                    time.sleep(0.002)
+
+        except Exception as e:
+            logger.exception(f"detoken process has exception {str(e)}")
+        return
 
     def gen_token_out(self):
         exist_need_detoken = False
@@ -170,7 +163,7 @@ def start_detokenization_process(args, detokenization_port, detokenization_pub_p
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     try:
-        router = DeTokenizationManager(
+        manager = DeTokenizationManager(
             args,
             args.eos_id,
             args.model_dir,
@@ -183,6 +176,5 @@ def start_detokenization_process(args, detokenization_port, detokenization_pub_p
         pipe_writer.send(str(e))
         raise
     pipe_writer.send("init ok")
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(router.handle_loop())
+    manager.handle_loop()
     return

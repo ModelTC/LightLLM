@@ -15,7 +15,6 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         b_length_penalty_param,
         b_mask_eos_reqs,
     ) = _get_post_sample_tensors(reqs)
-
     eos_ids = torch.tensor(eos_id, dtype=torch.int32, device="cpu", pin_memory=True).cuda(non_blocking=True)
 
     sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
@@ -30,17 +29,14 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
     # 然后在直接使用 triton kernel 在对应的logits上进行相应的惩罚操作，这种方法的特点是，处理速度快，但是需要预先
     # 分配较大的显存空间用于token的计数，如果以常见的词表大小 vocab_size = 500000, 预分配1000个请求的cuda tensor，
     # 使用int32类型进行计数大概需要600M的空间，这也不是一笔不菲的开销。
-    # 所以需要根据具体的显卡，使用场景，来判断使用那种方式，默认情况下 enable_gpu_buffer_for_out_token_id_counter
-    # = False， 当设置环境变量 LIGHTLLM_ENABLE_GPU_BUFFER_FOR_OUT_TOKEN_ID_COUNTER=True时，会切换到使用gpu buffer
-    # 的方式。
-    if not sampling_params_manager.enable_gpu_buffer_for_out_token_id_counter:
+    # 所以需要根据具体的显卡，使用场景，来判断使用那种方式，默认情况下 为gpu模式，可以调整args.penalty_counter_mode
+    # 参数来控制使用方式。
+    if sampling_params_manager.penalty_counter_mode == "cpu_counter":
         (
             p_token_ids,
             p_token_counts,
             p_cumsum_seq_len,
         ) = sampling_params_manager.gen_cpu_out_token_counter_sampling_params(req_objs=reqs)
-
-        logits = logits.contiguous()
 
         apply_penalty(
             Logits=logits,
@@ -54,7 +50,6 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
             sampling_params_manager=sampling_params_manager,
         )
     else:
-        logits = logits.contiguous()
         apply_penalty_gpu_cache(
             Logits=logits,
             b_req_idx=b_req_idx,
@@ -63,18 +58,15 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
             eos_ids=eos_ids,
             sampling_params_manager=sampling_params_manager,
         )
-
     logits.div_(b_temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
 
     if get_env_start_args().sampling_backend == "triton":
         probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
         sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
-
-        batch_next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
-        batch_next_token_probs = torch.gather(probs_sort, dim=1, index=sampled_index)
-
-        return batch_next_token_ids.view(-1), batch_next_token_probs.view(-1)
+        next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
+        next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
+        return next_token_ids.view(-1), next_token_logprobs.view(-1)
 
     elif get_env_start_args().sampling_backend == "sglang_kernel":
         from sgl_kernel import top_k_top_p_sampling_from_probs
@@ -84,12 +76,12 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
             b_top_ks,
             b_top_ps,
             filter_apply_order="joint",
-            check_nan=True,
+            check_nan=False,
         )
         int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
         int64_batch_next_token_ids[:] = batch_next_token_ids
         batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), batch_next_token_probs.view(-1)
+        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
     else:
         assert False, "dead path"
 

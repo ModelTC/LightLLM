@@ -6,6 +6,7 @@ from typing import Tuple, Any, Optional
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
+from .batch_objs import ModelInput
 
 
 class InferStateInfo:
@@ -87,9 +88,10 @@ class InferStateInfo:
                 self.b_kv_seq_len,
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
-                self.max_q_seq_len,
-                self.max_kv_seq_len,
-            ) = gen_decode_params(b_seq_len=self.b_seq_len)
+            ) = gen_decode_params(self.b_seq_len)
+            self.max_q_seq_len = 1
+            # TODO: check the correctness
+            self.max_kv_seq_len = self.max_len_in_batch
             self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):

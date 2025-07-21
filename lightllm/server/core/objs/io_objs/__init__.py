@@ -1,1 +1,1 @@
-from .group_req import GroupReqIndexes, GroupReqObjs
+from .group_req import GroupReqIndexes, GroupReqObjs, AbortedReqCmd

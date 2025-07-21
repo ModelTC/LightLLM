@@ -3,7 +3,6 @@ import torch
 from .impl import ChunkedPrefillBackend
 from typing import List
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
-from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -12,6 +11,9 @@ logger = init_logger(__name__)
 class FirstTokenConstraintBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
+        self.prefill_mask_func = self._mask_first_gen_token_logits
+        self.decode_mask_func = self._mask_first_gen_token_logits
+        self.extra_post_req_handle_func = None
 
     def init_custom(self):
         first_allowed_tokens_strs: str = os.environ.get("FIRST_ALLOWED_TOKENS", None)
@@ -24,37 +26,6 @@ class FirstTokenConstraintBackend(ChunkedPrefillBackend):
         # check token_id < vocab_size
         assert all(e < self.model.vocab_size for e in self.first_allowed_tokens)
         self.fill_value = torch.tensor(-1000000.0)
-        return
-
-    def decode(self):
-        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids
-        )
-
-        if aborted_reqs:
-            g_infer_context.filter_reqs(aborted_reqs)
-
-        # 先 decode
-        if decode_reqs:
-            ContinuesBatchBackend.normal_decode(
-                self,
-                decode_reqs=decode_reqs,
-                uninit_reqs=uninit_reqs,
-                ok_finished_reqs=ok_finished_reqs,
-                mask_func=self._mask_first_gen_token_logits,
-            )
-
-        # 再 prefill
-        if self.chunked_prefill_state.need_prefill(prefill_reqs=prefill_reqs, decode_reqs=decode_reqs):
-            ContinuesBatchBackend.normal_prefill_reqs(
-                self,
-                prefill_reqs=prefill_reqs,
-                uninit_reqs=uninit_reqs,
-                ok_finished_reqs=ok_finished_reqs,
-                mask_func=self._mask_first_gen_token_logits,
-            )
-
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
         return
 
     def _mask_first_gen_token_logits(self, run_reqs: List[InferReq], logits: torch.Tensor):

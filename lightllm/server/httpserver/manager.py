@@ -57,7 +57,6 @@ class HttpServerManager:
         self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 1)
         self._resource_lock = AsyncLock(self._shm_lock_pool.get_lock_context(0))
         self.node_rank = args.node_rank
-        self.transfer_lock = asyncio.Lock()  # the lock for transfer to next module in multi node mode.
         self.disable_abort = args.nnodes > 1 and args.dp == 1  # mulitnode dp=1 mode, disable abort
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
         self.is_multinode_tp_master = args.dp == 1 and args.nnodes > 1 and args.node_rank == 0
@@ -202,25 +201,20 @@ class HttpServerManager:
 
     async def loop_for_request(self):
         assert self.args.node_rank > 0
-        tasks = []
-        self.request_order_queue = []
         while True:
             (
                 prompt,
                 sampling_params,
                 multimodal_params,
             ) = await self.multinode_req_manager.recv_pyobj()
-            self.request_order_queue.append(sampling_params.group_request_id)
             results_generator = self.generate(prompt, sampling_params, multimodal_params, None)
 
             async def generate_wrapper(results_generator):
                 async for _, _, _, _ in results_generator:
                     pass
 
-            tasks.append(asyncio.create_task(generate_wrapper(results_generator)))
-            # cleanup
-            while len(tasks) > 0 and tasks[0].done():
-                tasks.pop(0)
+            asyncio.create_task(generate_wrapper(results_generator))
+        return
 
     def alloc_req_id(self, sampling_params, is_health_req: bool = False):
         # 请求的 id 可以由外部传入，也可以由内部生成，但是由外部传入的时候，要自己保证全局唯一性
@@ -413,32 +407,13 @@ class HttpServerManager:
         original_multimodal_params: MultimodalParams,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
-        # 多节点纯tp 运行模式下，master 节点需要将请求按照可控的顺序转发给slave节点，
-        # 同时转发给salve节点的时候，要保证master节点按照转发的顺序转发给next_module
-        # 所以需要锁的控制。
+        # 多节点纯tp 运行模式下，master 节点需要将请求转发给slave节点.
         if self.is_multinode_tp_master:
-            async with self.transfer_lock:
-                for sender in self.multinode_req_manager:
-                    sender.send_pyobj(
-                        (prompt, sampling_params, original_multimodal_params),
-                        protocol=pickle.HIGHEST_PROTOCOL,
-                    )
-                await self.transfer_to_next_module(group_req_objs)
-            return
-        # 多节点纯tp 的slave节点，需要按照接受到请求的顺序转发，这需要锁和排队机制来保证。
-        # self.request_order_queue 实现了一种简单的排队取出机制，这样master 和 slave
-        # 节点的请求到达各自节点的router的顺序才是一致的，才能完成同步同态调度。
-        if self.is_multinode_tp_slave:
-            while True:
-                if self.request_order_queue and self.request_order_queue[0] != group_req_objs.group_req_id:
-                    await asyncio.sleep(0.002)
-                    continue
-                else:
-                    async with self.transfer_lock:
-                        await self.transfer_to_next_module(group_req_objs)
-                        self.request_order_queue.pop(0)
-                    break
-            return
+            for sender in self.multinode_req_manager:
+                sender.send_pyobj(
+                    (prompt, sampling_params, original_multimodal_params),
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
 
         await self.transfer_to_next_module(group_req_objs)
         return

@@ -7,7 +7,7 @@ import numpy as np
 import collections
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Union, Any
+from typing import List, Dict, Tuple, Optional, Callable, Any
 from lightllm.common.req_manager import ReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
@@ -53,32 +53,36 @@ class InferenceContext:
             self.overlap_stream = torch.cuda.Stream()
         return self.overlap_stream
 
-    def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_req_obj=True):
+    def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
+        req_objs = []
         request_ids = []
         for r in requests:
-
             r_id, r_index, multimodal_params, _ = r
-            if r_id not in self.requests_mapping.keys():
-                r_obj = InferReq(
-                    req_id=r_id,
-                    req_idx=self.req_manager.alloc(),
-                    shm_index=r_index,
-                    multimodal_params=multimodal_params,
-                    vocab_size=self.vocab_size,
-                )
-                self.requests_mapping[r_id] = r_obj
-            else:
-                r_obj: InferReq = self.requests_mapping[r_id]
-                assert r_obj.paused is True
-
+            assert r_id not in self.requests_mapping.keys()
+            r_obj = InferReq(
+                req_id=r_id,
+                req_idx=self.req_manager.alloc(),
+                shm_index=r_index,
+                multimodal_params=multimodal_params,
+                vocab_size=self.vocab_size,
+                init_prefix_cache=init_prefix_cache,
+            )
+            self.requests_mapping[r_id] = r_obj
             request_ids.append(r_id)
-
-            if init_req_obj:
-                r_obj.init_all()
+            req_objs.append(r_obj)
 
         self.infer_req_ids.extend(request_ids)
 
-        return
+        # 多输出模式下需要将请求添加到各自的组对象 InferReqGroup 中
+        if get_env_start_args().diverse_mode:
+            for r_id in request_ids:
+                req: InferReq = g_infer_context.requests_mapping[r_id]
+                group_req_id = req.shm_req.group_req_id
+                if group_req_id not in g_infer_context.group_mapping:
+                    g_infer_context.group_mapping[group_req_id] = InferReqGroup(group_req_id=group_req_id)
+                g_infer_context.group_mapping[group_req_id].add_req(r_id)
+
+        return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq", is_group_finished: bool):
         if self.radix_cache is None:
@@ -125,7 +129,7 @@ class InferenceContext:
         torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
 
     @torch.no_grad()
-    def filter(self, finished_request_ids: List[int]):
+    def _filter(self, finished_request_ids: List[int]):
         if len(finished_request_ids) == 0:
             return
 
@@ -165,30 +169,56 @@ class InferenceContext:
 
     def filter_reqs(self, finished_reqs: List["InferReq"]):
         if finished_reqs:
-            self.filter([req.req_id for req in finished_reqs])
+            g_infer_state_lock.acquire()
+            self._filter([req.req_id for req in finished_reqs])
+            g_infer_state_lock.release()
         return
 
     @torch.no_grad()
-    def pause_reqs(self, pause_req_ids: List[int]):
-        free_token_index = []
-        for request_id in pause_req_ids:
-            req: InferReq = self.requests_mapping[request_id]
-            self.infer_req_ids.remove(request_id)
+    def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
+        if pause_reqs:
+            g_infer_state_lock.acquire()
 
-            if req.initialized:
-                # 不支持多输出的情况的暂停
+            free_token_index = []
+            for req in pause_reqs:
+                # 不支持多输出的情况的暂停, 不能支持 diverse 输出模式。
                 self.free_a_req_mem(free_token_index, req, is_group_finished=True)
                 req.cur_kv_len = 0
                 req.shm_req.shm_cur_kv_len = req.cur_kv_len
-                req.paused = True  # 暂停信息标记。
-            else:
+                assert req.wait_pause is True
+                req.wait_pause = False
                 req.paused = True
+                if is_master_in_dp:
+                    req.shm_req.is_paused = True
 
-        if len(free_token_index) != 0:
-            free_token_index = custom_cat(free_token_index)
-            self.req_manager.free_token(free_token_index)
+            if len(free_token_index) != 0:
+                free_token_index = custom_cat(free_token_index)
+                self.req_manager.free_token(free_token_index)
 
+            g_infer_state_lock.release()
         return self
+
+    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
+        if paused_reqs:
+            g_infer_state_lock.acquire()
+
+            for req in paused_reqs:
+                req._match_radix_cache()
+                assert req.paused is True
+                req.paused = False
+                if is_master_in_dp:
+                    req.shm_req.is_paused = False
+
+            g_infer_state_lock.release()
+        return
+
+    def get_can_alloc_token_num(self):
+        radix_cache_unref_token_num = 0
+        if self.radix_cache is not None:
+            radix_cache_unref_token_num = (
+                self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
+            )
+        return self.req_manager.mem_manager.can_use_mem_size + radix_cache_unref_token_num
 
 
 g_infer_context = InferenceContext()
@@ -250,67 +280,71 @@ class InferReq:
         shm_index: int,
         multimodal_params=None,
         vocab_size: int = -1,
+        init_prefix_cache: bool = True,
     ):
         self.req_id = req_id
         self.req_idx = req_idx
         self.shm_index = shm_index
         self.multimodal_params = multimodal_params
         self.vocab_size = vocab_size
-        self.initialized = False
+
+        # 请求需要被暂停
+        self.wait_pause = False
+        # 请求已经被暂停
         self.paused = False
+
+        self.infer_aborted = False
+        self.filter_mark = False
         self.need_out_token_id_statistics = True
         self.out_token_id_count: Dict[int, int] = None
 
-        # mtp_gen_token_ids 用于处理一个请求可以通过mtp进行很多token的预先生成
-        # 的技术，在没有开启 mtp 功能的时候，这个成员变量不会有任何的实际实用意义。
-        # 当开启后，mtp_gen_token_ids 保存多生成的多余的token_id,但是在后面的
-        # 步骤中需要重新进行校验。
-        self.mtp_gen_token_ids: List[int] = []
+        # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
+        # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
+        self.mtp_step: int = get_env_start_args().mtp_step
 
-    def init_all(self):
-        if self.initialized is False:
-            self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
-            self.shm_req.link_prompt_ids_shm_array()
-            self.shm_req.link_logprobs_shm_array()
-            self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
-
-            g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
-
-            self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
-            # token healing mode 才被使用的管理对象
-            if self.shm_req.prefix_token_ids.size != 0:
-                self.prefix_token_ids = self.shm_req.prefix_token_ids.get_token_ids()
-            else:
-                self.prefix_token_ids = []
-            self.multimodal_params = self.multimodal_params.to_dict()
-            self.shared_kv_node: TreeNode = None
-            self.cur_kv_len = 0
-            self.cur_output_len = 0
-            self.finish_status = FinishStatus()
-
-        if self.paused or not self.initialized:
-            # 如果是具有 prompt_cache 的使用特性则需要进行提前的填充和恢复操作。
-            if g_infer_context.radix_cache is not None and self.get_cur_total_len() > 1:
-                input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
-                key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
-                key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-                share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
-                if share_node is not None:
-                    self.shared_kv_node = share_node
-                    ready_cache_len = share_node.node_prefix_total_len
-                    # 从 cpu 到 gpu 是流内阻塞操作
-                    g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
-                    self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                    self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-
-            self.shm_req.shm_cur_kv_len = self.cur_kv_len
-
-        self.initialized = True
-        self.paused = False
+        self._init_all_state()
+        if init_prefix_cache:
+            self._match_radix_cache()
         return
 
-    def is_uninitialized(self):
-        return not self.initialized or self.paused
+    def _init_all_state(self):
+        self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
+        self.shm_req.link_prompt_ids_shm_array()
+        self.shm_req.link_logprobs_shm_array()
+        self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
+        self.cur_kv_len = 0
+        self.cur_output_len = 0
+
+        g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
+
+        self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
+        # token healing mode 才被使用的管理对象
+        if self.shm_req.prefix_token_ids.size != 0:
+            self.prefix_token_ids = self.shm_req.prefix_token_ids.get_token_ids()
+        else:
+            self.prefix_token_ids = []
+        self.multimodal_params = self.multimodal_params.to_dict()
+        self.shared_kv_node: TreeNode = None
+
+        self.finish_status = FinishStatus()
+        return
+
+    def _match_radix_cache(self):
+        if g_infer_context.radix_cache is not None and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
+            input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
+            key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
+            key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
+            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+            if share_node is not None:
+                self.shared_kv_node = share_node
+                ready_cache_len = share_node.node_prefix_total_len
+                # 从 cpu 到 gpu 是流内阻塞操作
+                g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
+                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+
+        self.shm_req.shm_cur_kv_len = self.cur_kv_len
+        return
 
     def get_output_len(self):
         return self.cur_output_len
@@ -331,10 +365,10 @@ class InferReq:
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
         return chunked_end
 
-    def set_next_gen_token_id(self, next_token_id: int, logprob: float):
-        index = self.get_cur_total_len()
-        self.shm_req.shm_prompt_ids.arr[index] = next_token_id
-        self.shm_req.shm_logprobs.arr[index] = logprob
+    def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
+        index = self.shm_req.input_len + output_len
+        self.shm_req.shm_prompt_ids.arr[index - 1] = next_token_id
+        self.shm_req.shm_logprobs.arr[index - 1] = logprob
         return
 
     def update_mtp_accepted_token_num(self, accept_token_num: int):
@@ -344,34 +378,44 @@ class InferReq:
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]
 
-    def update_finish_status(self, eos_ids):
-        if self._stop_sequences_matched():
+    def update_finish_status(self, eos_ids, output_len: int):
+        if self._stop_sequences_matched(output_len=output_len):
             self.finish_status.set_status(FinishStatus.FINISHED_STOP)
         elif (
-            self.cur_output_len > 0
-            and self.get_last_gen_token() in eos_ids
+            output_len > 0
+            and self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + output_len - 1] in eos_ids
             and self.sampling_param.shm_param.ignore_eos is False
         ):
             self.finish_status.set_status(FinishStatus.FINISHED_STOP)
-        elif self.cur_output_len >= self.sampling_param.shm_param.max_new_tokens:
+        elif output_len >= self.sampling_param.shm_param.max_new_tokens:
             self.finish_status.set_status(FinishStatus.FINISHED_LENGTH)
         return
 
     def is_finished_or_aborted(self):
         return self.finish_status.is_finished() or self.shm_req.router_aborted
 
-    def _stop_sequences_matched(self):
+    def _stop_sequences_matched(self, output_len: int):
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)
-            output_len = self.cur_output_len
             if stop_len > 0:
                 if output_len >= stop_len:
-                    input_token_ids = self.shm_req.shm_prompt_ids.arr[
-                        0 : (self.shm_req.input_len + self.cur_output_len)
-                    ]
+                    input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : (self.shm_req.input_len + output_len)]
                     if all(input_token_ids[i] == stop_token_ids[i] for i in range(-1, -(stop_len + 1), -1)):
                         return True
         return False
+
+    def prefill_need_token_num(self, is_chuncked_prefill: bool):
+        if is_chuncked_prefill:
+            input_token_ids = self.get_chuncked_input_token_ids()
+        else:
+            input_token_ids = self.get_input_token_ids()
+
+        seq_len = len(input_token_ids)
+        input_token_len = seq_len - self.cur_kv_len
+        return input_token_len
+
+    def decode_need_token_num(self):
+        return 1 + self.mtp_step
 
 
 class InferReqGroup:
@@ -418,3 +462,61 @@ class InferReqGroup:
             input_len = req.get_chuncked_input_token_len()
             req_manager.req_to_token_indexs[req.req_idx][prefix_len:input_len] = cache_token_id
             assert input_len == pre_input_len
+
+
+class InferReqUpdatePack:
+    """
+    用于延迟InferReq的请求更新,主要是为了方便更高效的overlap机制实现。解耦
+    原有post_handle 中，部分不需要确认输出，部分需要确认输出的部分，通过该
+    类绑定相关处理参数，实现解耦和延迟处理。
+    """
+
+    def __init__(self, req_obj: InferReq, output_len: int):
+        self.req_obj = req_obj
+        self.output_len = output_len
+
+    def handle(
+        self,
+        next_token_id: int,
+        next_token_logprob: float,
+        eos_ids: List[int],
+        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
+        is_master_in_dp: bool,
+    ):
+        if self.output_len <= 0:
+            return
+
+        req_obj = self.req_obj
+        shm_req = req_obj.shm_req
+        finish_status = req_obj.finish_status
+        req_obj.set_next_gen_token_id(next_token_id, next_token_logprob, self.output_len)
+
+        # 这里提前判定的主要作用是：
+        # 在 mtp mode 下，可以存在同一个 req 对象的多次处理，
+        # 在这种情况下， 如果前一步接收的mtp token 已经导致了请求
+        # 达到了finished 状态，后续的请求就不再进行后续的复杂流程
+        # 判断和处理，但是，因为 mtp 多请求还是导致了kv 的使用，所以
+        # 还是需要更新对应的 input_tokens 和 cur_kv_len 信息，否则
+        # 在 filter req 的时候，容易导致kv 管理的泄露和插入radix cache
+        # 的信息不完整等问题。
+        if finish_status.is_finished():
+            return
+
+        # 更新判断请求的 finished 状态
+        req_obj.update_finish_status(eos_ids=eos_ids, output_len=self.output_len)
+
+        if extra_post_req_handle_func is not None:
+            extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
+
+        if is_master_in_dp:
+            # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
+            # finish_token_index finish_status candetoken_out_len 是
+            # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
+            shm_req.shm_cur_output_len = self.output_len
+
+            if finish_status.is_finished():
+                shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
+                shm_req.finish_status = req_obj.finish_status
+
+            shm_req.candetoken_out_len = self.output_len
+        return
