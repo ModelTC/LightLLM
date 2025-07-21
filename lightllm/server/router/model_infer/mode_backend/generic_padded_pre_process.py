@@ -188,7 +188,9 @@ def padded_prepare_decode_inputs(
     return model_input, run_reqs, padded_req_num
 
 
-def padded_overlap_prepare_decode_inputs(req_objs: List[InferReq]):
+def padded_overlap_prepare_decode_inputs(
+    req_objs: List[InferReq],
+) -> Tuple[ModelInput, List[InferReq], int, ModelInput, List[InferReq], int]:
     split_req_bound = triton.cdiv(len(req_objs), 2)
     req_objs_0 = req_objs[0:split_req_bound]
     req_objs_1 = req_objs[split_req_bound:]
