@@ -3,8 +3,8 @@ from typing import List
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.infer_batch import InferReq
 
-class ControlState:
 
+class ControlState:
     def __init__(self):
         self.is_aggressive_schedule = not get_env_start_args().disable_aggressive_schedule
 
@@ -14,7 +14,6 @@ class ControlState:
 
         self.step_count = 0
 
-
     def select_run_way(self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]) -> "RunWay":
         """
         判断决策运行方式：
@@ -22,11 +21,9 @@ class ControlState:
         """
         self.step_count += 1
         if self.is_aggressive_schedule:
-            return self._agressive_way(prefill_reqs=prefill_reqs,
-                                       decode_reqs=decode_reqs)
+            return self._agressive_way(prefill_reqs=prefill_reqs, decode_reqs=decode_reqs)
         else:
-            return self._normal_way(prefill_reqs=prefill_reqs,
-                                    decode_reqs=decode_reqs)
+            return self._normal_way(prefill_reqs=prefill_reqs, decode_reqs=decode_reqs)
 
     def _agressive_way(self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]):
         if prefill_reqs:
@@ -34,7 +31,7 @@ class ControlState:
         if decode_reqs:
             return RunWay.DECODE
         return RunWay.PASS
-    
+
     def _normal_way(self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]):
         if decode_reqs:
             if self.left_decode_num > 0:
@@ -52,11 +49,10 @@ class ControlState:
                 return RunWay.PREFILL
             else:
                 return RunWay.PASS
-            
+
     def try_recover_paused_reqs(self) -> bool:
         return self.step_count % 100 == 0
 
-        
 
 class RunWay(Enum):
     PREFILL = 1
