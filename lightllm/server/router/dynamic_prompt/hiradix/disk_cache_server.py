@@ -2,21 +2,15 @@ import torch
 import time
 import tempfile
 import rpyc
-import zmq
 import inspect
 import asyncio
 import threading
-import numpy as np
 import torch.multiprocessing as mp
-from typing import List, Union
+from typing import List
 from rpyc.utils.server import ThreadedServer
 from os.path import join
-from typing import Tuple, Dict, Set, List
 from lightllm.utils.log_utils import init_logger
-from enum import Enum
-from ..shared_arr import SharedArray
 from .io_objs import ShmReqInfo, GroupReqInfo, HitSate, PullState, PushState, CacheTask
-from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.common.radixmem_buffer import RadixMemoryBuffer
@@ -24,6 +18,7 @@ from lightllm.common.radixmem_manager import RadixBufferManager
 from lightllm.server.core.objs import Req, RadixStatus
 
 logger = init_logger(__name__)
+
 
 def wait_until_ready(task, timeout=10.0, check_interval=0.01):
     start_time = time.time()
@@ -34,6 +29,7 @@ def wait_until_ready(task, timeout=10.0, check_interval=0.01):
             return False
     return True
 
+
 class RemoteCacheManager:
     def __init__(self, unique_name: str, rank_in_node: int, mem_manager):
         tmp_dir = tempfile.mkdtemp(prefix=f"cache_{unique_name}_{rank_in_node}")
@@ -42,22 +38,24 @@ class RemoteCacheManager:
         all_buffers = all_buffers.view(all_buffers.shape[0], all_buffers.shape[1], -1)
 
         from kvcache.python.jit import PyLocalCacheService
+
         self.py_cache_service = PyLocalCacheService(
             file=self.cache_file,
-            storage_size=128 * (1024 ** 3),  # 128GB
+            storage_size=128 * (1024**3),  # 128GB
             num_shard=32,
             kvcache_tensor=all_buffers,
-            num_worker=8
+            num_worker=8,
         )
 
     def insert(self, cache_task: CacheTask):
-        assert cache_task.mode == 'w', "Cache task mode must be 'w' for insert"
+        assert cache_task.mode == "w", "Cache task mode must be 'w' for insert"
 
         t = self.py_cache_service.create(
-                tokens=cache_task.tokens, 
-                kv_page_indexer=cache_task.kv_page_indexer, 
-                mode=cache_task.mode,
-                start_pos=cache_task.start_pos)
+            tokens=cache_task.tokens,
+            kv_page_indexer=cache_task.kv_page_indexer,
+            mode=cache_task.mode,
+            start_pos=cache_task.start_pos,
+        )
         res = wait_until_ready(t)
 
         if not res:
@@ -67,13 +65,14 @@ class RemoteCacheManager:
         return True
 
     def read(self, cache_task: CacheTask):
-        assert cache_task.mode == 'r', "Cache task mode must be 'r' for read"
+        assert cache_task.mode == "r", "Cache task mode must be 'r' for read"
 
         t = self.py_cache_service.create(
-                tokens=cache_task.tokens, 
-                kv_page_indexer=cache_task.kv_page_indexer, 
-                mode=cache_task.mode,
-                start_pos=cache_task.start_pos)
+            tokens=cache_task.tokens,
+            kv_page_indexer=cache_task.kv_page_indexer,
+            mode=cache_task.mode,
+            start_pos=cache_task.start_pos,
+        )
 
         res = wait_until_ready(t)
         return res
@@ -91,7 +90,9 @@ class RemoteCacheManager:
         return max_len * self.block_size
 
     @property
-    def block_size(self,):
+    def block_size(
+        self,
+    ):
         return self.py_cache_service.tokens_per_block
 
 
@@ -121,7 +122,7 @@ class DiskCacheService(rpyc.Service):
         if len(keys) != len(index_tensor):
             raise ValueError(f"Mismatch in keys and index size: {len(keys)} != {len(index_tensor)}")
 
-        insert_task = CacheTask(tokens=keys, kv_page_indexer=index_tensor, mode='w')
+        insert_task = CacheTask(tokens=keys, kv_page_indexer=index_tensor, mode="w")
         result = self.remote_cache_manager.insert(insert_task)
 
         reqs = [req]
@@ -156,15 +157,11 @@ class DiskCacheService(rpyc.Service):
         else:
             query_task = CacheTask(tokens=keys)
             query_len = self.remote_cache_manager.query(query_task)
-    
+
             if query_len > 0:
                 self.radix_manager.free_space(query_len)
                 index = self.radix_manager.radix_buffer.alloc(query_len)
-                read_task = CacheTask(
-                    tokens=keys[:query_len],
-                    kv_page_indexer=index,
-                    mode='r'
-                )
+                read_task = CacheTask(tokens=keys[:query_len], kv_page_indexer=index, mode="r")
                 self.remote_cache_manager.read(read_task)
 
                 self.radix_manager.write(keys=keys[:query_len], values=index.tolist())
@@ -186,7 +183,7 @@ class DiskCacheClient:
         self.rank_in_node = rank_in_node
         self.use_rpc = use_rpc
         self.service = service
-        self.proc=proc
+        self.proc = proc
         if self.use_rpc:
             self._push = self._async_wraper(self.service.push)
             self._pull = self._async_wraper(self.service.pull)
@@ -224,9 +221,9 @@ def start_cache_server(radix_manager, remote_cache_manager, shm_req_manager, ran
 
     def start():
         try:
-            server = ThreadedServer(CustomService(), 
-                                    port=port, 
-                                    protocol_config={"allow_public_attrs": True, "allow_pickle": True})
+            server = ThreadedServer(
+                CustomService(), port=port, protocol_config={"allow_public_attrs": True, "allow_pickle": True}
+            )
             init_event.set()
             server.start()
         except Exception as e:
@@ -239,31 +236,21 @@ def start_cache_server(radix_manager, remote_cache_manager, shm_req_manager, ran
     return t
 
 
-def _init_server(
-    device_id,
-    mem_queue,
-    radix_lock: List[mp.Lock],
-    init_event: mp.Event,
-    port:int=18861
-):
+def _init_server(device_id, mem_queue, radix_lock: List[mp.Lock], init_event: mp.Event, port: int = 18861):
     from lightllm.utils.envs_utils import get_unique_server_name
+
     graceful_registry(inspect.currentframe().f_code.co_name)
     torch.cuda.set_device(device_id)
     mem_proties, shared_mem_data = mem_queue.get()
     mem_manager = RadixMemoryBuffer(
-        mem_propties=mem_proties,
-        shared_data=shared_mem_data,
-        lock=radix_lock,
-        rank_in_node=device_id
+        mem_propties=mem_proties, shared_data=shared_mem_data, lock=radix_lock, rank_in_node=device_id
     )
     remote_cache_manager = RemoteCacheManager(
         unique_name=get_unique_server_name(),
         rank_in_node=device_id,
         mem_manager=mem_manager,
     )
-    radix_manager = RadixBufferManager(radix_buffer=mem_manager, 
-                                              radix_mem_data=shared_mem_data,
-                                              lock=radix_lock)
+    radix_manager = RadixBufferManager(radix_buffer=mem_manager, radix_mem_data=shared_mem_data, lock=radix_lock)
 
     shm_req_manager = ShmReqManager()
 
@@ -273,30 +260,22 @@ def _init_server(
         shm_req_manager=shm_req_manager,
         rank_in_node=device_id,
         port=port,
-        init_event=init_event
+        init_event=init_event,
     )
-    t.join() 
+    t.join()
     return
-    
-async def start_disk_cache_server_process(
-    args,
-    device_id,
-    node_word_size,
-    mem_queue,
-    radix_lock,
-    port
-):
+
+
+async def start_disk_cache_server_process(args, device_id, node_word_size, mem_queue, radix_lock, port):
     """
     Start the DiskCacheManager in process.
     """
     from lightllm.utils.envs_utils import get_unique_server_name
+
     if node_word_size == 1:
         mem_proties, shared_mem_data = mem_queue.get()
         mem_buffer = RadixMemoryBuffer(
-            mem_propties=mem_proties,
-            shared_data=shared_mem_data,
-            lock=radix_lock,
-            rank_in_node=device_id
+            mem_propties=mem_proties, shared_data=shared_mem_data, lock=radix_lock, rank_in_node=device_id
         )
         remote_cache_manager = RemoteCacheManager(
             unique_name=get_unique_server_name(),
@@ -305,15 +284,9 @@ async def start_disk_cache_server_process(
         )
         shm_req_manager = ShmReqManager()
 
-        radix_manager = RadixBufferManager(radix_buffer=mem_buffer, 
-                                                radix_mem_data=shared_mem_data,
-                                                lock=radix_lock)
+        radix_manager = RadixBufferManager(radix_buffer=mem_buffer, radix_mem_data=shared_mem_data, lock=radix_lock)
         service = DiskCacheService(radix_manager, remote_cache_manager, shm_req_manager)
-        client = DiskCacheClient(
-            service=service,
-            rank_in_node=0, 
-            use_rpc=False
-        )
+        client = DiskCacheClient(service=service, rank_in_node=0, use_rpc=False)
         return client
 
     init_event = mp.Event()
@@ -327,16 +300,11 @@ async def start_disk_cache_server_process(
         try:
             conn = rpyc.connect("localhost", port, config={"allow_pickle": True})
             break
-        except Exception as e:
+        except Exception:
             asyncio.sleep(2)
 
     service = conn.root
-    client = DiskCacheClient(
-        rank_in_node=device_id,
-        service=service,
-        use_rpc=True,
-        proc=proc
-    )
+    client = DiskCacheClient(rank_in_node=device_id, service=service, use_rpc=True, proc=proc)
     assert proc.is_alive()
     logger.info(f"disk cache process for device {device_id} start!")
     return client

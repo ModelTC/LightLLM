@@ -1,15 +1,12 @@
-import time
 import zmq
 import zmq.asyncio
 import inspect
 import pickle
 import torch.multiprocessing as mp
-import threading
 import asyncio
 from typing import List
-from dataclasses import dataclass
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
-from lightllm.utils.log_utils import init_logger, log_time_ready
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from .disk_cache_server import DiskCacheClient
 from lightllm.server.core.objs import ShmReqManager
@@ -18,9 +15,9 @@ from lightllm.server.core.objs import Req
 
 logger = init_logger(__name__)
 
+
 class HiRadixCacheManagerServer:
-    def __init__(
-            self, args, mem_queues: List[mp.Queue], radix_locks: List[mp.Lock], router_port: int):
+    def __init__(self, args, mem_queues: List[mp.Queue], radix_locks: List[mp.Lock], router_port: int):
         self.args = args
         self.mem_queues = mem_queues
         self.radix_locks = radix_locks
@@ -39,13 +36,13 @@ class HiRadixCacheManagerServer:
         self.recv_from_router.bind(f"{args.zmq_mode}127.0.0.1:{recv_from_router_port}")
         self.shm_req_manager = ShmReqManager()
 
-    
     async def asyn_init(self):
         self.pull_queue = asyncio.Queue()
         self.push_queue = asyncio.Queue()
-        
+
     async def start_all(self):
         from lightllm.server.router.dynamic_prompt.hiradix.disk_cache_server import start_disk_cache_server_process
+
         for rank_in_node in range(self.node_world_size):
             client = await start_disk_cache_server_process(
                 self.args,
@@ -53,15 +50,14 @@ class HiRadixCacheManagerServer:
                 node_word_size=self.node_world_size,
                 mem_queue=self.mem_queues[rank_in_node],
                 radix_lock=self.radix_locks[rank_in_node],
-                port=self.ports[rank_in_node]
+                port=self.ports[rank_in_node],
             )
             self.clients.append(client)
-    
+
     async def pull_cache(self, group_req):
         tasks = []
         group_req_info = GroupReqInfo(
-            group_req_id=group_req.group_req_id,
-            shm_req_indexes=group_req.shm_req_indexes
+            group_req_id=group_req.group_req_id, shm_req_indexes=group_req.shm_req_indexes
         ).to_dict()
         for client in self.clients:
             task = client.pull(group_req_info)
@@ -96,10 +92,7 @@ class HiRadixCacheManagerServer:
     async def run(self):
         await self.asyn_init()
         await asyncio.gather(
-            self.loop_for_netio_req_to_pull(),
-            self.pull_woker(),
-            self.loop_for_netio_req_to_push(),
-            self.push_woker()
+            self.loop_for_netio_req_to_pull(), self.pull_woker(), self.loop_for_netio_req_to_push(), self.push_woker()
         )
 
     async def loop_for_netio_req_to_push(self):
@@ -118,19 +111,11 @@ class HiRadixCacheManagerServer:
             else:
                 raise ValueError(f"Invalid request: {recv_req}")
 
-def _init_env_server(
-    args,
-    mem_queues,
-    radix_locks: List[mp.Lock],
-    init_event: mp.Event,
-    router_port: int
-):
+
+def _init_env_server(args, mem_queues, radix_locks: List[mp.Lock], init_event: mp.Event, router_port: int):
     graceful_registry(inspect.currentframe().f_code.co_name)
     hiradix_cache_manager = HiRadixCacheManagerServer(
-        args, 
-        mem_queues=mem_queues, 
-        radix_locks=radix_locks, 
-        router_port=router_port
+        args, mem_queues=mem_queues, radix_locks=radix_locks, router_port=router_port
     )
     asyncio.run(hiradix_cache_manager.start_all())
     try:
@@ -142,11 +127,9 @@ def _init_env_server(
         logger.error(f"hiradix server error happend {e}")
     return
 
+
 def start_hiradix_cache_manager_process_server(
-    args,
-    radix_mem_queues: List[mp.Queue],
-    radix_locks: List[mp.Lock],
-    router_port: int
+    args, radix_mem_queues: List[mp.Queue], radix_locks: List[mp.Lock], router_port: int
 ):
     """
     Start the HiRadix cache manager process.
@@ -155,6 +138,6 @@ def start_hiradix_cache_manager_process_server(
     proc = mp.Process(target=_init_env_server, args=(args, radix_mem_queues, radix_locks, init_event, router_port))
     proc.start()
     init_event.wait()
-    logger.info(f"HiRadix cache manager process started")
+    logger.info("HiRadix cache manager process started")
     assert proc.is_alive()
     return

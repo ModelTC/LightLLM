@@ -91,7 +91,7 @@ class RadixStatus(ctypes.Structure):
         self.finished = 1
 
     def is_finished(self):
-        self.finished == 1
+        return self.finished == 1
 
     def get_status(self, idx: int) -> int:
         assert 0 <= idx < 32, f"Index out of range: {idx}"

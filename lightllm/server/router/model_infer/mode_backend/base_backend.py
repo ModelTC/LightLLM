@@ -118,7 +118,6 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
             "use_hiradix_cache": self.use_hiradix_cache,
-            "radix_lock": self.radix_lock,
             "hiradix_cache_gpu": kvargs.get("hiradix_cache_gpu", False),
             "hiradix_cache_token_num": kvargs.get("hiradix_cache_token_num", False),
             "radix_lock": self.radix_lock

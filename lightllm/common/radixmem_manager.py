@@ -52,7 +52,7 @@ class RadixBufferManager:
             values = values[index * self.chunk_size:]
             chunks = chunks[index:]
             for i, (hash_val, _) in enumerate(chunks):
-                if hash not in self.radix_buffer.req_mem_index:
+                if hash_val not in self.radix_buffer.req_mem_index:
                     self.radix_buffer.req_mem_index[hash_val] = values[i * self.chunk_size : (i + 1) * self.chunk_size]
                 self._update_lru_state(hash_val)
 
