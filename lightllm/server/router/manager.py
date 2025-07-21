@@ -368,63 +368,73 @@ class RouterManager:
         return
 
     def _multinode_tp_generate_new_batch(self):
-        dist.barrier(group=self.mulitnode_group)
+        try:
+            dist.barrier(group=self.mulitnode_group)
 
-        # 调度的时候需要考虑当前运行的batch，和调度了但是暂时还没有推理的部分请求。
-        if self.is_multinode_tp_master:
-            new_batch = self.req_queue.generate_new_batch(
-                Batch.merge_two_batch(self.running_batch, self.schedule_new_batch)
-            )
-            if new_batch is not None:
-                req_ids = [req.request_id for req in new_batch.reqs]
+            # 调度的时候需要考虑当前运行的batch，和调度了但是暂时还没有推理的部分请求。
+            if self.is_multinode_tp_master:
+                new_batch = self.req_queue.generate_new_batch(
+                    Batch.merge_two_batch(self.running_batch, self.schedule_new_batch)
+                )
+                if new_batch is not None:
+                    req_ids = [req.request_id for req in new_batch.reqs]
+                else:
+                    req_ids = []
+                dist.broadcast_object_list([len(req_ids)], src=0, group=self.mulitnode_group)
+                if len(req_ids) == 0:
+                    new_batch = None
+                else:
+                    dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
+                    req_id_select_mark = [1 for _ in range(len(req_ids))]
+                    req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
+                    dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
+                    back_req_list = []
+                    for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
+                        if select == 0:
+                            req = new_batch.pop_req(req_id)
+                            back_req_list.append(req)
+                    self.req_queue.waiting_req_list = back_req_list + self.req_queue.waiting_req_list
+                    if new_batch.is_clear():
+                        new_batch = None
             else:
-                req_ids = []
-            dist.broadcast_object_list([len(req_ids)], src=0, group=self.mulitnode_group)
-            dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
-            req_id_select_mark = [1 for _ in range(len(req_ids))]
-            req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
-            dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-            back_req_list = []
-            for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
-                if select == 0:
-                    req = new_batch.pop_req(req_id)
-                    back_req_list.append(req)
-            self.req_queue.waiting_req_list = back_req_list + self.req_queue.waiting_req_list
-            if new_batch.is_clear():
-                new_batch = None
-        else:
-            req_nums = [None]
-            dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
-            req_num = req_nums[0]
-            req_ids = [None for _ in range(req_num)]
-            dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
-            all_req_id_set = set([req.request_id for req in self.req_queue.waiting_req_list])
-            req_id_select_mark = []
-            for req_id in req_ids:
-                req_id_select_mark.append(1 if req_id in all_req_id_set else 0)
-            req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
-            dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-            select_req_ids = []
-            for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
-                if select == 1:
-                    select_req_ids.append(req_id)
+                req_nums = [None]
+                dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
+                req_num = req_nums[0]
+                if req_num == 0:
+                    new_batch = None
+                else:
+                    req_ids = [None for _ in range(req_num)]
+                    dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
+                    all_req_id_set = set([req.request_id for req in self.req_queue.waiting_req_list])
+                    req_id_select_mark = []
+                    for req_id in req_ids:
+                        req_id_select_mark.append(1 if req_id in all_req_id_set else 0)
+                    req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
+                    dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
+                    select_req_ids = []
+                    for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
+                        if select == 1:
+                            select_req_ids.append(req_id)
 
-            select_reqs = []
-            for req_id in select_req_ids:
-                for req in self.req_queue.waiting_req_list:
-                    if req.request_id == req_id:
-                        select_reqs.append(req)
+                    select_reqs = []
+                    for req_id in select_req_ids:
+                        for req in self.req_queue.waiting_req_list:
+                            if req.request_id == req_id:
+                                select_reqs.append(req)
 
-            for req in select_reqs:
-                self.req_queue.waiting_req_list.remove(req)
-            if select_reqs:
-                new_batch = Batch(-1, reqs=select_reqs, dp_size_in_node=self.dp_size_in_node)
-            else:
-                new_batch = None
+                    for req in select_reqs:
+                        self.req_queue.waiting_req_list.remove(req)
+                    if select_reqs:
+                        new_batch = Batch(-1, reqs=select_reqs, dp_size_in_node=self.dp_size_in_node)
+                    else:
+                        new_batch = None
 
-        self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
+            self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
 
-        dist.barrier(group=self.mulitnode_group)
+            dist.barrier(group=self.mulitnode_group)
+        except Exception as e:
+            logger.exception(str(e))
+            raise e
         return
 
     async def _recv_new_reqs_and_schedule(self):
