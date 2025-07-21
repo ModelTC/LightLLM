@@ -33,7 +33,6 @@ class InferenceContext:
     vocab_size = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
-    cpu_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
 
     def register(
         self, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int
@@ -53,11 +52,6 @@ class InferenceContext:
         if self.overlap_stream is None:
             self.overlap_stream = torch.cuda.Stream()
         return self.overlap_stream
-
-    def get_cpu_stream(self) -> torch.cuda.Stream:
-        if self.cpu_stream is None:
-            self.cpu_stream = torch.cuda.Stream()
-        return self.cpu_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
