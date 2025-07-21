@@ -113,8 +113,8 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
             mem_fraction=self.mem_fraction,
         )
         if self.enable_hiradix_cache:
-            from lightllm.common.radixmem_buffer import RadixMemoryBuffer, init_shared_data, get_shared_data, MemPropties
-            from lightllm.common.radixmem_manager import RadixBufferManager
+            from lightllm.common.radixmem_buffer import get_shared_data, MemPropties
+            from lightllm.common.radixmem_manager import build_radix_manager
             mem_propties = MemPropties(
                 self.hiradix_cache_token_num,
                 dtype=self.data_type,
@@ -122,19 +122,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
                 head_dim=self.config["kv_lora_rank"] + self.config["qk_rope_head_dim"],
                 layer_num=self.config["num_hidden_layers"] + added_mtp_layer_num,
             )
-            init_shared_data(
-                mem_propties=mem_propties,
-                device="cpu" if not self.hiradix_cache_gpu else "cuda"
-            )
-            radix_mem_buffer = RadixMemoryBuffer(
-                mem_propties,
-                shared_data=get_shared_data(),
-                lock=self.radix_lock,
-                device="cpu" if not self.hiradix_cache_gpu else "cuda"
-            )
-            self.radix_manager = RadixBufferManager(radix_buffer=radix_mem_buffer, 
-                                            radix_mem_data=get_shared_data(),
-                                            lock=self.radix_lock)
+            self.radix_manager = build_radix_manager(mem_propties, self.hiradix_cache_gpu, self.radix_lock)
             self.mem_propties = mem_propties
             self.shared_mem_data = get_shared_data()
         return

@@ -137,14 +137,16 @@ class RadixMemoryBuffer:
                 return
             index = self.req_mem_index[req_id]
             self._free(index)
-            logger.info(f"Freed memory index for request {req_id} size {len(index)}, left size {self.can_use_mem_size.get_value()}")
+            logger.info(f"Freed memory index for request {req_id} size {len(index)}, "
+                        f"left size {self.can_use_mem_size.get_value()}")
             del self.req_mem_index[req_id]
 
     def alloc(self, need_size) -> torch.Tensor:
         with self.lock:
             if need_size > self.mark_end.get_value() - self.mark_start.get_value():
                 logger.error(
-                    f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size.get_value()}"
+                    f"warn no enough cache need_size {need_size} "
+                    f"left_size {self.can_use_mem_size.get_value()}"
                 )
                 raise RuntimeError(f"Not enough memory to allocate {need_size} tokens.")
 
@@ -160,7 +162,8 @@ class RadixMemoryBuffer:
         """Set the memory index for a specific request ID."""
         with self.lock:
             if req_id in self.req_mem_index:
-                logger.info(f"Request ID {req_id} already exists. Overwriting index {self.req_mem_index[req_id]} with {index}.")
+                logger.info(f"Request ID {req_id} already exists. "
+                            f"Overwriting index {self.req_mem_index[req_id]} with {index}.")
             self.req_mem_index[req_id] = index
             logger.info(f"radix mem buffer insert req {req_id}, current disk work num {self._get_current_work_num()}")
 

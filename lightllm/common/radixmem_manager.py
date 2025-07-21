@@ -6,6 +6,7 @@ from typing import List, Dict, Tuple, Optional
 import torch.multiprocessing as mp
 from collections import OrderedDict
 
+from .radixmem_buffer import MemPropties, init_shared_data, get_shared_data
 from .radixmem_buffer import SharedRadixMemoryData, RadixMemoryBuffer
 
 from lightllm.utils.log_utils import init_logger
@@ -117,3 +118,28 @@ class RadixBufferManager:
         with self.lock:
             self.radix_buffer.req_mem_index.clear()
             self.lru_queue[:] = []
+
+def build_radix_manager(mem_propties: MemPropties, 
+                        use_gpu: bool, 
+                        radix_lock) -> RadixBufferManager:
+    device = "cuda" if use_gpu else "cpu"
+
+    init_shared_data(
+        mem_propties=mem_propties,
+        device=device,
+    )
+
+    radix_mem_buffer = RadixMemoryBuffer(
+        mem_propties=mem_propties,
+        shared_data=get_shared_data(),
+        lock=radix_lock,
+        device=device,
+    )
+
+    radix_manager = RadixBufferManager(
+        radix_buffer=radix_mem_buffer,
+        radix_mem_data=get_shared_data(),
+        lock=radix_lock,
+    )
+
+    return radix_manager

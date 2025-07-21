@@ -7,7 +7,6 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.dynamic_prompt.hiradix.hiradix_cache import HiRadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
 from lightllm.server.router.token_load import TokenLoad
