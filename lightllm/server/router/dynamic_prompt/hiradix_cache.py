@@ -42,6 +42,8 @@ class LocalCacheManager:
         if alloc_len == 0:
             self._set_radix_staus(req, RadixStatus.WRITE_READY)
             return
+        
+        self.radix_manager.free_space(alloc_len)
 
         new_index = self._alloc_and_copy_kv(alloc_len, value)
 
@@ -56,7 +58,6 @@ class LocalCacheManager:
     
     def _query_cache(self, req, key):
         if req.radix_status.is_no_need_cache(self.rank_in_node):
-            logger.info(f"query no need cache {self.rank_in_node} {req.radix_status.get_status(self.rank_in_node)}")
             return 0, []
         
         if req.radix_status.is_read_ready(self.rank_in_node):

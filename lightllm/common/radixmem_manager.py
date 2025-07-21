@@ -17,7 +17,7 @@ class RadixBufferManager:
                  radix_buffer: RadixMemoryBuffer = None,
                  radix_mem_data: SharedRadixMemoryData = None,
                  lock: Optional[mp.Lock] = None,
-                 max_entries: int = 100,
+                 max_entries: int = 10000,
                  chunk_size: int = 64
                  ):
         self.chunk_size = chunk_size
@@ -66,7 +66,7 @@ class RadixBufferManager:
 
     def free_space(self, required_size: int) -> bool:
         with self.lock:
-            current_free = self.radix_buffer.get_can_use_mem_size.get_value()
+            current_free = self.radix_buffer.can_use_mem_size.get_value()
             
             if current_free >= required_size:
                 return True

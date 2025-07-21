@@ -87,7 +87,6 @@ class RouterManager:
             context_radix = zmq.asyncio.Context()
             self.send_to_hiradix_server = context_radix.socket(zmq.PUSH)
             self.send_to_hiradix_server.connect(f"{args.zmq_mode}127.0.0.1:{hiradix_port}")
-            logger.info(f"send_to_hiradix_server {args.zmq_mode}127.0.0.1:{hiradix_port}")
 
         if self.is_multinode_tp:
             self.mulitnode_group = dist.init_process_group(
@@ -406,7 +405,6 @@ class RouterManager:
                 req.index_in_shm_mem
             )
             await self.send_to_hiradix_server.send_pyobj(req_info, protocol=pickle.HIGHEST_PROTOCOL)
-            logger.info(f"_send_hiradix_manager  {req_info}")
         return
 
     def _send_detokenization_pack(self):
