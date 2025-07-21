@@ -235,8 +235,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_has_out_cpu = (
                 micro_input0.b_prefill_has_output_cpu[0:req_num0] + micro_input1.b_prefill_has_output_cpu[0:req_num1]
             )
-            b_mtp_index = torch.cat(micro_input0.b_mtp_index[0:req_num0], micro_input1.b_mtp_index[0:req_num1])
-            b_req_idx = torch.cat(micro_input0.b_req_idx[0:req_num0], micro_input1.b_req_idx[0:req_num1])
+            b_mtp_index = torch.cat((micro_input0.b_mtp_index[0:req_num0], micro_input1.b_mtp_index[0:req_num1]), dim=0)
+            b_req_idx = torch.cat((micro_input0.b_req_idx[0:req_num0], micro_input1.b_req_idx[0:req_num1]), dim=0)
 
             if (req_num0 + req_num1) > 0:
 
@@ -291,7 +291,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             micro_input1,
             run_reqs1,
             padded_req_num1,
-        ) = padded_overlap_prepare_decode_inputs(decode_reqs, is_multimodal=self.is_multimodal)
+        ) = padded_overlap_prepare_decode_inputs(req_objs=decode_reqs)
         micro_input0: ModelInput = micro_input0
         micro_input1: ModelInput = micro_input1
 
@@ -305,8 +305,8 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             logits[0:req_num0, :].copy_(logits0[0:req_num0, :], non_blocking=True)
             logits[req_num0 : (req_num0 + req_num1), :].copy_(logits1[0:req_num1, :], non_blocking=True)
-            b_mtp_index = torch.cat(micro_input0.b_mtp_index[0:req_num0], micro_input1.b_mtp_index[0:req_num1])
-            b_req_idx = torch.cat(micro_input0.b_req_idx[0:req_num0], micro_input1.b_req_idx[0:req_num1])
+            b_mtp_index = torch.cat((micro_input0.b_mtp_index[0:req_num0], micro_input1.b_mtp_index[0:req_num1]), dim=0)
+            b_req_idx = torch.cat((micro_input0.b_req_idx[0:req_num0], micro_input1.b_req_idx[0:req_num1]), dim=0)
 
             run_reqs = run_reqs0 + run_reqs1
             if (req_num0 + req_num1) > 0:

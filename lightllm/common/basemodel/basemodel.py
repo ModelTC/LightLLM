@@ -463,6 +463,9 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
+        model_input0.to_cuda()
+        model_input1.to_cuda()
+
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
         input_ids0, input_ids1 = model_input0.input_ids, model_input1.input_ids
@@ -500,6 +503,22 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
+        model_input0.to_cuda()
+        model_input1.to_cuda()
+
+        if model_input0.input_ids is None:
+            model_input0.input_ids = gather_token(
+                self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                model_input0.b_req_idx,
+                model_input0.b_mtp_index,
+            )
+        if model_input1.input_ids is None:
+            model_input1.input_ids = gather_token(
+                self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                model_input1.b_req_idx,
+                model_input1.b_mtp_index,
+            )
+
         assert model_input0.batch_size == model_input1.batch_size
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
