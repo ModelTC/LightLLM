@@ -1,4 +1,5 @@
 import torch
+import time
 import numpy as np
 from typing import List, Tuple
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -97,6 +98,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     event_pack.notify_post_handle_and_wait_pre_post_handle()
                     event_pack.notify_forward_and_wait_post_handle()
                     event_pack.notify_pre_post_handle()
+                    time.sleep(0.05)
                     continue
 
         except BaseException as e:
