@@ -45,7 +45,7 @@ class HiRadixCacheManagerServer:
         self.push_queue = asyncio.Queue()
         
     async def start_all(self):
-        from lightllm.server.router.dynamic_prompt.disk_cache_server import start_disk_cache_server_process
+        from lightllm.server.router.dynamic_prompt.hiradix.disk_cache_server import start_disk_cache_server_process
         for rank_in_node in range(self.node_world_size):
             client = await start_disk_cache_server_process(
                 self.args,

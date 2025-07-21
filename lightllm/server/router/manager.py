@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Union
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
-from lightllm.server.router.dynamic_prompt.io_objs import ShmReqInfo
+from lightllm.server.router.dynamic_prompt.hiradix.io_objs import ShmReqInfo
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
@@ -225,7 +225,7 @@ class RouterManager:
         
         if self.use_hiradix_cache:
             # 启动 hi radix cache 管理进程
-            from lightllm.server.router.dynamic_prompt.manager import start_hiradix_cache_manager_process_server
+            from lightllm.server.router.dynamic_prompt.hiradix.manager import start_hiradix_cache_manager_process_server
             start_hiradix_cache_manager_process_server(self.args, self.radix_mem_queues, self.radix_locks, self.router_port)
 
         return

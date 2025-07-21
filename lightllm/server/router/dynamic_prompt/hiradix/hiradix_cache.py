@@ -8,7 +8,7 @@ import numpy as np
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from os.path import join
-from .radix_cache import RadixCache, TreeNode, match
+from ..radix_cache import RadixCache, TreeNode, match
 from typing import Tuple, Dict, Set, List
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.common.radixmem_buffer import RadixMemoryBuffer
@@ -16,7 +16,7 @@ from lightllm.common.radixmem_manager import RadixBufferManager
 from lightllm.utils.log_utils import init_logger
 from threading import Lock
 from enum import Enum
-from .shared_arr import SharedArray
+from ..shared_arr import SharedArray
 from .io_objs import ShmReqInfo
 from lightllm.server.core.objs import Req, RadixStatus
 from lightllm.server.core.objs.io_objs import GroupReqIndexes

@@ -14,7 +14,7 @@ from os.path import join
 from typing import Tuple, Dict, Set, List
 from lightllm.utils.log_utils import init_logger
 from enum import Enum
-from .shared_arr import SharedArray
+from ..shared_arr import SharedArray
 from .io_objs import ShmReqInfo, GroupReqInfo, HitSate, PullState, PushState, CacheTask
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager
