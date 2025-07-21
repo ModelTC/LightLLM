@@ -12,7 +12,7 @@ class DPControlState:
         self.is_aggressive_schedule = not get_env_start_args().disable_aggressive_schedule
 
         # 非激进调度参数
-        self.decode_max_step = max(1, get_env_start_args().router_max_wait_tokens)
+        self.decode_max_step = max(0, get_env_start_args().router_max_wait_tokens)
         self.left_decode_num = self.decode_max_step
 
         self.step_count = 0
@@ -84,10 +84,17 @@ class DPControlState:
         use_ratio = np.count_nonzero(dp_prefill_req_nums) / dp_prefill_req_nums.shape[0]
         max_decode_num = np.max(dp_decode_req_nums)
         max_prefill_num = np.max(dp_prefill_req_nums)
+
+        if self.left_decode_num > 0 and max_decode_num > 0:
+            self.left_decode_num -= 1
+            return RunWay.DECODE
+
         if use_ratio < 0.6:
             if max_prefill_num > 0:
                 self.dp_prefill_wait_step += 1
                 if self.dp_prefill_wait_step > self.dp_prefill_wait_max_step:
+                    # prefill 一次允许进行几次 decode 操作。
+                    self.left_decode_num = self.decode_max_step
                     return RunWay.PREFILL
 
             if max_decode_num > 0:
@@ -97,6 +104,8 @@ class DPControlState:
         else:
             if max_prefill_num > 0:
                 self.dp_prefill_wait_step = 0
+                # prefill 一次允许进行几次 decode 操作。
+                self.left_decode_num = self.decode_max_step
                 return RunWay.PREFILL
             else:
                 if max_decode_num > 0:
