@@ -173,6 +173,11 @@ def normal_or_p_d_start(args):
             args.batch_max_tokens >= args.chunked_prefill_size
         ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size"
 
+    # if use_hiradix_cache, then use_dynamic_prompt_cache must be True
+    hiradix_cache_port_num = 0
+    if args.use_hiradix_cache:
+        assert not args.disable_dynamic_prompt_cache, "use_hiradix_cache must be used with use_dynamic_prompt_cache"
+
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_prepare
@@ -201,8 +206,11 @@ def normal_or_p_d_start(args):
     ports_locker.lock_port()
 
     node_world_size = args.tp // args.nnodes
+
+    if args.use_hiradix_cache:
+        hiradix_cache_port_num = node_world_size + 2
     can_use_ports = alloc_can_use_network_port(
-        num=7 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=7 + node_world_size + args.visual_dp * args.visual_tp + hiradix_cache_port_num, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -230,6 +238,10 @@ def normal_or_p_d_start(args):
     args.audio_port = audio_port
     args.cache_port = cache_port
     args.metric_port = metric_port
+    if args.use_hiradix_cache:
+        args.hiradix_cache_ports = can_use_ports[0:node_world_size]
+        args.hiradix_server_ports = can_use_ports[node_world_size: node_world_size + 2]
+        can_use_ports = can_use_ports[node_world_size + 2:]
 
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]

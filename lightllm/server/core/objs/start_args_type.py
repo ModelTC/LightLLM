@@ -46,6 +46,7 @@ class StartArgs:
     dp_prefill_wait_step: int = field(default=0)
     disable_aggressive_schedule: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
+    use_hiradix_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=8192)
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)

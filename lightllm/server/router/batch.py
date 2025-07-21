@@ -40,8 +40,14 @@ class Batch:
                 req_list.append(req)
         return req_list
 
-    def filter_out_finished_req(self, shm_req_manager: ShmReqManager):
+    def release_reqs(self, reqs: List[Req], shm_req_manager: ShmReqManager):
+        for req in reqs:
+            shm_req_manager.put_back_req_obj(req)
+
+    def filter_out_finished_req(self):
         unfinished_req_ids = []
+        finished_reqs = []
+        
         for req in self.reqs:
             # 更新aborted 标记，可以触发推理进程主动退出aborted的请求。
             if req.is_aborted:
@@ -49,14 +55,13 @@ class Batch:
 
             if req.shm_infer_released:
                 logger.info(f"router release req id {req.request_id}")
-                shm_req_manager.put_back_req_obj(req)
-                req = None
+                finished_reqs.append(req)
             else:
                 unfinished_req_ids.append(req.request_id)
 
         self.reqs = [self.id_to_reqs[req_id] for req_id in unfinished_req_ids]
         self.id_to_reqs = {req.request_id: req for req in self.reqs}
-        return
+        return finished_reqs
 
     def pop_req(self, req_id):
         self.reqs = [req for req in self.reqs if req.request_id != req_id]

@@ -7,7 +7,8 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.server.router.dynamic_prompt.hiradix.hiradix_cache import HiRadixCache
+from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -56,6 +57,8 @@ class ModeBackend:
         self.use_dynamic_prompt_cache = not self.args.disable_dynamic_prompt_cache
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
         self.disable_cudagraph = self.args.disable_cudagraph
+        self.use_hiradix_cache = kvargs.get("use_hiradix_cache", False)
+        self.radix_lock = kvargs.get("radix_lock", None)
 
         self.logger = init_logger(__name__)
 
@@ -113,16 +116,29 @@ class ModeBackend:
             "quant_type": kvargs.get("quant_type", None),
             "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
+            "use_hiradix_cache": self.use_hiradix_cache,
+            "hiradix_cache_gpu": kvargs.get("hiradix_cache_gpu", False),
+            "hiradix_cache_token_num": kvargs.get("hiradix_cache_token_num", False),
+            "radix_lock": self.radix_lock
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.radix_cache = (
-            RadixCache(
+            HiRadixCache(
                 get_unique_server_name(),
                 self.model.mem_manager.size,
                 self.rank_in_node,
                 mem_manager=self.model.mem_manager,
+                radix_manager=self.model.radix_manager,
+                radix_info_queue=kvargs.get("radix_info_queue", None)
+            )
+            if self.use_hiradix_cache
+            else RadixCache(
+                get_unique_server_name(),
+                self.model.mem_manager.size,
+                self.rank_in_node,
+                mem_manager=self.model.mem_manager
             )
             if self.use_dynamic_prompt_cache
             else None
@@ -138,6 +154,7 @@ class ModeBackend:
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
+            backend=self
         )
 
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
@@ -150,6 +167,13 @@ class ModeBackend:
 
         self.init_custom()
         return
+    
+    def set_radix_status(self, req):
+        if not self.use_hiradix_cache:
+            return
+        if self.is_master_in_dp:
+            req.radix_status.rank_status.set_status(self.dp_rank_in_node, self.dp_world_size)
+        return False
 
     def init_custom(self):
         pass

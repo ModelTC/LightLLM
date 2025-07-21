@@ -11,10 +11,11 @@ import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import multiprocessing
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
+from lightllm.server.router.dynamic_prompt.hiradix.io_objs import ShmReqInfo
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
@@ -56,7 +57,7 @@ class RouterManager:
         self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
-
+        self.use_hiradix_cache = args.use_hiradix_cache and not args.disable_dynamic_prompt_cache
         self.mtp_step = args.mtp_step
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
@@ -79,6 +80,13 @@ class RouterManager:
 
         self.send_to_detokenization = context.socket(zmq.PUSH)
         self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
+
+        self.router_port = router_port
+        if self.use_hiradix_cache:
+            hiradix_port = self.args.hiradix_server_ports[1]
+            context_radix = zmq.asyncio.Context()
+            self.send_to_hiradix_server = context_radix.socket(zmq.PUSH)
+            self.send_to_hiradix_server.connect(f"{args.zmq_mode}127.0.0.1:{hiradix_port}")
 
         if self.is_multinode_tp:
             self.mulitnode_group = dist.init_process_group(
@@ -114,6 +122,15 @@ class RouterManager:
         self.mem_queues: List[torch.multiprocessing.Queue] = [
             torch.multiprocessing.Queue() for _ in range(self.node_world_size)
         ]
+        self.radix_mem_queues: List[Union[torch.multiprocessing.Queue, None]] = [
+            torch.multiprocessing.Queue() if self.use_hiradix_cache else None  for _ in range(self.node_world_size)
+        ]
+        self.radix_info_queues: List[Union[torch.multiprocessing.Queue, None]] = [
+            torch.multiprocessing.Queue() if self.use_hiradix_cache else None  for _ in range(self.node_world_size)
+        ]
+        self.radix_locks: List[Union[torch.multiprocessing.Lock, None]] = [
+            torch.multiprocessing.Lock() if self.use_hiradix_cache else None  for _ in range(self.node_world_size)
+        ]
         self.rpc_event = multiprocessing.Event()
         self.rpc_finished_event = multiprocessing.Event()
 
@@ -130,6 +147,9 @@ class RouterManager:
                 info_queue=self.info_queue,
                 mem_queue=self.mem_queues[(rank_id % node_world_size)],
                 router_lock=self.router_lock,
+                radix_mem_queue=self.radix_mem_queues[(rank_id % node_world_size)],
+                radix_info_queue=self.radix_info_queues[(rank_id % node_world_size)],
+                radix_lock=self.radix_locks[(rank_id % node_world_size)]
             )
             self.model_rpc_servers.append(rpc_model)
 
@@ -158,6 +178,7 @@ class RouterManager:
             "return_all_prompt_logprobs": self.args.return_all_prompt_logprobs,
             "use_reward_model": self.args.use_reward_model,
             "disable_dynamic_prompt_cache": self.args.disable_dynamic_prompt_cache,
+            "use_hiradix_cache": self.args.use_hiradix_cache,
             "data_type": self.args.data_type,
             "eos_id": self.eos_id,
             "diverse_mode": self.args.diverse_mode,
@@ -201,6 +222,11 @@ class RouterManager:
             )
 
             start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+        
+        if self.use_hiradix_cache:
+            # 启动 hi radix cache 管理进程
+            from lightllm.server.router.dynamic_prompt.hiradix.manager import start_hiradix_cache_manager_process_server
+            start_hiradix_cache_manager_process_server(self.args, self.radix_mem_queues, self.radix_locks, self.router_port)
 
         return
 
@@ -307,7 +333,7 @@ class RouterManager:
             self._add_new_batch_to_running_batch(new_batch=new_batch)
             await self._prefill_batch(new_batch)
             self.stats_tool.count_prompt_tokens(new_batch)
-            self._filter_reqs_from_running_batch()
+            await self._filter_reqs_from_running_batch()
             self.has_wait_tokens = 0
 
         # Check if need pause some requests for decode.
@@ -324,7 +350,7 @@ class RouterManager:
         # Decode
         self.stats_tool.count_output_tokens(self.running_batch)
         await self._decode_batch()
-        self._filter_reqs_from_running_batch()
+        await self._filter_reqs_from_running_batch()
         self.has_wait_tokens += 1
         return
 
@@ -354,9 +380,11 @@ class RouterManager:
             self.running_batch.merge(new_batch)
         return
 
-    def _filter_reqs_from_running_batch(self):
+    async def _filter_reqs_from_running_batch(self):
         if self.running_batch is not None:
-            self.running_batch.filter_out_finished_req(self.shm_req_manager)
+            finishs_reqs = self.running_batch.filter_out_finished_req()
+            await self._send_hiradix_manager(finishs_reqs)
+            self.running_batch.release_reqs(finishs_reqs, self.shm_req_manager)
             if self.running_batch.is_clear():
                 self.running_batch = None
         return
@@ -367,6 +395,17 @@ class RouterManager:
         return (
             batch.get_batch_decode_need_tokens()[dp_index] + self.get_used_tokens(dp_index) <= self.max_total_token_num
         )
+
+    async def _send_hiradix_manager(self, reqs):
+        if not self.use_hiradix_cache:
+            return
+        for req in reqs:
+            req_info = ShmReqInfo(
+                req.request_id,
+                req.index_in_shm_mem
+            )
+            await self.send_to_hiradix_server.send_pyobj(req_info, protocol=pickle.HIGHEST_PROTOCOL)
+        return
 
     def _send_detokenization_pack(self):
         # 发 mtp_step + 1 个 None 包触发一下 detokenization, 因为在开启 mtp feature 以后，每一步

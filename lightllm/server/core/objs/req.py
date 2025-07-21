@@ -54,6 +54,73 @@ class PrefixTokenIdsStruct(ctypes.Structure):
     def get_token_ids(self):
         return list(self.data[: self.size])
 
+class ReqRankStatus(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [("dp_rank_in_node", ctypes.c_int), ("dp_world_size", ctypes.c_int)]
+
+    def __init__(self):
+        self.dp_rank_in_node = 0
+        self.dp_world_size = 8
+    
+    def set_status(self, dp_rank_in_node: int, dp_world_size: int):
+        self.dp_rank_in_node = dp_rank_in_node
+        self.dp_world_size = dp_world_size
+
+class RadixStatus(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [("status", ctypes.c_int * 32), ("rank_status", ReqRankStatus), ("finished", ctypes.c_int)]
+
+    NOCACHE = -2
+    NOT_READY = -1
+    READ_READY = 1
+    WRITE_READY = 2
+    WRITE_DONE = 3
+
+    def __init__(self, init_state=NOT_READY):
+        for i in range(32):
+            self.status[i] = init_state
+        self.rank_status = ReqRankStatus()
+        self.finished = 0
+
+    def set_status(self, idx: int, new_status: int):
+        assert 0 <= idx < 32, f"Index out of range: {idx}"
+        assert new_status in (self.NOCACHE, self.NOT_READY, self.READ_READY, self.WRITE_READY, self.WRITE_DONE)
+        self.status[idx] = new_status
+    
+    def set_finished(self):
+        self.finished = 1
+
+    def is_finished(self):
+        return self.finished == 1
+
+    def get_status(self, idx: int) -> int:
+        assert 0 <= idx < 32, f"Index out of range: {idx}"
+        return self.status[idx]
+    
+    def is_write_done(self):
+        dp_index = self.rank_status.dp_rank_in_node
+        dp_size = self.rank_status.dp_world_size
+        rank_list = range(dp_index * dp_size, (dp_index + 1) * dp_size)
+        return np.all(np.array(self.status)[rank_list] == self.WRITE_DONE)
+
+    def is_no_need_cache(self, idx: int) -> bool:
+        return self.get_status(idx) == self.NOCACHE
+
+    def is_read_ready(self, idx: int) -> bool:
+        return self.get_status(idx) == self.READ_READY
+
+    def is_write_ready(self, idx: int) -> bool:
+        return self.get_status(idx) == self.WRITE_READY
+
+    def is_not_ready(self, idx: int) -> bool:
+        return self.get_status(idx) == self.NOT_READY
+
+    def all_dp_read_ready_or_nocache(self, indexs: List[int]) -> bool:
+        return np.all(np.array(self.status)[indexs] == self.READ_READY) or np.all(np.array(self.status)[indexs] == self.NOCACHE)
+
+    def all_read_ready_or_nocache(self) -> bool:
+        return np.all(np.array(self.status) == self.READ_READY) or np.all(np.array(self.status) == self.NOCACHE)
+
 
 class Req(ctypes.Structure):
     _pack_ = 4
@@ -98,6 +165,8 @@ class Req(ctypes.Structure):
         ("mtp_accepted_token_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
+        # 用于标记当前请求的radix状态
+        ("radix_status", RadixStatus),
     ]
 
     def get_str(self):
@@ -151,6 +220,7 @@ class Req(ctypes.Structure):
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
         self.mtp_accepted_token_num = 0
         self._mtp_step = get_env_start_args().mtp_step
+        self.radix_status = RadixStatus(RadixStatus.NOT_READY)
 
         self.post_init()
 
@@ -204,7 +274,6 @@ class Req(ctypes.Structure):
         # 只有管理节点有一个引用
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
-
         if self.is_aborted and can_released_mark and ref_count_ok:
             return True
 
