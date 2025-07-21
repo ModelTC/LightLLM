@@ -23,7 +23,7 @@ def floor_by_factor(number: int, factor: int) -> int:
 
 # copy from https://github.com/QwenLM/Qwen2.5-VL/blob/main/qwen-vl-utils/src/qwen_vl_utils/vision_process.py#L60
 def smart_resize(
-    height: int, width: int, factor: int = 28, min_pixels: int = 256 * 28 * 28, max_pixels: int = 16384 * 28 * 28
+    height: int, width: int, factor: int = 28, min_pixels: int = 256 * 28 * 28, max_pixels: int = 3328 * 28 * 28
 ) -> tuple[int, int]:
     """
     Rescales the image so that the following conditions are met:
@@ -54,7 +54,7 @@ def smart_resize(
 
 
 def dynamic_preprocess_native_resolution(
-    image, size_factor=28, min_pixels=4 * 28 * 28, max_pixels=16384 * 28 * 28, **kwargs
+    image, size_factor=28, min_pixels=256 * 28 * 28, max_pixels=3328 * 28 * 28, **kwargs
 ):
     width, height = image.size
     resized_height, resized_width = smart_resize(
@@ -141,7 +141,7 @@ def load_image_naive(
     image = dynamic_preprocess_native_resolution(
         image, size_factor=int(patch_size // downsample_ratio), min_pixels=min_pixels, max_pixels=max_pixels
     )
-    pixel_values, grid_hw = preprocess_pixel_values(transform(image))
+    pixel_values, grid_hw = preprocess_pixel_values(transform(image).to(torch.float32))
     # num_image_token = get_image_token(image, patch_size=patch_size, downsample_ratio=downsample_ratio)
 
     return pixel_values, grid_hw

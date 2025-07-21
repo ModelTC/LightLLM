@@ -148,29 +148,32 @@ class ViTPreLayerInfer:
         target_device = layer_weight.patch_embedding_weight_.device
         if self.dynamic_image_size:
             assert pixel_values.dim() == 2, f"pixel_values must be 2D for native resolution, got: {pixel_values.dim()}"
-            self.patch_embedding = nn.Conv2d(
-                in_channels=3,
-                out_channels=self.embed_dim,
-                kernel_size=self.patch_size,
-                stride=self.patch_size,
-            )
-            self.patch_embedding = self.patch_embedding.to(
-                device=target_device,
-                dtype=target_dtype,
-            )
             pixel_values = pixel_values.view(
                 -1,
                 3,
                 self.patch_size,
                 self.patch_size,
             )
-            patch_embeds = self.patch_embedding(pixel_values).view(-1, self.embed_dim)
-            print(f"patch_embeds.shape is {patch_embeds.shape}")
+            patch_embeds = (
+                F.conv2d(
+                    pixel_values,
+                    weight=layer_weight.patch_embedding_weight_,
+                    bias=layer_weight.patch_embedding_bias_,
+                    stride=self.patch_size,
+                )
+                .view(-1, self.embed_dim)
+                .to(
+                    device=target_device,
+                    dtype=target_dtype,
+                )
+            )
+            print(f"patch_embeds is {patch_embeds}")
             self.cos_cached_x = self.cos_x.to(target_device)
             self.sin_cached_x = self.sin_x.to(target_device)
             self.cos_cached_y = self.cos_y.to(target_device)
             self.sin_cached_y = self.sin_y.to(target_device)
             embeddings = self._apply_2d_rotary_pos_emb(patch_embeds, grid_hw).to(target_dtype)
+            print(f"embeddings is {embeddings}")
         else:
 
             patch_embeds = F.conv2d(

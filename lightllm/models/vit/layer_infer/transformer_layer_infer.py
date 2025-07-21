@@ -111,6 +111,7 @@ class ViTTransformerLayerInfer:
         if q.dim() == k.dim() == v.dim() == 3 and cu_seqlens is not None:
             totoal_len, head_num, head_dim = q.shape
             cu_seqlens = cu_seqlens.to(q.device)
+            print(f"cu_seqlens is {cu_seqlens}")
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
             flash_attention_fwd(q, k, v, out, cu_seqlens, max_seqlen)
             return out.reshape(totoal_len, -1)
