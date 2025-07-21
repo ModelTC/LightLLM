@@ -135,7 +135,7 @@ class InferenceContext:
         torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
 
     @torch.no_grad()
-    def filter(self, finished_request_ids: List[int]):
+    def _filter(self, finished_request_ids: List[int]):
         if len(finished_request_ids) == 0:
             return
 
@@ -175,7 +175,9 @@ class InferenceContext:
 
     def filter_reqs(self, finished_reqs: List["InferReq"]):
         if finished_reqs:
-            self.filter([req.req_id for req in finished_reqs])
+            g_infer_state_lock.acquire()
+            self._filter([req.req_id for req in finished_reqs])
+            g_infer_state_lock.release()
         return
 
     @torch.no_grad()
