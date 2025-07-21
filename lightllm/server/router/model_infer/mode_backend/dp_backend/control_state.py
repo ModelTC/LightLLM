@@ -95,6 +95,7 @@ class DPControlState:
                 if self.dp_prefill_wait_step > self.dp_prefill_wait_max_step:
                     # prefill 一次允许进行几次 decode 操作。
                     self.left_decode_num = self.decode_max_step
+                    self.dp_prefill_wait_step = max(0, (self.dp_prefill_wait_step - self.decode_max_step))
                     return RunWay.PREFILL
 
             if max_decode_num > 0:
