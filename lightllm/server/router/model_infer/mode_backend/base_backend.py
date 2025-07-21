@@ -372,6 +372,9 @@ class ModeBackend:
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
 
+        if len(req_ids) == 0:
+            return [], []
+
         support_overlap = self.support_overlap
 
         wait_pause_reqs = []

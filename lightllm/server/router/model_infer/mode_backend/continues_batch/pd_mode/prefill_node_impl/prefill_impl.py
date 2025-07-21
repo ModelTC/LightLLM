@@ -55,6 +55,9 @@ class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         return
 
     def _prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, finished_reqs: List[InferReq]):
+        if len(finished_reqs) == 0:
+            return
+
         # 提前在radix cache中回收相关的信息，并添加引用进行锁定，方便传输进程传输kv。
         if self.is_master_in_dp:
             logger.info("prefill_req_handle_and_frozen_tokens")
