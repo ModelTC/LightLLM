@@ -162,7 +162,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         return
 
     def decode_normal(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
-        model_input, run_reqs, padded_req_num = padded_prepare_decode_inputs(decode_reqs=decode_reqs)
+        model_input, run_reqs, padded_req_num = padded_prepare_decode_inputs(req_objs=decode_reqs)
         model_input: ModelInput = model_input
         run_reqs_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
