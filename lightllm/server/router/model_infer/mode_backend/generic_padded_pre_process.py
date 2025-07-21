@@ -111,7 +111,6 @@ def padded_prepare_prefill_inputs(
 def padded_prepare_decode_inputs(
     req_objs: List[InferReq], dest_batch_size: Optional[int] = None
 ) -> Tuple[ModelInput, List[InferReq], int]:
-    mtp_step_num = get_env_start_args().mtp_step
     run_reqs = []
     total_token_num = 0
     max_len_in_batch = 0
@@ -141,11 +140,11 @@ def padded_prepare_decode_inputs(
         if len(run_reqs) == 0:
             dest_batch_size = 1
         else:
-            dest_batch_size = len(run_reqs) * (1 + mtp_step_num)
+            dest_batch_size = len(run_reqs)
     else:
-        assert len(run_reqs) * (1 + mtp_step_num) <= dest_batch_size
+        assert len(run_reqs) <= dest_batch_size
 
-    padded_req_num = dest_batch_size - len(run_reqs) * (1 + mtp_step_num)
+    padded_req_num = dest_batch_size - len(run_reqs)
 
     # padding fake req for decode
     for _ in range(padded_req_num):
