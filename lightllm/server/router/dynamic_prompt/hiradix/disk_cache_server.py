@@ -164,7 +164,7 @@ class DiskCacheService(rpyc.Service):
                 read_task = CacheTask(tokens=keys[:query_len], kv_page_indexer=index, mode="r")
                 self.remote_cache_manager.read(read_task)
 
-                self.radix_manager.write(keys=keys[:query_len], values=index.tolist())
+                self.radix_manager.write(tokens=keys[:query_len], values=index.tolist())
 
                 radix_state = RadixStatus.READ_READY
                 cache_state = PullState(query_len, HitSate.DISK)

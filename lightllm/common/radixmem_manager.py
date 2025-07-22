@@ -45,7 +45,7 @@ class RadixBufferManager:
             
         return chunks
 
-    def write(self, tokens: List[int], values: torch.Tensor, start_pos: int) -> None:
+    def write(self, tokens: List[int], values: torch.Tensor, start_pos: int=0) -> None:
         with self.lock:
             index = start_pos // self.chunk_size
             chunks = self._compute_hash(tokens)

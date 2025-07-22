@@ -53,7 +53,7 @@ class Qwen2TpPartModel(LlamaTpPartModel):
         )
 
         if self.enable_hiradix_cache:
-            from lightllm.common.radixmem_buffer import MemPropties, get_shared_data, MemPropties
+            from lightllm.common.radixmem_buffer import MemPropties, get_shared_data
             from lightllm.common.radixmem_manager import build_radix_manager
             mem_propties = MemPropties(
                 self.hiradix_cache_token_num,
