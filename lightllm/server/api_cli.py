@@ -289,9 +289,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )
     parser.add_argument(
-        "--cache_reserved_ratio", type=float, default=0.5, help="cache server reserved capacity ratio after clear"
-    )
-    parser.add_argument(
         "--data_type",
         type=str,
         choices=["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"],

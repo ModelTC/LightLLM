@@ -57,7 +57,6 @@ class StartArgs:
     enable_decode_microbatch_overlap: bool = field(default=False)
     enable_prefill_microbatch_overlap: bool = field(default=False)
     cache_capacity: int = field(default=200)
-    cache_reserved_ratio: float = field(default=0.5)
     data_type: Optional[str] = field(
         default=None, metadata={"choices": ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]}
     )
