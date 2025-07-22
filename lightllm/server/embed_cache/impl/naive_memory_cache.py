@@ -32,8 +32,6 @@ class InMemoryCache:
         self._records = dict()
         self._md5_to_record = dict()
         self.capacity = max(1, args.cache_capacity)
-        self.reserved = max(0, int(self.capacity * args.cache_reserved_ratio))
-        self.reserved = min(self.reserved, self.capacity - 1)
         self.occupied = 0
         self.expired_secs = 60 * 60
         self.lock = threading.Lock()
@@ -69,9 +67,9 @@ class InMemoryCache:
                         time.sleep(3)
         return
 
-    def _clear(self):
+    def _clear(self, free_max_count: int):
         deleted = 0
-        max_delete = max(1, self.occupied - self.reserved)
+        max_delete = free_max_count
         items = sorted(self._records.items(), key=lambda x: x[1].visittime)
         t = time.time()
         for id, record in items:
@@ -91,10 +89,10 @@ class InMemoryCache:
         now = time.time()
         with self.lock:
             new_md5s = [m for m in md5sum_list if m not in self._md5_to_record]
-            new_needed = len(new_md5s)
+            new_needed = len(set(new_md5s))
 
             if self.occupied + new_needed > self.capacity:
-                self._clear()
+                self._clear(free_max_count=new_needed - (self.capacity - self.occupied))
             if self.occupied + new_needed > self.capacity:
                 return None
 
@@ -127,19 +125,19 @@ class InMemoryCache:
 
     def release(self, ids: list[int]) -> None:
         with self.lock:
-            for id in ids:
-                self._records[id].ref -= 1
+            for id_ in ids:
+                self._records[id_].ref -= 1
 
     def set_items_data(self, ids: list[int]) -> None:
-        for id in ids:
-            self._records[id].data = True
+        for id_ in ids:
+            self._records[id_].data = True
 
     def get_items_data(self, ids: list[int]) -> list[Optional[bool]]:
-        return [self._records.get(i).data if i in self._records else False for i in ids]
+        return [self._records.get(id_).data if id_ in self._records else False for id_ in ids]
 
     def set_items_embed(self, ids: list[int]) -> None:
-        for id in ids:
-            self._records[id].embed = True
+        for id_ in ids:
+            self._records[id_].embed = True
 
     def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
-        return [self._records.get(i).embed if i in self._records else False for i in ids]
+        return [self._records.get(id_).embed if id_ in self._records else False for id_ in ids]

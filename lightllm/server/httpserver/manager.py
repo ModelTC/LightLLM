@@ -115,13 +115,12 @@ class HttpServerManager:
         return
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
-        wait_time = 1
+
         while True:
             records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
 
             if records is None:
-                await asyncio.sleep(wait_time)
-                wait_time = min(wait_time + 0.5, 2)
+                await asyncio.sleep(0.1)
                 continue
 
             uid_list = []
@@ -155,19 +154,19 @@ class HttpServerManager:
                     self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
                     data = img.read()
                     # must after init_imageitem_extral_params
-                    tokens_num = self.tokenizer.get_image_token_length(img)
+                    token_num = self.tokenizer.get_image_token_length(img)
                     md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
                     md5sums.append(md5sum)
-                    tokens_nums.append(tokens_num)
+                    tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(img)
                 for audio in multimodal_params.audios:
                     self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
                     data = audio.read()
-                    tokens_num = self.tokenizer.get_audio_token_length(audio)
+                    token_num = self.tokenizer.get_audio_token_length(audio)
                     md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
                     md5sums.append(md5sum)
-                    tokens_nums.append(tokens_num)
+                    tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(audio)
 
