@@ -199,4 +199,4 @@ class WhisperAudioModel:
                 create_shm(get_shm_name_embed(uid), cur_embed_bytes)
                 ids_to_set.append(uid)
         if ids_to_set:
-            self.cache_client.root.set_items_data(ids=ids_to_set)
+            self.cache_client.root.set_items_embed(ids=ids_to_set)
