@@ -10,6 +10,7 @@ SKIP_SPECIAL_TOKENS = os.getenv("SKIP_SPECIAL_TOKENS", "True").upper() in ["ON",
 
 # 从环境变量获取最大长度限制
 STOP_SEQUENCE_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_MAX_LENGTH", 256))
+STOP_SEQUENCE_STR_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_STR_MAX_LENGTH", 256))
 ALLOWED_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_ALLOWED_TOKEN_IDS_MAX_LENGTH", 256))
 MAX_STOP_SEQUENCES = int(os.getenv("LIGHTLLM_MAX_STOP_SEQUENCES", 10))
 REGULAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_REGULAR_CONSTRAINT_MAX_LENGTH", 2048))
@@ -22,16 +23,26 @@ class StopSequence(ctypes.Structure):
     _fields_ = [
         ("sequence", ctypes.c_int * STOP_SEQUENCE_MAX_LENGTH),
         ("size", ctypes.c_int),
+        ("sequence_str", ctypes.c_char * STOP_SEQUENCE_STR_MAX_LENGTH),
+        ("sequence_str_len", ctypes.c_int),
     ]
 
-    def initialize(self, sequence: List[int]):
+    def initialize(self, sequence: List[int], sequence_str: str = ""):
         self.size = len(sequence)
         assert self.size <= STOP_SEQUENCE_MAX_LENGTH, "stop token length too long."
         assert all(isinstance(e, int) for e in sequence), "all must be int"
         self.sequence[: self.size] = sequence[:]
 
+        sequence_str_bytes = sequence_str.encode("utf-8")
+        assert len(sequence_str_bytes) < STOP_SEQUENCE_STR_MAX_LENGTH, "stop sequence string too long."
+        self.sequence_str = sequence_str_bytes
+        self.sequence_str_len = len(sequence_str_bytes)
+
     def to_list(self):
         return list(self.sequence[0 : self.size])
+
+    def to_string(self):
+        return bytes(self.sequence_str[0 : self.sequence_str_len]).decode("utf-8")
 
 
 class StopSequenceGroups(ctypes.Structure):
@@ -45,8 +56,10 @@ class StopSequenceGroups(ctypes.Structure):
         groups: List[List[int]] = self.stop_sentences_to_token_ids(stop_sequences, tokenizer)
         self.size = len(groups)
         assert self.size <= MAX_STOP_SEQUENCES, "Too many stop sequence groups."
+        if isinstance(stop_sequences, str):
+            stop_sequences = [stop_sequences]
         for group_idx in range(self.size):
-            self.groups[group_idx].initialize(groups[group_idx])
+            self.groups[group_idx].initialize(groups[group_idx], stop_sequences[group_idx])
 
     def stop_sentences_to_token_ids(self, stop_sequences, tokenizer):
         if stop_sequences is None:
@@ -74,6 +87,10 @@ class StopSequenceGroups(ctypes.Structure):
 
     def to_list(self):
         return [self.groups[i].to_list() for i in range(self.size)]
+
+    def to_string(self):
+        # 降序匹配，在出现"\n\n"和"\n"情况时，优先匹配“\n\n”
+        return sorted([self.groups[i].to_string() for i in range(self.size)], key=len, reverse=True)
 
 
 class RegularConstraint(ctypes.Structure):
