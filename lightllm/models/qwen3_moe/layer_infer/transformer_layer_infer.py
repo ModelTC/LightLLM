@@ -28,7 +28,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
         self.norm_topk_prob = network_config["norm_topk_prob"]
-        self.n_shared_experts = network_config.get("n_shared_experts", None)
         super().__init__(layer_num, network_config, mode)
         self.head_dim_ = network_config["head_dim"]
         self.tp_k_head_num_ = max(self.tp_k_head_num_, 1)
@@ -153,10 +152,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state1.hook()
             infer_state1.hook = None
 
-        # 0 shared expert
-        if self.n_shared_experts is not None:
-            _0_shared_output = LlamaTransformerLayerInfer._ffn(self, _0_input1, infer_state, layer_weight)
-
         # 0 dispatch
         (
             _0_recv_x,
@@ -187,10 +182,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         if getattr(infer_state, "hook", None) is not None:
             infer_state.hook()
             infer_state.hook = None
-
-        # 1 shared expert
-        if self.n_shared_experts is not None:
-            _1_shared_output = LlamaTransformerLayerInfer._ffn(self, _1_input1, infer_state1, layer_weight)
 
         # 1 dispatch
         (
@@ -227,9 +218,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         # 0 hook
         if getattr(infer_state, "hook", None) is not None:
             infer_state.hook()
-            # _0_ffn_out *= self.routed_scaling_factor
-            if self.n_shared_experts is not None:
-                _0_ffn_out.add_(_0_shared_output)
             input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
             infer_state.hook = None
 
@@ -241,9 +229,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         def _1_hook_post():
             _1_hook()
             nonlocal _1_ffn_out
-            # _1_ffn_out *= self.routed_scaling_factor
-            if self.n_shared_experts is not None:
-                _1_ffn_out.add_(_1_shared_output)
             input_embdings1.add_(_1_ffn_out.view(-1, self.embed_dim_))
             return
 
@@ -327,14 +312,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         _1_overlap_event = Buffer.capture()
 
-        # 0 shared expert
-        if self.n_shared_experts is not None:
-            _0_shared_output = LlamaTransformerLayerInfer._ffn(self, _0_input1, infer_state, layer_weight)
-
-        # 1 shared expert
-        if self.n_shared_experts is not None:
-            _1_shared_output = LlamaTransformerLayerInfer._ffn(self, _1_input1, infer_state1, layer_weight)
-
         # 0 moe calu
         _0_moe_out = layer_weight.experts.prefilled_group_gemm(
             _0_num_recv_tokens_per_expert_list, _0_recv_x, _0_recv_topk_idx, _0_recv_topk_weight
@@ -373,9 +350,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         _1_combine_event = Buffer.capture()
 
-        # _0_ffn_out *= self.routed_scaling_factor
-        if self.n_shared_experts is not None:
-            _0_ffn_out.add_(_0_shared_output)
         input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
 
         # 1 combine execute
@@ -384,9 +358,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         def _1_hook_post():
             _1_hook()
             nonlocal _1_ffn_out
-            # _1_ffn_out *= self.routed_scaling_factor
-            if self.n_shared_experts is not None:
-                _1_ffn_out.add_(_1_shared_output)
             input_embdings1.add_(_1_ffn_out.view(-1, self.embed_dim_))
             return
 
