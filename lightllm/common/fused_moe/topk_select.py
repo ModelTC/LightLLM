@@ -21,6 +21,8 @@ import os
 import torch
 from lightllm.utils.sgl_utils import sgl_ops
 from lightllm.utils.light_utils import light_ops
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.balance_utils import BalancedTensor
 from typing import Callable, List, Optional, Tuple
 from lightllm.common.fused_moe.softmax_topk import softmax_topk
 
@@ -226,5 +228,12 @@ def select_experts(
         topk_weights, topk_ids = custom_routing_function(
             hidden_states=hidden_states, gating_output=router_logits, topk=top_k, renormalize=renormalize
         )
+
+    # Enable EP fake balance
+    if get_env_start_args().enable_ep_fake_balance:
+        num_tokens, num_experts = router_logits.shape
+        balanced_tensor_collection = BalancedTensor(num_experts=num_experts, num_selected=top_k)
+        balance_topk_ids = balanced_tensor_collection.get_balance_topk_ids(num_tokens)
+        topk_ids.copy_(balance_topk_ids)
 
     return topk_weights, topk_ids
