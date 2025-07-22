@@ -15,6 +15,7 @@ from .model_infer.model_rpc import start_model_process, VisualModelRpcClient
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
+from rpyc.utils.classic import obtain
 
 
 logger = init_logger(__name__)
@@ -121,7 +122,7 @@ class VisualManager:
                     multimodal_params = group_req_indexes.multimodal_params
 
                     img_uuids = [img.uuid for img in multimodal_params.images]
-                    ready_image = self.cache_client.root.get_items_embed(img_uuids)
+                    ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
 
                     for img, ready in zip(multimodal_params.images, ready_image):
                         if not ready:

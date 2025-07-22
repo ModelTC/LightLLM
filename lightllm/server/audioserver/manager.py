@@ -14,6 +14,7 @@ from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.multimodal_params import AudioItem
 from .model_infer.model_rpc import start_model_process, AudioModelRpcClient
 from lightllm.utils.graceful_utils import graceful_registry
+from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
 
@@ -95,7 +96,7 @@ class AudioManager:
                     multimodal_params = group_req_indexes.multimodal_params
 
                     audio_uuids = [audio.uuid for audio in multimodal_params.audios]
-                    ready_audio = self.cache_client.root.get_items_embed(audio_uuids)
+                    ready_audio = obtain(self.cache_client.root.get_items_embed(audio_uuids))
 
                     for audio, ready in zip(multimodal_params.audios, ready_audio):
                         if not ready:

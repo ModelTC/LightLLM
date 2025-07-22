@@ -11,7 +11,7 @@ from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
 from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
 from lightllm.server.multimodal_params import AudioItem
-
+from rpyc.utils.classic import obtain
 
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
@@ -190,7 +190,7 @@ class WhisperAudioModel:
         audio_lens_after_cnn = np.array(audio_lens_after_cnn, dtype=np.int32)
         audio_token_num = (audio_lens_after_cnn - 2) // 2 + 1
 
-        ready_audio = self.cache_client.root.get_items_embed(uuids)
+        ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
         ids_to_set = []
         for i, ready in enumerate(ready_audio):
             if not ready:

@@ -32,6 +32,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
+from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
 
@@ -116,7 +117,7 @@ class HttpServerManager:
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
         wait_time = 1
         while True:
-            records = self.cache_client.root.alloc(md5sums, token_nums)
+            records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
 
             if records is None:
                 await asyncio.sleep(wait_time)
@@ -130,16 +131,16 @@ class HttpServerManager:
                 item.token_num = rec["token_num"]
                 uid_list.append(rec["id"])
 
-            ready_flags = self.cache_client.root.get_items_data(uid_list)
-            need_write = []
+            ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
+            update_data_ids = []
 
             for uid, ready, data in zip(uid_list, ready_flags, datas):
                 if not ready:
                     create_shm(get_shm_name_data(uid), data)
-                    need_write.append(uid)
+                    update_data_ids.append(uid)
 
-            if need_write:
-                self.cache_client.root.set_items_data(need_write)
+            if update_data_ids:
+                self.cache_client.root.set_items_data(update_data_ids)
             return
 
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
