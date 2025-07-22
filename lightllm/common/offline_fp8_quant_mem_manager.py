@@ -25,7 +25,6 @@ class OfflineFP8QuantMemManager(MemoryManager):
 
         self.qmax = torch.finfo(torch.float8_e4m3fn).max
         self.qmin = torch.finfo(torch.float8_e4m3fn).min
-        self.layer_num = layer_num
         self.total_head_num = head_num * dist.get_world_size() if dist.is_initialized() else head_num
         self.count = 0
         self.scales = None
@@ -45,7 +44,13 @@ class OfflineFP8QuantMemManager(MemoryManager):
             self.scales_list = cfg["scales"]
             self.scales = torch.tensor(self.scales_list, dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
             if not get_env_start_args().enable_fa3:
-                self.scales = torch.repeat_interleave(self.scales, self.head_num, dim=-1)
+                self.scales = torch.repeat_interleave(self.scales, head_num, dim=-1)
+            elif cfg["num_head"] > self.total_head_num:
+                factor = cfg["num_head"] // self.total_head_num
+                self.scales = self.scales[..., ::factor].contiguous()
+            elif cfg["num_head"] < self.total_head_num:
+                factor = self.total_head_num // cfg["num_head"]
+                self.scales = torch.repeat_interleave(self.scales, factor, dim=-1).contiguous()
             if get_env_start_args().enable_fa3 and dist.is_initialized() and dist.get_world_size() > 1:
                 half_head = self.total_head_num // 2
                 start_head = dist.get_rank() * head_num
@@ -77,7 +82,7 @@ class OfflineFP8QuantMemManager(MemoryManager):
                 raise ValueError(
                     f"num_layers {cfg['num_layers']} in config " f"not match current layer_num {self.layer_num}"
                 )
-            if cfg["num_head"] != self.total_head_num:
+            if cfg["num_head"] % self.total_head_num != 0 and self.total_head_num % cfg["num_head"] != 0:
                 raise ValueError(
                     f"num_head {cfg['num_head']} in config " f"not match current model head num {self.total_head_num}"
                 )
