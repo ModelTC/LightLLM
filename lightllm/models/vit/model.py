@@ -169,10 +169,8 @@ class VisionTransformer:
     def forward(self, pixel_values, grid_hw=None):
         g_cache_manager.cache_env_in()
         input_embs = self.pre_infer.forward(pixel_values, self.pre_post_weight, grid_hw)
-        print(f"input_embs.shape is {input_embs.shape}")
         for i in range(self.layers_num + self.select_layer + 1):
             input_embs, cu_seqlens = self.layers_infer[i].forward(input_embs, self.trans_layers_weight[i], grid_hw)
-        print(f"after attention, input_embs,shape is {input_embs.shape}")
         if grid_hw is not None:
             input_embs = self.post_infer.forward(input_embs, self.pre_post_weight, cu_seqlens, grid_hw)
         else:
@@ -195,8 +193,6 @@ class VisionTransformer:
                     t, grid_hw = load_image_naive(
                         image_data, self.patch_size, self.downsample_ratio, self.min_pixels, self.max_pixels
                     )
-                    print(f"pixel_values is{t},pixel_values.shape is {t.shape}")
-                    print(f"grid_hw is {grid_hw}")
                 else:
                     t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
                     grid_hw = None

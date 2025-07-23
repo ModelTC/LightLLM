@@ -51,7 +51,6 @@ class ViTPostLayerInfer:
         assert x.shape[-1] == int(
             C / self.downsample_ratio ** 2
         ), f"Expected {int(C / self.downsample_ratio**2)} channels, but got {x.shape[-1]} channels after pixel shuffle."
-        print(f"x.shape is {x.shape}")
         return x
 
     def forward(self, vit_embeds, layer_weight: ViTPreAndPostLayerWeight, cu_seqlens, grid_hw):

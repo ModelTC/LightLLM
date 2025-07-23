@@ -88,7 +88,6 @@ class ViTTransformerLayerInfer:
         return q_norm, k_norm
 
     def _get_qkv(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
-        print(f"input.shape is {input.shape}")
         if input.dim() == 2:
             seq_len, _ = input.shape
             qkv = layer_weight.qkv_proj.mm(input, use_custom_tensor_mananger=True)
@@ -105,13 +104,9 @@ class ViTTransformerLayerInfer:
 
     def _context_attention_kernel(self, q, k, v, cu_seqlens=None) -> torch.Tensor:
         out = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
-        print(f"q.shape is {q.shape}")
-        print(f"k.shape is {k.shape}")
-        print(f"v.shape is {v.shape}")
         if q.dim() == k.dim() == v.dim() == 3 and cu_seqlens is not None:
             totoal_len, head_num, head_dim = q.shape
             cu_seqlens = cu_seqlens.to(q.device)
-            print(f"cu_seqlens is {cu_seqlens}")
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
             flash_attention_fwd(q, k, v, out, cu_seqlens, max_seqlen)
             return out.reshape(totoal_len, -1)

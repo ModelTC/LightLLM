@@ -48,8 +48,6 @@ def smart_resize(
         beta = math.sqrt(min_pixels / (height * width))
         h_bar = ceil_by_factor(height * beta, factor)
         w_bar = ceil_by_factor(width * beta, factor)
-    print(f"h_bar is {h_bar}")
-    print(f"w_bar is {w_bar}")
     return h_bar, w_bar
 
 

@@ -107,7 +107,7 @@ class ViTPreLayerInfer:
             self.sin_cached_y,
             abs_pos_x,
             abs_pos_y,
-        ).to(self.patch_embedding.weight.dtype)
+        )
         return embeddings
 
     def build_abs_positions_from_grid_hw(self, grid_hw: torch.Tensor, device=None):
@@ -167,13 +167,11 @@ class ViTPreLayerInfer:
                     dtype=target_dtype,
                 )
             )
-            print(f"patch_embeds is {patch_embeds}")
             self.cos_cached_x = self.cos_x.to(target_device)
             self.sin_cached_x = self.sin_x.to(target_device)
             self.cos_cached_y = self.cos_y.to(target_device)
             self.sin_cached_y = self.sin_y.to(target_device)
             embeddings = self._apply_2d_rotary_pos_emb(patch_embeds, grid_hw).to(target_dtype)
-            print(f"embeddings is {embeddings}")
         else:
 
             patch_embeds = F.conv2d(

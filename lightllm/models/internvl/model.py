@@ -77,10 +77,8 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
 
     def get_image_token_length(self, img: ImageItem):
         if self.dynamic_image_size:
-            print(f"image_token is {get_image_token(img.image_w, img.image_h, self.patch_size, self.downsample_ratio)}")
             return get_image_token(img.image_w, img.image_h, self.patch_size, self.downsample_ratio)
         else:
-            print("errorrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr")
             return (
                 self.get_image_patch_func(
                     img.image_w, img.image_h, max_num=img.extra_params["image_patch_max_num"], use_thumbnail=True
