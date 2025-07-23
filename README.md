@@ -21,7 +21,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 [English Docs](https://lightllm-en.readthedocs.io/en/latest/) | [中文文档](https://lightllm-cn.readthedocs.io/en/latest/) | [Blogs](https://modeltc.github.io/lightllm-blog/)
 
 ## News
-- [2025/05] LightLLM paper on constrained decoding accepted by [ACL25](https://openreview.net/pdf?id=g1aBeiyZEi) (Pre $^3$: Enabling Deterministic Pushdown Automata for Faster Structured LLM Generation)
+- [2025/05] LightLLM paper on constrained decoding accepted by [ACL25](https://arxiv.org/pdf/2506.03887) (Pre $^3$: Enabling Deterministic Pushdown Automata for Faster Structured LLM Generation). For a more accessible overview of the research with key insights and examples, check out our blog post: [LightLLM Blog](https://www.light-ai.top/lightllm-blog/2025/06/15/pre3.html)
 - [2025/04] LightLLM paper on request scheduler published in [ASPLOS’25](https://dl.acm.org/doi/10.1145/3676641.3716011) (Past-Future Scheduler for LLM Serving under SLA Guarantees)
 - [2025/02] 🔥 LightLLM v1.0.0 release, achieving the **fastest DeepSeek-R1** serving performance on single H200 machine.
 

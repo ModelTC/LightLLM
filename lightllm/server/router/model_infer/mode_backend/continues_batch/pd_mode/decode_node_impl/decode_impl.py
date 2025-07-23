@@ -3,10 +3,9 @@ import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import threading
-from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
+from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
+from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, g_infer_state_lock
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.log_utils import init_logger
 from rpyc.utils.server import ThreadedServer
@@ -19,11 +18,12 @@ from lightllm.utils.dist_utils import create_new_group_for_current_dp
 logger = init_logger(__name__)
 
 
-class ContinuesBatchBackendForDecodeNode(ModeBackend):
+class DecodeNode(ChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
         super().__init__()
         self.info_queue: mp.Queue = info_queue
         self.mem_queue: mp.Queue = mem_queue
+        self.classed_req_strict_prefill = False
 
     def init_custom(self):
 
@@ -48,27 +48,23 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
 
         return
 
-    def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs, init_req_obj=False)
-        return
+    def _init_reqs(self, reqs: List[Tuple]):
+        """
+        替换请求初始化操作，替换为 Decode 节点独有的一些特殊初始化流程
+        """
+        if self.dp_size_in_node != 1:
+            dp_rank_in_node = self.dp_rank_in_node
+            reqs = [req for req in reqs if req[3] == dp_rank_in_node]
 
-    def decode(self):
-        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids,
-            no_decode=False,
-        )
-        # p d 分离模式下， decode 节点不可能存在需要prefill操作的请求
-        assert len(prefill_reqs) == 0
+        g_infer_state_lock.acquire()
 
-        self._filter_reqs(aborted_reqs)
+        uninit_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=False)
+        # 匹配radix cache，并更新一些资源的管理。
+        self._post_init_reqs(uninit_reqs=uninit_reqs)
 
-        if decode_reqs:
-            ContinuesBatchBackend.normal_decode(
-                self, decode_reqs=decode_reqs, uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs
-            )
-
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
-        return
+        g_infer_state_lock.release()
+        req_ids = [e[0] for e in reqs]
+        return req_ids
 
     def _post_init_reqs(self, uninit_reqs: List[InferReq]):
         """
@@ -89,12 +85,11 @@ class ContinuesBatchBackendForDecodeNode(ModeBackend):
                 req_all_len = len(task.input_tokens) + task.decode_node.max_new_tokens
                 remove_count += req_all_len
                 estimated_peak_token_count += req_all_len
-                req_obj.init_all()
+                req_obj._match_radix_cache()
             else:
                 # 对于不合法的请求，直接模拟将其finished掉
-                req_obj.init_all()
-                req_obj.set_next_gen_token_id(0, 0.0)
                 req_obj.cur_output_len += 1
+                req_obj.set_next_gen_token_id(0, 0.0, 1)
                 req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
 
                 if self.is_master_in_dp:

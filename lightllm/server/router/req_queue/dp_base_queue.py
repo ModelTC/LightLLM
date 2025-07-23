@@ -26,14 +26,11 @@ class DpQueue:
         assert dp_index < self.dp_size_in_node, "dp index out of range"
         return self.inner_queues[dp_index]
 
-    def get_paused_req_num(self, dp_index: int = 0):
-        return self.inner_queues[dp_index].get_paused_req_num()
-
     def get_wait_req_num(self):
         return sum(queue.get_wait_req_num() for queue in self.inner_queues)
 
     # @calculate_time(show=True, min_cost_ms=10)
-    def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
+    def generate_new_batch(self, current_batch: Batch):
         batches = [
             self.inner_queues[dp_index].generate_new_batch(current_batch) for dp_index in range(self.dp_size_in_node)
         ]
@@ -43,7 +40,7 @@ class DpQueue:
         merged_batch: Batch = None
         for iter_batch in dp_batches:
             if merged_batch is not None:
-                merged_batch.dp_merge(iter_batch)
+                merged_batch.merge(iter_batch)
             else:
                 merged_batch = iter_batch
         return merged_batch
@@ -74,9 +71,6 @@ class DpQueue:
                 self.inner_queues[suggested_dp_index].append(req)
 
         return
-
-    def back_to_wait_list(self, req_list: List[Req]):
-        raise NotImplementedError("not supported feature")
 
     def is_busy(self):
         return True

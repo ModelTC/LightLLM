@@ -110,6 +110,21 @@ def normal_or_p_d_start(args):
     if args.return_all_prompt_logprobs:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
+    if "offline_calibration_fp8kv" in args.mode:
+        assert args.enable_fa3 is True or (
+            args.enable_flashinfer_prefill is True and args.enable_flashinfer_decode is True
+        ), (
+            "offline_calibration_fp8kv mode need enable fa3 or flashinfer, add --enable_fa3 or "
+            "--enable_flashinfer_prefill and --enable_flashinfer_decode"
+        )
+    if "export_fp8kv_calibration" in args.mode:
+        assert args.enable_fa3 is True or (
+            args.enable_flashinfer_prefill is True and args.enable_flashinfer_decode is True
+        ), (
+            "export_fp8kv_calibration mode need enable fa3 or flashinfer, add --enable_fa3 or "
+            "--enable_flashinfer_prefill and --enable_flashinfer_decode"
+        )
+        assert args.disable_cudagraph is True, "export_fp8kv_calibration mode need disable cudagraph"
 
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
@@ -144,6 +159,7 @@ def normal_or_p_d_start(args):
         args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
     if args.disable_chunked_prefill:
+        args.chunked_prefill_size = args.max_req_total_len
         # 普通模式下
         if args.batch_max_tokens is None:
             args.batch_max_tokens = args.max_req_total_len

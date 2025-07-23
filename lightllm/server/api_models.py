@@ -48,6 +48,32 @@ class ToolChoice(BaseModel):
     type: Literal["function"] = Field(default="function", examples=["function"])
 
 
+class CompletionRequest(BaseModel):
+    model: str
+    # prompt: string or tokens
+    prompt: Union[str, List[str], List[int], List[List[int]]]
+    suffix: Optional[str] = None
+    max_tokens: Optional[int] = 16
+    temperature: Optional[float] = 1.0
+    top_p: Optional[float] = 1.0
+    n: Optional[int] = 1
+    stream: Optional[bool] = False
+    logprobs: Optional[int] = None
+    echo: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    best_of: Optional[int] = 1
+    logit_bias: Optional[Dict[str, float]] = None
+    user: Optional[str] = None
+
+    # Additional parameters supported by LightLLM
+    do_sample: Optional[bool] = False
+    top_k: Optional[int] = -1
+    repetition_penalty: Optional[float] = 1.0
+    ignore_eos: Optional[bool] = False
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Message]
@@ -144,6 +170,52 @@ class ChatCompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionStreamResponseChoice]
+
+    @field_validator("id", mode="before")
+    def ensure_id_is_str(cls, v):
+        return str(v)
+
+
+class CompletionLogprobs(BaseModel):
+    tokens: List[str] = []
+    token_logprobs: List[Optional[float]] = []
+    top_logprobs: List[Optional[Dict[str, float]]] = []
+    text_offset: List[int] = []
+
+
+class CompletionChoice(BaseModel):
+    text: str
+    index: int
+    logprobs: Optional["CompletionLogprobs"] = None
+    finish_reason: Optional[Literal["stop", "length"]] = None
+
+
+class CompletionResponse(BaseModel):
+    id: str = Field(default_factory=lambda: f"cmpl-{uuid.uuid4().hex}")
+    object: str = "text_completion"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: List[CompletionChoice]
+    usage: UsageInfo
+
+    @field_validator("id", mode="before")
+    def ensure_id_is_str(cls, v):
+        return str(v)
+
+
+class CompletionStreamChoice(BaseModel):
+    text: str
+    index: int
+    logprobs: Optional[Dict] = None
+    finish_reason: Optional[Literal["stop", "length"]] = None
+
+
+class CompletionStreamResponse(BaseModel):
+    id: str = Field(default_factory=lambda: f"cmpl-{uuid.uuid4().hex}")
+    object: str = "text_completion"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: List[CompletionStreamChoice]
 
     @field_validator("id", mode="before")
     def ensure_id_is_str(cls, v):

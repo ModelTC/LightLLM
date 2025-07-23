@@ -1,6 +1,6 @@
 import pytest
 
-from lightllm.server.core.objs.req import Req, NormalReq, TokenHealingReq, ChunkedPrefillReq, SamplingParams
+from lightllm.server.core.objs.req import Req, TokenHealingReq, ChunkedPrefillReq, SamplingParams
 
 
 @pytest.fixture
@@ -22,13 +22,6 @@ def test_create_prompt_ids_shm_array(req):
 def test_get_used_tokens(req):
     req.shm_cur_kv_len = 5
     assert req.get_used_tokens() == 5
-
-
-def test_normal_req_get_tuple_tokens():
-    normal_req = NormalReq()
-    normal_req.init(1, [1, 2, 3], {"max_new_tokens": 2}, None)
-    result = normal_req.get_tuple_tokens(False, 10)
-    assert result == (4, 7)  # Adjust expected result based on logic
 
 
 def test_token_healing_req_post_init():
