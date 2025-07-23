@@ -210,7 +210,7 @@ class CudaGraph:
         model: TpPartBaseModel = model
 
         # decode cuda graph init
-        for batch_size in self.cuda_graph_batch_sizes[::-1]:
+        for batch_size in (self.cuda_graph_batch_sizes[-1],):
             seq_len = 2
             total_token_num = batch_size * seq_len
             max_len_in_batch = self.graph_max_len_in_batch
@@ -261,7 +261,7 @@ class CudaGraph:
 
         model: TpPartBaseModel = model
 
-        for batch_size in self.cuda_graph_batch_sizes[::-1]:
+        for batch_size in (self.cuda_graph_batch_sizes[-1],):
             decode_batches = []
             for micro_batch_index in [0, 1]:
                 # dummy decoding, capture the cudagraph
