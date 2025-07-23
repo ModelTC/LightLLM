@@ -574,7 +574,7 @@ class HttpServerManager:
         return
 
     async def abort(self, group_req_id: int):
-        req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, default=None)
+        req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, None)
         if req_status is None:
             logger.warning(f"aborted group_request_id {group_req_id} not exist")
             return
@@ -599,7 +599,7 @@ class HttpServerManager:
             # 清理已经处理完的可以删除的请求
             release_req_status: List[ReqStatus] = []
             for group_req_id_ in list(self.req_id_to_out_inf.keys()):
-                req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id_, default=None)
+                req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id_, None)
                 if req_status is not None and req_status.can_release():
                     release_req_status.append(req_status)
 
@@ -614,7 +614,7 @@ class HttpServerManager:
             if time.time() - pre_time_mark > 120:
                 pre_time_mark = time.time()
                 for group_req_id_ in list(self.req_id_to_out_inf.keys()):
-                    req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id_, default=None)
+                    req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id_, None)
                     if req_status is None:
                         continue
 
@@ -646,7 +646,7 @@ class HttpServerManager:
                 pass
 
             for group_req_id_ in list(self.req_id_to_out_inf.keys()):
-                req_status = self.req_id_to_out_inf.get(group_req_id_, default=None)
+                req_status = self.req_id_to_out_inf.get(group_req_id_, None)
                 if req_status is None:
                     continue
 
