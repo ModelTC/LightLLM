@@ -574,14 +574,15 @@ class HttpServerManager:
         return
 
     async def abort(self, group_req_id: int):
-        if group_req_id in self.req_id_to_out_inf:
-            req_status = self.req_id_to_out_inf[group_req_id]
-            group_req_objs: GroupReqObjs = req_status.group_req_objs
-            for req in group_req_objs.shm_req_objs:
-                req.is_aborted = True
-            logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
-        else:
-            logger.warning("aborted group_request_id not exist")
+        req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, default=None)
+        if req_status is None:
+            logger.warning(f"aborted group_request_id {group_req_id} not exist")
+            return
+
+        group_req_objs: GroupReqObjs = req_status.group_req_objs
+        for req in group_req_objs.shm_req_objs:
+            req.is_aborted = True
+        logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return
 
     async def recycle_resource_loop(self):
@@ -597,9 +598,11 @@ class HttpServerManager:
 
             # 清理已经处理完的可以删除的请求
             release_req_status: List[ReqStatus] = []
-            for req_status in self.req_id_to_out_inf.values():
-                if req_status.can_release():
+            for group_req_id_ in list(self.req_id_to_out_inf.keys()):
+                req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id_, default=None)
+                if req_status is not None and req_status.can_release():
                     release_req_status.append(req_status)
+
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 for req in req_status.group_req_objs.shm_req_objs:
@@ -610,7 +613,11 @@ class HttpServerManager:
             # 先保留这个关键得日志，用于方便定位重构中的问题。
             if time.time() - pre_time_mark > 120:
                 pre_time_mark = time.time()
-                for req_status in self.req_id_to_out_inf.values():
+                for group_req_id_ in list(self.req_id_to_out_inf.keys()):
+                    req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id_, default=None)
+                    if req_status is None:
+                        continue
+
                     logger.info(
                         f"left req id {req_status.group_req_objs.group_req_id}"
                         f"can release {req_status.group_req_objs.shm_req_objs[0].can_released_mark} "
@@ -638,7 +645,11 @@ class HttpServerManager:
             except asyncio.TimeoutError:
                 pass
 
-            for req_status in self.req_id_to_out_inf.values():
+            for group_req_id_ in list(self.req_id_to_out_inf.keys()):
+                req_status = self.req_id_to_out_inf.get(group_req_id_, default=None)
+                if req_status is None:
+                    continue
+
                 token_list = []
                 for req in req_status.group_req_objs.shm_req_objs:
                     req_id = req.request_id
