@@ -180,5 +180,27 @@ async def _pd_process_generate(
 async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket):
     while True:
         handle_list = await forwarding_queue.wait_to_get_all_data()
+
         if handle_list:
-            await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list)))
+            has_finished_req = any(finish_status.is_finished() for _, _, _, finish_status in handle_list)
+            if has_finished_req:
+                # 获取节点负载信息
+                from lightllm.server.api_http import g_objs
+                if g_objs.shared_token_load is not None:
+                    current_load = [
+                        float(g_objs.shared_token_load.get_current_load(dp_index)) for dp_index in range(g_objs.args.dp)
+                    ]
+                    if g_objs.args.dp == 1:
+                        current_load = current_load[0]
+                    load_info = {
+                        "current_load": current_load,
+                        "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{g_objs.args.port}"
+                    }
+                else:
+                    load_info = {
+                        "current_load": 0.0,
+                        "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{g_objs.args.port}"
+                    }
+                await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
+            else:
+                await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, None)))
