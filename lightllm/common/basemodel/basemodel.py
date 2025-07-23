@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from typing import final
 
+import torch.distributed as dist
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.mem_manager import MemoryManager
@@ -18,7 +19,7 @@ from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_m
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.dist_utils import get_dp_world_size
+from lightllm.utils.dist_utils import get_dp_world_size, get_global_world_size, get_global_rank
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed.communication_op import CustomProcessGroup, dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
@@ -344,10 +345,18 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ) -> ModelOutput:
-        if self.graph is not None and self.graph.can_run(model_input.batch_size, model_input.max_len_in_batch):
-            find_graph_batch_size = self.graph.find_closest_graph_batch_size(model_input.batch_size)
+        # collect global max batch_size
+        world_size = get_global_world_size()
+        rank = get_global_rank()
+        all_batch_sizes = [None] * world_size
+        all_batch_sizes[rank] = model_input.batch_size
+        dist.all_gather_object(all_batch_sizes, model_input.batch_size)
+        global_max_batch_size = max(all_batch_sizes)
+
+        if self.graph is not None and self.graph.can_run(global_max_batch_size, model_input.max_len_in_batch):
+            find_graph_batch_size = self.graph.find_closest_graph_batch_size(global_max_batch_size)
             if find_graph_batch_size is None:
-                logger.error("No suitable graph batch size found for batch_size={model_input.batch_size}, return None.")
+                logger.error("No suitable graph batch size found for batch_size={global_max_batch_size}, return None.")
                 return None
 
             padded_model_input = self._create_padded_decode_model_input(model_input, find_graph_batch_size)
@@ -501,10 +510,18 @@ class TpPartBaseModel:
         origin_batch_size = model_input0.batch_size
         max_len_in_batch = max(model_input0.max_len_in_batch, model_input1.max_len_in_batch)
 
-        if self.graph is not None and self.graph.can_run(origin_batch_size, max_len_in_batch):
-            find_graph_batch_size = self.graph.find_closest_graph_batch_size(origin_batch_size)
+        # collect global max batch_size
+        world_size = get_global_world_size()
+        rank = get_global_rank()
+        all_batch_sizes = [None] * world_size
+        all_batch_sizes[rank] = origin_batch_size
+        dist.all_gather_object(all_batch_sizes, origin_batch_size)
+        global_max_batch_size = max(all_batch_sizes)
+
+        if self.graph is not None and self.graph.can_run(global_max_batch_size, max_len_in_batch):
+            find_graph_batch_size = self.graph.find_closest_graph_batch_size(global_max_batch_size)
             if find_graph_batch_size is None:
-                logger.error("No suitable graph batch size found for batch_size={origin_batch_size}, return None.")
+                logger.error("No suitable graph batch size found for batch_size={global_max_batch_size}, return None.")
                 return None
 
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, find_graph_batch_size)
