@@ -158,6 +158,16 @@ def normal_or_p_d_start(args):
     else:
         args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
+    if args.visual_dp <= 0:
+        raise ValueError("visual_dp must be a positive integer.")
+
+    # 检查visual_infer_batch_size是否合理
+    if args.visual_infer_batch_size // args.visual_dp < 1 or args.visual_infer_batch_size % args.visual_dp != 0:
+        raise ValueError(
+            f"visual_infer_batch_size ({args.visual_infer_batch_size}) must be "
+            f"a positive integer multiple of visual_dp ({args.visual_dp})"
+        )
+
     if args.disable_chunked_prefill:
         args.chunked_prefill_size = args.max_req_total_len
         # 普通模式下
