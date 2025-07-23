@@ -49,15 +49,15 @@ class CudaGraph:
     def can_run(self, batch_size, max_len_in_batch):
         return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
 
-    def get_graph(self, batch_size):
+    def need_capture(self, batch_size):
         # We assume batch_size has already been adjusted to the closest supported graph batch size
         # If the graph already exists, get it and move it to the most recently used position.
         if batch_size in self.graph:
             find_graph = self.graph.pop(batch_size)  # Dequeue the graph
             self.graph[batch_size] = find_graph  # Enqueue the graph for LRU
-            return find_graph
+            return False
         else:
-            return None
+            return True
 
     def evict_oldest_graph(self):
         if self.graph:

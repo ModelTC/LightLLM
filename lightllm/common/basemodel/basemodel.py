@@ -381,9 +381,7 @@ class TpPartBaseModel:
             )
             infer_state.init_some_extra_state(self, padded_model_input.input_ids)
 
-            # Check if a graph needs to be captured.
-            # get_graph returns None if a graph for the batch_size doesn't exist.
-            if self.graph.get_graph(find_graph_batch_size) is None:
+            if self.graph.need_capture(find_graph_batch_size):
                 infer_state.is_cuda_graph = True
                 model_output: ModelOutput = self.graph.capture_decode(
                     self._token_forward, padded_model_input.input_ids, infer_state
@@ -574,9 +572,7 @@ class TpPartBaseModel:
             )
             infer_state1.init_some_extra_state(self, padded_model_input1.input_ids)
 
-            # Check if a graph needs to be captured.
-            # get_graph returns None if a graph for the batch_size doesn't exist.
-            if self.graph.get_graph(find_graph_batch_size) is None:
+            if self.graph.need_capture(find_graph_batch_size):
                 infer_state0.is_cuda_graph = True
                 infer_state1.is_cuda_graph = True
 
