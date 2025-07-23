@@ -133,10 +133,6 @@ class ModelRpcServer:
             else:
                 self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
         elif is_nixl_prefill_node:
-<<<<<<< HEAD
-=======
-            assert not enable_mtp, "nixl pd does not support mtp now."
->>>>>>> a9995b3... fix lint.
             if self.args.dp > 1:
                 self.backend = PDNIXLDPBackendForPrefillNode(self.info_queue, self.result_queue, self.mem_queue)
             else:
@@ -149,10 +145,6 @@ class ModelRpcServer:
                 self.backend = DecodeNode(self.info_queue, self.mem_queue)
 
         elif is_nixl_decode_node:
-<<<<<<< HEAD
-=======
-            assert not enable_mtp, "nixl pd does not support mtp now."
->>>>>>> a9995b3... fix lint.
             if self.args.dp > 1:
                 self.backend = PDNIXLDPBackendForDecodeNode(self.info_queue, self.result_queue, self.mem_queue)
             else:
