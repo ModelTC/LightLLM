@@ -209,8 +209,8 @@ class HttpServerManagerForPDMaster:
         try:
             await asyncio.wait_for(up_status_event.wait(), timeout=60)
         except asyncio.TimeoutError:
-            logger.warning(f"group_request_id: {group_request_id} kv move time out err")
-            assert False, f"req_id {group_request_id} kv move time out, server is busy"
+            logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
+            raise ServerBusyError()
 
         sampling_params.move_kv_to_decode_node.initialize(None)
         sampling_params.max_new_tokens = old_max_new_tokens - 1
