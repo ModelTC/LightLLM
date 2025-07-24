@@ -645,50 +645,54 @@ class HttpServerManager:
             except asyncio.TimeoutError:
                 pass
 
-            for group_req_id_ in list(self.req_id_to_out_inf.keys()):
-                req_status = self.req_id_to_out_inf.get(group_req_id_, None)
-                if req_status is None:
-                    continue
+            try:
+                for group_req_id_ in list(self.req_id_to_out_inf.keys()):
+                    req_status = self.req_id_to_out_inf.get(group_req_id_, None)
+                    if req_status is None:
+                        continue
 
-                token_list = []
-                for req in req_status.group_req_objs.shm_req_objs:
-                    req_id = req.request_id
-                    read_token_count = 1
-                    if req.out_tokens_queue.is_full():
-                        read_token_count = LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
+                    token_list = []
+                    for req in req_status.group_req_objs.shm_req_objs:
+                        req_id = req.request_id
+                        read_token_count = 1
+                        if req.out_tokens_queue.is_full():
+                            read_token_count = LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 
-                    for _ in range(read_token_count):
-                        if not req.out_tokens_queue.is_empty():
+                        for _ in range(read_token_count):
+                            if not req.out_tokens_queue.is_empty():
 
-                            text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
-                            req.cumlogprob += float(req.shm_logprobs.arr[src_index])
-                            metadata = {
-                                "id": int(req.shm_prompt_ids.arr[src_index]),
-                                "logprob": float(req.shm_logprobs.arr[src_index]),
-                                "cumlogprob": float(req.cumlogprob) / count_output_tokens,
-                                "special": special,
-                                "count_output_tokens": count_output_tokens,
-                                "prompt_cache_len": req.prompt_cache_len,
-                                "mtp_accepted_token_num": req.mtp_accepted_token_num,
-                            }
-                            if self.args.return_all_prompt_logprobs:
-                                metadata.update(req.get_all_prompt_metadata())
-                            if self.args.use_reward_model:
-                                metadata["score"] = float(req.reward_score)
+                                text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
+                                req.cumlogprob += float(req.shm_logprobs.arr[src_index])
+                                metadata = {
+                                    "id": int(req.shm_prompt_ids.arr[src_index]),
+                                    "logprob": float(req.shm_logprobs.arr[src_index]),
+                                    "cumlogprob": float(req.cumlogprob) / count_output_tokens,
+                                    "special": special,
+                                    "count_output_tokens": count_output_tokens,
+                                    "prompt_cache_len": req.prompt_cache_len,
+                                    "mtp_accepted_token_num": req.mtp_accepted_token_num,
+                                }
+                                if self.args.return_all_prompt_logprobs:
+                                    metadata.update(req.get_all_prompt_metadata())
+                                if self.args.use_reward_model:
+                                    metadata["score"] = float(req.reward_score)
 
-                            req.out_tokens_queue.pop_no_ret()
+                                req.out_tokens_queue.pop_no_ret()
 
-                            if req.finish_token_index != src_index:
-                                token_list.append((req_id, text, metadata, FinishStatus()))
+                                if req.finish_token_index != src_index:
+                                    token_list.append((req_id, text, metadata, FinishStatus()))
+                                else:
+                                    finish_status = FinishStatus(req.finish_status.status)
+                                    token_list.append((req_id, text, metadata, finish_status))
                             else:
-                                finish_status = FinishStatus(req.finish_status.status)
-                                token_list.append((req_id, text, metadata, finish_status))
-                        else:
-                            break
+                                break
 
-                async with req_status.lock:
-                    req_status.out_token_info_list.extend(token_list)
-                    req_status.event.set()
+                    async with req_status.lock:
+                        req_status.out_token_info_list.extend(token_list)
+                        req_status.event.set()
+            except BaseException as e:
+                logger.exception(str(e))
+                raise e
 
             self.recycle_event.set()
         return
