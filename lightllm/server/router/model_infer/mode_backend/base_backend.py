@@ -282,7 +282,9 @@ class ModeBackend:
                 self.node_broadcast_tensor.fill_(1)
             else:
                 self.node_broadcast_tensor.fill_(0)
-        dist.broadcast(self.node_broadcast_tensor, src=0, group=self.node_nccl_group, async_op=False)
+
+        src_rank_id = self.args.node_rank * self.node_world_size
+        dist.broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
         new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
