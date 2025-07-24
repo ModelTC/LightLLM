@@ -148,6 +148,8 @@ class ModelRpcServer:
             else:
                 self.backend = PDNIXLBackendForDecodeNode(self.info_queue, self.result_queue, self.mem_queue)
 
+        elif self.args.dp > 1:
+            self.backend = DPChunkedPrefillBackend()
         elif use_reward_model:
             self.backend = RewardModelBackend()
         elif return_all_prompt_logprobs:

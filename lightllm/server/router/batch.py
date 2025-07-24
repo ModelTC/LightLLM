@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 from lightllm.server.core.objs import ShmReqManager, Req, PDNIXLChunkedPrefillReq
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.dist_utils import get_dp_world_size
 
 logger = init_logger(__name__)
 
