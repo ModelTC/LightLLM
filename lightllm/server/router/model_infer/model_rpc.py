@@ -7,26 +7,19 @@ import inspect
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from lightllm.server.router.model_infer.mode_backend import (
-    ContinuesBatchBackend,
-    ReturnPromptLogProbBackend,
     ChunkedPrefillBackend,
-    DiversehBackend,
+    FirstTokenConstraintBackend,
+    OutlinesConstraintBackend,
+    ReturnPromptLogProbBackend,
     RewardModelBackend,
     TokenHealingBackend,
-    OutlinesConstraintBackend,
     XgrammarBackend,
-    FirstTokenConstraintBackend,
     DPChunkedPrefillBackend,
-    ContinuesBatchBackendForDecodeNode,
+    DiversehBackend,
+    DecodeNode,
     DPForDecodeNode,
     ChunckedPrefillForPrefillNode,
     DPChunkedForPrefillNode,
-    ContinuesBatchWithMTPBackend,
-    DPChunkedPrefillWithMTPBackend,
-    DPForMtpDecodeNode,
-    ContinuesBatchBackendForMtpDecodeNode,
-    ChunckedPrefillForMtpPrefillNode,
-    DPChunkedForMtpPrefillNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.core.objs import RpcShmParams, RpcShmResults, ShmSyncStatusArray
@@ -69,10 +62,8 @@ class ModelRpcServer:
         self.rank_in_node = rank_in_node
         logger.info(f"Initialized RPC server for rank {self.rank}.")
 
-        # 多卡才是跨进程的
-        if self.args.tp != 1:
-            self.loop_thread = threading.Thread(target=self.rpc_loop)
-            self.loop_thread.start()
+        self.rpc_loop_thread = threading.Thread(target=self.rpc_loop, daemon=True)
+        self.rpc_loop_thread.start()
         return
 
     def rpc_loop(self):
@@ -114,7 +105,6 @@ class ModelRpcServer:
         # 填充真正的 rank_id 参数
         kvargs["rank_id"] = self.rank
         self.world_size = kvargs["world_size"]
-        disable_chunked_prefill = self.args.disable_chunked_prefill
         return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
         use_reward_model = self.args.use_reward_model
         diverse_mode = self.args.diverse_mode
@@ -127,35 +117,18 @@ class ModelRpcServer:
         is_prefill_node = self.args.run_mode == "prefill"
         is_decode_node = self.args.run_mode == "decode"
 
-        enable_mtp = self.args.mtp_mode is not None
-
         if is_prefill_node:
-            if enable_mtp:
-                if self.args.dp > 1:
-                    self.backend = DPChunkedForMtpPrefillNode(self.info_queue, self.mem_queue)
-                else:
-                    self.backend = ChunckedPrefillForMtpPrefillNode(self.info_queue, self.mem_queue)
+            if self.args.dp > 1:
+                self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
             else:
-                if self.args.dp > 1:
-                    self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
-                else:
-                    self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
+                self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
         elif is_decode_node:
-            if enable_mtp:
-                if self.args.dp > 1:
-                    self.backend = DPForMtpDecodeNode(self.info_queue, self.mem_queue)
-                else:
-                    self.backend = ContinuesBatchBackendForMtpDecodeNode(self.info_queue, self.mem_queue)
+            if self.args.dp > 1:
+                self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
             else:
-                if self.args.dp > 1:
-                    self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
-                else:
-                    self.backend = ContinuesBatchBackendForDecodeNode(self.info_queue, self.mem_queue)
+                self.backend = DecodeNode(self.info_queue, self.mem_queue)
         elif self.args.dp > 1:
-            if enable_mtp:
-                self.backend = DPChunkedPrefillWithMTPBackend()
-            else:
-                self.backend = DPChunkedPrefillBackend()
+            self.backend = DPChunkedPrefillBackend()
         elif use_reward_model:
             self.backend = RewardModelBackend()
         elif return_all_prompt_logprobs:
@@ -170,16 +143,8 @@ class ModelRpcServer:
             self.backend = XgrammarBackend()
         elif is_first_token_constraint_mode:
             self.backend = FirstTokenConstraintBackend()
-        elif disable_chunked_prefill:
-            if enable_mtp:
-                self.backend = ContinuesBatchWithMTPBackend()
-            else:
-                self.backend = ContinuesBatchBackend()
         else:
-            if enable_mtp:
-                self.backend = ContinuesBatchWithMTPBackend()
-            else:
-                self.backend = ChunkedPrefillBackend()
+            self.backend = ChunkedPrefillBackend()
 
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
@@ -190,52 +155,14 @@ class ModelRpcServer:
             logger.info("init redundancy_expert_manager")
         else:
             self.redundancy_expert_manager = None
-
         return
-
-    def prefill(self, reqs):
-        try:
-            # only deepseekv3 can support auto_update_redundancy_expert
-            if self.redundancy_expert_manager is not None:
-                self.redundancy_expert_manager.step()
-
-            return self.backend.prefill(reqs)
-        except Exception as e:
-            err_msg = str(e)
-            logger.exception(f"Batch prefill encountered an unexpected ERROR: {err_msg}")
-            raise e
-
-    def decode(self):
-        try:
-            # only deepseekv3 can support auto_update_redundancy_expert
-            if self.redundancy_expert_manager is not None:
-                self.redundancy_expert_manager.step()
-
-            return self.backend.decode()
-        except Exception as e:
-            err_msg = str(e)
-            logger.exception(f"Batch decode encountered an unexpected ERROR: {err_msg}")
-            raise e
-
-    def pause_reqs(self, req_ids):
-        return self.backend.pause_reqs(req_ids)
 
     def get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
 
 
 class ModelRpcClient:
-    def __init__(self, model_infer_servers: List[ModelRpcServer], world_size, rpc_event, rpc_finished_event):
-        # model_infer_servers 是传入的推理服务对象，但是在重构后，
-        # 单卡不使用rpc 通信的时候，里面才有真实对象，当多卡使用rpc
-        # 以后，model_infer_servers 传入的是 None 数组
-        if world_size == 1:
-            self.model_infer_server: ModelRpcServer = model_infer_servers[0]
-        else:
-            self.model_infer_server: ModelRpcServer = None
-
-        self.world_size = world_size
-        self.use_rpc = self.world_size != 1
+    def __init__(self, rpc_event, rpc_finished_event):
         self.rpc_shm_params = RpcShmParams()
         self.rpc_shm_params.create_or_link_shm()
         self.rpc_shm_results = RpcShmResults()
@@ -246,65 +173,22 @@ class ModelRpcClient:
         return
 
     async def init_model(self, kvargs):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("init_model", (kvargs,))
-            self.rpc_event.set()
+        self.rpc_shm_params.write_func_params("init_model", (kvargs,))
+        self.rpc_event.set()
 
-            self.rpc_finished_event.wait()
-            self.rpc_finished_event.clear()
-            return
-        else:
-            self.model_infer_server.init_model(kvargs)
-            return
-
-    async def prefill(self, reqs):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("prefill", (reqs,))
-            self.rpc_event.set()
-
-            await asyncio.to_thread(self.rpc_finished_event.wait)
-            self.rpc_finished_event.clear()
-            return
-        else:
-            self.model_infer_server.prefill(reqs)
-            return
-
-    async def decode(self):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("decode", ())
-            self.rpc_event.set()
-
-            await asyncio.to_thread(self.rpc_finished_event.wait)
-            self.rpc_finished_event.clear()
-            return
-        else:
-            self.model_infer_server.decode()
-            return
-
-    async def pause_reqs(self, req_ids):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("pause_reqs", (req_ids,))
-            self.rpc_event.set()
-
-            self.rpc_finished_event.wait()
-            self.rpc_finished_event.clear()
-            return
-        else:
-            self.model_infer_server.pause_reqs(req_ids)
-            return
+        self.rpc_finished_event.wait()
+        self.rpc_finished_event.clear()
+        return
 
     async def get_max_total_token_num(self):
-        if self.use_rpc:
-            self.rpc_shm_params.write_func_params("get_max_total_token_num", ())
-            self.rpc_event.set()
+        self.rpc_shm_params.write_func_params("get_max_total_token_num", ())
+        self.rpc_event.set()
 
-            self.rpc_finished_event.wait()
-            self.rpc_finished_event.clear()
-            func_name, ret = self.rpc_shm_results.read_func_result()
-            assert func_name == "get_max_total_token_num"
-            return ret
-        else:
-            return self.model_infer_server.get_max_total_token_num()
+        self.rpc_finished_event.wait()
+        self.rpc_finished_event.clear()
+        func_name, ret = self.rpc_shm_results.read_func_result()
+        assert func_name == "get_max_total_token_num"
+        return ret
 
 
 def _init_env(
@@ -335,7 +219,7 @@ def _init_env(
     )
     success_event.set()
 
-    model_rpc_server.loop_thread.join()
+    model_rpc_server.rpc_loop_thread.join()
     return
 
 
@@ -351,19 +235,6 @@ async def start_model_process(
     router_lock: mp.Queue,
 ):
     import lightllm.utils.rpyc_fix_utils as _
-
-    # 单卡单机时不使用 rpc
-    if node_world_size == 1 and args.nnodes == 1:
-        return ModelRpcServer(
-            args,
-            rank,
-            rank_in_node,
-            node_world_size,
-            rpc_event,
-            rpc_finished_event,
-            info_queue,
-            mem_queue,
-        )
 
     success_event = mp.Event()
     proc = mp.Process(

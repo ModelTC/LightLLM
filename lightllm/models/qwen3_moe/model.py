@@ -25,4 +25,4 @@ class Qwen3MOEModel(Qwen3TpPartModel):
 
     def _init_custom(self):
         super()._init_custom()
-        dist_group_manager.new_deepep_group(256, self.config["hidden_size"])
+        dist_group_manager.new_deepep_group(self.config["num_experts"], self.config["hidden_size"])

@@ -202,6 +202,7 @@ class CudaGraph:
             )
             b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
             b_seq_len.fill_(seq_len)
+            b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
 
             model_input = ModelInput(
                 batch_size=batch_size,
@@ -211,6 +212,7 @@ class CudaGraph:
                 mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
+                b_mtp_index=b_mtp_index,
                 is_prefill=False,
                 **model._gen_special_model_input(batch_size),
             )
@@ -256,6 +258,7 @@ class CudaGraph:
                 )
                 b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
                 b_seq_len.fill_(seq_len)
+                b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
 
                 micro_batch = ModelInput(
                     is_prefill=False,
@@ -263,6 +266,7 @@ class CudaGraph:
                     total_token_num=total_token_num,
                     max_len_in_batch=max_len_in_batch,
                     input_ids=input_ids,
+                    b_mtp_index=b_mtp_index,
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,

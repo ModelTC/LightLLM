@@ -1,14 +1,8 @@
 import os
-import shutil
 import torch
 from .impl import ChunkedPrefillBackend
-from typing import List, Tuple
+from typing import List
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
-from lightllm.server.router.model_infer.mode_backend.pre import (
-    prepare_prefill_inputs,
-    prepare_decode_inputs,
-)
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -17,6 +11,9 @@ logger = init_logger(__name__)
 class FirstTokenConstraintBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
+        self.prefill_mask_func = self._mask_first_gen_token_logits
+        self.decode_mask_func = self._mask_first_gen_token_logits
+        self.extra_post_req_handle_func = None
 
     def init_custom(self):
         first_allowed_tokens_strs: str = os.environ.get("FIRST_ALLOWED_TOKENS", None)
@@ -29,58 +26,6 @@ class FirstTokenConstraintBackend(ChunkedPrefillBackend):
         # check token_id < vocab_size
         assert all(e < self.model.vocab_size for e in self.first_allowed_tokens)
         self.fill_value = torch.tensor(-1000000.0)
-        return
-
-    def decode(self):
-        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids
-        )
-
-        if aborted_reqs:
-            g_infer_context.filter_reqs(aborted_reqs)
-
-        # 先 decode
-        if decode_reqs:
-            model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-            model_output = self.model.forward(model_input)
-            logits = model_output.logits
-            self._overlap_req_init_and_filter(
-                uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
-            )
-            self._mask_first_gen_token_logits(run_reqs, logits)
-            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-            self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=False, do_filter_finished_reqs=False
-            )
-            del model_output
-            del logits
-
-        # 再 prefill
-        if len(decode_reqs) == 0 or (self.forward_step % self.max_wait_step == 0) or (self.need_prefill_count > 0):
-            if prefill_reqs:
-                self.need_prefill_count -= 1
-                model_input, run_reqs = prepare_prefill_inputs(
-                    prefill_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
-                )
-                model_output = self.model.forward(model_input)
-                logits = model_output.logits
-                self._overlap_req_init_and_filter(
-                    uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
-                )
-                self._mask_first_gen_token_logits(run_reqs, logits)
-                next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-                next_token_ids = next_token_ids.detach().cpu().numpy()
-                next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-                self._post_handle(
-                    run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=True, do_filter_finished_reqs=False
-                )
-                del model_output
-                del logits
-
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
-        self.forward_step += 1
         return
 
     def _mask_first_gen_token_logits(self, run_reqs: List[InferReq], logits: torch.Tensor):

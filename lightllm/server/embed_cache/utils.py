@@ -22,7 +22,7 @@ def tensor2bytes(t: torch.Tensor):
 
 def bytes2tensor(b):
     # return torch.from_numpy(np.frombuffer(b, dtype=np.float16)).cuda()
-    return torch.load(BytesIO(b))
+    return torch.load(BytesIO(b), weights_only=False)
 
 
 def create_shm(name, data):

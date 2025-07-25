@@ -31,9 +31,22 @@ def get_eos_token_ids(model_path: str):
     assert False, "error eos_token_id format in config.json"
 
 
+def get_model_architectures(model_path: str):
+    try:
+        config_json = get_config_json(model_path)
+        arch = config_json["architectures"][0]
+        return arch
+    except:
+        logger.error("can not get architectures from config.json, return unknown_architecture")
+        return "unknown_architecture"
+
+
 def get_vocab_size(model_path: str):
     try:
         config_json = get_config_json(model_path)
+        if "llm_config" in config_json:
+            vocab_size = int(config_json["llm_config"]["vocab_size"])
+            return vocab_size
         vocab_size = config_json["vocab_size"]
         if not isinstance(vocab_size, int):
             vocab_size = int(vocab_size)

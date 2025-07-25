@@ -56,7 +56,7 @@ def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None):
     if N > BLOCK_SIZE:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
+    num_warps = min(max(BLOCK_SIZE // 256, 1), 4)
     num_warps = triton.next_power_of_2(num_warps)
     if BLOCK_SIZE > 16384:
         BLOCK_SIZE = 16384

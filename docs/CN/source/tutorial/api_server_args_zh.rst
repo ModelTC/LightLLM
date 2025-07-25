@@ -274,10 +274,6 @@ attention类型选择参数
 
     多模态资源的缓存服务器容量，默认为 ``200``
 
-.. option:: --cache_reserved_ratio
-
-    缓存服务器清理后的保留容量比例，默认为 ``0.5``
-
 .. option:: --visual_infer_batch_size
 
     每次推理批次中处理的图像数量，默认为 ``1``

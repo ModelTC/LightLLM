@@ -11,7 +11,7 @@ from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
 from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
 from lightllm.server.multimodal_params import AudioItem
-
+from rpyc.utils.classic import obtain
 
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
@@ -89,7 +89,7 @@ class WhisperAudioModel:
         self.sampling_rate = 16000
         self.max_length = self.max_seconds * self.sampling_rate
         self.cache_port = kvargs["cache_port"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port)
+        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         data_type = kvargs["data_type"]
         if data_type in ["bf16", "bfloat16"]:
             self.data_type = torch.bfloat16
@@ -190,8 +190,13 @@ class WhisperAudioModel:
         audio_lens_after_cnn = np.array(audio_lens_after_cnn, dtype=np.int32)
         audio_token_num = (audio_lens_after_cnn - 2) // 2 + 1
 
-        for i in range(len(uuids)):
-            if not self.cache_client.root.get_item_embed(uuids[i]):
+        ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
+        ids_to_set = []
+        for i, ready in enumerate(ready_audio):
+            if not ready:
+                uid = uuids[i]
                 cur_embed_bytes = tensor2bytes(audios[i][: audio_token_num[i]])
-                create_shm(get_shm_name_embed(uuids[i]), cur_embed_bytes)
-                self.cache_client.root.set_item_embed(uuids[i])
+                create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                ids_to_set.append(uid)
+        if ids_to_set:
+            self.cache_client.root.set_items_embed(ids=ids_to_set)

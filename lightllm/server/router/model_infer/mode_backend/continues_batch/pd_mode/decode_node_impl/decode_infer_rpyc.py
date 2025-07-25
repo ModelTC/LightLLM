@@ -4,7 +4,7 @@ import rpyc
 import time
 from typing import Dict, List, Tuple, Optional, Union
 from rpyc.utils.classic import obtain
-from .decode_impl import ContinuesBatchBackendForDecodeNode
+from .decode_impl import DecodeNode
 from lightllm.common.basemodel.infer_lock import acquire_lock_until_ready, release_acquired_lock, g_router_lock
 from .decode_task_cache import g_kv_move_task_cache, g_success_kv_move_task_cache
 from lightllm.server.pd_io_struct import KVMoveTask
@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 
 
 class PDDecodeInferRpcServer(rpyc.Service):
-    def __init__(self, backend: ContinuesBatchBackendForDecodeNode) -> None:
+    def __init__(self, backend: DecodeNode) -> None:
         super().__init__()
         self.backend = backend
         self.device_id = self.backend.current_device_id

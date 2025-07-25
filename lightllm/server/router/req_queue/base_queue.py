@@ -25,7 +25,6 @@ class BaseQueue:
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
         self.router_max_new_token_len = args.router_max_new_token_len
-        self.pause_req_dict: Dict[int, Req] = {}  # List of paused requests
 
     def append(self, req: Req):
         req.sample_params.suggested_dp_index = self.dp_index
@@ -38,19 +37,8 @@ class BaseQueue:
         self.waiting_req_list.extend(req_group)
         return
 
-    def get_paused_req_num(self, fake_dp_index: int = 0):
-        assert fake_dp_index == 0
-        return len(self.pause_req_dict)
-
     def get_wait_req_num(self):
         return len(self.waiting_req_list)
-
-    def back_to_wait_list(self, req_list: List[Req]):
-        for req in req_list:
-            if req.is_paused:
-                self.pause_req_dict[req.request_id] = req
-        self.waiting_req_list = req_list + self.waiting_req_list
-        return
 
     def is_busy(self):
         # 计算当前所有的token使用量, 如果使用了dynamic prompt cache, 使用的token量中不包含，cache tree 中未被引用的数据。
@@ -70,12 +58,10 @@ class BaseQueue:
 
         return len([req for req in current_batch.reqs if req.sample_params.suggested_dp_index == self.dp_index])
 
-    def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
+    def generate_new_batch(self, current_batch: Batch):
         """
         args:
             current_batch: current batch
-            limit_router_queue_length: the least length of waiting list across all nodes.
-            It only works when nnodes > 1 and dp_size == 1.
         return:
             new batch
         """

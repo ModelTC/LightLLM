@@ -4,35 +4,26 @@ from lightllm.server.router.model_infer.infer_batch import (
     g_infer_context,
     InferReq,
     InferReqGroup,
-    InferSamplingParams,
 )
 from typing import List, Tuple
-from lightllm.utils.log_utils import init_logger
-from lightllm.server.tokenizer import get_tokenizer
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
-    prepare_decode_inputs,
 )
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
+from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from ..chunked_prefill.impl import ChunkedPrefillBackend
 
 
-class DiversehBackend(ModeBackend):
+class DiversehBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
+        self.prefill = self.beam_prefill
+        self.classed_req_strict_prefill = True
 
-    def init_custom(self):
-        pass
-
-    def build_group(self, req_ids: List[int]):
-        for r_id in req_ids:
-            req: InferReq = g_infer_context.requests_mapping[r_id]
-            group_req_id = req.shm_req.group_req_id
-            if group_req_id not in g_infer_context.group_mapping:
-                g_infer_context.group_mapping[group_req_id] = InferReqGroup(group_req_id=group_req_id)
-            g_infer_context.group_mapping[group_req_id].add_req(r_id)
-
-    def diverse_copy(self, groups: List[InferReqGroup]):
+    def diverse_copy(self, groups: List[InferReqGroup]) -> Tuple[List[int], List[InferReq]]:
         batch_idx = []
         run_reqs = []
         for i in range(len(groups)):
@@ -46,68 +37,76 @@ class DiversehBackend(ModeBackend):
             run_reqs.extend(req_group.get_all_reqs())
         return batch_idx, run_reqs
 
-    def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs, init_req_obj=False)
-        return
+    def beam_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+        # 第一阶段
+        group_reqs = [
+            g_infer_context.requests_mapping[req.req_id]
+            for req in prefill_reqs
+            if convert_sub_id_to_group_id(req.req_id) == req.req_id
+        ]
+        groups = [
+            g_infer_context.group_mapping[req.req_id]
+            for req in prefill_reqs
+            if convert_sub_id_to_group_id(req.req_id) == req.req_id
+        ]
 
-    def decode(self):
-        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids,
-            strict_prefill=True,
+        model_input, group_run_reqs = prepare_prefill_inputs(
+            group_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
         )
 
-        if aborted_reqs:
-            g_infer_context.filter_reqs(aborted_reqs)
-        if prefill_reqs:
-            group_reqs = [
-                g_infer_context.requests_mapping[req.req_id]
-                for req in prefill_reqs
-                if convert_sub_id_to_group_id(req.req_id) == req.req_id
-            ]
-            groups = [
-                g_infer_context.group_mapping[req.req_id]
-                for req in prefill_reqs
-                if convert_sub_id_to_group_id(req.req_id) == req.req_id
-            ]
-            model_input, group_run_reqs = prepare_prefill_inputs(
-                group_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
-            )
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+
             model_output = self.model.forward(model_input)
             logits = model_output.logits
 
-            uninit_req_ids = [req.req_id for req in uninit_reqs]
-            self._overlap_req_init_and_filter(
-                uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
-            )
-            self.build_group(uninit_req_ids)
             batch_idx, run_reqs = self.diverse_copy(groups)
+            b_req_idx = [req.req_idx for req in run_reqs]
+            b_has_out = [model_input.b_prefill_has_output_cpu[i] for i in batch_idx]
+
+            batch_idx = g_pin_mem_manager.gen_from_list(key="batch_idx_", data=batch_idx, dtype=torch.int64).cuda(
+                non_blocking=True
+            )
+            b_req_idx = g_pin_mem_manager.gen_from_list(key="b_req_idx_", data=b_req_idx, dtype=torch.int32).cuda(
+                non_blocking=True
+            )
+            b_has_out = g_pin_mem_manager.gen_from_list(key="b_has_out_", data=b_has_out, dtype=torch.bool).cuda(
+                non_blocking=True
+            )
+
             logits = logits[batch_idx]
-            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+            b_mtp_index = model_input.b_mtp_index[batch_idx]
 
-            self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=True, do_filter_finished_reqs=False
+            next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+
+            scatter_token(
+                next_token_ids=next_token_ids,
+                req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                b_req_idx=b_req_idx,
+                b_mtp_index=b_mtp_index,
+                b_has_out=b_has_out,
             )
 
-        if decode_reqs:
-            model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-            model_output = self.model.forward(model_input)
-            logits = model_output.logits
-            uninit_req_ids = [req.req_id for req in uninit_reqs]
-            self._overlap_req_init_and_filter(
-                uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True
+            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
+                next_token_ids=next_token_ids, next_token_logprobs=next_token_logprobs
             )
-            self.build_group(uninit_req_ids)
 
-            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+            sync_event = torch.cuda.Event()
+            sync_event.record()
 
-            self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=False, do_filter_finished_reqs=False
-            )
-        uninit_req_ids = [req.req_id for req in uninit_reqs]
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
-        self.build_group(uninit_req_ids)
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+        update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+
+        # 第三阶段
+        event_pack.notify_forward_and_wait_post_handle()
+        sync_event.synchronize()
+        self._post_handle(
+            run_reqs=run_reqs,
+            next_token_ids=next_token_ids_cpu,
+            next_token_logprobs=next_token_logprobs_cpu,
+            run_reqs_update_packs=update_packs,
+            extra_post_req_handle_func=self.extra_post_req_handle_func,
+        )
+        # 第四阶段
+        event_pack.notify_pre_post_handle()
         return

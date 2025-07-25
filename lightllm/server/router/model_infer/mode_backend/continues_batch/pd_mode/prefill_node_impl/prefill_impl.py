@@ -5,30 +5,27 @@ import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from typing import List, Tuple
-from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams, g_infer_context
-from lightllm.server.core.objs import FinishStatus
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import KVMoveTask, DecodeNodeInfo
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.router.model_infer.mode_backend.generic_pre_process import prepare_prefill_inputs
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.infer_lock import g_router_lock, g_infer_state_lock
 from rpyc.utils.server import ThreadedServer
 from .prefill_task_cache import g_kv_move_task_cache
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
+from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 
 logger = init_logger(__name__)
 
 
-class ChunckedPrefillForPrefillNode(ModeBackend):
+class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
         super().__init__()
+        self.support_overlap = False
         self.info_queue: mp.Queue = info_queue
         self.mem_queue: mp.Queue = mem_queue
+        self.classed_req_no_decode = True
 
     def init_custom(self):
 
@@ -53,47 +50,26 @@ class ChunckedPrefillForPrefillNode(ModeBackend):
 
         return
 
-    def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs)
+    def _pre_handle_finished_reqs(self, finished_reqs):
+        self._prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(finished_reqs=finished_reqs)
         return
 
-    def decode(self):
-        uinit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids,
-            no_decode=True,
-        )
-        assert len(uinit_reqs) == 0
-        assert len(decode_reqs) == 0
+    def _prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, finished_reqs: List[InferReq]):
+        if len(finished_reqs) == 0:
+            return
 
-        self._filter_reqs(aborted_reqs)
-
-        if ok_finished_reqs:
-            self.prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(ok_finished_reqs)
-            self._filter_reqs(ok_finished_reqs)
-
-        if prefill_reqs:
-            model_input, run_reqs = prepare_prefill_inputs(
-                prefill_reqs, is_chuncked_mode=True, is_multimodal=self.is_multimodal
-            )
-
-            model_output = self.model.forward(model_input)
-            logits = model_output.logits
-            next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
-            next_token_ids = next_token_ids.detach().cpu().numpy()
-            next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
-
-            self._post_handle(
-                run_reqs, next_token_ids, next_token_logprobs, is_chuncked_mode=True, do_filter_finished_reqs=False
-            )
-        return
-
-    def prefill_req_frozen_tokens_and_put_to_kvmove_taskqueue(self, run_reqs: List[InferReq]):
-        # 提前在radix cache中回收相关的信息，并添加引用信息
+        # 提前在radix cache中回收相关的信息，并添加引用进行锁定，方便传输进程传输kv。
         if self.is_master_in_dp:
             logger.info("prefill_req_handle_and_frozen_tokens")
+
         g_infer_state_lock.acquire()
         try:
-            for req in run_reqs:
+            for req in finished_reqs:
+
+                # 区分abort 和 正常结束的请求，正常结束的请求才发起kv传输任务。
+                if not req.finish_status.is_finished():
+                    continue
+
                 req: InferReq = req
                 key = req.get_input_token_ids()[0 : req.cur_kv_len]
                 key = torch.tensor(key, dtype=torch.int64, device="cpu")

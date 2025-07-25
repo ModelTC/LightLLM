@@ -43,10 +43,6 @@ class Batch:
     def filter_out_finished_req(self, shm_req_manager: ShmReqManager):
         unfinished_req_ids = []
         for req in self.reqs:
-            # 更新aborted 标记，可以触发推理进程主动退出aborted的请求。
-            if req.is_aborted:
-                req.router_aborted = True
-
             if req.shm_infer_released:
                 logger.info(f"router release req id {req.request_id}")
                 shm_req_manager.put_back_req_obj(req)
@@ -58,21 +54,15 @@ class Batch:
         self.id_to_reqs = {req.request_id: req for req in self.reqs}
         return
 
-    def pop_req(self, req_id):
+    def pop_req(self, req_id) -> Req:
         self.reqs = [req for req in self.reqs if req.request_id != req_id]
-        self.id_to_reqs.pop(req_id)
-        return
+        req = self.id_to_reqs.pop(req_id)
+        return req
 
     def is_clear(self):
         return len(self.reqs) == 0
 
     def merge(self, mini_batch: "Batch"):
-        for _req in mini_batch.reqs:
-            self.reqs.append(_req)
-        self.id_to_reqs = {req.request_id: req for req in self.reqs}
-        return
-
-    def dp_merge(self, mini_batch: "Batch"):
         if mini_batch is None:
             return
 
@@ -80,6 +70,18 @@ class Batch:
             self.reqs.append(_req)
         self.id_to_reqs = {req.request_id: req for req in self.reqs}
         return
+
+    @staticmethod
+    def merge_two_batch(batch1: "Batch", batch2: "Batch") -> "Batch":
+        if batch1 is None and batch2 is None:
+            return None
+
+        not_none_batch = batch1 if batch1 is not None else batch2
+
+        merge_batch = Batch(-1, [], not_none_batch.dp_size_in_node)
+        merge_batch.merge(batch1)
+        merge_batch.merge(batch2)
+        return merge_batch
 
     def __repr__(self):
         return f"batch_id={self.batch_id}, " f"reqs={self.reqs}, "

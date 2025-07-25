@@ -5,10 +5,6 @@ import numpy as np
 import torch.nn.functional as F
 import flashinfer
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.llama.triton_kernel.context_flashattention_nopad import (
-    context_attention_fwd,
-    context_attention_fwd_no_prompt_cache,
-)
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.req_manager import ReqManager
 from lightllm.models.llama.triton_kernel.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
@@ -70,7 +66,7 @@ def ref_token_attention_nopad(q, k, v, o, q_h, h_dim, infer_state):
         for e in [128]
     ],
 )
-def test_context_attention_fwd(batch, seqlen, q_heads, kv_heads, head_dim):
+def test_token_attention_nopad(batch, seqlen, q_heads, kv_heads, head_dim):
     Z, N_CTX, Q_HEADS, KV_HEADS, HEAD_DIM = batch, seqlen, q_heads, kv_heads, head_dim
     dtype = torch.bfloat16
     q = torch.randn((Z, Q_HEADS, HEAD_DIM), dtype=dtype, device="cuda")

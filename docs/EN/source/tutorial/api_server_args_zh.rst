@@ -273,10 +273,6 @@ Multimodal Parameters
 
     Cache server capacity for multimodal resources, default is ``200``
 
-.. option:: --cache_reserved_ratio
-
-    Reserved capacity ratio after cache server cleanup, default is ``0.5``
-
 .. option:: --visual_infer_batch_size
 
     Number of images processed in each inference batch, default is ``1``
