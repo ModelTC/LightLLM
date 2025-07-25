@@ -115,6 +115,11 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_mtp_index=model_input.b_mtp_index,
                 b_has_out=b_has_out,
             )
+            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                b_req_idx=model_input.b_req_idx,
+                next_token_ids=next_token_ids,
+                mask=b_has_out,
+            )
             next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids, next_token_logprobs
             )
@@ -157,6 +162,10 @@ class ChunkedPrefillBackend(ModeBackend):
                 self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
                 model_input.b_req_idx,
                 model_input.b_mtp_index,
+            )
+            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                b_req_idx=model_input.b_req_idx,
+                next_token_ids=next_token_ids,
             )
             next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids, next_token_logprobs
@@ -204,6 +213,11 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 b_has_out=b_has_out,
+            )
+            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                b_req_idx=model_input.b_req_idx,
+                next_token_ids=next_token_ids,
+                mask=b_has_out,
             )
             next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids, next_token_logprobs
@@ -305,6 +319,13 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 mtp_accept_len=mtp_accept_len,
             )
+
+            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                b_req_idx=model_input.b_req_idx,
+                next_token_ids=next_token_ids,
+                mask=accepted_index == 1,
+            )
+
             next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids, next_token_logprobs
             )
