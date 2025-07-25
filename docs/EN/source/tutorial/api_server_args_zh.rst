@@ -236,6 +236,10 @@ Scheduling Parameters
 
     Multi-result output mode
 
+.. option:: --schedule_time_interval
+
+    Schedule time interval, default is ``0.03``, unit is seconds
+
 Output Constraint Parameters
 ---------------------------
 
