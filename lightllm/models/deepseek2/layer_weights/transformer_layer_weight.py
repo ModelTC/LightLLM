@@ -3,7 +3,7 @@ import torch
 import math
 import numpy as np
 from lightllm.common.basemodel import TransformerLayerWeight
-from lightllm.utils.envs_utils import enable_env_vars
+from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     MultiROWMMWeight,
@@ -39,6 +39,9 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self.v_head_dim = self.network_config_["v_head_dim"]
         self.num_attention_heads = self.network_config_["num_attention_heads"]
         self.kv_lora_rank = self.network_config_["kv_lora_rank"]
+        self.num_fused_shared_experts = 0
+        if get_env_start_args().enable_fused_shared_experts and self.is_moe:
+            self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
 
     def _init_weight_names(self):
         if self.q_lora_rank is None:
@@ -96,8 +99,25 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         )[:, :, self.qk_nope_head_dim // block_size :].transpose(0, 1)
         return v_b_proj_scale_.contiguous().to(kv_b_proj_scale_.dtype)
 
+    def _rename_shared_experts(self, weights, weight_scale_suffix):
+        old_prefix = f"model.layers.{self.layer_num_}.mlp.shared_experts"
+        new_prefix = f"model.layers.{self.layer_num_}.mlp.experts"
+        proj_names = ["gate_proj", "down_proj", "up_proj"]
+        for i in range(self.num_fused_shared_experts):
+            expert_id = self.n_routed_experts + i
+            for proj in proj_names:
+                weight_tensor = weights.get(f"{old_prefix}.{proj}.weight")
+                if weight_tensor is not None:
+                    weights[f"{new_prefix}.{expert_id}.{proj}.weight"] = weight_tensor
+                if self.quant_cfg.quantized_weight:
+                    scale_tensor = weights.get(f"{old_prefix}.{proj}." + weight_scale_suffix)
+                    if scale_tensor is not None:
+                        weights[f"{new_prefix}.{expert_id}.{proj}." + weight_scale_suffix] = scale_tensor
+
     def load_hf_weights(self, weights):
         kv_b_quant_method = self.quant_cfg.get_quant_method(self.layer_num_, "kv_b_proj")
+        if self.quant_cfg.quantized_weight:
+            weight_scale_suffix = kv_b_quant_method.weight_scale_suffix
 
         if f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight" in weights:
             kv_b_proj_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight"]
@@ -105,29 +125,27 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             if self.quant_cfg.quantized_weight:
                 kv_b_proj_ = weight_dequant(
                     kv_b_proj_.cuda(),
-                    weights[
-                        f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + kv_b_quant_method.weight_scale_suffix
-                    ].cuda(),
+                    weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix].cuda(),
                 ).cpu()
             weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight"] = self._load_kb(kv_b_proj_)
             weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight"] = self._load_vb(kv_b_proj_)
 
         if (
             self.quant_cfg.quantized_weight
-            and f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + kv_b_quant_method.weight_scale_suffix
-            in weights
+            and f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix in weights
         ):
-            kv_b_proj_scale_ = weights[
-                f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + kv_b_quant_method.weight_scale_suffix
-            ]
+            kv_b_proj_scale_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix]
             block_size = 128
-            weights[
-                f"model.layers.{self.layer_num_}.self_attn.k_b_proj." + kv_b_quant_method.weight_scale_suffix
-            ] = self._load_kb_scale(kv_b_proj_scale_, block_size)
-            weights[
-                f"model.layers.{self.layer_num_}.self_attn.v_b_proj." + kv_b_quant_method.weight_scale_suffix
-            ] = self._load_vb_scale(kv_b_proj_scale_, block_size)
+            weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj." + weight_scale_suffix] = self._load_kb_scale(
+                kv_b_proj_scale_, block_size
+            )
+            weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj." + weight_scale_suffix] = self._load_vb_scale(
+                kv_b_proj_scale_, block_size
+            )
 
+        # rename the shared experts weight
+        if self.num_fused_shared_experts > 0:
+            self._rename_shared_experts(weights, weight_scale_suffix)
         return super().load_hf_weights(weights)
 
     def _init_qkvo(self):
@@ -198,6 +216,8 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _load_mlp(self, mlp_prefix):
+        if self.num_fused_shared_experts > 0:
+            return
         self.gate_up_proj = MultiROWMMWeight(
             weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
             data_type=self.data_type_,
@@ -235,6 +255,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 e_score_correction_bias_name=self.e_score_correction_bias_name,
                 weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
                 n_routed_experts=self.n_routed_experts,
+                num_fused_shared_experts=self.num_fused_shared_experts,
                 split_inter_size=moe_intermediate_size // self.tp_world_size_,
                 data_type=self.data_type_,
                 network_config=self.network_config_,
