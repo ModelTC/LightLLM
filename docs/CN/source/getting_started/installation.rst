@@ -29,7 +29,8 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $ # 1.如果是纯文本服务，建议分配2GB以上的共享内存, 如果你的内存充足，建议分配16GB以上的共享内存.
     $ # 2.如果是多模态服务，建议分配16GB以上的共享内存，具体可以根据实际情况进行调整. 
     $ # 如果你没有足够的共享内存，可以尝试在启动服务的时候调低 --running_max_req_size 参数，这会降低
-    $ # 服务的并发请求数量，但可以减少共享内存的占用。
+    $ # 服务的并发请求数量，但可以减少共享内存的占用。如果是多模态服务，也可以通过降低 --cache_capacity
+    $ # 参数来减少共享内存的占用。
     $ docker run -it --gpus all -p 8080:8080            \
     $   --shm-size 2g -v your_local_path:/data/         \
     $   ghcr.io/modeltc/lightllm:main /bin/bash
