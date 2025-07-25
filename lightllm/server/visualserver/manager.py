@@ -156,7 +156,7 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = await self.recv_from_httpserver.recv_pyobj()
+                    recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
                         self.waiting_reqs.append(recv_req)
                     else:
@@ -165,6 +165,7 @@ class VisualManager:
             except zmq.ZMQError:
                 # 当队列已经开始清空的时候，将一次接受数量下调
                 self.visual_recv_max_count = 64
+            await asyncio.sleep(0.01)
 
     def clean_up(self):
         for model_rpc in self.model_rpcs:

@@ -471,4 +471,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="""Path of the kv quant calibration config. It can be used for llama and qwen model.""",
     )
+    parser.add_argument(
+        "--schedule_time_interval",
+        type=float,
+        default=0.03,
+        help="""The interval of the schedule time, default is 30ms.""",
+    )
     return parser
