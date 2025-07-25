@@ -41,6 +41,7 @@ class RouterManager:
         self.nnodes = args.nnodes
         self.node_rank = args.node_rank
         self.dp_size = args.dp
+        self.schedule_time_interval = 0.03  # 默认30ms 的调度周期
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
         self.is_multinode_tp = args.nnodes > 1 and args.dp == 1
@@ -194,6 +195,14 @@ class RouterManager:
             start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
         return
+
+    def _get_schedule_time_interval(self):
+        if self.running_batch is None:
+            # 没有运行中的 batch 时，每 10ms 触发一次请求调度
+            return 0.01
+
+        # dp 模式，为了更好的配平，需要更长的调度间隔，以便于能收到更多的请求
+        return self.schedule_time_interval * self.dp_size_in_node
 
     async def loop_for_fwd(
         self,

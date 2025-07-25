@@ -30,7 +30,7 @@ class VisualManager:
         cache_port,
         visual_model_rpc_ports,
     ):
-        context = zmq.asyncio.Context(2)
+        context = zmq.Context(2)
         self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
         self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
 
@@ -150,12 +150,21 @@ class VisualManager:
                     images_need_infer = []
 
     async def loop_for_netio_req(self):
+        if not hasattr(self, "visual_recv_max_count"):
+            self.visual_recv_max_count = 64
+
         while True:
-            recv_req: GroupReqIndexes = await self.recv_from_httpserver.recv_pyobj()
-            if isinstance(recv_req, GroupReqIndexes):
-                self.waiting_reqs.append(recv_req)
-            else:
-                assert False, f"Error Req Inf {recv_req}"
+            try:
+                for _ in range(self.visual_recv_max_count):
+                    recv_req: GroupReqIndexes = await self.recv_from_httpserver.recv_pyobj()
+                    if isinstance(recv_req, GroupReqIndexes):
+                        self.waiting_reqs.append(recv_req)
+                    else:
+                        assert False, f"Error Req Inf {recv_req}"
+                self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
+            except zmq.ZMQError:
+                # 当队列已经开始清空的时候，将一次接受数量下调
+                self.visual_recv_max_count = 64
 
     def clean_up(self):
         for model_rpc in self.model_rpcs:
