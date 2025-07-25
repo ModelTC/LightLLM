@@ -159,8 +159,8 @@ class DiskCacheService(rpyc.Service):
             query_len = self.remote_cache_manager.query(query_task)
 
             if query_len > 0:
-                self.radix_manager.free_space(query_len)
-                index = self.radix_manager.radix_buffer.alloc(query_len)
+
+                index = self.radix_manager.alloc(query_len)
                 read_task = CacheTask(tokens=keys[:query_len], kv_page_indexer=index, mode="r")
                 self.remote_cache_manager.read(read_task)
 

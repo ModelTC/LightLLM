@@ -8,9 +8,11 @@ LIGHTLLM_DECODE_PREFIX_LENGTH = int(os.getenv("LIGHTLLM_DECODE_PREFIX_LENGTH", 5
 class DecodeReq:
     def __init__(
         self,
+        args,
         req: Req,
         is_pd_decode_mode: bool,
     ) -> None:
+        self.args = args
         self.request_id = req.request_id
         self.group_req_id = req.group_req_id
         self.prompt_ids = req.shm_prompt_ids.arr[0 : req.input_len].tolist()
@@ -59,6 +61,7 @@ class DecodeReq:
             self.req.finish_status.is_finished()
             and self.req.candetoken_out_len == len(self.output_ids)
             and self.req.finish_token_index == self.input_len + len(self.output_ids) - 1
+            and (self.req.radix_status.is_finished() if self.args.use_hiradix_cache else True)
         ):
             return True
         return False

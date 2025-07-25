@@ -65,22 +65,27 @@ class RadixBufferManager:
         while len(self.lru_queue) > self.max_entries:
             self.lru_queue.pop(0)
 
-    def free_space(self, required_size: int) -> bool:
+    def _free_space(self, required_size: int) -> bool:
+        current_free = self.radix_buffer.can_use_mem_size.get_value()
+        
+        if current_free >= required_size:
+            return True
+            
+        need_to_free = required_size - current_free
+        freed_size = 0
+        
+        while freed_size < need_to_free and len(self.lru_queue) > 0:
+            evict_size = self._evict_lru()
+            freed_size += evict_size
+        
+        final_free = self.radix_buffer.can_use_mem_size.get_value()
+        return final_free >= required_size
+    
+    def alloc(self, required_size: int) -> bool:
         with self.lock:
-            current_free = self.radix_buffer.can_use_mem_size.get_value()
-            
-            if current_free >= required_size:
-                return True
-                
-            need_to_free = required_size - current_free
-            freed_size = 0
-            
-            while freed_size < need_to_free and len(self.lru_queue) > 0:
-                evict_size = self._evict_lru()
-                freed_size += evict_size
-            
-            final_free = self.radix_buffer.can_use_mem_size.get_value()
-            return final_free >= required_size
+            self._free_space(required_size)
+            ans = self.radix_buffer.alloc(required_size)
+            return ans
 
     def _evict_lru(self):
         if not self.lru_queue:

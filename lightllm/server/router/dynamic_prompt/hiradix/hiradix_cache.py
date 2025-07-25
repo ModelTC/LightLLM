@@ -27,8 +27,6 @@ class LocalCacheManager:
             self._set_radix_staus(req, RadixStatus.WRITE_READY)
             return
 
-        self.radix_manager.free_space(alloc_len)
-
         new_index = self._alloc_and_copy_kv(alloc_len, value)
 
         start_pos = max(0, (query_len - 1) // self.chunk_size * self.chunk_size)
@@ -48,7 +46,7 @@ class LocalCacheManager:
     def _alloc_and_copy_kv(self, alloc_len, value):
         assert alloc_len > 0, "No allocation needed"
 
-        new_index = self.radix_buffer.alloc(alloc_len)
+        new_index = self.radix_manager.alloc(alloc_len)
         dst_kv_buffer = self.radix_buffer.get_kv_buffer(new_index)
         src_kv_buffer = self.mem_manager.get_index_kv_buffer(value[-alloc_len:])["kv_buffer"]
 

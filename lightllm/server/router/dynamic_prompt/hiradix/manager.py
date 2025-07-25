@@ -75,6 +75,7 @@ class HiRadixCacheManagerServer:
         req: Req = self.shm_req_manager.get_req_obj_by_index(req_info["shm_req_index"])
         assert req.radix_status.is_write_done()
         req.radix_status.set_finished()
+        self.shm_req_manager.put_back_req_obj(req)
         logger.info(f"push cache results {all_results}")
 
     async def pull_woker(self):

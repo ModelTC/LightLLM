@@ -90,6 +90,7 @@ class RadixMemoryBuffer:
         mark_start = 0
         mark_end = self.size
         rank_in_node = rank_in_node if rank_in_node is not None else get_current_rank_in_node() 
+        self.rank_in_node = rank_in_node
         self.can_use_mem_size = SharedInt(
             f"{get_unique_server_name()}_radix_mem_manger_can_use_token_num_{rank_in_node}"
         )
@@ -127,6 +128,7 @@ class RadixMemoryBuffer:
 
         if self.can_use_mem_size.get_value() == len(self.mem_state):
             logger.debug(f"freed all gpu mem size {self.can_use_mem_size.get_value()}")
+
         return
     
     def free_req_index(self, req_id: int):
@@ -142,21 +144,20 @@ class RadixMemoryBuffer:
             del self.req_mem_index[req_id]
 
     def alloc(self, need_size) -> torch.Tensor:
-        with self.lock:
-            if need_size > self.mark_end.get_value() - self.mark_start.get_value():
-                logger.error(
-                    f"warn no enough cache need_size {need_size} "
-                    f"left_size {self.can_use_mem_size.get_value()}"
-                )
-                raise RuntimeError(f"Not enough memory to allocate {need_size} tokens.")
+        if need_size > self.mark_end.get_value() - self.mark_start.get_value():
+            logger.error(
+                f"warn no enough cache need_size {need_size} "
+                f"left_size {self.can_use_mem_size.get_value()}"
+            )
+            raise RuntimeError(f"Not enough memory to allocate {need_size} tokens.")
 
-            start = self.mark_start.get_value()
-            end = start + need_size
-            ans = self.mem_state[start:end]
-            self.mark_start.set_value(start + need_size)
+        start = self.mark_start.get_value()
+        end = start + need_size
+        ans = self.mem_state[start:end]
+        self.mark_start.set_value(start + need_size)
 
-            self.can_use_mem_size.set_value(self.can_use_mem_size.get_value() - need_size)
-            return ans
+        self.can_use_mem_size.set_value(self.can_use_mem_size.get_value() - need_size)
+        return ans
 
     def set_req_mem_index(self, req_id: int, index: List[int]):
         """Set the memory index for a specific request ID."""

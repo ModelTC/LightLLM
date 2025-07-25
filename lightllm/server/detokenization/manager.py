@@ -71,7 +71,7 @@ class DeTokenizationManager:
                         )
 
                         # p d 分离模式，decode节点的解码需要做一些特殊的修复。
-                        decode_req = DecodeReq(req, self.is_pd_decode_mode)
+                        decode_req = DecodeReq(self.args, req, self.is_pd_decode_mode)
                         if self.is_pd_decode_mode:
                             decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
                         # token_healing mode 的特殊初始化
