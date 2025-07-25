@@ -23,9 +23,15 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $ # 拉取官方镜像
     $ docker pull ghcr.io/modeltc/lightllm:main
     $
-    $ # 运行
+    $ # 运行服务, 注意现在的lightllm服务非常的依赖共享内存部分，在启动
+    $ # 前请确保你的docker设置中已经分配了足够的共享内存，否则可能导致
+    $ # 服务无法正常启动。
+    $ # 1.如果是纯文本服务，建议分配2GB以上的共享内存, 如果你的内存充足，建议分配16GB以上的共享内存.
+    $ # 2.如果是多模态服务，建议分配16GB以上的共享内存，具体可以根据实际情况进行调整. 
+    $ # 如果你没有足够的共享内存，可以尝试在启动服务的时候调低 --running_max_req_size 参数，这会降低
+    $ # 服务的并发请求数量，但可以减少共享内存的占用。
     $ docker run -it --gpus all -p 8080:8080            \
-    $   --shm-size 1g -v your_local_path:/data/         \
+    $   --shm-size 2g -v your_local_path:/data/         \
     $   ghcr.io/modeltc/lightllm:main /bin/bash
 
 你也可以使用源码手动构建镜像并运行：
@@ -37,7 +43,7 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $
     $ # 运行
     $ docker run -it --gpus all -p 8080:8080            \
-    $   --shm-size 1g -v your_local_path:/data/         \
+    $   --shm-size 2g -v your_local_path:/data/         \
     $   <image_name> /bin/bash
 
 或者你也可以直接使用脚本一键启动镜像并且运行：
