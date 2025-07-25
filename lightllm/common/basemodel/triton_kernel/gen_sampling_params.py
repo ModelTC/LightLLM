@@ -121,37 +121,54 @@ def _token_id_counter_update_kernel(
     counter_stride_m,
     counter_stride_n,
     next_token_ids_ptr,
+    mask_ptr,
     batch_size,
+    HAS_MASK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
 
     block_start_index = tl.program_id(0) * BLOCK
     offs = block_start_index + tl.arange(0, BLOCK)
-    mask = offs < batch_size
+    loc_mask = offs < batch_size
 
-    req_idx = tl.load(b_req_idx_ptr + offs, mask=mask, other=0)
-    token_ids = tl.load(next_token_ids_ptr + offs, mask=mask, other=0)
+    req_idx = tl.load(b_req_idx_ptr + offs, mask=loc_mask, other=0)
+    token_ids = tl.load(next_token_ids_ptr + offs, mask=loc_mask, other=0)
 
-    tl.atomic_add(
-        req_to_out_token_id_counter_ptr + req_idx * counter_stride_m + token_ids * counter_stride_n, 1, mask=mask
-    )
+    if HAS_MASK:
+        mask = tl.load(mask_ptr + offs, mask=loc_mask, other=False)
+        tl.atomic_add(
+            req_to_out_token_id_counter_ptr + req_idx * counter_stride_m + token_ids * counter_stride_n,
+            1,
+            mask=loc_mask & mask,
+        )
+    else:
+        tl.atomic_add(
+            req_to_out_token_id_counter_ptr + req_idx * counter_stride_m + token_ids * counter_stride_n,
+            1,
+            mask=loc_mask,
+        )
     return
 
 
 @torch.no_grad()
 def update_req_to_token_id_counter(
-    b_req_idx: torch.Tensor, next_token_ids: torch.Tensor, req_to_out_token_id_counter: torch.Tensor
+    b_req_idx: torch.Tensor,
+    next_token_ids: torch.Tensor,
+    req_to_out_token_id_counter: torch.Tensor,
+    mask: torch.Tensor = None,
 ):
     batch_size = b_req_idx.shape[0]
     BLOCK = 256
-
+    has_mask = mask is not None
     _token_id_counter_update_kernel[(triton.cdiv(batch_size, BLOCK),)](
         b_req_idx_ptr=b_req_idx,
         req_to_out_token_id_counter_ptr=req_to_out_token_id_counter,
         counter_stride_m=req_to_out_token_id_counter.stride(0),
         counter_stride_n=req_to_out_token_id_counter.stride(1),
         next_token_ids_ptr=next_token_ids,
+        mask_ptr=mask,
         batch_size=batch_size,
+        HAS_MASK=has_mask,
         BLOCK=BLOCK,
         num_warps=1,
     )

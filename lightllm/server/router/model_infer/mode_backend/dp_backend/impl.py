@@ -134,6 +134,12 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_mtp_index=b_mtp_index,
                     b_has_out=b_has_out,
                 )
+                g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                    b_req_idx=b_req_idx,
+                    next_token_ids=next_token_ids,
+                    mask=b_has_out,
+                )
+
                 next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                     next_token_ids, next_token_logprobs
                 )
@@ -181,6 +187,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                     req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
+                )
+                g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                    b_req_idx=b_req_idx,
+                    next_token_ids=next_token_ids,
                 )
                 next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                     next_token_ids, next_token_logprobs
@@ -254,6 +264,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_mtp_index=b_mtp_index,
                     b_has_out=b_has_out,
                 )
+                g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                    b_req_idx=b_req_idx,
+                    next_token_ids=next_token_ids,
+                    mask=b_has_out,
+                )
                 next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                     next_token_ids, next_token_logprobs
                 )
@@ -318,6 +333,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                 )
+                g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                    b_req_idx=b_req_idx,
+                    next_token_ids=next_token_ids,
+                )
                 next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                     next_token_ids, next_token_logprobs
                 )
@@ -373,6 +392,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     b_has_out=b_has_out,
+                )
+                g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                    b_req_idx=b_req_idx,
+                    next_token_ids=next_token_ids,
+                    mask=b_has_out,
                 )
                 next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                     next_token_ids, next_token_logprobs
@@ -493,6 +517,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     mtp_accept_len=mtp_accept_len,
                 )
+                g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                    b_req_idx=b_req_idx,
+                    next_token_ids=next_token_ids,
+                    mask=accepted_index == 1,
+                )
                 next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                     next_token_ids, next_token_logprobs
                 )
@@ -570,6 +599,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     b_has_out=b_has_out,
+                )
+                g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                    b_req_idx=b_req_idx,
+                    next_token_ids=next_token_ids,
+                    mask=b_has_out,
                 )
 
             # spec prefill: MTP
@@ -732,6 +766,12 @@ class DPChunkedPrefillBackend(ModeBackend):
                     all_next_token_ids=all_next_token_ids,
                     b_req_idx=b_req_idx,
                     mtp_accept_len=mtp_accept_len,
+                )
+
+                g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                    b_req_idx=b_req_idx,
+                    next_token_ids=next_token_ids,
+                    mask=accepted_index == 1,
                 )
                 next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                     next_token_ids, next_token_logprobs
