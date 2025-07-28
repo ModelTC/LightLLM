@@ -1,17 +1,23 @@
 import threading
 import torch.multiprocessing as mp
 from typing import List, Tuple
-from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
+from lightllm.server.core.objs.req import PDNIXLChunkedPrefillReq
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
-from .impl_for_pd_base import PDNIXLBackendBase
+
+from .impl_for_pd_base import PDNIXLBackendBaseChunked
+from .pd_remote_prefill_obj import RemoteTransferStatusType
 
 logger = init_logger(__name__)
 
 
-class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
+class PDNIXLBackendForPrefillNode(PDNIXLBackendBaseChunked):
     def __init__(self, transfer_task_queue: mp.Queue, transfer_done_queue: mp.Queue, nixl_meta_queue: mp.Queue) -> None:
         super().__init__(transfer_task_queue, transfer_done_queue, nixl_meta_queue)
+        self.support_overlap = False
+        self.classed_req_no_decode = True
+        self.extra_post_req_handle_func = self._handle_chunked_transfer
+        self.call_post_handle_for_chunk = True
 
     def init_custom(self):
         super().init_custom()
@@ -30,32 +36,32 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBase):
         self.wait_transfer_loop_thread.start()
         return
 
-    def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs)
-        return
+    def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
+        new_finished_reqs = []
+        need_remote_aborted_reqs = []
+        for req in finished_reqs:
+            if req.in_prefill_or_transfer:
+                if req.infer_aborted:
+                    need_remote_aborted_reqs.append(req)
+                    new_finished_reqs.append(req)
+                else:
+                    if req.infer_nixl_rpd:
+                        shm_req: PDNIXLChunkedPrefillReq = req.shm_req
+                        state = shm_req.get_pd_req_state()
+                        if state == RemoteTransferStatusType.SUCCESS.value:  # success
+                            req.in_prefill_or_transfer = False
+                            new_finished_reqs.append(req)
+                        elif state == RemoteTransferStatusType.FAILED.value:  # failure
+                            need_remote_aborted_reqs.append(req)
+                            req.in_prefill_or_transfer = False
+                            new_finished_reqs.append(req)
+                        else:
+                            logger.warning(f"remote prefill request {shm_req.group_req_id} unexpected state {state}")
+                    else:
+                        pass
+            else:
+                new_finished_reqs.append(req)
 
-    def decode(self):
-        uinit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids,
-            no_decode=True,
-        )
+        finished_reqs = new_finished_reqs
 
-        ok_finished_reqs, aborted_reqs, _ = self._prefill_filter_reqs(ok_finished_reqs, aborted_reqs)
-
-        assert len(uinit_reqs) == 0
-        assert len(decode_reqs) == 0
-
-        self._prefill_abort_remote(aborted_reqs)
-        self._filter_reqs(aborted_reqs)
-
-        if prefill_reqs:
-            ContinuesBatchBackend.normal_prefill_reqs(
-                self,
-                prefill_reqs=prefill_reqs,
-                uninit_reqs=uinit_reqs,
-                ok_finished_reqs=ok_finished_reqs,
-                extra_post_req_handle_func=self._handle_chunked_transfer,
-                call_post_handle_for_chunk=True,
-            )
-        self._overlap_req_init_and_filter(uninit_reqs=uinit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
-        return
+        self._prefill_abort_remote(need_remote_aborted_reqs)

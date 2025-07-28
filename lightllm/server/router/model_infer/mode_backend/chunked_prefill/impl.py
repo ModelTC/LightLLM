@@ -51,7 +51,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 # 关闭overlap 模式
                 if not self.support_overlap:
                     event_pack._close_overlap()
-
                 event_pack.wait_to_forward()
 
                 self._try_read_new_reqs()
@@ -139,6 +138,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_logprobs=next_token_logprobs_cpu,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
+            call_post_handle_for_chunk=self.call_post_handle_for_chunk
         )
         # 第四阶段
         event_pack.notify_pre_post_handle()
@@ -186,6 +186,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_logprobs=next_token_logprobs_cpu,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
+            call_post_handle_for_chunk=self.call_post_handle_for_chunk
         )
 
         # 第四阶段
@@ -253,6 +254,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_logprobs=next_token_logprobs_cpu,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
+            call_post_handle_for_chunk=self.call_post_handle_for_chunk,
         )
 
         # 第四阶段
@@ -351,6 +353,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_logprobs=next_token_logprobs_cpu[select_mask],
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
+            call_post_handle_for_chunk=self.call_post_handle_for_chunk
         )
         if len(need_free_mem_indexes) > 0:
             g_infer_state_lock.acquire()

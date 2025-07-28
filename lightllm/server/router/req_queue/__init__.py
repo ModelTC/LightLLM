@@ -13,9 +13,9 @@ def _get_req_queue_class(args, router, dp_size_in_node: int):
         return ChunkedPrefillQueue
     if args.first_token_constraint_mode:
         return ChunkedPrefillQueue
-    if args.run_mode in ["decode", "nixl_decode"]:
+    if args.run_mode in ["decode"]:
         return QueueForPDDecode
-    if args.run_mode in ["prefill", "nixl_prefill"]:
+    if args.run_mode in ["prefill", "nixl_prefill", "nixl_decode"]:
         return ChunkedPrefillQueue
 
     if args.disable_chunked_prefill:
