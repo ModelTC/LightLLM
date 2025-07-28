@@ -1,19 +1,18 @@
 import time
-from concurrent.futures import ThreadPoolExecutor
 import torch.multiprocessing as mp
 import torch
-from typing import Dict, List
+from typing import List
 import queue
 import numpy as np
 import asyncio
-import pickle
 import threading
 
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.core.objs.req import PDNIXLChunkedPrefillReq
-from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
+from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
+from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
+from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, InferReqUpdatePack
 
 from .nixl_kv_transporter import NixlMetadata, NixlKVTransporter
 from .pd_remote_prefill_obj import (
@@ -36,7 +35,7 @@ from .pd_remote_prefill_obj import (
 logger = init_logger(__name__)
 
 
-class PDNIXLBackendBase(ModeBackend):
+class PDNIXLBackendBase(object):
     _THREAD_WAIT_INTERVAL = 0.001
 
     def __init__(self, to_remote_queue: mp.Queue, from_remote_queue: mp.Queue, nixl_meta_queue: mp.Queue):
@@ -54,6 +53,8 @@ class PDNIXLBackendBase(ModeBackend):
         # for prefill
         self.remote_prefill_requests: ThreadSafeDict = ThreadSafeDict()
         self.inflght_transfer_requests: ThreadSafeDict = ThreadSafeDict()
+
+        self.page_copy_stream = torch.cuda.Stream()
 
     def init_custom(self):
         self.nixl_agent = NixlKVTransporter(self.args.pd_node_id, self.rank_in_node)
@@ -99,20 +100,16 @@ class PDNIXLBackendBase(ModeBackend):
 
             if req_status.is_last or status != RemoteTransferStatusType.SUCCESS:
                 shm_req: PDNIXLChunkedPrefillReq = run_req.shm_req
-                shm_req.set_pd_req_rank_state(self.rank_in_dp, status.value)
                 self.remote_prefilled_reqs.pop(group_req_id)
                 self.request_to_first_token[group_req_id] = (req_status.next_token_id, req_status.next_token_logprob)
+                shm_req.set_pd_req_rank_state(self.rank_in_dp, status.value)
 
                 if self.is_master_in_dp:
-                    # return page ids
-                    if group_req_id in self.request_to_page_ids:
-                        self.page_scheduer.return_(self.request_to_page_ids[group_req_id])
-                        del self.request_to_page_ids[group_req_id]
-
                     logger.info(
-                        f"remote prefill reqeust: {group_req_id} done with status: {status} "
+                        f"remote prefill request: {group_req_id} done with status: {status} "
                         f"took: {time.time() - run_req.remote_prefill_start} seconds"
                     )
+
                 ret = None
 
         else:
@@ -133,22 +130,24 @@ class PDNIXLBackendBase(ModeBackend):
             # from remote
             notifies = self.nixl_agent.get_new_notifs()
             for agent_name, req_statuses in notifies.items():
-                acks = []
-                for req_statuses_bytes in req_statuses:
-                    noti: Notification = Notification.from_bytes(req_statuses_bytes)
-                    if noti.type == NotificationType.REMOTE_MD:
-                        self.nixl_agent.connect_to_remote(agent_name, noti.data)
-                    elif noti.type == NotificationType.TRANSFER_NOTIFY:
-                        for req_status in noti.data:
-                            prefill_status = RemotePrefillStatus.deserialize(req_status)
-                            ack = await self._handle_remote_prefill(prefill_status)
-                            if ack:
-                                acks.append(ack)
-                if len(acks) > 0:
-                    # wait for copy done
-                    torch.cuda.current_stream().synchronize()
-                    logger.info(f"send {len(acks)} acks to {agent_name}")
-                    self.nixl_agent.send_transfer_notify(agent_name, acks)
+                with torch.cuda.stream(self.page_copy_stream):
+                    acks = []
+                    for req_statuses_bytes in req_statuses:
+                        noti: Notification = Notification.from_bytes(req_statuses_bytes)
+                        if noti.type == NotificationType.REMOTE_MD:
+                            self.nixl_agent.connect_to_remote(agent_name, noti.data)
+                        elif noti.type == NotificationType.TRANSFER_NOTIFY:
+                            for req_status in noti.data:
+                                prefill_status = RemotePrefillStatus.deserialize(req_status)
+                                ack = await self._handle_remote_prefill(prefill_status)
+                                if ack:
+                                    acks.append(ack)
+                    if len(acks) > 0:
+
+                        # wait for copy done
+                        self.page_copy_stream.synchronize()
+                        # logger.info(f"send {len(acks)} acks to {agent_name}")
+                        self.nixl_agent.send_transfer_notify(agent_name, acks)
 
             await asyncio.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
 
@@ -195,53 +194,54 @@ class PDNIXLBackendBase(ModeBackend):
         requests_by_agents = dict()
         transfer_pages = self.page_scheduer.borrow(len(transfer_reqs))
         # first copy the kv to transfer pages & build notification
-        for trans_req, page_index in zip(transfer_reqs, transfer_pages):
-            trans_req: KVMoveRequest
-            group_req_id = trans_req.group_req_id
-            remote_request: PrefillRequest = self.remote_prefill_requests.get(group_req_id)
-            transfer_state: TransferState = remote_request.transfer_state
-            decode_id: int = remote_request.decode_id
-            if decode_id not in requests_by_agents:
-                requests_by_agents[decode_id] = ([], [], [])
+        with torch.cuda.stream(self.page_copy_stream):
+            for trans_req, page_index in zip(transfer_reqs, transfer_pages):
+                trans_req: KVMoveRequest
+                group_req_id = trans_req.group_req_id
+                remote_request: PrefillRequest = self.remote_prefill_requests.get(group_req_id)
+                transfer_state: TransferState = remote_request.transfer_state
+                decode_id: int = remote_request.decode_id
+                if decode_id not in requests_by_agents:
+                    requests_by_agents[decode_id] = ([], [], [])
 
-            with transfer_state.lock:
+                with transfer_state.lock:
 
-                start_kv_len = transfer_state.transfered_kv_len
-                trans_kv_len = min(trans_req.cur_kv_len - trans_req.prev_kv_len, self.nixl_agent.page_size)
-                trans_kv_index = transfer_state.token_index[start_kv_len : start_kv_len + trans_kv_len]
-                self.model.mem_manager.kv_move_buffer[page_index][:trans_kv_len] = self.model.mem_manager.kv_buffer[
-                    :, trans_kv_index, :, :
-                ].transpose(0, 1)
+                    start_kv_len = transfer_state.transfered_kv_len
+                    trans_kv_len = min(trans_req.cur_kv_len - trans_req.prev_kv_len, self.nixl_agent.page_size)
+                    trans_kv_index = transfer_state.token_index[start_kv_len : start_kv_len + trans_kv_len]
+                    self.model.mem_manager.kv_move_buffer[page_index][:trans_kv_len] = self.model.mem_manager.kv_buffer[
+                        :, trans_kv_index, :, :
+                    ].transpose(0, 1)
 
-                receive_page = transfer_state.free_page_ids.pop(0)
-                requests_by_agents[decode_id][0].append(page_index)
-                requests_by_agents[decode_id][1].append(receive_page)
-                is_last = transfer_state.is_finished and start_kv_len + trans_kv_len == transfer_state.current_kv_len
+                    receive_page = transfer_state.free_page_ids.pop(0)
+                    requests_by_agents[decode_id][0].append(page_index)
+                    requests_by_agents[decode_id][1].append(receive_page)
+                    is_last = transfer_state.is_finished and start_kv_len + trans_kv_len == transfer_state.current_kv_len
 
-                requests_by_agents[decode_id][2].append(
-                    RemotePrefillStatus(
-                        transfer_type=RemoteTransferType.PAGE_TRANSFER,
-                        group_req_id=group_req_id,
-                        status=RemoteTransferStatusType.SUCCESS,
-                        chunk_id=transfer_state.current_chunk_id,
-                        is_last=is_last,
-                        page_id=receive_page,
-                        kv_start=start_kv_len,
-                        kv_len=trans_kv_len,
-                        next_token_id=transfer_state.next_token_id,
-                        next_token_logprob=transfer_state.next_token_logprob,
+                    requests_by_agents[decode_id][2].append(
+                        RemotePrefillStatus(
+                            transfer_type=RemoteTransferType.PAGE_TRANSFER,
+                            group_req_id=group_req_id,
+                            status=RemoteTransferStatusType.SUCCESS,
+                            chunk_id=transfer_state.current_chunk_id,
+                            is_last=is_last,
+                            page_id=receive_page,
+                            kv_start=start_kv_len,
+                            kv_len=trans_kv_len,
+                            next_token_id=transfer_state.next_token_id,
+                            next_token_logprob=transfer_state.next_token_logprob,
+                        )
                     )
-                )
-                transfer_state.transfered_kv_len += trans_kv_len
+                    transfer_state.transfered_kv_len += trans_kv_len
 
         # wait copy done
-        torch.cuda.current_stream().synchronize()
+        self.page_copy_stream.synchronize()
         for decode_id, (transfer_pages, receive_pages, notifications) in requests_by_agents.items():
             assert len(transfer_reqs) == len(receive_pages), "transfer_reqs and receive_pages should have same length"
             # transfer
             self.nixl_agent.write_blocks_paged(decode_id, transfer_pages, receive_pages, notifications)
 
-        logger.info(f"transfer kv to remote paged batch: {len(transfer_reqs)} " f"took: {time.time() - start} seconds")
+        # logger.info(f"transfer kv to remote paged batch: {len(transfer_reqs)} " f"took: {time.time() - start} seconds")
 
     async def _handle_transfer_loop(self):
         while True:
@@ -408,97 +408,70 @@ class PDNIXLBackendBase(ModeBackend):
     def _post_remote_prefill(self, req: InferReq, success: bool = True):
 
         req.in_prefill_or_transfer = False
+        group_req_id = req.shm_req.group_req_id
         req.cur_kv_len = req.get_cur_total_len()
+
         if self.is_master_in_dp:
             req.shm_req.shm_cur_kv_len = req.cur_kv_len
+            if group_req_id in self.request_to_page_ids:
+                self.page_scheduer.return_(self.request_to_page_ids[group_req_id])
+                del self.request_to_page_ids[group_req_id]
 
-        group_req_id = req.shm_req.group_req_id
         if not success:
             self.request_to_first_token.pop(group_req_id, None)
             return
 
-        assert group_req_id in self.request_to_first_token
+        assert group_req_id in self.request_to_first_token, f"{group_req_id} not in request_to_first_token dict"
         token_id, token_logprob = self.request_to_first_token.pop(group_req_id)
-
-        req.set_next_gen_token_id(token_id, token_logprob)
         req.cur_output_len += 1
 
-        req.out_token_id_count[token_id] += 1
-        req.update_finish_status(self.eos_id)
-
-        if self.is_master_in_dp:
-            req.shm_req.shm_cur_output_len = req.cur_output_len
-
-            if req.finish_status.is_finished():
-                req.shm_req.finish_token_index = req.get_cur_total_len() - 1
-                req.shm_req.finish_status = req.finish_status
-
-            req.shm_req.candetoken_out_len = req.cur_output_len
+        pack = InferReqUpdatePack(req, req.cur_output_len)
+        pack.handle(
+            token_id,
+            token_logprob,
+            eos_ids=self.eos_id,
+            extra_post_req_handle_func=None,
+            is_master_in_dp=self.is_master_in_dp,
+            call_post_handle_for_chunk=False
+        )
+        return token_id
 
     def _decode_filter_reqs(
-        self, prefill_reqs: List[InferReq], aborted_reqs: List[InferReq], decode_reqs: List[InferReq]
+        self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
     ):
         new_prefill_reqs: List[InferReq] = []
-        new_aborted_reqs: List[InferReq] = []
         remote_prefill_reqs: List[InferReq] = []
-
-        # filter out aborted requests
-        for req in aborted_reqs:
-            if req.in_prefill_or_transfer:
-                shm_req: PDNIXLChunkedPrefillReq = req.shm_req
-                state = shm_req.get_pd_req_state()
-                if state != RemoteTransferStatusType.IN_PROGRESS.value:
-                    new_aborted_reqs.append(req)
-                    self._post_remote_prefill(req, False)
-                else:
-                    remote_prefill_reqs.append(req)
-            else:
-                new_aborted_reqs.append(req)
+        failed_prefill_reqs: List[InferReq] = []
+        next_token_ids: List[int] = []
+        rpd_reqs: List[InferReq] = []
 
         for req in prefill_reqs:
             if req.in_prefill_or_transfer:
-                shm_req: PDNIXLChunkedPrefillReq = req.shm_req
-                # state is updated by router
-                state = shm_req.get_pd_req_state()
-                if state == RemoteTransferStatusType.SUCCESS.value:  # success
-                    self._post_remote_prefill(req)
-                    decode_reqs.append(req)
-                elif state == RemoteTransferStatusType.FAILED.value:  # failure
-                    self._post_remote_prefill(req, False)
-                    new_aborted_reqs.append(req)
-                elif state == RemoteTransferStatusType.IN_PROGRESS.value:  # in progress
+                if req.infer_nixl_rpd:
+                    shm_req: PDNIXLChunkedPrefillReq = req.shm_req
+                    # state is updated by router
+                    state = shm_req.get_pd_req_state()
+                    if state == RemoteTransferStatusType.SUCCESS.value:  # success
+                        next_token_ids.append(self._post_remote_prefill(req))
+                        rpd_reqs.append(req)
+                    elif state == RemoteTransferStatusType.FAILED.value:
+                        self._post_remote_prefill(req, False)
+                        failed_prefill_reqs.append(req)
+                    else:
+                        logger.warning(f"remote prefill request {shm_req.group_req_id} unexpected state {state}")
+                else:
                     remote_prefill_reqs.append(req)
-                else:
-                    logger.warning(f"remote prefill request {shm_req.group_req_id} unexpected state {state}")
-                continue
+            else:
+                new_prefill_reqs.append(req)
 
-            new_prefill_reqs.append(req)
+        if rpd_reqs:
+            g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
+                rpd_reqs,
+                next_token_ids,
+            )
+            decode_reqs.extend(rpd_reqs)
 
-        return new_prefill_reqs, new_aborted_reqs, decode_reqs, remote_prefill_reqs
-
-    def _prefill_filter_reqs(self, ok_finished_reqs: List[InferReq], aborted_reqs: List[InferReq]):
-        new_ok_finished_reqs = []
-        kv_transfer_reqs = []
-
-        for req in ok_finished_reqs:
-            if req.in_prefill_or_transfer:
-                shm_req: PDNIXLChunkedPrefillReq = req.shm_req
-                state = shm_req.get_pd_req_state()
-                if state == RemoteTransferStatusType.SUCCESS.value:  # success
-                    new_ok_finished_reqs.append(req)
-                    req.in_prefill_or_transfer = False
-                elif state == RemoteTransferStatusType.FAILED.value:  # failure
-                    aborted_reqs.append(req)
-                    req.in_prefill_or_transfer = False
-                elif state == RemoteTransferStatusType.IN_PROGRESS.value:
-                    kv_transfer_reqs.append(req)
-                else:
-                    logger.warning(f"remote prefill request {shm_req.group_req_id} unexpected state {state}")
-                continue
-
-            new_ok_finished_reqs.append(req)
-
-        return new_ok_finished_reqs, aborted_reqs, kv_transfer_reqs
+        return new_prefill_reqs, decode_reqs, failed_prefill_reqs, remote_prefill_reqs
 
     def _prepare_remote_prefill_inputs(self, req_objs: List[InferReq]):
         run_reqs = []
@@ -539,11 +512,8 @@ class PDNIXLBackendBase(ModeBackend):
 
         kwargs = {
             "batch_size": len(run_reqs),
-            "input_ids": input_ids,
             "mem_indexes": mem_indexes.tolist(),
-            "b_req_idx": nopad_b_req_idx,
             "b_start_loc": nopad_b_start_loc,
-            "b_seq_len": nopad_b_seq_len,
         }
 
         return kwargs, run_reqs
@@ -556,3 +526,10 @@ class PDNIXLBackendBase(ModeBackend):
                 del self.remote_prefill_requests[group_req_id]
                 if group_req_id in self.inflght_transfer_requests:
                     del self.inflght_transfer_requests[group_req_id]
+
+
+class PDNIXLBackendBaseChunked(PDNIXLBackendBase, ChunkedPrefillBackend):
+    pass
+
+class PDNIXLBackendBaseDPChunked(PDNIXLBackendBase, DPChunkedPrefillBackend):
+    pass
