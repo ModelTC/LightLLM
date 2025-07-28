@@ -20,6 +20,7 @@ class DpQueue:
             base_queue_class(args, router, dp_index, dp_size_in_node) for dp_index in range(self.dp_size_in_node)
         ]
         self.dp_balancer = get_dp_balancer(args, dp_size_in_node, self.inner_queues)
+        self.reqs_waiting_for_dp_index = []
         return
 
     def get_dp_queue(self, dp_index: int):
@@ -31,10 +32,16 @@ class DpQueue:
 
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch):
-        batches = [
-            self.inner_queues[dp_index].generate_new_batch(current_batch) for dp_index in range(self.dp_size_in_node)
-        ]
-        return self._merge_batch(batches)
+        try:
+            self.dp_balancer.assign_reqs_to_dp(current_batch, self.reqs_waiting_for_dp_index)
+            batches = [
+                self.inner_queues[dp_index].generate_new_batch(current_batch)
+                for dp_index in range(self.dp_size_in_node)
+            ]
+            return self._merge_batch(batches)
+        except Exception as e:
+            logger.error(f"generate new batch failed: {e}")
+            raise e
 
     def _merge_batch(self, dp_batches: List[Batch]):
         merged_batch: Batch = None
@@ -48,26 +55,20 @@ class DpQueue:
     def append(self, req: Req):
         suggested_dp_index = req.sample_params.suggested_dp_index
         if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
-            logger.warning(f"input req {req.request_id} dp index {suggested_dp_index} is invalid")
-            suggested_dp_index = self.dp_balancer.get_suggest_dp_index()
-            req.sample_params.suggested_dp_index = suggested_dp_index
-            self.inner_queues[suggested_dp_index].append(req)
+            # 在调度时，统一分配请求id
+            self.reqs_waiting_for_dp_index.append(req)
         else:
             self.inner_queues[suggested_dp_index].append(req)
         return
 
     def extend(self, req_group: List[Req]):
-        # 同一个组的，要分配在同一个 dp 上，效率最高
-        index = self.dp_balancer.get_suggest_dp_index()
-        for req in req_group:
-            suggested_dp_index = req.sample_params.suggested_dp_index
-            if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
-                logger.warning(f"input req {req.request_id} dp index {suggested_dp_index} is invalid")
-                req.sample_params.suggested_dp_index = index
-                self.inner_queues[index].append(req)
-            else:
+        suggested_dp_index = req_group[0].sample_params.suggested_dp_index
+        if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
+            # 同一个组的，要分配在同一个 dp 上
+            self.reqs_waiting_for_dp_index.append(req_group)
+        else:
+            for req in req_group:
                 self.inner_queues[suggested_dp_index].append(req)
-
         return
 
     def is_busy(self):
