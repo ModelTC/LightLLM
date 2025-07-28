@@ -349,7 +349,9 @@ class PdNixlReqState(ctypes.Structure):
         self.state = (ctypes.c_int * self._MAX_TP_SIZE)(*([0] * self._MAX_TP_SIZE))
 
     def set_dp_world_size(self, size: int):
+        assert size < self._MAX_TP_SIZE, f"size {size} > max size {self._MAX_TP_SIZE}"
         self.dp_world_size = size
+        ctypes.memset(ctypes.addressof(self.state), 0, (self.dp_world_size + 1) * ctypes.sizeof(ctypes.c_int))
 
     def set_tp_state(self, tp_id: int, state: int):
         assert (
@@ -361,6 +363,7 @@ class PdNixlReqState(ctypes.Structure):
         assert self.dp_world_size > 0, "dp_world_size should be set before calling this"
         unique_state = np.unique(self.state[: self.dp_world_size])
         self.state[self.dp_world_size] = unique_state[0]
+        return unique_state[0]
 
     def get_state(self):
         assert self.dp_world_size > 0, "dp_world_size should be set before calling this"
@@ -371,11 +374,16 @@ class PDNIXLChunkedPrefillReq(ChunkedPrefillReq):
     _pack_ = 4
     _fields_ = ChunkedPrefillReq._fields_ + [
         # 用于pd nixl状态同步
-        ("pd_nixl_req_state", PdNixlReqState)
+        ("pd_nixl_req_state", PdNixlReqState),
+        ("router_nixl_rpd", ctypes.c_bool),
     ]
 
+    def post_init(self):
+        self.router_nixl_rpd = False
+
     def set_dp_world_size(self, dp_world_size):
-        self.pd_nixl_req_state.dp_world_size = dp_world_size
+        self.pd_nixl_req_state.set_dp_world_size(dp_world_size)
+        self.router_nixl_rpd = False
 
     # called by each tp rank, no contention
     def set_pd_req_rank_state(self, tp_id: int, state: int):
@@ -384,7 +392,7 @@ class PDNIXLChunkedPrefillReq(ChunkedPrefillReq):
     # state: -1 for failed, 0 for in progress, 1 for success
     # set by router
     def set_pd_req_state(self):
-        self.pd_nixl_req_state.set_state()
+        return self.pd_nixl_req_state.set_state()
 
     # read by all rank
     def get_pd_req_state(self):

@@ -11,11 +11,11 @@ import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import multiprocessing
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
-from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd, StopStrMatchedReqCmd
+from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd, StopStrMatchedReqCmd, NIXLRemotePrefillDoneCmd, ReqCmd
 from lightllm.server.core.objs import ShmReqManager, StartArgs, PDNIXLChunkedPrefillReq
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .shm_reqs_io_buffer import ShmReqsIOBuffer
@@ -323,12 +323,24 @@ class RouterManager:
             await self._add_batch(new_batch)
 
         self._filter_reqs_from_running_batch()
+
+        filter_cmds = []
+
         aborted_reqs = self._get_aborted_reqs_from_running_batch()
         if aborted_reqs:
-            await self._aborted_reqs(aborted_reqs=aborted_reqs)
+            filter_cmds.extend([AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs])
+
         stop_str_matched_reqs = self._get_stop_str_reqs_from_running_batch()
         if stop_str_matched_reqs:
-            await self._stop_str_matched_reqs(stop_str_matched_reqs=stop_str_matched_reqs)
+            filter_cmds.extend([StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs])
+
+        if self.args.run_mode == 'nixl_decode':
+            remote_prefill_done_reqs = self._get_nixl_rpd_reqs_from_running_batch()
+            if remote_prefill_done_reqs:
+                filter_cmds.extend([NIXLRemotePrefillDoneCmd(req_id=r.request_id) for r in remote_prefill_done_reqs])
+
+        if filter_cmds:
+            await self._filter_running_reqs(filter_cmds)
         return
 
     async def _add_batch(self, batch: Batch):
@@ -342,17 +354,7 @@ class RouterManager:
         logger.debug(f"Prefill Batch: {batch.simple_log()} \n")
         return
 
-    async def _aborted_reqs(self, aborted_reqs: List[Req]):
-        cmds = [AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs]
-        while not self.shm_reqs_io_buffer.is_empty():
-            await asyncio.sleep(0.02)
-
-        self.shm_reqs_io_buffer.write_obj(cmds)
-        self.shm_reqs_io_buffer.set_ready()
-        return
-
-    async def _stop_str_matched_reqs(self, stop_str_matched_reqs: List[Req]):
-        cmds = [StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs]
+    async def _filter_running_reqs(self, cmds: List[ReqCmd]):
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.02)
 
@@ -398,6 +400,16 @@ class RouterManager:
                 ans.append(req)
         return ans
 
+    def _get_nixl_rpd_reqs_from_running_batch(self) -> List[Req]:
+        ans = []
+        if self.running_batch is None:
+            return ans
+        for req in self.running_batch.reqs:
+            req: PDNIXLChunkedPrefillReq
+            if req.set_pd_req_state() != 0:
+                ans.append(req)
+        return ans
+
     def _get_paused_req_num(self) -> int:
         if self.running_batch is None:
             return 0
@@ -439,8 +451,10 @@ class RouterManager:
             req._router_aborted = False
             # 作用同 _router_aborted 类似
             req._router_stop_str_matched = False
+
             if isinstance(req, PDNIXLChunkedPrefillReq):
-                req.dp_world_size = self.world_size
+                req.set_dp_world_size(self.dp_world_size)
+
             req_group.append(req)
 
             logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")

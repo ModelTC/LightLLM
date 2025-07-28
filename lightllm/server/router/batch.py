@@ -58,8 +58,6 @@ class Batch:
                 req = None
             else:
                 unfinished_req_ids.append(req.request_id)
-                if isinstance(req, PDNIXLChunkedPrefillReq):
-                    req.set_pd_req_state()
 
         self.reqs = [self.id_to_reqs[req_id] for req_id in unfinished_req_ids]
         self.id_to_reqs = {req.request_id: req for req in self.reqs}

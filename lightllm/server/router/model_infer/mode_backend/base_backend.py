@@ -19,7 +19,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_verify import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
-from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
+from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd, NIXLRemotePrefillDoneCmd, ReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
@@ -47,6 +47,7 @@ class ModeBackend:
         self.decode_mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None
         # extra_post_req_handle_func 用于添加请求InferReq的状态变化中添加额外的后处理信息，主要是状态机相关的调整等。
         self.extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None
+        self.call_post_handle_for_chunk: bool = False
 
         self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
@@ -314,18 +315,14 @@ class ModeBackend:
         cmds: List = self.shm_reqs_io_buffer.read_obj()
         self.shm_reqs_io_buffer.sub_state()
         if cmds:
-            if isinstance(cmds[0], AbortedReqCmd):
+            if isinstance(cmds[0], ReqCmd):
                 for obj in cmds:
-                    obj: AbortedReqCmd = obj
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
-                        req.infer_aborted = True
-            elif isinstance(cmds[0], StopStrMatchedReqCmd):
-                for obj in cmds:
-                    obj: StopStrMatchedReqCmd = obj
-                    if obj.req_id in g_infer_context.requests_mapping:
-                        req: InferReq = g_infer_context.requests_mapping[obj.req_id]
-                        req.infer_aborted = True
+                        if isinstance(obj, AbortedReqCmd) or isinstance(obj, StopStrMatchedReqCmd):
+                            req.infer_aborted = True
+                        elif isinstance(obj, NIXLRemotePrefillDoneCmd):
+                            req.infer_nixl_rpd = True
             else:
                 self._init_reqs(reqs=cmds)
         return
@@ -510,6 +507,7 @@ class ModeBackend:
         next_token_logprobs: List[float],
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
+        call_post_handle_for_chunk: bool = False,
     ):
         """
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
@@ -526,6 +524,7 @@ class ModeBackend:
                 eos_ids=self.eos_id,
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 is_master_in_dp=self.is_master_in_dp,
+                call_post_handle_for_chunk=call_post_handle_for_chunk
             )
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(

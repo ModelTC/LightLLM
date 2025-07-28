@@ -298,6 +298,8 @@ class InferReq:
         self.filter_mark = False
         self.need_out_token_id_statistics = True
         self.out_token_id_count: Dict[int, int] = None
+
+        self.infer_nixl_rpd = False
         self.in_prefill_or_transfer = False
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
@@ -481,8 +483,11 @@ class InferReqUpdatePack:
         eos_ids: List[int],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
         is_master_in_dp: bool,
+        call_post_handle_for_chunk: bool,
     ):
         if self.output_len <= 0:
+            if call_post_handle_for_chunk and extra_post_req_handle_func:
+                extra_post_req_handle_func(self.req_obj, next_token_id, next_token_logprob)
             return
 
         req_obj = self.req_obj

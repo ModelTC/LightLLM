@@ -1,8 +1,8 @@
+import os
 import time
 import torch.multiprocessing as mp
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
 from typing import List, Tuple, Dict
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.core.objs.req import PDNIXLChunkedPrefillReq
@@ -16,21 +16,24 @@ from .pd_remote_prefill_obj import (
     RemoteTransferStatusType,
 )
 
-from .impl_for_pd_base import PDNIXLBackendBase
+from .impl_for_pd_base import PDNIXLBackendBaseChunked
 
 logger = init_logger(__name__)
 
 
-class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
+class PDNIXLBackendForDecodeNode(PDNIXLBackendBaseChunked):
     def __init__(self, prefill_task_queue: mp.Queue, prefill_done_queue: mp.Queue, nix_meta_queue: mp.Queue) -> None:
         super().__init__(prefill_task_queue, prefill_done_queue, nix_meta_queue)
+        self.classed_req_strict_prefill = False
+        self.support_overlap = True
 
     def init_custom(self):
         super().init_custom()
         self.wait_prefill_thread = threading.Thread(
             target=self._start_async_loop, args=(self._prefill_wait_loop_async,), daemon=True
         )
-        self.wait_move_page_pool = ThreadPoolExecutor(max_workers=4)
+        max_workers = int(os.getenv("PD_NIXL_MOVE_PAGE_POOL_SIZE", 4))
+        self.wait_move_page_pool = ThreadPoolExecutor(max_workers)
         self.wait_prefill_thread.start()
         return
 
@@ -59,25 +62,32 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
         self.request_to_page_ids[req_id] = remote_prefill_task.prefill_request.page_ids
         self.to_remote_queue.put(remote_prefill_task)
 
-    def prefill(self, reqs: List[Tuple]):
-        self._init_reqs(reqs, init_req_obj=False)
-        return
+    def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
+        new_finished_reqs = []
+        for req in finished_reqs:
+            if req.infer_aborted and req.in_prefill_or_transfer:
+                # those are in progress, we will handle them later
+                pass
+            else:
+                new_finished_reqs.append(req)
 
-    def decode(self):
+        finished_reqs = new_finished_reqs
 
-        uninit_reqs, aborted_reqs, ok_finished_reqs, prefill_reqs, decode_reqs = self._get_classed_reqs(
-            g_infer_context.infer_req_ids,
-            no_decode=False,
-        )
-        # filter out remote prefilling reqs
-        prefill_reqs, aborted_reqs, decode_reqs, _ = self._decode_filter_reqs(prefill_reqs, aborted_reqs, decode_reqs)
 
-        self._filter_reqs(aborted_reqs)
+    def _get_classed_reqs(
+        self,
+        req_ids: List[int] = None,
+        no_decode: bool = False,
+        strict_prefill: bool = False,
+        recover_paused: bool = False,
+    ):
+        prefill_reqs, decode_reqs = super()._get_classed_reqs(req_ids, no_decode, strict_prefill, recover_paused)
+        prefill_reqs, decode_reqs, failed_reqs, _ = self._decode_filter_reqs(prefill_reqs, decode_reqs)
 
-        # allocate kv cache, do remote prefill
+        if failed_reqs:
+            g_infer_context.filter_reqs(failed_reqs)
+
         if prefill_reqs:
-            # TODO: we could allocate cache later after remote prefill done and get a signal from remote
-            #       but it will have a risk to not have enough cache for this request.
             kwargs, run_reqs = self._prepare_remote_prefill_inputs(prefill_reqs)
             for idx, run_req in enumerate(run_reqs):
                 run_req: InferReq = run_req
@@ -97,10 +107,6 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBase):
                 run_req.in_prefill_or_transfer = True
                 self.remote_prefilled_reqs[shm_req.group_req_id] = run_req
 
-        if decode_reqs:
-            ContinuesBatchBackend.normal_decode(
-                self, decode_reqs=decode_reqs, uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs
-            )
+            prefill_reqs.clear()
 
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
-        return
+        return prefill_reqs, decode_reqs
