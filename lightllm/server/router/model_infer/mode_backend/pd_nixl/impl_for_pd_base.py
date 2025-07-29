@@ -409,7 +409,7 @@ class PDNIXLBackendBase(object):
 
         req.in_prefill_or_transfer = False
         group_req_id = req.shm_req.group_req_id
-        req.cur_kv_len = req.get_cur_total_len()
+        req.cur_kv_len = req.get_cur_total_len() - 1
 
         if self.is_master_in_dp:
             req.shm_req.shm_cur_kv_len = req.cur_kv_len
@@ -423,17 +423,20 @@ class PDNIXLBackendBase(object):
 
         assert group_req_id in self.request_to_first_token, f"{group_req_id} not in request_to_first_token dict"
         token_id, token_logprob = self.request_to_first_token.pop(group_req_id)
-        req.cur_output_len += 1
 
-        pack = InferReqUpdatePack(req, req.cur_output_len)
-        pack.handle(
-            token_id,
-            token_logprob,
-            eos_ids=self.eos_id,
-            extra_post_req_handle_func=None,
-            is_master_in_dp=self.is_master_in_dp,
-            call_post_handle_for_chunk=False
-        )
+
+        #(TODO) figure out how to update req_to_next_token_ids
+        # req.cur_output_len += 1
+
+        # pack = InferReqUpdatePack(req, req.cur_output_len)
+        # pack.handle(
+        #     token_id,
+        #     token_logprob,
+        #     eos_ids=self.eos_id,
+        #     extra_post_req_handle_func=None,
+        #     is_master_in_dp=self.is_master_in_dp,
+        #     call_post_handle_for_chunk=False
+        # )
         return token_id
 
     def _decode_filter_reqs(
@@ -465,10 +468,10 @@ class PDNIXLBackendBase(object):
                 new_prefill_reqs.append(req)
 
         if rpd_reqs:
-            g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
-                rpd_reqs,
-                next_token_ids,
-            )
+            # g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
+            #     rpd_reqs,
+            #     next_token_ids,
+            # )
             decode_reqs.extend(rpd_reqs)
 
         return new_prefill_reqs, decode_reqs, failed_prefill_reqs, remote_prefill_reqs
