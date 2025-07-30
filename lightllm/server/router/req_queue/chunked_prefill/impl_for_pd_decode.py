@@ -48,15 +48,13 @@ class QueueForPDDecode(BaseQueue):
                 can_run_list.append(req)
             else:
                 break
-
+        new_batch = None
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
-            for req in abort_req_list:
-                self.router.shm_req_manager.put_back_req_obj(req)
-            self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
-            return new_batch
-        else:
-            return None
+        for req in abort_req_list:
+            self.router.shm_req_manager.put_back_req_obj(req)
+        self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
+        return new_batch
 
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):
         is_busy = self.is_busy()
