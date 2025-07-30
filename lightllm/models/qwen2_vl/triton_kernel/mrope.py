@@ -100,6 +100,7 @@ def mrope_triton(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch
     k_out = torch.empty_like(k)
     qo_sb, qo_sh, qo_sl, qo_sd = map(int, q_out.stride())
     ko_sb, ko_sh, ko_sl, ko_sd = map(int, k_out.stride())
+
     assert len(cos.shape) == 4
     token_dim = 2
     axis_dim = 0
