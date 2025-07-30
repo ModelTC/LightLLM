@@ -188,6 +188,9 @@ class Req(ctypes.Structure):
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
 
+    def get_prompt_ids_numpy(self):
+        return self.shm_prompt_ids.arr[: self.input_len]
+
     def to_router_rpc_obj(self):
         if hasattr(self, "multimodal_params"):
             return (

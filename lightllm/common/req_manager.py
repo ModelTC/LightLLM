@@ -155,7 +155,7 @@ class ReqSamplingParamsManager:
         else:
             self.req_to_out_token_id_counter[req.req_idx].fill_(0)
             if req.sampling_param.shm_param.input_penalty and req.need_out_token_id_statistics:
-                prompt_ids = torch.from_numpy(req.shm_req.get_prompt_ids()).pin_memory().cuda(non_blocking=True)
+                prompt_ids = torch.from_numpy(req.shm_req.get_prompt_ids_numpy()).pin_memory().cuda(non_blocking=True)
                 token_id_counter(
                     prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
                 )
