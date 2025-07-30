@@ -2,7 +2,7 @@ import xxhash
 import numpy as np
 from typing import List, Tuple, Optional
 
-def compute_token_list_hash(self, tokens: List[int], chuncked_size:int) -> List[int]:
+def compute_token_list_hash(tokens: List[int], chuncked_size:int) -> List[int]:
     chunks_hash_value = []
     hsum = xxhash.xxh3_64()
 
