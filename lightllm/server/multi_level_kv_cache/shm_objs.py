@@ -1,9 +1,48 @@
 import ctypes
+import numpy as np
 from multiprocessing import shared_memory
 from typing import List, Optional
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+class IntList(object):
+    def __init__(self, name: str, capacity: int, init_shm_data: bool):
+        self.capacity: int = capacity
+        byte_size = np.int32.itemsize * (self.capacity + 1)
+        shm_name = name
+        shm = _create_shm(name=shm_name, byte_size=byte_size)
+        self.shm = shm
+
+        if self.shm.size != byte_size:
+            logger.info(f"size not same, unlink lock shm {self.shm.name} and create again")
+            self.shm.close()
+            self.shm.unlink()
+            self.shm = None
+            self.shm = _create_shm(name=shm_name, byte_size=byte_size)
+
+        self.arr = np.ndarray((self.capacity + 1), dtype=np.int32, buffer=self.shm.buf)
+        if init_shm_data:
+            self.arr.fill(0)
+        return
+
+    def size(self):
+        return self.arr[-1]
+
+    def add_item(self, value: int):
+        write_index = self.arr[-1]
+        self.arr[write_index] = value
+        self.arr[-1] += 1
+        return
+
+    def pop_all_item(self) -> Optional[List[int]]:
+        if self.size() == 0:
+            return None
+
+        ans = self.arr[0 : self.size()].tolist()
+        self.arr[-1] = 0
+        return ans
 
 
 class ShmLinkedList(object):
