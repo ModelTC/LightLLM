@@ -13,6 +13,8 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         InferStateInfo.init_some_extra_state(self, model, input_ids)
         if self.is_prefill:
+            self.max_seq_len = self.max_kv_seq_len
+            self.q_max_seq_len = self.max_q_seq_len
             position_ids = self.position_ids
             self.position_sin = model._sin_cached[:, position_ids, :].unsqueeze(1)
             self.position_cos = model._cos_cached[:, position_ids, :].unsqueeze(1)
