@@ -28,7 +28,7 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBaseChunked):
         self.support_overlap = True
 
     def init_custom(self):
-        super().init_custom()
+        super(type(self), self).init_custom()
         self.wait_prefill_thread = threading.Thread(
             target=self._start_async_loop, args=(self._prefill_wait_loop_async,), daemon=True
         )
@@ -81,7 +81,7 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBaseChunked):
         strict_prefill: bool = False,
         recover_paused: bool = False,
     ):
-        prefill_reqs, decode_reqs = super()._get_classed_reqs(req_ids, no_decode, strict_prefill, recover_paused)
+        prefill_reqs, decode_reqs = super(type(self), self)._get_classed_reqs(req_ids, no_decode, strict_prefill, recover_paused)
         prefill_reqs, decode_reqs, failed_reqs, _ = self._decode_filter_reqs(prefill_reqs, decode_reqs)
 
         if failed_reqs:
