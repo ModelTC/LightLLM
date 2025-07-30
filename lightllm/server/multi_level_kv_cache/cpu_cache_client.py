@@ -18,7 +18,7 @@ class CpuKvCacheClient(object):
         self.page_num: int = self.args.page_num
         self._create_cpu_status_list(init_shm_data)
 
-    def get_empty_pages_for_loading_from_gpu(self, page_hashes: List[int]) -> List[int]:
+    def get_empty_pages_for_loading_from_gpu(self, page_hashes: List[int], disk_offload_enable: bool) -> List[int]:
         """
         -1 means no page, did not need for copy.
         """
@@ -35,24 +35,24 @@ class CpuKvCacheClient(object):
                 self.page_items.add_item_to_tail(page_item.self_index)
                 page_list.append(-1)
             else:
-                page_index = self.get_one_empty_page(hash_key=hash_key)
+                page_index = self.get_one_empty_page(hash_key=hash_key, disk_offload_enable=disk_offload_enable)
                 if page_index is None:
                     page_list.append(-1)
                 else:
                     page_list.append(page_index)
         return page_list
 
-    def get_one_empty_page(self, hash_key: int) -> Optional[int]:
+    def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
         head = self.page_items.head
         tail = self.page_items.tail
         cur_page: _CpuPageStatus = head.get_next_item()
         if cur_page.self_index == tail.self_index:
             return None
 
-        if (cur_page.is_empty() or cur_page.is_ready_recycle()) and cur_page.ref_count == 0:
+        if cur_page.can_realloc(disk_offload_enable=disk_offload_enable):
             page_index = cur_page.self_index
             cur_page.del_self_from_list()
-            if cur_page.is_ready_recycle():
+            if not cur_page.is_empty():
                 self.page_hash_dict.remove(cur_page.hash_key)
             cur_page.hash_key = hash_key
             cur_page.status = cur_page.LOADING
@@ -63,13 +63,14 @@ class CpuKvCacheClient(object):
         else:
             return None
 
-    def update_pages_status_to_ready(self, page_list: List[int], deref: bool = True):
+    def update_pages_status_to_ready(self, page_list: List[int], deref: bool = True, disk_offload_enable: bool = False):
         for page_index in page_list:
             if page_index != -1:
                 cur_page: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
                 assert cur_page.is_loading()
                 cur_page.status = cur_page.READY
-                self.offload_page_indexes.add_item(value=cur_page.self_index)
+                if disk_offload_enable:
+                    self.offload_page_indexes.add_item(value=cur_page.self_index)
                 if deref:
                     assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
@@ -131,25 +132,6 @@ class CpuKvCacheClient(object):
         page_item.ref_count -= 1
         return
 
-    def _create_cpu_status_list(self, init_shm_data: bool):
-        self.page_items = ShmLinkedList(
-            name=f"{get_unique_server_name()}_cpu_kv_cache_page_items",
-            item_class=_CpuPageStatus,
-            capacity=self.page_num,
-            init_shm_data=init_shm_data,
-        )
-        self.page_hash_dict = ShmDict(
-            name=f"{get_unique_server_name()}_cpu_kv_cache_hash",
-            capacity=self.page_num * 2,
-            init_shm_data=init_shm_data,
-        )
-        self.offload_page_indexes = IntList(
-            name=f"{get_unique_server_name()}_cpu_kv_cache_offload_page_indexes",
-            capacity=self.page_num,
-            init_shm_data=init_shm_data,
-        )
-        return
-
     def get_pages_to_offloading(self) -> Optional[List[int]]:
         page_list = self.offload_page_indexes.pop_all_item()
         if page_list is not None:
@@ -169,6 +151,25 @@ class CpuKvCacheClient(object):
                 if deref:
                     assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
+        return
+
+    def _create_cpu_status_list(self, init_shm_data: bool):
+        self.page_items = ShmLinkedList(
+            name=f"{get_unique_server_name()}_cpu_kv_cache_page_items",
+            item_class=_CpuPageStatus,
+            capacity=self.page_num,
+            init_shm_data=init_shm_data,
+        )
+        self.page_hash_dict = ShmDict(
+            name=f"{get_unique_server_name()}_cpu_kv_cache_hash",
+            capacity=self.page_num * 2,
+            init_shm_data=init_shm_data,
+        )
+        self.offload_page_indexes = IntList(
+            name=f"{get_unique_server_name()}_cpu_kv_cache_offload_page_indexes",
+            capacity=self.page_num,
+            init_shm_data=init_shm_data,
+        )
         return
 
 
@@ -212,3 +213,9 @@ class _CpuPageStatus(_LinkedListItem):
         判断数据是否是填充ok的，可能包含多种状态下属于数据是可填充的状态。
         """
         return self.status >= self.READY
+
+    def can_realloc(self, disk_offload_enable: bool):
+        if disk_offload_enable:
+            return (self.is_empty() or self.is_ready_recycle()) and self.ref_count == 0
+        else:
+            return (self.is_empty() or self.is_data_ready()) and self.ref_count == 0
