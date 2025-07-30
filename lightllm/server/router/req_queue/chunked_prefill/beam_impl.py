@@ -116,15 +116,14 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
             if ok_insert:
                 can_run_list.extend(cur_group_reqs)
 
+        new_batch = None
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
-            for req in abort_req_list:
-                self.router.shm_req_manager.put_back_req_obj(req)
 
-            self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
-            return new_batch
-        else:
-            return None
+        for req in abort_req_list:
+            self.router.shm_req_manager.put_back_req_obj(req)
+        self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
+        return new_batch
 
     def _add_to_group(self, cur_group_reqs, req: Req):
         if len(cur_group_reqs) == 0:
