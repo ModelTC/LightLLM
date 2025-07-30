@@ -7,7 +7,7 @@ logger = init_logger(__name__)
 
 
 class ShmLinkedList(object):
-    def __init__(self, name: str, item_class: "_LinkedListItem.__class__", capacity: int):
+    def __init__(self, name: str, item_class: "_LinkedListItem.__class__", capacity: int, init_shm_data: bool):
         self.capacity: int = capacity
         # add head and tail node.
         byte_size = ctypes.sizeof(item_class) * (self.capacity + 2)
@@ -24,20 +24,24 @@ class ShmLinkedList(object):
         # 构建 hash table 表
         self.linked_items: List[_LinkedListItem] = (item_class * (self.capacity + 2)).from_buffer(self.shm.buf)
         for e in self.linked_items:
-            e.init()
             e.set_list_obj(self.linked_items)
 
-        self.head = self.linked_items[self.capacity]
-        self.head.self_index = self.capacity
-        self.tail = self.linked_items[self.capacity + 1]
-        self.head.self_index = self.capacity + 1
-        self.head.next_index = self.tail.self_index
-        self.tail.pre_index = self.head.self_index
+        if init_shm_data:
+            for e in self.linked_items:
+                e.init()
 
-        for i in range(self.capacity):
-            item = self.linked_items[i]
-            item.self_index = i
-            self.add_item_to_tail(i)
+            self.head = self.linked_items[self.capacity]
+            self.tail = self.linked_items[self.capacity + 1]
+
+            self.head.self_index = self.capacity
+            self.tail.self_index = self.capacity + 1
+            self.head.next_index = self.tail.self_index
+            self.tail.pre_index = self.head.self_index
+
+            for i in range(self.capacity):
+                item = self.linked_items[i]
+                item.self_index = i
+                self.add_item_to_tail(i)
         return
 
     def add_item_to_tail(self, index: int):
@@ -62,15 +66,18 @@ class ShmLinkedList(object):
 
 
 class ShmDict(object):
-    def __init__(self, name: str, capacity: int):
+    def __init__(self, name: str, capacity: int, init_shm_data: bool):
         self.capacity: int = capacity
-        self.link_items: ShmLinkedList = ShmLinkedList(name=name, item_class=_HashLinkItem, capacity=self.capacity * 2)
-        # 将前capacity个item,作为hash item。
-        for i in range(self.capacity):
-            self.link_items.pop_head_item()
-            item: _HashLinkItem = self.link_items.get_item_by_index(i)
-            item.pre_index = -1
-            item.next_index = -1
+        self.link_items: ShmLinkedList = ShmLinkedList(
+            name=name, item_class=_HashLinkItem, capacity=self.capacity * 2, init_shm_data=init_shm_data
+        )
+        # 将前capacity个item,作为hash item的链表头。
+        if init_shm_data:
+            for i in range(self.capacity):
+                self.link_items.pop_head_item()
+                item: _HashLinkItem = self.link_items.get_item_by_index(i)
+                item.pre_index = -1
+                item.next_index = -1
         return
 
     def put(self, key: int, value: int):
