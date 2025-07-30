@@ -185,8 +185,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ids=next_token_ids_cpu,
             next_token_logprobs=next_token_logprobs_cpu,
             run_reqs_update_packs=update_packs,
-            extra_post_req_handle_func=self.extra_post_req_handle_func,
-            call_post_handle_for_chunk=self.call_post_handle_for_chunk
+            extra_post_req_handle_func=self.extra_post_req_handle_func
         )
 
         # 第四阶段
@@ -352,8 +351,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ids=next_token_ids_cpu[select_mask],
             next_token_logprobs=next_token_logprobs_cpu[select_mask],
             run_reqs_update_packs=update_packs,
-            extra_post_req_handle_func=self.extra_post_req_handle_func,
-            call_post_handle_for_chunk=self.call_post_handle_for_chunk
+            extra_post_req_handle_func=self.extra_post_req_handle_func
         )
         if len(need_free_mem_indexes) > 0:
             g_infer_state_lock.acquire()
