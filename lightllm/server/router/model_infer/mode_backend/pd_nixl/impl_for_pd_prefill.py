@@ -20,7 +20,7 @@ class PDNIXLBackendForPrefillNode(PDNIXLBackendBaseChunked):
         self.call_post_handle_for_chunk = True
 
     def init_custom(self):
-        super().init_custom()
+        super(type(self), self).init_custom()
         self.handle_prefill_loop_thread = threading.Thread(
             target=self._start_async_loop, args=(self._handle_prefill_loop,), daemon=True
         )
