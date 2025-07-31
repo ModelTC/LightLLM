@@ -96,3 +96,8 @@ class StartArgs:
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
+    enable_cpu_cache: bool = field(default=False)
+    cpu_cache_storage_size: float = field(default=2)
+    cpu_cache_token_chuncked_size: int = field(default=256)
+    enable_disk_cache: bool = field(default=False)
+    disk_cache_storage_size: float = field(default=10)
