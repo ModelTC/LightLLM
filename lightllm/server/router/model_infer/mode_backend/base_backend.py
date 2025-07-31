@@ -75,6 +75,7 @@ class ModeBackend:
         self.chunked_prefill_size = self.args.chunked_prefill_size
         self.return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
         self.use_dynamic_prompt_cache = not self.args.disable_dynamic_prompt_cache
+        self.batch_max_tokens = self.args.batch_max_tokens
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
         self.disable_cudagraph = self.args.disable_cudagraph
         self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
@@ -391,6 +392,7 @@ class ModeBackend:
         # 请求，其逻辑是不适合的。
         pause_max_req_num = 2
         wait_pause_count = 0
+        prefill_tokens = 0
 
         # 因为会使用到 radix cache 和 mem_manager 的计数信息
         # 所以需要加锁保护。
@@ -439,6 +441,11 @@ class ModeBackend:
                         wait_pause_count += 1
             else:
                 token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+                if prefill_tokens + token_num > self.batch_max_tokens:
+                    # 跳过等下次prefill，避免oom
+                    prefill_tokens = 0
+                    break
+                prefill_tokens += token_num
                 if token_num <= can_alloc_token_num:
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num

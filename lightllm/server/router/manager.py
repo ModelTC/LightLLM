@@ -197,10 +197,6 @@ class RouterManager:
         return
 
     def _get_schedule_time_interval(self):
-        if self.running_batch is None:
-            # 没有运行中的 batch 时，每 10ms 触发一次请求调度
-            return 0.01
-
         # dp 模式，为了更好的配平，需要更长的调度间隔，以便于能收到更多的请求
         return self.schedule_time_interval
 
@@ -370,9 +366,7 @@ class RouterManager:
 
     def _generate_new_batch(self):
         # 调度的时候需要考虑当前运行的batch，和调度了但是暂时还没有推理的部分请求。
-        new_batch = self.req_queue.generate_new_batch(
-            Batch.merge_two_batch(self.running_batch, self.schedule_new_batch)
-        )
+        new_batch = self.req_queue.generate_new_batch(self.schedule_new_batch)
         self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
         return
 
@@ -469,7 +463,7 @@ class RouterManager:
         if self.is_multinode_tp:
             self._multinode_tp_generate_new_batch()
         else:
-            if self._get_paused_req_num() == 0:
+            if self._get_paused_req_num() == 0 and self.shm_reqs_io_buffer.is_empty():
                 self._generate_new_batch()
         return
 
