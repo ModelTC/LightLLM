@@ -5,7 +5,7 @@ import numpy as np
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
-from .token_chunck_hash_list import TokenHashList
+from .token_chunck_hash_list import TokenHashList, CpuCachePageList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
@@ -101,6 +101,8 @@ class Req(ctypes.Structure):
         ("_mtp_step", ctypes.c_int),
         # 用于在开启cpu cache 或者 硬盘 cache时，预先计算，分块输入token的hash值。
         ("token_hash_list", TokenHashList),
+        # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
+        ("cpu_cache_match_page_indexes", CpuCachePageList),
         # 分块hash的块大小
         ("cpu_cache_token_chuncked_size", ctypes.c_int),
     ]
@@ -173,6 +175,7 @@ class Req(ctypes.Structure):
         self.token_hash_list.clear()
         hash_values = compute_token_list_hash(self.get_prompt_ids(), chuncked_size=self.cpu_cache_token_chuncked_size)
         self.token_hash_list.fill(hash_values)
+        self.cpu_cache_match_page_indexes = CpuCachePageList()
         return
 
     def create_prompt_ids_shm_array(self):
