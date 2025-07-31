@@ -149,6 +149,15 @@ def get_kv_quant_calibration_inference_count():
     return int(os.getenv("LIGHTLLM_KV_QUANT_CALIBRARTION_INFERENCE_COUNT", 4000))
 
 
+@lru_cache(maxsize=None)
+def get_page_size():
+    try:
+        args = get_env_start_args()
+        return int(os.getenv("PAGE_SIZE", 4)) if "page_size_variable" in args.mode else 1
+    except:
+        return 1
+
+
 g_model_init_done = False
 
 

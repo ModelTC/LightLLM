@@ -1,4 +1,6 @@
-def init_req_to_token_indexes(req_to_token_indexs, b_req_idx, b_seq_len, b_ready_cache_len, alloc_mem_index):
+def init_req_to_token_indexes(
+    req_to_token_indexs, b_req_idx, b_seq_len, b_ready_cache_len, max_len_in_batch, alloc_mem_index
+):
     start_index = 0
     b_seq_len_numpy = b_seq_len.cpu().numpy()
     b_ready_cache_len_numpy = b_ready_cache_len.cpu().numpy()

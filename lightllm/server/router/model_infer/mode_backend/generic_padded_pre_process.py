@@ -77,7 +77,9 @@ def padded_prepare_prefill_inputs(
     # dynamic prompt cache 准备 token
     g_infer_state_lock.acquire()
     if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0] - padded_req_num)
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(
+            input_ids.shape[0] - padded_req_num, b_seq_len, b_ready_cache_len, True
+        )
     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(
         input_ids.shape[0] - padded_req_num, b_req_idx, b_seq_len, b_ready_cache_len, True
     )
@@ -164,7 +166,7 @@ def padded_prepare_decode_inputs(
     # dynamic prompt cache 准备 token
     g_infer_state_lock.acquire()
     if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0] - padded_req_num)
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0] - padded_req_num, b_seq_len)
     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(
         b_seq_len.shape[0] - padded_req_num, b_req_idx, b_seq_len
     )
