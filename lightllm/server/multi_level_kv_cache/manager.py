@@ -61,7 +61,7 @@ class MultiLevelKVCacheManager:
                     current_group_req = self.recv_queue[0]
                     self.recv_queue = self.recv_queue[1:]
 
-                self.executor.submit(self._handle_group_req, current_group_req, time.time())
+                self.executor.submit(self._handle_group_req_cpu_cache_match, current_group_req, time.time())
             except BaseException as e:
                 logger.exception(str(e))
         return
@@ -90,6 +90,7 @@ class MultiLevelKVCacheManager:
 
         # 对每个请求进行cpu cache page 的匹配操作。
         for req in reqs:
+            self.cpu_cache_client.lock.acquire_sleep1ms()
             req: Req = req
             finded_page_indexes = []
             for token_chuncked_hash_value in req.token_hash_list.get_all():
@@ -98,6 +99,12 @@ class MultiLevelKVCacheManager:
                     finded_page_indexes.append(page_index)
                 else:
                     break
+            self.cpu_cache_client.lock.release()
+
+            # 等待所有的cpu cache 页面ready
+            while not self.cpu_cache_client.check_allpages_ready(finded_page_indexes):
+                time.sleep(0.01)
+
             req.cpu_cache_match_page_indexes.fill(finded_page_indexes)
 
         for req in reqs:

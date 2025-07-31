@@ -1,9 +1,9 @@
 import ctypes
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
-from multiprocessing import shared_memory
 from typing import List, Optional
 from lightllm.utils.log_utils import init_logger
 from .shm_objs import ShmDict, ShmLinkedList, _LinkedListItem, IntList
+from lightllm.server.core.objs import AtomicShmLock
 
 logger = init_logger(__name__)
 
@@ -17,6 +17,7 @@ class CpuKvCacheClient(object):
         self.args = get_env_start_args()
         # to do here need calcu from from settings.
         self.page_num: int = self.args.cpu_cache_storage_size
+        self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_cpu_kv_cache_client_lock")
         self._create_cpu_status_list(init_shm_data)
 
     def get_empty_pages_for_loading_from_gpu(self, page_hashes: List[int], disk_offload_enable: bool) -> List[int]:
