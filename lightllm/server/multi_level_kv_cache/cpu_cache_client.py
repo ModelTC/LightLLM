@@ -4,6 +4,7 @@ from typing import List, Optional
 from lightllm.utils.log_utils import init_logger
 from .shm_objs import ShmDict, ShmLinkedList, _LinkedListItem, IntList
 from lightllm.server.core.objs import AtomicShmLock
+from lightllm.utils.kv_cache_utils import calcu_cpu_cache_page_num
 
 logger = init_logger(__name__)
 
@@ -16,7 +17,7 @@ class CpuKvCacheClient(object):
     def __init__(self, init_shm_data: bool):
         self.args = get_env_start_args()
         # to do here need calcu from from settings.
-        self.page_num: int = self.args.cpu_cache_storage_size
+        self.page_num: int = calcu_cpu_cache_page_num()
         self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_cpu_kv_cache_client_lock")
         self._create_cpu_status_list(init_shm_data)
 
