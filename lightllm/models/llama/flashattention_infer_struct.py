@@ -3,10 +3,14 @@ import torch
 import numpy as np
 import torch.distributed as dist
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
 from lightllm.common.basemodel.batch_objs import ModelInput
+
+
+def cdiv(a, b):
+    return (a + b - 1) // b
 
 
 class FlashAttentionStateInfo(LlamaInferStateInfo):
@@ -28,32 +32,34 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
         if self.is_prefill:
             self.cu_seqlens_q = self.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
-            self.page_table = torch.empty(
-                (self.batch_size, self.max_seq_len), dtype=torch.int32, device=input_ids.device
-            )
-            self.page_table.copy_(model.req_manager.req_to_token_indexs[self.b_req_idx, : self.max_seq_len])
+            length = cdiv(self.max_seq_len, get_page_size())
+            self.page_table = torch.empty((self.batch_size, length), dtype=torch.int32, device=input_ids.device)
+            if "page_size_variable" in model.mode:
+                self.page_table.copy_(model.req_manager.req_to_page_indexs[self.b_req_idx, :length])
+            else:
+                self.page_table.copy_(model.req_manager.req_to_token_indexs[self.b_req_idx, :length])
         else:
             # Meta information of flashattention for decoding
             self.cu_seqlens_q = self.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
             max_seq_len_k = self.max_kv_seq_len
             if self.batch_size <= model.graph_max_batch_size and self.max_len_in_batch <= model.graph_max_len_in_batch:
-                page_buffer = FlashAttentionStateInfo.get_page_table_buffer(
-                    model.graph_max_batch_size, model.graph_max_len_in_batch
+                page_size = get_page_size()
+                length = cdiv(model.graph_max_len_in_batch, page_size)
+                page_buffer = FlashAttentionStateInfo.get_page_table_buffer(model.graph_max_batch_size, length)
+                self.page_table = page_buffer[self.microbatch_index][: self.batch_size * length].reshape(
+                    self.batch_size, length
                 )
-                self.page_table = page_buffer[self.microbatch_index][
-                    : self.batch_size * model.graph_max_len_in_batch
-                ].reshape(self.batch_size, model.graph_max_len_in_batch)
             else:
-                self.page_table = torch.empty(
-                    (self.batch_size, self.max_len_in_batch), dtype=torch.int32, device=input_ids.device
-                )
+                length = cdiv(self.max_len_in_batch, get_page_size())
+                self.page_table = torch.empty((self.batch_size, length), dtype=torch.int32, device=input_ids.device)
 
-            self.page_table[:, :max_seq_len_k].copy_(
-                model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k],
-                non_blocking=True,
-            )
-            self.page_table[:, max_seq_len_k:].fill_(0)
+            length = cdiv(max_seq_len_k, get_page_size())
+            if "page_size_variable" in model.mode:
+                self.page_table[:, :length].copy_(model.req_manager.req_to_page_indexs[self.b_req_idx, :length])
+            else:
+                self.page_table[:, :length].copy_(model.req_manager.req_to_token_indexs[self.b_req_idx, :length])
+            self.page_table[:, length:].fill_(0)
 
         if "offline_calibration_fp8kv" in model.mode:
             if self.is_prefill:

@@ -12,8 +12,6 @@ from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.common.infer_utils import init_req_to_token_indexes
-from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 
 logger = init_logger(__name__)
 
@@ -260,24 +258,6 @@ class MemoryManager:
 
         self.can_use_mem_size -= need_size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-
-        if self.req_to_token_indexs is not None:
-            assert b_req_idx is not None and b_seq_len is not None, "b_req_idx and b_seq_len must be provided"
-            if is_prefill:
-                init_req_to_token_indexes(
-                    self.req_to_token_indexs,
-                    b_req_idx,
-                    b_seq_len,
-                    b_ready_cache_len,
-                    ans,
-                )
-            else:
-                copy_kv_index_to_req(
-                    self.req_to_token_indexs,
-                    b_req_idx.cuda(),
-                    b_seq_len.cuda(),
-                    ans.cuda(),
-                )
         return ans
 
     def set_prefix_cache_to_req(self, req_idx: int, start: int, end: int, values: torch.Tensor):
