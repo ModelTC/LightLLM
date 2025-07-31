@@ -4,7 +4,7 @@ import numpy as np
 from typing import Tuple, Dict, Set, List
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.utils.envs_utils import get_page_size
 
 
 class UniqueTimeIdGenerator:
@@ -21,7 +21,7 @@ time_gen = UniqueTimeIdGenerator()
 
 class TreeNode:
     def __init__(self):
-        self.children: Dict[int, TreeNode] = {}  # 这里的键 为 token_id_key 的第一个元素
+        self.children: Dict[int, TreeNode] = {}  # page_hash -> TreeNode
         self.parent: TreeNode = None
         self.token_id_key: torch.Tensor = None
         self.token_mem_index_value: torch.Tensor = None  # 用于记录存储的 token_index 为每个元素在 token mem 中的index位置
@@ -30,25 +30,56 @@ class TreeNode:
 
         self.node_value_len = 0
         self.node_prefix_total_len = 0
+        self.total_children_count = 0
+        self.page_size = get_page_size()
+        self._page_size_is_power_of_2 = (self.page_size & (self.page_size - 1)) == 0
+        self._page_size_mask = self.page_size - 1 if self._page_size_is_power_of_2 else None
 
     def get_compare_key(self):
-        return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
+        return (0 if self.ref_counter == 0 else 1, self.total_children_count, self.time_id)
+
+    def _compute_key(self, tokens: torch.Tensor) -> int:
+        page_tokens = tokens[: self.page_size]
+        return page_tokens.item() if self.page_size == 1 else hash(page_tokens.cpu().numpy().tobytes())
+
+    def find_matched_child(self, token_id_key: torch.Tensor) -> Tuple["TreeNode", int]:
+        target_key = self._compute_key(token_id_key)
+        if target_key in self.children:
+            child = self.children[target_key]
+            prefix_len = match(token_id_key, child.token_id_key)
+            # 只匹配page_size的整数倍长度
+            if self.page_size > 1:
+                if prefix_len % self.page_size != 0:
+                    if self._page_size_is_power_of_2:
+                        # 位运算加速
+                        prefix_len = prefix_len & ~self._page_size_mask
+                    else:
+                        prefix_len = (prefix_len // self.page_size) * self.page_size
+                    if prefix_len == 0:
+                        return None, 0
+            return child, prefix_len
+
+        return None, 0
 
     def split_node(self, prefix_len):
         split_parent_node = TreeNode()
         split_parent_node.parent = self.parent
-        split_parent_node.parent.children[self.token_id_key[0].item()] = split_parent_node
+        self.parent.children[self._compute_key(self.token_id_key)] = split_parent_node
+
         split_parent_node.token_id_key = self.token_id_key[0:prefix_len]
         split_parent_node.token_mem_index_value = self.token_mem_index_value[0:prefix_len]
         split_parent_node.children = {}
-        split_parent_node.children[self.token_id_key[prefix_len].item()] = self
+
+        remaining_tokens = self.token_id_key[prefix_len:]
+        split_parent_node.children[self._compute_key(remaining_tokens)] = self
         split_parent_node.ref_counter = self.ref_counter
+        split_parent_node.total_children_count = 1
 
         new_len = len(split_parent_node.token_mem_index_value)
         split_parent_node.node_value_len = new_len
         split_parent_node.node_prefix_total_len = split_parent_node.parent.node_prefix_total_len + new_len
 
-        self.token_id_key = self.token_id_key[prefix_len:]
+        self.token_id_key = remaining_tokens
         self.token_mem_index_value = self.token_mem_index_value[prefix_len:]
         self.parent = split_parent_node
         new_len = len(self.token_mem_index_value)
@@ -60,10 +91,10 @@ class TreeNode:
         child = TreeNode()
         child.token_id_key = token_id_key
         child.token_mem_index_value = token_mem_index_value
-        first_token_key = child.token_id_key[0].item()
-        assert first_token_key not in self.children.keys()
-        self.children[first_token_key] = child
+
+        self.children[self._compute_key(token_id_key)] = child
         child.parent = self
+        self.total_children_count += 1
 
         new_len = len(child.token_mem_index_value)
         child.node_value_len = new_len
@@ -71,15 +102,16 @@ class TreeNode:
         return child
 
     def remove_child(self, child_node: "TreeNode"):
-        del self.children[child_node.token_id_key[0].item()]
+        del self.children[self._compute_key(child_node.token_id_key)]
         child_node.parent = None
+        self.total_children_count -= 1
         return
 
     def update_time(self):
         self.time_id = time_gen.generate_time_id()
 
     def is_leaf(self):
-        return len(self.children) == 0
+        return self.total_children_count == 0
 
 
 def match(t1: torch.Tensor, t2: torch.Tensor) -> int:
@@ -98,15 +130,19 @@ def match(t1: torch.Tensor, t2: torch.Tensor) -> int:
         return mismatch_indices[0].item()
 
 
-class RadixCache:
+class PagedRadixCache:
     """
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager: MemoryManager = None):
+    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
         self.mem_manager = mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
+        # 预计算page_size相关的常量
+        self.page_size = get_page_size()
+        self._page_size_is_power_of_2 = (self.page_size & (self.page_size - 1)) == 0
+        self._page_size_mask = self.page_size - 1 if self._page_size_is_power_of_2 else None
 
         self.root_node = TreeNode()
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
@@ -123,12 +159,31 @@ class RadixCache:
         )
         self.tree_total_tokens_num.arr[0] = 0
 
+    def _get_page_aligned_key(self, key, value=None):
+        aligned_len = len(key)
+        if aligned_len == 0:
+            return None, None
+        # page_size > 1时, 需要确保输入的key长度是page_size的整数倍
+        if self.page_size > 1:
+            if aligned_len % self.page_size != 0:
+                if self._page_size_is_power_of_2:
+                    # 位运算加速
+                    aligned_len = aligned_len & ~self._page_size_mask
+                else:
+                    aligned_len = (aligned_len // self.page_size) * self.page_size
+                return (
+                    key[:aligned_len] if aligned_len > 0 else None,
+                    value[:aligned_len] if value is not None and aligned_len > 0 else None,
+                )
+        return key, value
+
     def insert(self, key, value=None):
         if value is None:
             value = key
 
         assert len(key) == len(value)  # and len(key) >= 1
-        if len(key) == 0:
+        key, value = self._get_page_aligned_key(key, value)
+        if key is None:
             return 0
         return self._insert_helper(self.root_node, key, value)
 
@@ -137,10 +192,8 @@ class RadixCache:
             self.evict_tree_set.discard(node)
 
         try:
-            first_key_id = key[0].item()
-            if first_key_id in node.children.keys():
-                child: TreeNode = node.children[first_key_id]
-                prefix_len = match(key, child.token_id_key)
+            child, prefix_len = node.find_matched_child(key)
+            if child is not None:
                 if prefix_len == len(key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
@@ -148,22 +201,21 @@ class RadixCache:
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
                     return prefix_len
-
                 elif prefix_len < len(key) and prefix_len < len(child.token_id_key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
 
-                    key = key[prefix_len:]
-                    value = value[prefix_len:]
+                    remaining_key = key[prefix_len:]
+                    remaining_value = value[prefix_len:]
                     split_parent_node = child.split_node(prefix_len)
-                    new_node = split_parent_node.add_and_return_new_child(key, value)
+                    new_node = split_parent_node.add_and_return_new_child(remaining_key, remaining_value)
                     # update total token num
                     self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
+                    if new_node.is_leaf():
+                        self.evict_tree_set.add(new_node)
 
                     if split_parent_node.is_leaf():
                         self.evict_tree_set.add(split_parent_node)
-                    if new_node.is_leaf():
-                        self.evict_tree_set.add(new_node)
 
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
@@ -173,13 +225,12 @@ class RadixCache:
                 else:
                     assert False, "can not run to here"
 
-            else:
-                new_node = node.add_and_return_new_child(key, value)
-                # update total token num
-                self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
-                if new_node.is_leaf():
-                    self.evict_tree_set.add(new_node)
-                return 0
+            new_node = node.add_and_return_new_child(key, value)
+            # update total token num
+            self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
+            if new_node.is_leaf():
+                self.evict_tree_set.add(new_node)
+            return 0
         finally:
             node.update_time()
             if node.is_leaf():
@@ -187,6 +238,10 @@ class RadixCache:
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
+        key, _ = self._get_page_aligned_key(key)
+        if key is None:
+            return None, 0, None
+
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
         if tree_node != self.root_node:
@@ -213,12 +268,8 @@ class RadixCache:
             if len(key) == 0:
                 return node
 
-            first_key_id = key[0].item()
-            if first_key_id not in node.children.keys():
-                return node
-            else:
-                child = node.children[first_key_id]
-                prefix_len = match(key, child.token_id_key)
+            child, prefix_len = node.find_matched_child(key)
+            if child is not None:
                 if prefix_len == len(child.token_id_key):
                     ans_value_list.append(child.token_mem_index_value)
                     return self._match_prefix_helper(child, key[prefix_len:], ans_value_list, update_refs=update_refs)
@@ -243,6 +294,8 @@ class RadixCache:
                     return split_parent_node
                 else:
                     assert False, "error state"
+
+            return node
         finally:
             node.update_time()
             if node.is_leaf():
@@ -256,9 +309,7 @@ class RadixCache:
         num_evicted = 0
         while num_evicted < need_remove_tokens:
             node: TreeNode = self.evict_tree_set.pop(0)
-            assert (
-                node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
-            ), "error evict tree node state"
+            assert node.ref_counter == 0 and node.is_leaf() and node != self.root_node, "error evict tree node state"
             num_evicted += len(node.token_mem_index_value)
             evict_callback(node.token_mem_index_value)
             # update total token num
@@ -337,8 +388,29 @@ class RadixCache:
         self, need_token_num=None, b_seq_len=None, b_ready_cache_len=None, is_prefill=False
     ):
         assert self.mem_manager is not None
-        if need_token_num > self.mem_manager.can_use_mem_size:
-            need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size
+        need_pages = 0
+        can_use_pages = 0
+        if hasattr(self.mem_manager, "can_use_page_size") and self.page_size > 1 and b_seq_len is not None:
+
+            def get_need_page_size(page_size, b_seq_len, b_ready_cache_len=None, is_prefill=False):
+                need_new_pages = 0
+                if is_prefill:
+                    need_tokens_array = b_seq_len - b_ready_cache_len
+                    need_pages_array = (need_tokens_array + page_size - 1) // page_size
+                    need_new_pages = need_pages_array.sum()
+                else:
+                    mask = (b_seq_len - 1) % page_size == 0
+                    need_new_pages = mask.sum()
+                return need_new_pages
+
+            need_pages = get_need_page_size(self.page_size, b_seq_len, b_ready_cache_len, is_prefill)
+            can_use_pages = self.mem_manager.can_use_page_size
+        if need_token_num > self.mem_manager.can_use_mem_size or need_pages > can_use_pages:
+            need_evict_single_token_num = need_token_num - self.mem_manager.can_use_mem_size
+            need_evict_page_token_num = (need_pages - can_use_pages) * self.page_size
+            need_evict_token_num = max(need_evict_single_token_num, need_evict_page_token_num)
+            remaining_tokens = self.get_tree_total_tokens_num() - self.get_refed_tokens_num()
+            need_evict_token_num = min(need_evict_token_num, remaining_tokens)
             release_mems = []
 
             def release_mem(mem_index):
@@ -346,8 +418,9 @@ class RadixCache:
                 return
 
             self.evict(need_evict_token_num, release_mem)
-            mem_index = torch.concat(release_mems)
-            self.mem_manager.free(mem_index)
+            if release_mems:
+                mem_index = torch.concat(release_mems)
+                self.mem_manager.free(mem_index)
         return
 
 
