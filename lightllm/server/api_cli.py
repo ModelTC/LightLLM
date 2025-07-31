@@ -112,7 +112,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="tool call parser type",
     )
     parser.add_argument(
-        "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
+        "--running_max_req_size", type=int, default=2048, help="the max size for forward requests in the same time"
     )
     parser.add_argument("--nnodes", type=int, default=1, help="the number of nodes")
     parser.add_argument("--node_rank", type=int, default=0, help="the rank of the current node")
@@ -136,6 +136,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""This is just a useful parameter for deepseekv2. When
                         using the deepseekv2 model, set dp to be equal to the tp parameter. In other cases, please
                         do not set it and keep the default value as 1.""",
+    )
+    parser.add_argument(
+        "--dp_balancer",
+        type=str,
+        default="round_robin",
+        help="the dp balancer type, default is round_robin",
     )
     parser.add_argument(
         "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
