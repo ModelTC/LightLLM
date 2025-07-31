@@ -15,7 +15,8 @@ class CpuKvCacheClient(object):
 
     def __init__(self, init_shm_data: bool):
         self.args = get_env_start_args()
-        self.page_num: int = self.args.page_num
+        # to do here need calcu from from settings.
+        self.page_num: int = self.args.cpu_cache_storage_size
         self._create_cpu_status_list(init_shm_data)
 
     def get_empty_pages_for_loading_from_gpu(self, page_hashes: List[int], disk_offload_enable: bool) -> List[int]:
