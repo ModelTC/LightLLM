@@ -30,3 +30,15 @@ except:
         "sgl_kernel is not installed, or the installed version did not support fa3. \
         Try to upgrade it."
     )
+
+try:
+    import flashinfer
+    from flashinfer.norm import fused_add_rmsnorm, rmsnorm
+
+    HAS_FLASHINFER = True
+except:
+    HAS_FLASHINFER = False
+    logger.warning(
+        "flashinfer is not installed, you can't use the api of it. \
+                   You can solve it by running `pip install flashinfer`."
+    )

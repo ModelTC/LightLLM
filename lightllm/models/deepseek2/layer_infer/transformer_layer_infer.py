@@ -19,7 +19,6 @@ from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding import gqa_token
 from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding_fp8 import gqa_token_decode_attention_flash_decoding_fp8
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
-from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.flashinfer_struct import Deepseek2FlashInferStateInfo
@@ -666,7 +665,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
-        if self.n_shared_experts is not None:
+        # if fused_shared_experts is not enabled, compute shared_output
+        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 
         router_logits = layer_weight.moe_gate.mm(hidden_states)
@@ -682,7 +682,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         hidden_states.mul_(self.routed_scaling_factor)
 
-        if self.n_shared_experts is not None:
+        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             hidden_states.add_(shared_output)
 
         return hidden_states.view(num_tokens, hidden_dim)

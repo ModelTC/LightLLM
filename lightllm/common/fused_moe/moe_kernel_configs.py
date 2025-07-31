@@ -42,12 +42,12 @@ class MoeGroupedGemmKernelConfig(KernelConfigs):
         else:
             if M <= expert_num:
                 config = {
-                    "BLOCK_SIZE_M": 16,
-                    "BLOCK_SIZE_N": 32,
-                    "BLOCK_SIZE_K": 64,
-                    "GROUP_SIZE_M": 1,
+                    "BLOCK_SIZE_M": 32,
+                    "BLOCK_SIZE_N": 128,
+                    "BLOCK_SIZE_K": 128,
+                    "GROUP_SIZE_M": 32,
                     "num_warps": 4,
-                    "num_stages": 1,
+                    "num_stages": 3,
                 }
             else:
                 config = {
