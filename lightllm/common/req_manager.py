@@ -5,7 +5,7 @@ from .mem_manager import MemoryManager
 from typing import List, Optional
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
+from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, get_page_size
 from lightllm.utils.config_utils import get_vocab_size
 
 logger = init_logger(__name__)
@@ -63,6 +63,14 @@ class ReqManager:
             (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
         )
         mem_manager.req_to_token_indexs = self.req_to_token_indexs
+        if hasattr(mem_manager, "req_to_page_indexs"):
+            page_size = get_page_size()
+            self.req_to_page_indexs = torch.zeros(
+                (max_request_num + 1, (max_sequence_length + page_size - 1) // page_size),
+                dtype=torch.int32,
+                device="cuda",
+            )
+            mem_manager.req_to_page_indexs = self.req_to_page_indexs
         self.mem_manager = mem_manager
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
