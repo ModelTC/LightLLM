@@ -40,7 +40,7 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"]:
                 # skip the same image
-                if img["token_id"] in img_start_token_ids or img.get("_prefill_", False):
+                if img["token_id"] in img_start_token_ids or img["_prefill_"] is False:
                     continue
                 # pull the img_embeds by uid from shm
                 data = read_shm(get_shm_name_embed(img["uuid"]))
