@@ -39,7 +39,7 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         infer_images = []
         for _, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
-                if img.get("_prefill_", True):
+                if img.get("_prefill_"):
                     infer_images.append(img)
         if len(infer_images) > 0:
             self.cache_client = rpyc.connect("localhost", get_cache_port(), config={"allow_pickle": True})
