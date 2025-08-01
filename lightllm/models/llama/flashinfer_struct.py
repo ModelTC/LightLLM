@@ -81,8 +81,8 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                     self.req_manager.req_to_token_indexs,
                     self.b_req_idx,
                     self.b_seq_len,
-                    kv_starts,
-                    self.max_len_in_batch,
+                    kv_starts[:-1],
+                    self.max_kv_seq_len,
                     kv_indices,
                 )
                 self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
