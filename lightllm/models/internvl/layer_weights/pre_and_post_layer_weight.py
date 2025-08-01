@@ -5,7 +5,6 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 from lightllm.models.internlm2.layer_weights.pre_and_post_layer_weight import Internlm2PreAndPostLayerWeight
 from lightllm.models.vit.model import VisionTransformer
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.image_cache_manager import image_cache_manager
 
 
 # add key: language_model.xxx -> xxx
@@ -29,11 +28,11 @@ class InternVLPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
                 "quant_type": get_env_start_args().vit_quant_type,
                 "quant_cfg": get_env_start_args().vit_quant_cfg,
                 "max_batch_size": get_env_start_args().visual_infer_batch_size,
+                "cache_port": get_env_start_args().cache_port,
             }
             self.visual_model = VisionTransformer(
                 kvargs=kvargs,
             )
-            image_cache_manager.set_max_size(get_env_start_args().cache_capacity * 2)
         return
 
     def load_hf_weights(self, weights):
@@ -52,11 +51,11 @@ class InternVLPhi3PreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
                 "quant_type": get_env_start_args().vit_quant_type,
                 "quant_cfg": get_env_start_args().vit_quant_cfg,
                 "max_batch_size": get_env_start_args().visual_infer_batch_size,
+                "cache_port": get_env_start_args().cache_port,
             }
             self.visual_model = VisionTransformer(
                 kvargs=kvargs,
             )
-            image_cache_manager.set_max_size(get_env_start_args().cache_capacity * 2)
         return
 
     def load_hf_weights(self, weights):
@@ -76,11 +75,11 @@ class InternVLInternlm2PreAndPostLayerWeight(Internlm2PreAndPostLayerWeight):
                 "quant_type": get_env_start_args().vit_quant_type,
                 "quant_cfg": get_env_start_args().vit_quant_cfg,
                 "max_batch_size": get_env_start_args().visual_infer_batch_size,
+                "cache_port": get_env_start_args().cache_port,
             }
             self.visual_model = VisionTransformer(
                 kvargs=kvargs,
             )
-            image_cache_manager.set_max_size(get_env_start_args().cache_capacity * 2)
         return
 
     def load_hf_weights(self, weights):
@@ -100,11 +99,11 @@ class InternVLLlamaPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
                 "quant_type": get_env_start_args().vit_quant_type,
                 "quant_cfg": get_env_start_args().vit_quant_cfg,
                 "max_batch_size": get_env_start_args().visual_infer_batch_size,
+                "cache_port": get_env_start_args().cache_port,
             }
             self.visual_model = VisionTransformer(
                 kvargs=kvargs,
             )
-            image_cache_manager.set_max_size(get_env_start_args().cache_capacity * 2)
         return
 
     def load_hf_weights(self, weights):

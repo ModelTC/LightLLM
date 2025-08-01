@@ -44,7 +44,6 @@ from transformers.image_utils import (
     ChannelDimension,
     ImageInput,
     PILImageResampling,
-    VideoInput,
     get_image_size,
     infer_channel_dimension_format,
     is_scaled_image,
@@ -95,23 +94,6 @@ def make_batched_images(images) -> List[List[ImageInput]]:
     raise ValueError(f"Could not make batched images from {images}")
 
 
-# Copied from transformers.models.llava_next_video.image_processing_llava_next_video.make_batched_videos
-def make_batched_videos(videos) -> List[VideoInput]:
-    if isinstance(videos, (list, tuple)) and isinstance(videos[0], (list, tuple)) and is_valid_image(videos[0][0]):
-        return videos
-
-    elif isinstance(videos, (list, tuple)) and is_valid_image(videos[0]):
-        if isinstance(videos[0], Image.Image):
-            return [videos]
-        elif len(videos[0].shape) == 4:
-            return [list(video) for video in videos]
-
-    elif is_valid_image(videos) and len(videos.shape) == 4:
-        return [list(videos)]
-
-    raise ValueError(f"Could not make batched video from {videos}")
-
-
 def round_by_factor(number: int, factor: int) -> int:
     """Returns the closest integer to 'number' that is divisible by 'factor'."""
     return round(number / factor) * factor
@@ -156,71 +138,8 @@ def smart_resize(
     return h_bar, w_bar
 
 
-def fetch_image(ele: dict[str, str | Image.Image], size_factor: int = IMAGE_FACTOR) -> Image.Image:
-    if "image" in ele:
-        image = ele["image"]
-    else:
-        image = ele["image_url"]
-    image_obj = None
-    if isinstance(image, Image.Image):
-        image_obj = image
-    elif image.startswith("http://") or image.startswith("https://"):
-        image_obj = Image.open(requests.get(image, stream=True).raw)
-    elif image.startswith("file://"):
-        image_obj = Image.open(image[7:])
-    elif image.startswith("data:image"):
-        data = image.split(";", 1)[1]
-        if data.startswith("base64,"):
-            data = base64.b64decode(data[7:])
-            image_obj = Image.open(BytesIO(data))
-    else:
-        image_obj = Image.open(image)
-    if image_obj is None:
-        raise ValueError(f"Unrecognized image input, support local path, http url, base64 and PIL.Image, got {image}")
-    image = image_obj.convert("RGB")
-    ## resize
-    if "resized_height" in ele and "resized_width" in ele:
-        resized_height, resized_width = smart_resize(
-            ele["resized_height"],
-            ele["resized_width"],
-            factor=size_factor,
-        )
-    else:
-        width, height = image.size
-        min_pixels = ele.get("min_pixels", MIN_PIXELS)
-        max_pixels = ele.get("max_pixels", MAX_PIXELS)
-        resized_height, resized_width = smart_resize(
-            height,
-            width,
-            factor=size_factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-        )
-    image = image.resize((resized_width, resized_height))
-    return image
-
-
-def get_image(image_file: str | Image.Image, size_factor: int = IMAGE_FACTOR) -> tuple[Image.Image, int, int]:
-    image_obj = None
-
-    if isinstance(image_file, Image.Image):
-        image_obj = image_file
-    elif image_file.startswith("http://") or image_file.startswith("https://"):
-        image_obj = Image.open(requests.get(image_file, stream=True).raw)
-    elif image_file.startswith("file://"):
-        image_obj = Image.open(image_file[7:])
-    elif image_file.startswith("data:image"):
-        data = image_file.split(";", 1)[1]
-        if data.startswith("base64,"):
-            data = base64.b64decode(data[7:])
-            image_obj = Image.open(BytesIO(data))
-    else:
-        image_obj = Image.open(image_file)
-
-    if image_obj is None:
-        raise ValueError("Unrecognized image input. Supports local path, http url, base64, and PIL.Image.")
-
-    image = image_obj.convert("RGB")
+def get_image(image_file: Image.Image, size_factor: int = IMAGE_FACTOR) -> tuple[Image.Image, int, int]:
+    image = image_file.convert("RGB")
 
     # 获取原始宽度和高度
     width, height = image.size
@@ -238,43 +157,6 @@ def get_image(image_file: str | Image.Image, size_factor: int = IMAGE_FACTOR) ->
     image = image.resize((resized_width, resized_height))
 
     return image
-
-
-def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[dict]:
-    vision_infos = []
-    if isinstance(conversations[0], dict):
-        conversations = [conversations]
-    for conversation in conversations:
-        for message in conversation:
-            if isinstance(message["content"], list):
-                for ele in message["content"]:
-                    if (
-                        "image" in ele
-                        or "image_url" in ele
-                        or "video" in ele
-                        or ele["type"] in ("image", "image_url", "video")
-                    ):
-                        vision_infos.append(ele)
-    return vision_infos
-
-
-def process_vision_info(
-    conversations: list[dict] | list[list[dict]],
-) -> tuple[list[Image.Image] | None, list[torch.Tensor | list[Image.Image]] | None]:
-    vision_infos = extract_vision_info(conversations)
-    ## Read images or videos
-    image_inputs = []
-    # video_inputs = []
-    for vision_info in vision_infos:
-        if "image" in vision_info or "image_url" in vision_info:
-            image_inputs.append(fetch_image(vision_info))
-        # elif "video" in vision_info:
-        #     video_inputs.append(fetch_video(vision_info))
-        else:
-            raise ValueError("image, image_url or video should in content.")
-    if len(image_inputs) == 0:
-        image_inputs = None
-    return image_inputs
 
 
 # adapted from
@@ -318,7 +200,7 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
 
     def _preprocess(
         self,
-        images: Union[ImageInput, VideoInput],
+        images: Union[ImageInput],
         do_resize: bool = None,
         resample: PILImageResampling = None,
         do_rescale: bool = None,
@@ -402,7 +284,6 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
     def preprocess(
         self,
         images: ImageInput,
-        videos: VideoInput = None,
         do_resize: bool = None,
         size: Dict[str, int] = None,
         resample: PILImageResampling = None,
@@ -429,26 +310,6 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
 
         if images is not None:
             images = make_batched_images(images)
-        if videos is not None:
-            videos = make_batched_videos(videos)
-
-        if images is not None and not valid_images(images):
-            raise ValueError(
-                "Invalid image type. Must be of type PIL.Image.Image, numpy.ndarray, "
-                "torch.Tensor, tf.Tensor or jax.ndarray."
-            )
-
-        validate_preprocess_arguments(
-            rescale_factor=rescale_factor,
-            do_normalize=do_normalize,
-            image_mean=image_mean,
-            image_std=image_std,
-            do_resize=do_resize,
-            size=size,
-            resample=resample,
-        )
-
-        if images is not None:
             pixel_values, vision_grid_thws = [], []
             for image in images:
                 patches, image_grid_thw = self._preprocess(
@@ -469,27 +330,5 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
             pixel_values = np.array(pixel_values)
             vision_grid_thws = np.array(vision_grid_thws)
             data = {"pixel_values": pixel_values, "image_grid_thw": vision_grid_thws}
-
-        if videos is not None:
-            pixel_values, vision_grid_thws = [], []
-            for images in videos:
-                patches, video_grid_thw = self._preprocess(
-                    images,
-                    do_resize=do_resize,
-                    resample=resample,
-                    do_rescale=do_rescale,
-                    rescale_factor=rescale_factor,
-                    do_normalize=do_normalize,
-                    image_mean=image_mean,
-                    image_std=image_std,
-                    data_format=data_format,
-                    do_convert_rgb=do_convert_rgb,
-                    input_data_format=input_data_format,
-                )
-                pixel_values.extend(patches)
-                vision_grid_thws.append(video_grid_thw)
-            pixel_values = np.array(pixel_values)
-            vision_grid_thws = np.array(vision_grid_thws)
-            data = {"pixel_values_videos": pixel_values, "video_grid_thw": vision_grid_thws}
 
         return BatchFeature(data=data, tensor_type=return_tensors)
