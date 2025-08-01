@@ -240,6 +240,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--enable_multimodal", action="store_true", help="Whether or not to allow to load additional visual models."
     )
     parser.add_argument(
+        "--disable_extra_process_for_multimodal",
+        action="store_true",
+        help="Whether or not to disable extra process for multimodal.",
+    )
+    parser.add_argument(
         "--enable_multimodal_audio",
         action="store_true",
         help="Whether or not to allow to load additional audio models (requird --enable_multimodal).",
