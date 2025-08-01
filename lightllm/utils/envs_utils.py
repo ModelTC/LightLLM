@@ -164,7 +164,7 @@ def disable_triton_autotune():
 def get_page_size():
     try:
         args = get_env_start_args()
-        return int(os.getenv("PAGE_SIZE", 4)) if "page_size_variable" in args.mode else 1
+        return int(os.getenv("PAGE_SIZE", 64)) if "page_size_variable" in args.mode else 1
     except:
         return 1
 
