@@ -38,7 +38,7 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
                     self.b_req_idx,
                     self.b_seq_len,
                     self.b_start_loc,
-                    self.max_len_in_batch,
+                    self.max_kv_seq_len,
                     self.kv_indices,
                 )
                 if self.decode_wrapper is None:
