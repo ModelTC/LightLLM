@@ -107,9 +107,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 raise Exception(f"Unsupported mode for fa3 backend: {self.mode}")
             return
         elif get_env_start_args().enable_flashinfer_prefill:
-            self._context_attention_kernel = partial(
-                LlamaTransformerLayerInfer._context_attention_flashinfer_kernel, self
-            )
+            if "page_size_variable" in self.mode:
+                self._context_attention_kernel = partial(
+                    LlamaTransformerLayerInfer._paged_context_attention_flashinfer_kernel, self
+                )
+            elif not self.mode:
+                self._context_attention_kernel = partial(
+                    LlamaTransformerLayerInfer._context_attention_flashinfer_kernel, self
+                )
+            else:
+                raise Exception(f"Unsupported mode for flashinfer backend: {self.mode}")
         else:
             self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
         if "ppl_int8kv" in self.mode:
@@ -174,6 +181,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             self._copy_kv_to_mem_cache = partial(
                 LlamaTransformerLayerInfer._copy_kv_to_mem_cache_with_calibration, self
             )
+        elif "page_size_variable" in self.mode:
+            assert get_env_start_args().enable_flashinfer_prefill and get_env_start_args().enable_flashinfer_decode
+            self._token_attention_kernel = partial(
+                LlamaTransformerLayerInfer._paged_token_decode_attention_flashinfer, self
+            )
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         elif not self.mode:
             if get_env_start_args().enable_flashinfer_decode:
                 self._token_attention_kernel = partial(
@@ -267,6 +280,21 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
         kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
         kv = kv.unsqueeze(1)
+        infer_state.prefill_wrapper.run(
+            q.view(q.shape[0], -1, self.head_dim_),
+            (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
+            out=o_tensor.view(q.shape[0], -1, self.head_dim_),
+        )
+        return o_tensor
+
+    def _paged_context_attention_flashinfer_kernel(
+        self, q, kv, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
+    ) -> torch.Tensor:
+        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
+        page_size = get_page_size()
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].view(
+            -1, page_size, 2 * self.tp_k_head_num_, self.head_dim_
+        )
         infer_state.prefill_wrapper.run(
             q.view(q.shape[0], -1, self.head_dim_),
             (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
@@ -580,6 +608,24 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
         kv = infer_state.mem_manager.kv_buffer[self.layer_num_].unsqueeze(1)
+        infer_state.decode_wrapper.run(
+            q.view(calcu_shape1),
+            (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
+            out=o_tensor.view(calcu_shape1),
+        )
+        return o_tensor
+
+    def _paged_token_decode_attention_flashinfer(
+        self, q, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
+    ):
+        batch_size = infer_state.batch_size
+        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
+
+        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
+        page_size = get_page_size()
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].view(
+            -1, page_size, 2 * self.tp_k_head_num_, self.head_dim_
+        )
         infer_state.decode_wrapper.run(
             q.view(calcu_shape1),
             (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
