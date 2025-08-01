@@ -15,6 +15,7 @@ from .model_infer.model_rpc import start_model_process, VisualModelRpcClient
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
+from rpyc.utils.classic import obtain
 
 
 logger = init_logger(__name__)
@@ -29,13 +30,13 @@ class VisualManager:
         cache_port,
         visual_model_rpc_ports,
     ):
-        context = zmq.asyncio.Context(2)
+        context = zmq.Context(2)
         self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
         self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
 
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
-        self.cache_client = rpyc.connect("localhost", cache_port)
+        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
         self.cache_port = cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
@@ -120,8 +121,11 @@ class VisualManager:
 
                     multimodal_params = group_req_indexes.multimodal_params
 
-                    for img in multimodal_params.images:
-                        if not self.cache_client.root.get_item_embed(img.uuid):
+                    img_uuids = [img.uuid for img in multimodal_params.images]
+                    ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
+
+                    for img, ready in zip(multimodal_params.images, ready_image):
+                        if not ready:
                             images_need_infer.append(img)
 
                         if len(images_need_infer) == self.infer_batch_size:
@@ -146,12 +150,22 @@ class VisualManager:
                     images_need_infer = []
 
     async def loop_for_netio_req(self):
+        if not hasattr(self, "visual_recv_max_count"):
+            self.visual_recv_max_count = 64
+
         while True:
-            recv_req: GroupReqIndexes = await self.recv_from_httpserver.recv_pyobj()
-            if isinstance(recv_req, GroupReqIndexes):
-                self.waiting_reqs.append(recv_req)
-            else:
-                assert False, f"Error Req Inf {recv_req}"
+            try:
+                for _ in range(self.visual_recv_max_count):
+                    recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+                    if isinstance(recv_req, GroupReqIndexes):
+                        self.waiting_reqs.append(recv_req)
+                    else:
+                        assert False, f"Error Req Inf {recv_req}"
+                self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
+            except zmq.ZMQError:
+                # 当队列已经开始清空的时候，将一次接受数量下调
+                self.visual_recv_max_count = 64
+            await asyncio.sleep(0.01)
 
     def clean_up(self):
         for model_rpc in self.model_rpcs:

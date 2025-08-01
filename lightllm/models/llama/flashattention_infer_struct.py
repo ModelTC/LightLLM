@@ -6,6 +6,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 class FlashAttentionStateInfo(LlamaInferStateInfo):
@@ -23,8 +24,7 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
             ]
         return cls._shared_page_table_buffer
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
+    def _init_flash_attention_state(self, model, input_ids: torch.Tensor):
         if self.is_prefill:
             self.cu_seqlens_q = self.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
@@ -50,7 +50,8 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
                 )
 
             self.page_table[:, :max_seq_len_k].copy_(
-                model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k]
+                model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k],
+                non_blocking=True,
             )
             self.page_table[:, max_seq_len_k:].fill_(0)
 
@@ -90,4 +91,9 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
                     device=input_ids.device,
                 )
             )
+        return
+
+    def init_some_extra_state(self, model, input_ids: torch.Tensor):
+        super().init_some_extra_state(model, input_ids)
+        self._init_flash_attention_state(model, input_ids)
         return

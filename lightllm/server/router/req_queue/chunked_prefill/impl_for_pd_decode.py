@@ -24,12 +24,12 @@ class QueueForPDDecode(BaseQueue):
         return
 
     # @calculate_time(show=True, min_cost_ms=10)
-    def generate_new_batch(self, current_batch: Batch, limit_router_queue_length: int = None):
+    def generate_new_batch(self, current_batch: Batch):
         if len(self.waiting_req_list) == 0:
             return None
 
         # 如果当前已经被调度的请求数量超过了上限，直接不调度新的请求了。
-        exist_req_num = self.get_batch_dp_req_size(current_batch) + len(self.pause_req_dict)
+        exist_req_num = self.get_batch_dp_req_size(current_batch)
         req_is_full = exist_req_num >= self.running_max_req_size
         if req_is_full:
             return None
@@ -38,7 +38,7 @@ class QueueForPDDecode(BaseQueue):
         abort_req_list = []
         aborted_count = 0
         for req in self.waiting_req_list:
-            if req.is_aborted and not req.is_paused:
+            if req.is_aborted:
                 # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.
                 # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token和管理req对象的泄漏
                 aborted_count += 1
@@ -48,15 +48,13 @@ class QueueForPDDecode(BaseQueue):
                 can_run_list.append(req)
             else:
                 break
-
+        new_batch = None
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
-            for req in abort_req_list:
-                self.router.shm_req_manager.put_back_req_obj(req)
-            self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
-            return new_batch
-        else:
-            return None
+        for req in abort_req_list:
+            self.router.shm_req_manager.put_back_req_obj(req)
+        self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
+        return new_batch
 
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):
         is_busy = self.is_busy()

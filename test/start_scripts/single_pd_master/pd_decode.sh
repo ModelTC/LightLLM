@@ -14,7 +14,6 @@ MOE_MODE=EP KV_TRANS_USE_P2P=1 LOADWORKER=18 python -m lightllm.server.api_serve
 --port 8121 \
 --nccl_port 12322 \
 --enable_fa3 \
---disable_cudagraph \
 --pd_master_ip $pd_master_ip \
 --pd_master_port 60011 
 # if you want to enable microbatch overlap, you can uncomment the following lines

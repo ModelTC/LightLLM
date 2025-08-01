@@ -236,6 +236,10 @@ Scheduling Parameters
 
     Multi-result output mode
 
+.. option:: --schedule_time_interval
+
+    Schedule time interval, default is ``0.03``, unit is seconds
+
 Output Constraint Parameters
 ---------------------------
 
@@ -272,10 +276,6 @@ Multimodal Parameters
 .. option:: --cache_capacity
 
     Cache server capacity for multimodal resources, default is ``200``
-
-.. option:: --cache_reserved_ratio
-
-    Reserved capacity ratio after cache server cleanup, default is ``0.5``
 
 .. option:: --visual_infer_batch_size
 

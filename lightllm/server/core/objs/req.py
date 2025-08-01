@@ -75,9 +75,8 @@ class Req(ctypes.Structure):
         ("is_paused", ctypes.c_bool),  # 标记一个Req因为显存资源管理的原因被临时暂停了。
         ("finish_status", FinishStatus),
         ("is_aborted", ctypes.c_bool),
-        # 这个标记变量是router进程读取到is_aborted信息后，将这个router_aborted 变量标记为True，因为推理进程
-        # 直接读取 is_aborted 变量可能会存在异步问题，但是router的执行线程和推理进程之间是线性运行的，所以router
-        # 进程写入的router_aborted信息，所有推理进程可以保证同时读取到的是正确信息，不会出现异步问题。
+        # 这个标记变量是router进程读取到is_aborted信息后，router 进程标记该请求已经被abort处理
+        # 等待推理进程处理，防止router进程反复给推理进程发送abort指令。
         ("router_aborted", ctypes.c_bool),
         # 当FinishStatus 是正常结束状态时，finish_token_index 用于标识结束的
         # token 的index位置
@@ -189,6 +188,9 @@ class Req(ctypes.Structure):
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
 
+    def get_prompt_ids_numpy(self):
+        return self.shm_prompt_ids.arr[: self.input_len]
+
     def to_router_rpc_obj(self):
         if hasattr(self, "multimodal_params"):
             return (
@@ -248,37 +250,7 @@ class Req(ctypes.Structure):
 # 估计不准确的问题，通过加长输出的长度，进行偏向保守一些的调度
 # 理论上不会多估计太多的 token 占用量, 同时得到较高的token显存
 # 使用率
-ADDED_OUTPUT_LEN = 6
-
-
-class NormalReq(Req):
-    _pack_ = 4
-
-    def get_tuple_tokens(self, is_busy, router_max_new_token_len):
-        has_out_len = self.shm_cur_output_len
-        if self.sample_params.ignore_eos:
-            cur_max_new_token_len = self.sample_params.max_new_tokens
-        elif is_busy:
-            cur_max_new_token_len = self.sample_params.max_new_tokens
-        else:
-            # 用当前输出长度的 1.1 倍作为预估输出长度的另一个参考量，用于更新估计的最大输出长度量
-            # 后续会更新为更合理的统计条件概率估计方式 to do
-            cur_max_new_token_len = min(
-                self.sample_params.max_new_tokens, max(int(1.1 * has_out_len), router_max_new_token_len)
-            )
-
-        a_len = max(self.input_len + has_out_len + 1, self.shm_cur_kv_len + 1)
-        b_len = max(0, cur_max_new_token_len - has_out_len - 1) + ADDED_OUTPUT_LEN
-
-        return (a_len, b_len)
-
-    def get_decode_need_tokens(self):
-        # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
-        return self._mtp_step + 1
-
-    def get_first_router_need_tokens(self):
-
-        return self.input_len + self.shm_cur_output_len
+ADDED_OUTPUT_LEN = 16
 
 
 class ChunkedPrefillReq(Req):

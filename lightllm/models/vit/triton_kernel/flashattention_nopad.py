@@ -152,7 +152,7 @@ else:
 
 _flash_attn_v3_available = False
 try:
-    from flash_attn_interface import _flash_attn_forward
+    from sgl_kernel.flash_attn import flash_attn_varlen_func
 
     _flash_attn_v3_available = True
 
@@ -166,36 +166,43 @@ try:
     ):
         head_dim = q.shape[-1]
         softmax_scale = head_dim ** -0.5
-        _flash_attn_forward(
+        window_size = (-1, -1)
+        torch.ops.sgl_kernel.fwd.default(
             q,
             k,
             v,
-            None,
-            None,  # k_new, v_new
+            None,  # k_new
+            None,  # v_new
+            None,  # qv
             o,  # out
             cu_seqlens,
             cu_seqlens,
-            None,  # cu_seqlens_q/k/k_new
+            None,  # cu_seqlens_k_new
             None,
-            None,  # seqused_q/k
+            None,
             max_seqlen,
-            max_seqlen,  # max_seqlen_q/k
-            None,
-            None,
-            None,  # page_table, kv_batch_idx, leftpad_k,
-            None,
-            None,  # rotary_cos/sin
+            max_seqlen,
+            None,  # page_table,
+            None,  # kv_batch_idx
+            None,  # leftpad_k
+            None,  # rotary cos
+            None,  # rotary sin
+            None,  # seqlens_rotary
             None,
             None,
             None,
             softmax_scale,
-            False,  # causal
-            window_size=(-1, -1),
-            softcap=0.0,
+            False,
+            window_size[0],
+            window_size[1],
+            0.0,
+            is_rotary_interleaved=False,
+            scheduler_metadata=None,
             num_splits=1,
             pack_gqa=None,
             sm_margin=0,
         )
+
         return
 
 except ImportError:
@@ -205,10 +212,10 @@ except ImportError:
 
 def flash_attention_fwd(q, k, v, o, cu_seqlens, max_seqlen):
     """
-    统一的 Flash Attention 接口。如果 _flash_attn_forward 存在，
-    则使用 flash_attention_v3_fwd，否则使用 Triton 版本。
+    统一的 Flash Attention 接口。如果 sgl_kernel 存在，
+    则使用 sgl_kernel里的接口，否则使用 Triton 版本。
     """
-    if _flash_attn_v3_available and is_hopper():
+    if _flash_attn_v3_available and is_hopper() and False:
         flash_attention_v3_fwd(q, k, v, o, cu_seqlens, max_seqlen)
     else:
         _flash_attention_triton_fwd(q, k, v, o, cu_seqlens, max_seqlen)

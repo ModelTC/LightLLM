@@ -1,38 +1,30 @@
 import torch
-from .impl import ContinuesBatchBackend
-from typing import List, Tuple, Callable, Optional
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams, g_infer_context
+from .impl import ChunkedPrefillBackend
+from typing import List
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.model_infer.mode_backend.pre import prepare_prefill_inputs
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 
 
-class ReturnPromptLogProbBackend(ContinuesBatchBackend):
+class ReturnPromptLogProbBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
-
-    def prefill(self, run_reqs: List[Tuple]):
-        # 在 return all_prompt_logprobs 的模式下，不能启用 dynamic prompt cache
-        assert self.radix_cache is None
-        self._init_reqs(run_reqs, init_req_obj=False)
+        self.prefill = self.return_all_prompt_logprobs_prefill
         return
 
-    def normal_prefill_reqs(
-        self,
-        prefill_reqs: List[InferReq],
-        uninit_reqs: List[InferReq],
-        ok_finished_reqs: List[InferReq],
-        mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None,
-        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
-    ):
+    def return_all_prompt_logprobs_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+
+        # 在 return all_prompt_logprobs 的模式下，不能启用 dynamic prompt cache
+        assert self.radix_cache is None
+        assert self.disable_chunked_prefill is True
+
         model_input, run_reqs = prepare_prefill_inputs(
-            prefill_reqs, is_chuncked_mode=False, is_multimodal=self.is_multimodal
+            prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
         )
 
         model_output = self.model.forward(model_input)
         prompt_all_logits = model_output.logits
-
-        self._overlap_req_init_and_filter(uninit_reqs=uninit_reqs, ok_finished_reqs=ok_finished_reqs, clear_list=True)
 
         input_ids = model_input.input_ids
         b_ready_cache_len = model_input.b_ready_cache_len
@@ -53,21 +45,26 @@ class ReturnPromptLogProbBackend(ContinuesBatchBackend):
             cur_logprobs = torch.gather(cur_logprobs, dim=1, index=cur_ids[1:].view(-1, 1)).detach().cpu().numpy()
 
             if req_obj.shm_req.input_len > 1:
-                req_obj.shm_req.shm_logprobs.arr[1 : req_obj.shm_req.input_len] = cur_logprobs.flatten()
+                if self.is_master_in_dp:
+                    req_obj.shm_req.shm_logprobs.arr[1 : req_obj.shm_req.input_len] = cur_logprobs.flatten()
 
-        if mask_func is not None:
-            mask_func(run_reqs, logits)
+        if self.prefill_mask_func is not None:
+            self.prefill_mask_func(run_reqs, logits)
 
         next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
         next_token_ids = next_token_ids.detach().cpu().numpy()
         next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
 
+        update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         self._post_handle(
-            run_reqs,
-            next_token_ids,
-            next_token_logprobs,
-            is_chuncked_mode=False,
-            do_filter_finished_reqs=False,
-            extra_post_req_handle_func=extra_post_req_handle_func,
+            run_reqs=run_reqs,
+            next_token_ids=next_token_ids,
+            next_token_logprobs=next_token_logprobs,
+            run_reqs_update_packs=update_packs,
+            extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
+
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+        event_pack.notify_forward_and_wait_post_handle()
+        event_pack.notify_pre_post_handle()
         return

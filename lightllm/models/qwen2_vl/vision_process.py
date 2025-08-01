@@ -53,6 +53,7 @@ from transformers.image_utils import (
     valid_images,
     validate_preprocess_arguments,
 )
+from transformers.video_utils import VideoInput
 from transformers.utils import TensorType, is_vision_available, logging
 
 logger = logging.get_logger(__name__)

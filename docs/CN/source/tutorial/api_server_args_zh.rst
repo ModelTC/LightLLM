@@ -236,6 +236,10 @@ attention类型选择参数
 
     多结果输出模式
 
+.. option:: --schedule_time_interval
+
+    调度时间间隔，默认为 ``0.03``，单位为秒
+
 
 输出约束参数
 -----------
@@ -273,10 +277,6 @@ attention类型选择参数
 .. option:: --cache_capacity
 
     多模态资源的缓存服务器容量，默认为 ``200``
-
-.. option:: --cache_reserved_ratio
-
-    缓存服务器清理后的保留容量比例，默认为 ``0.5``
 
 .. option:: --visual_infer_batch_size
 
