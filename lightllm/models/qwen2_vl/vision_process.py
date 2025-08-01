@@ -50,10 +50,7 @@ from transformers.image_utils import (
     is_valid_image,
     make_list_of_images,
     to_numpy_array,
-    valid_images,
-    validate_preprocess_arguments,
 )
-from transformers.video_utils import VideoInput
 from transformers.utils import TensorType, is_vision_available, logging
 
 logger = logging.get_logger(__name__)

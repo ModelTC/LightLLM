@@ -29,7 +29,6 @@ class Record(object):
 class InMemoryCache:
     def __init__(self, args) -> None:
         self.args = args
-        self.cache_port = self.args.cache_port
         self._records = dict()
         self._md5_to_record = dict()
         self.capacity = max(1, args.cache_capacity)

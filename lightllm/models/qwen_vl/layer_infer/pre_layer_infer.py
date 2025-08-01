@@ -7,11 +7,10 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.utils.infer_utils import mark_cost_time
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_cache_port
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.server.embed_cache.utils import bytes2tensor, tensor2bytes, read_shm, create_shm, get_shm_name_embed
-
 
 """
 infer_state.multimodal_params: batch list of MultimodalParams-dict like:
@@ -31,8 +30,6 @@ infer_state.multimodal_params: batch list of MultimodalParams-dict like:
 class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
     def __init__(self, network_config, mode):
         super().__init__(network_config, mode)
-        print(f"network_config is {network_config}")
-        self.cache_client = rpyc.connect("localhost", self.cache_port)
         self.disable_extra_process_for_multimodal = get_env_start_args().disable_extra_process_for_multimodal
         return
 
@@ -42,21 +39,26 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         infer_images = []
         for _, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
-                if img["_prefill_"] is True:
+                if img.get("_prefill_", True):
                     infer_images.append(img)
         if len(infer_images) > 0:
+            self.cache_client = rpyc.connect("localhost", get_cache_port(), config={"allow_pickle": True})
             infer_batch_size = get_env_start_args().visual_infer_batch_size
             for i in range(0, len(infer_images), infer_batch_size):
                 img_embeds, uuids, valid_ids = layer_weight.visual_model.encode(infer_images[i : i + infer_batch_size])
                 img_embeds = img_embeds.to(torch.device("cpu"))
                 if not dist.is_initialized() or dist.get_rank() == 0:
-                    for i in range(len(uuids)):
-                        uid = uuids[i]
-                        if not self.cache_client.root.get_item_embed(uid):
+                    ready_flags = self.cache_client.root.get_items_embed(uuids)
+                    ids_to_set = []
+                    for i, ready in enumerate(ready_flags):
+                        if not ready:
+                            uid = uuids[i]
                             start, end = valid_ids[i]
                             cur_embed_bytes = tensor2bytes(img_embeds[start:end])
-                            create_shm(get_shm_name_embed(uuids[i]), cur_embed_bytes)
-                            self.cache_client.root.set_item_embed(uuids[i])
+                            create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                            ids_to_set.append(uid)
+                    if ids_to_set:
+                        self.cache_client.root.set_items_embed(ids_to_set)
         return
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
@@ -77,7 +79,7 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
                 # skip the same image
-                if img["token_id"] in img_start_token_ids or img["_prefill_"] is False:
+                if img["token_id"] in img_start_token_ids or img.get("_prefill_", False):
                     continue
                 # pull the img_embeds by uid from shm
                 data = read_shm(get_shm_name_embed(img["uuid"]))

@@ -9,7 +9,7 @@ from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
+from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name, set_cache_port
 from lightllm.utils.envs_utils import get_lightllm_gunicorn_time_out_seconds, get_lightllm_gunicorn_keep_alive
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
@@ -242,6 +242,7 @@ def normal_or_p_d_start(args):
     args.cache_port = cache_port
     args.metric_port = metric_port
 
+    set_cache_port(args.cache_port)
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
