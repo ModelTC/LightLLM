@@ -17,3 +17,13 @@ def calcu_cpu_cache_page_num() -> int:
     one_token_byte_size = layer_num * num_key_value_heads * head_dim * item_size
     cpu_cache_page_num = int((args.cpu_cache_storage_size * 1024 * 1024 * 1024) / one_token_byte_size)
     return cpu_cache_page_num
+
+
+def get_cpu_cache_pin_tensor():
+    """
+    get cpu cache pin tensor, this function is used to get the cpu cache pin tensor.
+    """
+    args = get_env_start_args()
+    assert args.enable_cpu_cache
+    # cpu_cache_page_num = calcu_cpu_cache_page_num()
+    # to do: 这里需要考虑到 cpu cache 的 page size
