@@ -10,6 +10,7 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.deepseek2_mem_manager import Deepseek2MemoryManager
+from lightllm.common.deepseek2_page_size_variable_mem_manager import Deepseek2PageSizeVariableMemoryManager
 from lightllm.common.deepseek2_fp8kv_mem_manager import Deepseek2FP8KVMemoryManager
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
@@ -97,6 +98,10 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         manager_class = Deepseek2MemoryManager
         if "triton_fp8kv" in self.mode:
             manager_class = Deepseek2FP8KVMemoryManager
+        elif "page_size_variable" in self.mode:
+            manager_class = Deepseek2PageSizeVariableMemoryManager
+        elif self.mode:
+            raise ValueError(f"Unsupported mode for deepseek2: {self.mode}")
 
         # mtp 模式下需要在mem manger上扩展draft model使用的layer
         added_mtp_layer_num = 0

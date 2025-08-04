@@ -4,6 +4,11 @@ import numpy as np
 import torch.distributed as dist
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.envs_utils import get_page_size
+
+
+def cdiv(a, b):
+    return (a + b - 1) // b
 
 
 class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
@@ -38,20 +43,24 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
             self.cu_seqlens_q = self.b1_cu_q_seq_len
             self.cu_seqlens_k = self.b1_cu_kv_seq_len
             max_seq_len_k = self.max_kv_seq_len
+            page_size = get_page_size()
             if self.batch_size <= model.graph_max_batch_size and self.max_len_in_batch <= model.graph_max_len_in_batch:
-                page_buffer = Deepseek2FlashAttentionStateInfo.get_page_table_buffer(
-                    model.graph_max_batch_size, model.graph_max_len_in_batch
+                length = cdiv(model.graph_max_len_in_batch, page_size)
+                page_buffer = Deepseek2FlashAttentionStateInfo.get_page_table_buffer(model.graph_max_batch_size, length)
+                self.page_table = page_buffer[self.microbatch_index][: self.batch_size * length].reshape(
+                    self.batch_size, length
                 )
-                self.page_table = page_buffer[self.microbatch_index][
-                    : self.batch_size * model.graph_max_len_in_batch
-                ].reshape(self.batch_size, model.graph_max_len_in_batch)
             else:
-                self.page_table = torch.empty((self.batch_size, self.max_len_in_batch), dtype=torch.int32).to(
-                    input_ids.device
-                )
+                length = cdiv(self.max_len_in_batch, page_size)
+                self.page_table = torch.empty((self.batch_size, length), dtype=torch.int32).to(input_ids.device)
 
-            self.page_table[:, :max_seq_len_k].copy_(
-                model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k]
-            )
-            self.page_table[:, max_seq_len_k:].fill_(0)
+            if "page_size_variable" in model.mode:
+                length = cdiv(max_seq_len_k, page_size)
+                self.page_table[:, :length].copy_(model.req_manager.req_to_page_indexs[self.b_req_idx, :length])
+                self.page_table[:, length:].fill_(0)
+            else:
+                self.page_table[:, :max_seq_len_k].copy_(
+                    model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k]
+                )
+                self.page_table[:, max_seq_len_k:].fill_(0)
         return
