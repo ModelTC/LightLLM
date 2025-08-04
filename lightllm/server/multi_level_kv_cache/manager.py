@@ -41,7 +41,7 @@ class MultiLevelKVCacheManager:
         # 控制 cpu cache time out的时间，如果超过这个时间无法获取信号量则直接转发。
         self.cpu_cache_time_out = 0.3
         # lock 用于控制对 recv_queue 和 transfer_queue 的访问。
-        self.lock = threading.Lock()
+        self.queue_lock = threading.Lock()
         self.recv_queue: List[GroupReqIndexes] = []
         self.transfer_queue: List[GroupReqIndexes] = []
         self.transfer_thread = threading.Thread(target=self.transfer_loop, daemon=True)
@@ -57,7 +57,7 @@ class MultiLevelKVCacheManager:
                     time.sleep(0.003)
                     continue
 
-                with self.lock:
+                with self.queue_lock:
                     current_group_req = self.recv_queue[0]
                     self.recv_queue = self.recv_queue[1:]
 
@@ -75,7 +75,7 @@ class MultiLevelKVCacheManager:
         while True:
             current_time = time.time()
             if current_time - start_time >= self.cpu_cache_time_out:
-                with self.lock:
+                with self.queue_lock:
                     self.transfer_queue.append(group_req_indexes)
                 return
 
@@ -114,7 +114,7 @@ class MultiLevelKVCacheManager:
         self.semaphore.release()
 
         # 将请求放入转发队列
-        with self.lock:
+        with self.queue_lock:
             self.transfer_queue.append(group_req_indexes)
         return
 
@@ -122,7 +122,7 @@ class MultiLevelKVCacheManager:
         while True:
             try:
                 if len(self.transfer_queue) != 0:
-                    with self.lock:
+                    with self.queue_lock:
                         for e in self.transfer_queue:
                             self.send_to_router.send_pyobj(e, protocol=pickle.HIGHEST_PROTOCOL)
                         self.transfer_queue.clear()
@@ -151,7 +151,7 @@ class MultiLevelKVCacheManager:
                     # 当队列已经开始清空的时候，将一次接受的数量下调
                     recv_max_count = 128
 
-                with self.lock:
+                with self.queue_lock:
                     self.recv_queue.extend(recv_objs)
 
                 time.sleep(0.003)
