@@ -77,7 +77,7 @@ def create_shm_kv_cache_ptr() -> int:
 
     # 创建共享内存
     key = args.cpu_kv_cache_shm_id  # 共享内存的键
-    size = 1024  # 共享内存大小
+    size = calcu_cpu_cache_meta().calcu_size()  # 共享内存大小
     shmflg = 0o666 | 0o1000  # 权限和 IPC_CREAT 标志
 
     shmid = libc.shmget(key, size, shmflg)
