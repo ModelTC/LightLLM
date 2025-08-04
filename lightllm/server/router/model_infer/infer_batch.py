@@ -110,7 +110,7 @@ class InferenceContext:
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
 
             if is_group_finished:
-                prefix_len = self.radix_cache.insert(key, value)
+                prefix_len, _ = self.radix_cache.insert(key, value)
                 old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
                 free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
                 if req.shared_kv_node is not None:
