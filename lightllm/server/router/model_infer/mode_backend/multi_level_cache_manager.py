@@ -31,7 +31,7 @@ class MultiLevelCacheManager(object):
     ) -> Optional["TransTask"]:
         with torch.cuda.stream(cpu_kv_cache_stream):
             all_token_hash_list = req.shm_req.token_hash_list.get_all()
-            block_size = req.cur_kv_len // self.args.cpu_cache_token_chuncked_size
+            block_size = req.cur_kv_len // self.args.cpu_cache_token_page_size
             move_block_size = min(block_size, len(all_token_hash_list))
             if move_block_size == 0:
                 req.cpu_cache_task_finished = True
@@ -116,12 +116,12 @@ class MultiLevelCacheManager(object):
 
     def fill_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
-        token_chuncked_size = self.args.cpu_cache_token_chuncked_size
+        token_page_size = self.args.cpu_cache_token_page_size
         all_page_list = []
         for req in reqs:
             if req.shm_req.group_req_id == req.shm_req.request_id:
                 page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
-                match_tokens = len(page_list) * token_chuncked_size
+                match_tokens = len(page_list) * token_page_size
                 need_token_num = match_tokens - req.cur_kv_len
                 # 多匹配了一定数量的token 才进行复制操作，不然操作效率不高
                 if need_token_num > 256:
