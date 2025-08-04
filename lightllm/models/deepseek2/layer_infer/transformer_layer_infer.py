@@ -26,7 +26,7 @@ from lightllm.models.deepseek2.flashattention_infer_struct import Deepseek2Flash
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor, all_reduce, reduce_scatter_tensor
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.sgl_utils import flash_attn_varlen_func, flash_attn_with_kvcache, merge_state_v2
@@ -93,6 +93,18 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             self._token_attention_kernel = partial(
                 Deepseek2TransformerLayerInfer._token_gqa_decode_attention_flashdecoding_fp8, self
             )
+        elif "page_size_variable" in self.mode:
+            self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+            if get_env_start_args().enable_fa3:
+                self._token_attention_kernel = partial(
+                    Deepseek2TransformerLayerInfer._token_gqa_decode_attention_flashattention_paged, self
+                )
+            elif get_env_start_args().enable_flashinfer_decode:
+                self._token_attention_kernel = partial(
+                    Deepseek2TransformerLayerInfer._token_gqa_decode_attention_flashinfer_paged, self
+                )
+            else:
+                raise Exception("Page size variable mode is not supported in other backends.")
         else:
             self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
             if get_env_start_args().enable_fa3:
@@ -574,6 +586,36 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         return o_tensor
 
+    def _token_gqa_decode_attention_flashattention_paged(
+        self, q, infer_state: Deepseek2FlashInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
+    ):
+        page_size = get_page_size()
+        q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
+        q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        k_rope = kv[:, :, -self.qk_rope_head_dim :].reshape(-1, page_size, 1, self.qk_rope_head_dim)
+        kv_nope = kv[:, :, : -self.qk_rope_head_dim].reshape(-1, page_size, 1, self.kv_lora_rank)
+        k_descale, v_descale = None, None
+        o_tensor = flash_attn_with_kvcache(
+            q=q_rope,
+            k_cache=k_rope,
+            v_cache=kv_nope,
+            qv=q_nope,
+            page_table=infer_state.page_table,
+            cache_seqlens=infer_state.b_seq_len,
+            cu_seqlens_q=infer_state.cu_seqlens_q,
+            cu_seqlens_k_new=infer_state.cu_seqlens_k,
+            max_seqlen_q=1,
+            softmax_scale=self.softmax_scale,
+            causal=True,
+            window_size=(-1, -1),
+            softcap=0.0,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            return_softmax_lse=False,
+        )
+        return o_tensor
+
     def _token_gqa_decode_attention_flashinfer(
         self, q, infer_state: Deepseek2FlashInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
     ):
@@ -588,6 +630,26 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             q_rope,
             kv[:, :, : -self.qk_rope_head_dim],
             kv[:, :, -self.qk_rope_head_dim :],
+            out=o_tensor,
+            return_lse=False,
+        )
+        return o_tensor
+
+    def _token_gqa_decode_attention_flashinfer_paged(
+        self, q, infer_state: Deepseek2FlashInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
+    ):
+        page_size = get_page_size()
+        q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
+        q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
+
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype)
+
+        infer_state.decode_wrapper.run(
+            q_nope,
+            q_rope,
+            kv[:, :, : -self.qk_rope_head_dim].reshape(-1, page_size, 1, self.kv_lora_rank),
+            kv[:, :, -self.qk_rope_head_dim :].reshape(-1, page_size, 1, self.qk_rope_head_dim),
             out=o_tensor,
             return_lse=False,
         )
