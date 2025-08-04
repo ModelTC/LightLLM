@@ -5,9 +5,11 @@ import numpy as np
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
+from .token_chunck_hash_list import TokenHashList, CpuCachePageList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
 
 
@@ -97,6 +99,12 @@ class Req(ctypes.Structure):
         ("mtp_accepted_token_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
+        # 用于在开启cpu cache 或者 硬盘 cache时，预先计算，分块输入token的hash值。
+        ("token_hash_list", TokenHashList),
+        # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
+        ("cpu_cache_match_page_indexes", CpuCachePageList),
+        # 分块hash的块大小
+        ("cpu_cache_token_page_size", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -153,9 +161,22 @@ class Req(ctypes.Structure):
 
         self.post_init()
 
+        self.cpu_cache_token_page_size = get_env_start_args().cpu_cache_token_page_size
+        if get_env_start_args().enable_cpu_cache:
+            self._fill_input_token_hash()
+        return
+
     def post_init(self):
         # 子类继承进行一些额外的初始化操作
         pass
+
+    def _fill_input_token_hash(self):
+        self.token_hash_list = TokenHashList()
+        self.token_hash_list.clear()
+        hash_values = compute_token_list_hash(self.get_prompt_ids(), chuncked_size=self.cpu_cache_token_page_size)
+        self.token_hash_list.fill(hash_values)
+        self.cpu_cache_match_page_indexes = CpuCachePageList()
+        return
 
     def create_prompt_ids_shm_array(self):
         service_uni_name = get_unique_server_name()
