@@ -172,25 +172,7 @@ class InferenceContext:
     def filter_reqs(self, finished_reqs: List["InferReq"]):
         if finished_reqs:
             if self.args.enable_cpu_cache:
-                # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
-                # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
-                true_finished_reqs = []
-                for req in finished_reqs:
-                    # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
-                    # 这个限制是为了兼容 diverse 模式下的请求处理。
-                    if req.shm_req.group_req_id == req.shm_req.request_id:
-                        if req.cur_kv_len < self.args.cpu_cache_token_chuncked_size:
-                            true_finished_reqs.append(req)
-                            continue
-
-                        if req.cpu_cache_task_finished:
-                            true_finished_reqs.append(req)
-                        else:
-                            # 将请求的 kv cache 卸载到 cpu cache 中
-                            # to do: 这里需要实现一个异步的卸载操作，当前的实现是同步的。
-                            pass
-                    else:
-                        true_finished_reqs.append(req)
+                true_finished_reqs = self._pre_filter_cpu_kv_cache_reqs(finished_reqs=finished_reqs)
             else:
                 true_finished_reqs = finished_reqs
 
@@ -198,6 +180,28 @@ class InferenceContext:
             self._filter([req.req_id for req in true_finished_reqs])
             g_infer_state_lock.release()
         return
+
+    def _pre_filter_cpu_kv_cache_reqs(self, finished_reqs: List["InferReq"]):
+        # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
+        # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
+        true_finished_reqs = []
+        for req in finished_reqs:
+            # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
+            # 这个限制是为了兼容 diverse 模式下的请求处理。
+            if req.shm_req.group_req_id == req.shm_req.request_id:
+                if req.cur_kv_len < self.args.cpu_cache_token_chuncked_size:
+                    true_finished_reqs.append(req)
+                    continue
+
+                if req.cpu_cache_task_finished:
+                    true_finished_reqs.append(req)
+                else:
+                    # 将请求的 kv cache 卸载到 cpu cache 中
+                    # to do: 这里需要实现一个异步的卸载操作，当前的实现是同步的。
+                    pass
+            else:
+                true_finished_reqs.append(req)
+            return true_finished_reqs
 
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):

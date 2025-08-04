@@ -34,7 +34,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
 
 @lru_cache(maxsize=None)
-def get_shm_kv_cache_ptr():
+def create_shm_kv_cache_ptr() -> int:
     args = get_env_start_args()
 
     # 加载 libc
@@ -72,7 +72,7 @@ def get_shm_kv_cache_ptr():
 
 
 @lru_cache(maxsize=None)
-def attach_shm_kv_cache_ptr():
+def attach_shm_kv_cache_ptr() -> int:
     """
     Attach to the shared memory segment with the given shmid.
     """

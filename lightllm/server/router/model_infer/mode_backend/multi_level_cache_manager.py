@@ -15,11 +15,10 @@ class MultiLevelCacheManager(object):
         self.backend: ModeBackend = backend
         self.gloo_group = create_new_group_for_current_dp("gloo")
 
-        if self.args.enable_cpu_cache:
-            self.cpu_cache_handle_queue = deque()
-            self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)
-            self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_handle_loop, daemon=True)
-            self.cpu_cache_thread.start()
+        self.cpu_cache_handle_queue = deque()
+        self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)
+        self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_handle_loop, daemon=True)
+        self.cpu_cache_thread.start()
 
     def cpu_cache_handle_loop(self):
         pass

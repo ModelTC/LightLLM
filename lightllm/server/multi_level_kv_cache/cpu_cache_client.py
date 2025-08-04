@@ -1,10 +1,17 @@
 import ctypes
+import torch
+import numpy as np
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from .shm_objs import ShmDict, ShmLinkedList, _LinkedListItem, IntList
 from lightllm.server.core.objs import AtomicShmLock
-from lightllm.utils.kv_cache_utils import calcu_cpu_cache_page_num
+from lightllm.utils.kv_cache_utils import (
+    calcu_cpu_cache_meta,
+    create_shm_kv_cache_ptr,
+    attach_shm_kv_cache_ptr,
+    register_shm_ptr_to_pin,
+)
 
 logger = init_logger(__name__)
 
@@ -17,9 +24,15 @@ class CpuKvCacheClient(object):
     def __init__(self, init_shm_data: bool):
         self.args = get_env_start_args()
         # to do here need calcu from from settings.
-        self.page_num: int = calcu_cpu_cache_page_num()
+        self.kv_cache_tensor_meta = calcu_cpu_cache_meta()
+        self.page_num: int = self.kv_cache_tensor_meta.page_num
         self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_cpu_kv_cache_client_lock")
         self._create_cpu_status_list(init_shm_data)
+        if init_shm_data:
+            self._create_shm_cpu_kv_cache()
+        else:
+            self._attach_shm_cpu_kv_cache()
+        return
 
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
         assert self.page_hash_dict.get(hash_key) is None
@@ -177,6 +190,35 @@ class CpuKvCacheClient(object):
             capacity=self.page_num,
             init_shm_data=init_shm_data,
         )
+        return
+
+    def _create_shm_cpu_kv_cache(self):
+        shm_ptr = create_shm_kv_cache_ptr()
+        numpy_array = np.frombuffer(
+            memoryview((ctypes.c_uint8 * self.kv_cache_tensor_meta.calcu_size()).from_address(shm_ptr)), dtype=np.uint8
+        )
+        # 将 NumPy 数组转换为 PyTorch 张量
+        shape = (
+            self.kv_cache_tensor_meta.page_num,
+            self.kv_cache_tensor_meta.layer_num,
+            self.kv_cache_tensor_meta.num_heads,
+            self.kv_cache_tensor_meta.head_dim,
+        )
+        self.cpu_kv_cache_tensor = torch.from_numpy(numpy_array).view(dtype=torch.bfloat16).view(shape)
+        return
+
+    def _attach_shm_cpu_kv_cache(self):
+        shm_ptr = attach_shm_kv_cache_ptr()
+        register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.kv_cache_tensor_meta.calcu_size())
+        shape = (
+            self.kv_cache_tensor_meta.page_num,
+            self.kv_cache_tensor_meta.layer_num,
+            self.kv_cache_tensor_meta.num_heads,
+            self.kv_cache_tensor_meta.head_dim,
+        )
+        self.cpu_kv_cache_tensor = torch.empty(size=shape, dtype=torch.bfloat16, device="meta")
+        # 将指针绑定到 tensor上，方便triton获取真实的地址。
+        self.cpu_kv_cache_tensor.data_ptr = lambda: shm_ptr
         return
 
 
