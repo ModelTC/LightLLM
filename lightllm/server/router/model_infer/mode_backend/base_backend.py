@@ -31,6 +31,7 @@ from lightllm.distributed import dist_group_manager
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from .multi_level_cache_manager import MultiLevelCacheManager
 
 
 class ModeBackend:
@@ -197,6 +198,9 @@ class ModeBackend:
         self.infer_loop_thread.start()
         self.infer_loop_thread1 = threading.Thread(target=self.infer_loop, daemon=True)
         self.infer_loop_thread1.start()
+
+        if self.args.enable_cpu_cache:
+            self.multi_level_cache_manager = MultiLevelCacheManager(self)
         return
 
     def init_custom(self):

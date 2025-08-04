@@ -33,11 +33,15 @@ class InferenceContext:
     vocab_size = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
+    cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
 
     def register(
-        self, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int
+        self, backend, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int
     ):
         self.args = get_env_start_args()
+        from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+
+        self.backend: ModeBackend = backend
         self.req_manager = req_manager
         self.req_sampling_manager = self.req_manager.req_sampling_params_manager
         self.radix_cache = radix_cache
@@ -54,6 +58,11 @@ class InferenceContext:
         if self.overlap_stream is None:
             self.overlap_stream = torch.cuda.Stream()
         return self.overlap_stream
+
+    def get_cpu_kv_cache_stream(self) -> torch.cuda.Stream:
+        if self.cpu_kv_cache_stream is None:
+            self.cpu_kv_cache_stream = torch.cuda.Stream()
+        return self.cpu_kv_cache_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
@@ -197,8 +206,12 @@ class InferenceContext:
                     true_finished_reqs.append(req)
                 else:
                     # 将请求的 kv cache 卸载到 cpu cache 中
-                    # to do: 这里需要实现一个异步的卸载操作，当前的实现是同步的。
-                    pass
+                    multi_level_cache_manager = self.backend.multi_level_cache_manager
+                    trans_task = multi_level_cache_manager.req_to_cpu_cache_task(
+                        req=req, cpu_kv_cache_stream=self.get_cpu_kv_cache_stream()
+                    )
+                    if trans_task is not None:
+                        self.backend.multi_level_cache_manager.cpu_cache_handle_queue.append(trans_task)
             else:
                 true_finished_reqs.append(req)
             return true_finished_reqs

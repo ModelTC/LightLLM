@@ -2,6 +2,7 @@ import threading
 import torch.distributed as dist
 import torch
 import dataclasses
+from typing import Optional
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.envs_utils import get_env_start_args
@@ -26,50 +27,51 @@ class MultiLevelCacheManager(object):
     def cpu_cache_handle_loop(self):
         pass
 
-    def req_to_cpu_cache(self, req: InferReq):
-        all_token_hash_list = req.shm_req.token_hash_list.get_all()
-        block_size = req.cur_kv_len // self.args.cpu_cache_token_chuncked_size
-        move_block_size = min(block_size, len(all_token_hash_list))
-        if move_block_size == 0:
-            req.cpu_cache_task_finished = True
-            return
-        if self.backend.is_master_in_dp:
-            self.cpu_cache_client.lock.acquire_sleep1ms()
-            page_list, ready_list = self.cpu_cache_client.allocate_pages(
-                all_token_hash_list[:move_block_size],
-                disk_offload_enable=self.args.enable_disk_cache,
-            )
-            self.cpu_cache_client.lock.release()
-            item_size = len(page_list)
-            dist.broadcast_object_list([item_size], group=self.gloo_group, group_src=0)
-            if item_size == 0:
+    def req_to_cpu_cache_task(self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream) -> Optional["TransTask"]:
+        with torch.cuda.stream(cpu_kv_cache_stream):
+            all_token_hash_list = req.shm_req.token_hash_list.get_all()
+            block_size = req.cur_kv_len // self.args.cpu_cache_token_chuncked_size
+            move_block_size = min(block_size, len(all_token_hash_list))
+            if move_block_size == 0:
                 req.cpu_cache_task_finished = True
-                return
-            dist.broadcast_object_list(page_list, group=self.gloo_group, group_src=0)
-            dist.broadcast_object_list(ready_list, group=self.gloo_group, group_src=0)
-        else:
-            recv_list = [None]
-            dist.broadcast_object_list(recv_list, group=self.gloo_group, group_src=0)
-            item_size = recv_list[0]
-            if item_size == 0:
-                req.cpu_cache_task_finished = True
-                return
-            page_list = [None] * item_size
-            ready_list = [None] * item_size
-            dist.broadcast_object_list(page_list, group=self.gloo_group, group_src=0)
-            dist.broadcast_object_list(ready_list, group=self.gloo_group, group_src=0)
+                return None
+            if self.backend.is_master_in_dp:
+                self.cpu_cache_client.lock.acquire_sleep1ms()
+                page_list, ready_list = self.cpu_cache_client.allocate_pages(
+                    all_token_hash_list[:move_block_size],
+                    disk_offload_enable=self.args.enable_disk_cache,
+                )
+                self.cpu_cache_client.lock.release()
+                item_size = len(page_list)
+                dist.broadcast_object_list([item_size], group=self.gloo_group, group_src=0)
+                if item_size == 0:
+                    req.cpu_cache_task_finished = True
+                    return None
+                dist.broadcast_object_list(page_list, group=self.gloo_group, group_src=0)
+                dist.broadcast_object_list(ready_list, group=self.gloo_group, group_src=0)
+            else:
+                recv_list = [None]
+                dist.broadcast_object_list(recv_list, group=self.gloo_group, group_src=0)
+                item_size = recv_list[0]
+                if item_size == 0:
+                    req.cpu_cache_task_finished = True
+                    return None
+                page_list = [None] * item_size
+                ready_list = [None] * item_size
+                dist.broadcast_object_list(page_list, group=self.gloo_group, group_src=0)
+                dist.broadcast_object_list(ready_list, group=self.gloo_group, group_src=0)
 
-        page_indexes = torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
-        page_readies = torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
-        trans_task = TransTask(page_indexes=page_indexes, page_readies=page_readies, req_obj=req)
-        token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0 : req.cur_kv_len]
-        offload_gpu_kv_to_cpu(
-            token_indexes=token_indexes,
-            gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
-            cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
-            page_indexes=page_indexes,
-            page_readies=page_readies,
-        )
+            page_indexes = torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
+            page_readies = torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
+            trans_task = TransTask(page_indexes=page_indexes, page_readies=page_readies, req_obj=req)
+            token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0 : req.cur_kv_len]
+            offload_gpu_kv_to_cpu(
+                token_indexes=token_indexes,
+                gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
+                cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
+                page_indexes=page_indexes,
+                page_readies=page_readies,
+            )
 
         return trans_task
 
