@@ -19,6 +19,7 @@ def _offload_gpu_kv_to_cpu(
     cpu_stride3,
     cpu_stride4,
     page_indexes_ptr,
+    page_readies_ptr,
     token_num,
     layer_num,
     head_all_dim,
@@ -28,6 +29,9 @@ def _offload_gpu_kv_to_cpu(
     block_index = tl.program_id(0)
     cpu_page_index = tl.load(page_indexes_ptr + block_index)
     if cpu_page_index == -1:
+        return
+    ready_state = tl.load(page_readies_ptr + block_index)
+    if ready_state:
         return
 
     token_range = block_index * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
@@ -65,6 +69,7 @@ def offload_gpu_kv_to_cpu(
     gpu_kv_cache: torch.Tensor,
     cpu_kv_cache: torch.Tensor,
     page_indexes: torch.Tensor,
+    page_readies: torch.Tensor,
 ):
     """
     this function is used to offload GPU KV cache to CPU KV cache.
@@ -97,6 +102,7 @@ def offload_gpu_kv_to_cpu(
         cpu_stride3=cpu_kv_cache.stride(3),
         cpu_stride4=cpu_kv_cache.stride(4),
         page_indexes_ptr=page_indexes,
+        page_readies_ptr=page_readies,
         token_num=token_num,
         layer_num=gpu_kv_cache.shape[0],
         head_all_dim=gpu_kv_cache.shape[-1] * gpu_kv_cache.shape[-2],
