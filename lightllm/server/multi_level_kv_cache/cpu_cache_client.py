@@ -91,6 +91,7 @@ class CpuKvCacheClient(object):
             else:
                 page_list.append(-1)
                 ready_list.append(False)
+                break
 
         left_num = len(hash_keys) - len(page_list)
         page_list.extend([-1 for _ in range(left_num)])
@@ -114,14 +115,16 @@ class CpuKvCacheClient(object):
         page_index = self.page_hash_dict.get(hash_key)
         if page_index is not None:
             page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
-            page_item.ref_count += 1
-            # lru 更新
-            page_item.del_self_from_list()
-            self.page_items.add_item_to_tail(index=page_index)
-
             if page_item.is_data_ready():
+                page_item.ref_count += 1
+                # lru 更新
+                page_item.del_self_from_list()
+                self.page_items.add_item_to_tail(index=page_index)
                 return page_index, True
             else:
+                # lru 更新
+                page_item.del_self_from_list()
+                self.page_items.add_item_to_tail(index=page_index)
                 return None, False
         else:
             return None, False
