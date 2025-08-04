@@ -114,3 +114,24 @@ class CpuKVCacheMeta:
 
     def calcu_size(self):
         return self.page_num * self.layer_num * self.num_heads * self.head_dim * self.item_size
+
+
+def register_shm_ptr_to_pin(shm_ptr: int, size: int):
+    # 加载 CUDA 库
+    cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")  # Linux 下的 CUDA 库路径
+
+    # 定义 cudaHostRegister 函数的参数和返回类型
+    cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+    cuda.cudaHostRegister.restype = ctypes.c_int
+
+    # 定义常量
+    cudaHostRegisterDefault = 0  # 默认注册标志
+
+    # 调用 cudaHostRegister
+    result = cuda.cudaHostRegister(shm_ptr, size, cudaHostRegisterDefault)
+
+    if result != 0:
+        raise Exception(f"Error registering host memory: {result}")
+    else:
+        logger.info("Host memory registered successfully.")
+    return
