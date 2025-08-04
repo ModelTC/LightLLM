@@ -8,7 +8,7 @@ from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClie
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
-from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu
+from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
 
@@ -119,25 +119,39 @@ class MultiLevelCacheManager(object):
         token_chuncked_size = self.args.cpu_cache_token_chuncked_size
         all_page_list = []
         for req in reqs:
-            page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
-            match_tokens = len(page_list) * token_chuncked_size
-            need_token_num = match_tokens - req.cur_kv_len
-            # 多匹配了一定数量的token 才进行复制操作，不然操作效率不高
-            if need_token_num > 256:
-                if need_token_num <= idle_token_num:
-                    if self.backend.radix_cache is not None:
-                        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
+            if req.shm_req.group_req_id == req.shm_req.request_id:
+                page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
+                match_tokens = len(page_list) * token_chuncked_size
+                need_token_num = match_tokens - req.cur_kv_len
+                # 多匹配了一定数量的token 才进行复制操作，不然操作效率不高
+                if need_token_num > 256:
+                    if need_token_num <= idle_token_num:
+                        if self.backend.radix_cache is not None:
+                            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(
+                                need_token_num=need_token_num
+                            )
 
-                mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
-                idle_token_num -= need_token_num
-                g_infer_context.req_manager.req_to_token_indexs[
-                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
-                ] = mem_indexes
-                req.cur_kv_len = req.cur_kv_len + need_token_num
-                if self.backend.is_master_in_dp:
-                    req.shm_req.shm_cur_kv_len = req.cur_kv_len
+                    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
-            all_page_list.extend(page_list)
+                    # 将 cpu page 的内容拷贝到 gpu 页面中
+                    load_cpu_kv_to_gpu(
+                        mem_indexes=mem_indexes,
+                        gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
+                        cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
+                        page_indexes=torch.tensor(page_list, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
+                    )
+
+                    torch.cuda.current_stream().synchronize()
+
+                    idle_token_num -= need_token_num
+                    g_infer_context.req_manager.req_to_token_indexs[
+                        req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
+                    ] = mem_indexes
+                    req.cur_kv_len = req.cur_kv_len + need_token_num
+                    if self.backend.is_master_in_dp:
+                        req.shm_req.shm_cur_kv_len = req.cur_kv_len
+
+                all_page_list.extend(page_list)
 
         if self.backend.is_master_in_dp:
             self.cpu_cache_client.lock.acquire_sleep1ms()
