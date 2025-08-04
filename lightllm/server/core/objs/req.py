@@ -9,7 +9,7 @@ from .token_chunck_hash_list import TokenHashList, CpuCachePageList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.hash_utils import compute_token_list_hash
+from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
 
 
