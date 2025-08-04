@@ -16,6 +16,7 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
 
     def __init__(self):
         super().__init__()
+        self.page_size = get_page_size()
 
     @classmethod
     def get_page_table_buffer(cls, graph_max_batch_size: int, max_seq_len: int):
@@ -43,19 +44,18 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
             self.cu_seqlens_q = self.b1_cu_q_seq_len
             self.cu_seqlens_k = self.b1_cu_kv_seq_len
             max_seq_len_k = self.max_kv_seq_len
-            page_size = get_page_size()
             if self.batch_size <= model.graph_max_batch_size and self.max_len_in_batch <= model.graph_max_len_in_batch:
-                length = cdiv(model.graph_max_len_in_batch, page_size)
+                length = cdiv(model.graph_max_len_in_batch, self.page_size)
                 page_buffer = Deepseek2FlashAttentionStateInfo.get_page_table_buffer(model.graph_max_batch_size, length)
                 self.page_table = page_buffer[self.microbatch_index][: self.batch_size * length].reshape(
                     self.batch_size, length
                 )
             else:
-                length = cdiv(self.max_len_in_batch, page_size)
+                length = cdiv(self.max_len_in_batch, self.page_size)
                 self.page_table = torch.empty((self.batch_size, length), dtype=torch.int32).to(input_ids.device)
 
             if "page_size_variable" in model.mode:
-                length = cdiv(max_seq_len_k, page_size)
+                length = cdiv(max_seq_len_k, self.page_size)
                 self.page_table[:, :length].copy_(model.req_manager.req_to_page_indexs[self.b_req_idx, :length])
                 self.page_table[:, length:].fill_(0)
             else:

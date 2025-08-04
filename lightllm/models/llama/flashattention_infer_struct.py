@@ -18,6 +18,7 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
 
     def __init__(self):
         super().__init__()
+        self.page_size = get_page_size()
 
     @classmethod
     def get_page_table_buffer(cls, graph_max_batch_size: int, max_seq_len: int):
@@ -32,7 +33,7 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
         if self.is_prefill:
             self.cu_seqlens_q = self.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
-            length = cdiv(self.max_seq_len, get_page_size())
+            length = cdiv(self.max_seq_len, self.page_size)
             self.page_table = torch.empty((self.batch_size, length), dtype=torch.int32, device=input_ids.device)
             if "page_size_variable" in model.mode:
                 self.page_table.copy_(model.req_manager.req_to_page_indexs[self.b_req_idx, :length])
@@ -44,17 +45,16 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
             self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
             max_seq_len_k = self.max_kv_seq_len
             if self.batch_size <= model.graph_max_batch_size and self.max_len_in_batch <= model.graph_max_len_in_batch:
-                page_size = get_page_size()
-                length = cdiv(model.graph_max_len_in_batch, page_size)
+                length = cdiv(model.graph_max_len_in_batch, self.page_size)
                 page_buffer = FlashAttentionStateInfo.get_page_table_buffer(model.graph_max_batch_size, length)
                 self.page_table = page_buffer[self.microbatch_index][: self.batch_size * length].reshape(
                     self.batch_size, length
                 )
             else:
-                length = cdiv(self.max_len_in_batch, get_page_size())
+                length = cdiv(self.max_len_in_batch, self.page_size)
                 self.page_table = torch.empty((self.batch_size, length), dtype=torch.int32, device=input_ids.device)
 
-            length = cdiv(max_seq_len_k, get_page_size())
+            length = cdiv(max_seq_len_k, self.page_size)
             if "page_size_variable" in model.mode:
                 self.page_table[:, :length].copy_(model.req_manager.req_to_page_indexs[self.b_req_idx, :length])
             else:
