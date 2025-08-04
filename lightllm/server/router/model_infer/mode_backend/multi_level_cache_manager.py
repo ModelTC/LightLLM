@@ -1,6 +1,7 @@
 import threading
 import torch.distributed as dist
 import torch
+import dataclasses
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.envs_utils import get_env_start_args
@@ -58,17 +59,23 @@ class MultiLevelCacheManager(object):
             dist.broadcast_object_list(page_list, group=self.gloo_group, group_src=0)
             dist.broadcast_object_list(ready_list, group=self.gloo_group, group_src=0)
 
+        page_indexes = torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
+        page_readies = torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
+        trans_task = TransTask(page_indexes=page_indexes, page_readies=page_readies, req_obj=req)
         token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0 : req.cur_kv_len]
         offload_gpu_kv_to_cpu(
             token_indexes=token_indexes,
             gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
             cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
-            page_indexes=torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True).cuda(
-                non_blocking=True
-            ),
-            page_readies=torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True).cuda(
-                non_blocking=True
-            ),
+            page_indexes=page_indexes,
+            page_readies=page_readies,
         )
 
-        return
+        return trans_task
+
+
+@dataclasses.dataclass
+class TransTask:
+    page_indexes: torch.Tensor
+    page_readies: torch.Tensor
+    req_obj: InferReq
