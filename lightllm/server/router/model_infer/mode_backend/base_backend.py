@@ -157,6 +157,7 @@ class ModeBackend:
 
         self.logger.info(f"loaded model class {self.model.__class__}")
         g_infer_context.register(
+            backend=self,
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
@@ -326,7 +327,10 @@ class ModeBackend:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
             else:
-                self._init_reqs(reqs=cmds)
+                req_ids = self._init_reqs(reqs=cmds)
+                if self.args.enable_cpu_cache:
+                    self._fill_cpu_cache_to_reqs(req_ids=req_ids)
+
         return
 
     # 一些可以复用的通用功能函数
@@ -347,6 +351,13 @@ class ModeBackend:
         g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
         return req_ids
+
+    def _fill_cpu_cache_to_reqs(self, req_ids):
+        req_objs: List[InferReq] = [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
+        g_infer_state_lock.acquire()
+        self.multi_level_cache_manager.fill_cpu_cache_to_reqs(reqs=req_objs)
+        g_infer_state_lock.release()
+        return
 
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(
@@ -374,6 +385,8 @@ class ModeBackend:
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
         """
+        if self.args.enable_cpu_cache:
+            self.multi_level_cache_manager.update_kv_cache_offload_task_states()
 
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
@@ -486,7 +499,7 @@ class ModeBackend:
                     else:
                         # 将请求的 kv cache 卸载到 cpu cache 中
                         multi_level_cache_manager = self.multi_level_cache_manager
-                        trans_task = multi_level_cache_manager.req_to_cpu_cache_task(
+                        trans_task = multi_level_cache_manager.start_kv_cache_offload_task(
                             req=req, cpu_kv_cache_stream=g_infer_context.get_cpu_kv_cache_stream()
                         )
                         if trans_task is not None:

@@ -9,6 +9,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu
+from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
 
 class MultiLevelCacheManager(object):
@@ -20,11 +21,14 @@ class MultiLevelCacheManager(object):
         self.gloo_group = create_new_group_for_current_dp("gloo")
         self.filter_group = create_new_group_for_current_dp("gloo")
         self.sync_group = create_new_group_for_current_dp("nccl")
+        self.init_sync_group = create_new_group_for_current_dp("nccl")
 
         self.cpu_cache_handle_queue = deque()
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)
 
-    def req_to_cpu_cache_task(self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream) -> Optional["TransTask"]:
+    def start_kv_cache_offload_task(
+        self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
+    ) -> Optional["TransTask"]:
         with torch.cuda.stream(cpu_kv_cache_stream):
             all_token_hash_list = req.shm_req.token_hash_list.get_all()
             block_size = req.cur_kv_len // self.args.cpu_cache_token_chuncked_size
@@ -79,7 +83,7 @@ class MultiLevelCacheManager(object):
 
         return trans_task
 
-    def handle_task_queue(self):
+    def update_kv_cache_offload_task_states(self):
         if self.backend.is_master_in_dp:
             trans_ok_reqs = []
             while len(self.cpu_cache_handle_queue) != 0:
@@ -108,6 +112,37 @@ class MultiLevelCacheManager(object):
             self.cpu_cache_client.lock.release()
             for req in trans_ok_reqs:
                 req.req_obj.cpu_cache_task_finished = True
+        return
+
+    def fill_cpu_cache_to_reqs(self, reqs: List[InferReq]):
+        idle_token_num = g_infer_context.get_can_alloc_token_num()
+        token_chuncked_size = self.args.cpu_cache_token_chuncked_size
+        all_page_list = []
+        for req in reqs:
+            page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
+            match_tokens = len(page_list) * token_chuncked_size
+            need_token_num = match_tokens - req.cur_kv_len
+            # 多匹配了一定数量的token 才进行复制操作，不然操作效率不高
+            if need_token_num > 256:
+                if need_token_num <= idle_token_num:
+                    if self.backend.radix_cache is not None:
+                        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
+
+                mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
+                idle_token_num -= need_token_num
+                g_infer_context.req_manager.req_to_token_indexs[
+                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
+                ] = mem_indexes
+                req.cur_kv_len = req.cur_kv_len + need_token_num
+                if self.backend.is_master_in_dp:
+                    req.shm_req.shm_cur_kv_len = req.cur_kv_len
+
+            all_page_list.extend(page_list)
+
+        if self.backend.is_master_in_dp:
+            self.cpu_cache_client.lock.acquire_sleep1ms()
+            self.cpu_cache_client.deref_pages(page_list=all_page_list)
+            self.cpu_cache_client.lock.release()
         return
 
 
