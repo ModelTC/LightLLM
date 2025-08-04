@@ -23,6 +23,7 @@ from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.flashinfer_struct import Deepseek2FlashInferStateInfo
+from lightllm.models.deepseek2.flashattention_infer_struct import Deepseek2FlashAttentionStateInfo
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor, all_reduce, reduce_scatter_tensor
@@ -302,7 +303,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         self,
         q: torch.Tensor,
         kv,
-        infer_state: Deepseek2FlashInferStateInfo,
+        infer_state: Deepseek2FlashAttentionStateInfo,
         layer_weight: Deepseek2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
@@ -323,7 +324,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             k=k.view(-1, self.tp_k_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
             v=v.view(-1, self.tp_v_head_num_, self.v_head_dim),
             cu_seqlens_q=infer_state.cu_seqlens_q,
-            cu_seqlens_k=infer_state.cu_seqlens_k,
+            cu_seqlens_k=infer_state.cu_seqlens_q,
             max_seqlen_q=infer_state.q_max_seq_len,
             max_seqlen_k=infer_state.max_seq_len,
             softmax_scale=self.softmax_scale,
@@ -547,7 +548,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         return o_tensor
 
     def _token_gqa_decode_attention_flashattention(
-        self, q, infer_state: Deepseek2FlashInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
+        self, q, infer_state: Deepseek2FlashAttentionStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
@@ -566,7 +567,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             cu_seqlens_k_new=infer_state.cu_seqlens_k,
             max_seqlen_q=1,
             softmax_scale=self.softmax_scale,
-            causal=True,
+            causal=False,
             window_size=(-1, -1),
             softcap=0.0,
             k_descale=k_descale,
