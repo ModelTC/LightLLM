@@ -567,7 +567,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             cu_seqlens_k_new=infer_state.cu_seqlens_k,
             max_seqlen_q=1,
             softmax_scale=self.softmax_scale,
-            causal=False,
+            causal=True,
             window_size=(-1, -1),
             softcap=0.0,
             k_descale=k_descale,
