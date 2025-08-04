@@ -386,7 +386,7 @@ class ModeBackend:
         5. decode_reqs 需要进行decode操作的请求
         """
         if self.args.enable_cpu_cache:
-            self.multi_level_cache_manager.update_kv_cache_offload_task_states()
+            self.multi_level_cache_manager.update_cpu_cache_task_states()
 
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
@@ -467,48 +467,19 @@ class ModeBackend:
         g_infer_state_lock.release()
 
         self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
-        true_finished_reqs = self._cpu_kv_cache_task_handle(finished_reqs=finished_reqs)
-        g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
+        # 如果使能了 cpu cache 功能，对于已经完成的请求，进行 gpu kv 卸载到 cpu cache的操作。
+        if self.args.enable_cpu_cache:
+            true_finished_reqs = self.multi_level_cache_manager.handle_finished_reqs(finished_reqs=finished_reqs)
+        else:
+            true_finished_reqs = finished_reqs
 
+        g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
         g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
         if recover_paused:
             g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp)
 
         return prefill_reqs, decode_reqs
-
-    def _cpu_kv_cache_task_handle(self, finished_reqs: List[InferReq]) -> List[InferReq]:
-        """
-        将满足cpu kv cache 传输任务的请求，进行kv 的卸载。
-        """
-
-        if self.args.enable_cpu_cache:
-            # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
-            # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
-            true_finished_reqs = []
-            for req in finished_reqs:
-                # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
-                # 这个限制是为了兼容 diverse 模式下的请求处理。
-                if req.shm_req.group_req_id == req.shm_req.request_id:
-                    if req.cur_kv_len < self.args.cpu_cache_token_page_size:
-                        true_finished_reqs.append(req)
-                        continue
-
-                    if req.cpu_cache_task_finished:
-                        true_finished_reqs.append(req)
-                    else:
-                        # 将请求的 kv cache 卸载到 cpu cache 中
-                        multi_level_cache_manager = self.multi_level_cache_manager
-                        trans_task = multi_level_cache_manager.start_kv_cache_offload_task(
-                            req=req, cpu_kv_cache_stream=g_infer_context.get_cpu_kv_cache_stream()
-                        )
-                        if trans_task is not None:
-                            self.multi_level_cache_manager.cpu_cache_handle_queue.append(trans_task)
-                else:
-                    true_finished_reqs.append(req)
-                return true_finished_reqs
-        else:
-            return finished_reqs
 
     def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
         """
