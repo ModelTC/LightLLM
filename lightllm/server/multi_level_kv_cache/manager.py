@@ -9,7 +9,7 @@ import time
 import threading
 import concurrent.futures
 from typing import List
-from lightllm.server.core.objs import ShmReqManager, Req
+from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from .cpu_cache_client import CpuKvCacheClient
@@ -25,7 +25,7 @@ class MultiLevelKVCacheManager:
         detokenization_port,
         router_port,
     ):
-        self.args = args
+        self.args: StartArgs = args
         context = zmq.Context(2)
         self.recv_from_pre_module = context.socket(zmq.PULL)
         self.recv_from_pre_module.bind(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
@@ -90,12 +90,17 @@ class MultiLevelKVCacheManager:
 
         # 对每个请求进行cpu cache page 的匹配操作。
         for req in reqs:
+            # diverse_mode 只有主请求一个初始化 cpu cache 信息。
+            if self.args.diverse_mode and req.request_id != req.group_req_id:
+                continue
+
             self.cpu_cache_client.lock.acquire_sleep1ms()
             req: Req = req
             finded_page_indexes = []
             for token_chuncked_hash_value in req.token_hash_list.get_all():
-                page_index = self.cpu_cache_client.query_one_page(token_chuncked_hash_value)
+                page_index, ready = self.cpu_cache_client.query_one_page(token_chuncked_hash_value)
                 if page_index is not None:
+                    assert ready
                     finded_page_indexes.append(page_index)
                 else:
                     break
