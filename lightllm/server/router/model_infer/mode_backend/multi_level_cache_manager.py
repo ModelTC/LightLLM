@@ -19,6 +19,7 @@ class MultiLevelCacheManager(object):
         self.backend: ModeBackend = backend
         self.gloo_group = create_new_group_for_current_dp("gloo")
         self.filter_group = create_new_group_for_current_dp("gloo")
+        self.sync_group = create_new_group_for_current_dp("nccl")
 
         self.cpu_cache_handle_queue = deque()
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)
@@ -68,6 +69,7 @@ class MultiLevelCacheManager(object):
                 page_indexes=page_indexes,
                 page_readies=page_readies,
             )
+            dist.barrier(group=self.sync_group)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
