@@ -489,10 +489,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""The capacity of cpu cache. GB used.""",
     )
     parser.add_argument(
-        "--cpu_cache_token_chuncked_size",
+        "--cpu_cache_token_page_size",
         type=int,
         default=256,
-        help="""The token chunked size of cpu cache. also means the hash chuncked size""",
+        help="""The token page size of cpu cache""",
     )
     parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
     parser.add_argument(

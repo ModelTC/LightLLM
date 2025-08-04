@@ -104,7 +104,7 @@ class Req(ctypes.Structure):
         # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
         ("cpu_cache_match_page_indexes", CpuCachePageList),
         # 分块hash的块大小
-        ("cpu_cache_token_chuncked_size", ctypes.c_int),
+        ("cpu_cache_token_page_size", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -161,7 +161,7 @@ class Req(ctypes.Structure):
 
         self.post_init()
 
-        self.cpu_cache_token_chuncked_size = get_env_start_args().cpu_cache_token_chuncked_size
+        self.cpu_cache_token_page_size = get_env_start_args().cpu_cache_token_page_size
         if get_env_start_args().enable_cpu_cache:
             self._fill_input_token_hash()
         return
@@ -173,7 +173,7 @@ class Req(ctypes.Structure):
     def _fill_input_token_hash(self):
         self.token_hash_list = TokenHashList()
         self.token_hash_list.clear()
-        hash_values = compute_token_list_hash(self.get_prompt_ids(), chuncked_size=self.cpu_cache_token_chuncked_size)
+        hash_values = compute_token_list_hash(self.get_prompt_ids(), chuncked_size=self.cpu_cache_token_page_size)
         self.token_hash_list.fill(hash_values)
         self.cpu_cache_match_page_indexes = CpuCachePageList()
         return
