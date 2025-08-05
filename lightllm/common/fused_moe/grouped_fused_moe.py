@@ -627,13 +627,13 @@ def fused_experts_impl(
     topk_num = topk_ids.shape[1]
     M = min(num_tokens, CHUNK_SIZE)
 
-    intermediate_cache1 = alloc_tensor_func((M, topk_num, N), device=hidden_states.device, dtype=hidden_states.dtype)
+    cache = alloc_tensor_func(M*topk_num*max(N, w2.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype)
+    intermediate_cache1 = cache[:M * topk_num * N].view(M, topk_num, N)
     intermediate_cache2 = alloc_tensor_func(
         (M, topk_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype
     )
-    intermediate_cache3 = alloc_tensor_func(
-        (M, topk_num, w2.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype
-    )
+    intermediate_cache3 = cache[:M * topk_num * w2.shape[1]].view(M, topk_num, w2.shape[1])
+
 
     if inplace:
         out_hidden_states = hidden_states
@@ -647,9 +647,10 @@ def fused_experts_impl(
         curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
         tokens_in_chunk, _ = curr_hidden_states.shape
 
-        intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
-        intermediate_cache2 = intermediate_cache2[:tokens_in_chunk]
-        intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
+        if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
+            intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
+            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk]
+            intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
