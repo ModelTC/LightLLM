@@ -52,6 +52,7 @@ class MemoryManager:
             layer_num,
         )
         self.HOLD_TOKEN_MEMINDEX = self.size
+        self.req_to_token_indexs = None
 
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
@@ -243,7 +244,9 @@ class MemoryManager:
     def _free_buffers(self):
         self.kv_buffer = None
 
-    def alloc(self, need_size) -> torch.Tensor:
+    def alloc(
+        self, need_size, b_req_idx=None, b_seq_len=None, b_ready_cache_len=None, is_prefill=False
+    ) -> torch.Tensor:
         if need_size > self.mark_end - self.mark_start:
             logger.error(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
             assert False, "error alloc state"
@@ -256,6 +259,9 @@ class MemoryManager:
         self.can_use_mem_size -= need_size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         return ans
+
+    def set_prefix_cache_to_req(self, req_idx: int, start: int, end: int, values: torch.Tensor):
+        self.req_to_token_indexs[req_idx, start:end] = values
 
     def free(self, free_index: Union[torch.Tensor, List[int]]):
         """_summary_
