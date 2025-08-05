@@ -76,9 +76,9 @@ class FusedMoeWeightTP(BaseWeight):
         w2, w2_scale = self.w2
         use_fp8_w8a8 = self.quant_method is not None
 
-        from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
+        from lightllm.common.fused_moe.grouped_fused_moe import fused_experts
 
-        fused_experts_impl(
+        fused_experts(
             hidden_states=input_tensor,
             w1=w1,
             w2=w2,
