@@ -70,7 +70,7 @@ def _fwd_kernel(
             Req_to_tokens + cur_batch_req_idx * stride_req_to_tokens_b + start_n + offs_n,
             mask=(start_n + offs_n) < cur_batch_seq_len,
             other=0,
-        )
+        ).to(tl.int64)
         k = tl.load(
             k_ptrs + kv_loc[None, :] * stride_kbs, mask=(start_n + offs_n[None, :]) < cur_batch_seq_len, other=0.0
         )
