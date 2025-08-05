@@ -17,21 +17,24 @@ def rename_weight_keys(weights):
             weights[k[len(prefix) :]] = weights[k]
 
 
+def build_visual_model(args, data_type: torch.dtype):
+    if args.disable_extra_process_for_multimodal:
+        kvargs = {
+            "weight_dir": args.model_dir,
+            "data_type": data_type,
+            "quant_type": args.vit_quant_type,
+            "quant_cfg": args.vit_quant_cfg,
+            "max_batch_size": args.visual_infer_batch_size,
+        }
+        return VisionTransformer(kvargs=kvargs)
+    return None
+
+
 class InternVLPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
         # if we don't assign an extra process for visual model, we need initialize the image cache manager here
-        if get_env_start_args().disable_extra_process_for_multimodal:
-            kvargs = {
-                "weight_dir": get_env_start_args().model_dir,
-                "data_type": self.data_type_,
-                "quant_type": get_env_start_args().vit_quant_type,
-                "quant_cfg": get_env_start_args().vit_quant_cfg,
-                "max_batch_size": get_env_start_args().visual_infer_batch_size,
-            }
-            self.visual_model = VisionTransformer(
-                kvargs=kvargs,
-            )
+        self.visual_model = build_visual_model(get_env_start_args(), data_type)
         return
 
     def load_hf_weights(self, weights):
@@ -43,17 +46,7 @@ class InternVLPhi3PreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
         # if we don't assign an extra process for visual model, we need initialize the image cache manager here
-        if get_env_start_args().disable_extra_process_for_multimodal:
-            kvargs = {
-                "weight_dir": get_env_start_args().model_dir,
-                "data_type": self.data_type_,
-                "quant_type": get_env_start_args().vit_quant_type,
-                "quant_cfg": get_env_start_args().vit_quant_cfg,
-                "max_batch_size": get_env_start_args().visual_infer_batch_size,
-            }
-            self.visual_model = VisionTransformer(
-                kvargs=kvargs,
-            )
+        self.visual_model = build_visual_model(get_env_start_args(), data_type)
         return
 
     def load_hf_weights(self, weights):
@@ -66,17 +59,7 @@ class InternVLInternlm2PreAndPostLayerWeight(Internlm2PreAndPostLayerWeight):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
         # if we don't assign an extra process for visual model, we need initialize the image cache manager here
-        if get_env_start_args().disable_extra_process_for_multimodal:
-            kvargs = {
-                "weight_dir": get_env_start_args().model_dir,
-                "data_type": self.data_type_,
-                "quant_type": get_env_start_args().vit_quant_type,
-                "quant_cfg": get_env_start_args().vit_quant_cfg,
-                "max_batch_size": get_env_start_args().visual_infer_batch_size,
-            }
-            self.visual_model = VisionTransformer(
-                kvargs=kvargs,
-            )
+        self.visual_model = build_visual_model(get_env_start_args(), data_type)
         return
 
     def load_hf_weights(self, weights):
@@ -89,17 +72,7 @@ class InternVLLlamaPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
         # if we don't assign an extra process for visual model, we need initialize the image cache manager here
-        if get_env_start_args().disable_extra_process_for_multimodal:
-            kvargs = {
-                "weight_dir": get_env_start_args().model_dir,
-                "data_type": self.data_type_,
-                "quant_type": get_env_start_args().vit_quant_type,
-                "quant_cfg": get_env_start_args().vit_quant_cfg,
-                "max_batch_size": get_env_start_args().visual_infer_batch_size,
-            }
-            self.visual_model = VisionTransformer(
-                kvargs=kvargs,
-            )
+        self.visual_model = build_visual_model(get_env_start_args(), data_type)
         return
 
     def load_hf_weights(self, weights):

@@ -16,6 +16,7 @@ from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateL
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.mtp_verify import mtp_verify
+from lightllm.common.image_cache_manager import image_cache_manager
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -458,6 +459,37 @@ class ModeBackend:
             g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp)
 
         return prefill_reqs, decode_reqs
+
+    def _preprocess_image(self, batch: ModelInput):
+        # 如果不是多模态模型，或者单进程推理，直接跳过
+        args = get_env_start_args()
+        if not args.enable_multimodal:
+            return
+        # assert self.model.visual_model is not None, "visual_model is not initialized"
+        image_start_locs = []
+        image_token_lens = []
+        image_start_token_ids = []
+        image_start_loc = 0
+        for i, p in enumerate(batch.multimodal_params):
+            image_datas = []
+            for img in p["images"]:
+                # 重复图片
+                if img["token_id"] in image_start_token_ids:
+                    continue
+                image_start_locs.append(image_start_loc)
+                image_token_lens.append(img["token_num"])
+                image_start_token_ids.append(img["token_id"])
+                image_start_loc += img["token_num"]
+                if not args.disable_extra_process_for_multimodal:
+                    continue
+                # 预拉取已经存在的image embed
+                image_data = self.model.pre_post_weight.visual_model.load_image(img)
+                image_datas.append([img["uuid"], image_data, img["token_num"]])
+            p["image_data"] = image_datas
+        batch.image_start_locs = torch.tensor(image_start_locs, device="cpu", dtype=torch.long)
+        batch.image_token_lens = torch.tensor(image_token_lens, device="cpu", dtype=torch.long)
+        batch.image_start_token_ids = torch.tensor(image_start_token_ids, device="cpu", dtype=torch.long)
+        return batch
 
     def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
         """

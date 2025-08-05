@@ -59,6 +59,22 @@ class VisionTransformer:
         self._check_max_len_infer()
         return
 
+    def load_image(self, img: List[ImageItem]):
+        from lightllm.server.multimodal_params import ImageItem
+
+        img_tensor = None
+        if isinstance(img, ImageItem):
+            image_data = read_shm(get_shm_name_data(img.uuid))
+            image_data = Image.open(BytesIO(image_data))
+            img_tensor = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
+        elif isinstance(img, dict):
+            image_data = read_shm(get_shm_name_data(img["uuid"]))
+            image_data = Image.open(BytesIO(image_data))
+            img_tensor = self.load_image_func(image_data, max_num=img["extra_params"]["image_patch_max_num"])
+        else:
+            raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+        return img_tensor.to(dtype=self.data_type)
+
     @final
     @torch.no_grad()
     def _check_max_len_infer(self):
