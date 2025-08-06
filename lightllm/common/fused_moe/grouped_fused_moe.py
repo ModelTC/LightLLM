@@ -36,7 +36,7 @@ from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.torch_ops_utils import direct_register_custom_op
 
-FFN_MOE_CHUNK_SIZE = 8 * 1024
+FFN_MOE_CHUNK_SIZE = 32 * 1024
 
 logger = init_logger(__name__)
 
@@ -356,7 +356,7 @@ def grouped_matmul_kernel(
     tile_n_idx = pid_n
 
     # get the gemm size of the current problem
-    cur_m = tl.load(expert_to_token_num + expert_id, eviction_policy="evict_last")
+    cur_m = tl.load(expert_to_token_num + expert_id)
 
     # do regular gemm here
     offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -463,6 +463,7 @@ def grouped_matmul(
     mul_routed_weight: bool,
     use_fp8_w8a8: bool,
     reused_mblock_infos=None,
+    run_config: Optional[dict] = None,
 ):
     """
     token_num_mul_topk_num is int equal token_num * topk_num,
@@ -492,17 +493,18 @@ def grouped_matmul(
         if expert_to_weights_scale.ndim == 3:
             block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
-            
-    run_config = MoeGroupedGemmKernelConfig.try_to_get_best_config(
-        M=token_inputs.shape[0],
-        N=n,
-        K=k,
-        topk_num=topk_num,
-        expert_num=expert_num,
-        mul_routed_weight=mul_routed_weight,
-        use_fp8_w8a8=use_fp8_w8a8,
-        out_dtype=str(out.dtype),
-    )
+    
+    if run_config is None:
+        run_config = MoeGroupedGemmKernelConfig.try_to_get_best_config(
+            M=token_inputs.shape[0],
+            N=n,
+            K=k,
+            topk_num=topk_num,
+            expert_num=expert_num,
+            mul_routed_weight=mul_routed_weight,
+            use_fp8_w8a8=use_fp8_w8a8,
+            out_dtype=str(out.dtype),
+        )
 
     BLOCK_SIZE_M = run_config["BLOCK_SIZE_M"]
     BLOCK_SIZE_N = run_config["BLOCK_SIZE_N"]
@@ -610,6 +612,7 @@ def fused_experts_impl(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    run_config: Optional[dict] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -669,6 +672,7 @@ def fused_experts_impl(
             out=intermediate_cache1.view(-1, N),
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
+            run_config=run_config,
         )
 
         silu_and_mul_fwd(intermediate_cache1.view(-1, N), intermediate_cache2.view(-1, N // 2))
@@ -687,6 +691,7 @@ def fused_experts_impl(
             mul_routed_weight=True,
             use_fp8_w8a8=use_fp8_w8a8,
             reused_mblock_infos=reused_mblock_infos,
+            run_config=run_config,
         )
 
         moe_sum_reduce(
