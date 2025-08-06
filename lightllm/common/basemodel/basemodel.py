@@ -265,6 +265,9 @@ class TpPartBaseModel:
                 infer_state.b_ready_cache_len = torch.zeros_like(input=infer_state.b_seq_len)
 
         infer_state.multimodal_params = model_input.multimodal_params
+        infer_state.image_start_locs = model_input.image_start_locs
+        infer_state.image_token_lens = model_input.image_token_lens
+        infer_state.image_start_token_ids = model_input.image_start_token_ids
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager

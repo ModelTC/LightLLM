@@ -16,7 +16,6 @@ from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateL
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.mtp_verify import mtp_verify
-from lightllm.common.image_cache_manager import image_cache_manager
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -471,7 +470,6 @@ class ModeBackend:
         image_start_token_ids = []
         image_start_loc = 0
         for i, p in enumerate(batch.multimodal_params):
-            image_datas = []
             for img in p["images"]:
                 # 重复图片
                 if img["token_id"] in image_start_token_ids:
@@ -482,10 +480,9 @@ class ModeBackend:
                 image_start_loc += img["token_num"]
                 if not args.disable_extra_process_for_multimodal:
                     continue
-                # 预拉取已经存在的image embed
+                # 预拉取已经存在的image data
                 image_data = self.model.pre_post_weight.visual_model.load_image(img)
-                image_datas.append([img["uuid"], image_data, img["token_num"]])
-            p["image_data"] = image_datas
+                img["image_data"] = image_data
         batch.image_start_locs = torch.tensor(image_start_locs, device="cpu", dtype=torch.long)
         batch.image_token_lens = torch.tensor(image_token_lens, device="cpu", dtype=torch.long)
         batch.image_start_token_ids = torch.tensor(image_start_token_ids, device="cpu", dtype=torch.long)
