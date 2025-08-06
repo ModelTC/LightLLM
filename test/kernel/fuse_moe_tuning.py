@@ -450,7 +450,7 @@ def main(args):
         )
 
     down_dict = {}
-    for m in [1, 8, 64, 128, 256, 512, 1024, 4096, 8192]:
+    for m in [1, 8, 64, 128, 256, 512, 1024, 4096, 8192, 16384, 32768]:
         ans = mp_tuning(
             tuning_configs,
             {
