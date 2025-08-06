@@ -141,7 +141,7 @@ def test_kernel(
             out=out1,
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
-            **config,
+            run_config=config,
         )
     else:
         grouped_matmul(
@@ -157,7 +157,7 @@ def test_kernel(
             out=out2,
             mul_routed_weight=True,
             use_fp8_w8a8=use_fp8_w8a8,
-            **config,
+            run_config=config,
         )
 
     graph = torch.cuda.CUDAGraph()
@@ -177,10 +177,9 @@ def test_kernel(
                     expert_to_weights_scale=w1_scale,
                     topk_num=topk,
                     out=out1,
-                    expert_token_limit=2 ** 31 - 1,
                     mul_routed_weight=False,
                     use_fp8_w8a8=use_fp8_w8a8,
-                    **config,
+                    run_config=config,
                 )
             else:
                 grouped_matmul(
@@ -194,10 +193,9 @@ def test_kernel(
                     expert_to_weights_scale=w2_scale,
                     topk_num=1,
                     out=out2,
-                    expert_token_limit=2 ** 31 - 1,
                     mul_routed_weight=True,
                     use_fp8_w8a8=use_fp8_w8a8,
-                    **config,
+                    run_config=config,
                 )
 
     graph.replay()
@@ -276,11 +274,11 @@ def get_test_configs(split_id, split_count):
                 8,
             ]:
                 for BLOCK_SIZE_M in [
-                    16,
                     32,
                     64,
+                    128
                 ]:
-                    for BLOCK_SIZE_N in [64, 128]:
+                    for BLOCK_SIZE_N in [32, 64, 128]:
                         for BLOCK_SIZE_K in [32, 64, 128]:
                             t_config = {
                                 "BLOCK_SIZE_M": BLOCK_SIZE_M,
@@ -452,7 +450,7 @@ def main(args):
         )
 
     down_dict = {}
-    for m in [1, 8, 64, 128, 256, 512, 1024, 4096, 8192]:
+    for m in [1, 8, 64, 128, 256, 512, 1024, 4096, 8192, 16384, 32768]:
         ans = mp_tuning(
             tuning_configs,
             {
