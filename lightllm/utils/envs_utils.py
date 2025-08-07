@@ -26,9 +26,7 @@ def get_unique_server_name():
 def set_cuda_arch(args):
     if not torch.cuda.is_available():
         return
-    from lightllm.utils.sgl_utils import HAS_FLASHINFER
-
-    if HAS_FLASHINFER:
+    if args.enable_flashinfer_prefill or args.enable_flashinfer_decode:
         capability = torch.cuda.get_device_capability()
         arch = f"{capability[0]}.{capability[1]}"
         os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"

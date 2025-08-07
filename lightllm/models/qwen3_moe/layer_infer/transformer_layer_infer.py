@@ -111,7 +111,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         ep_output = layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
-            top_k=8,
+            top_k=self.num_experts_per_tok,
             renormalize=self.norm_topk_prob,
             use_grouped_topk=False,
             topk_group=None,

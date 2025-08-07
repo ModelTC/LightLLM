@@ -516,8 +516,7 @@ def grouped_matmul(
     if block_size_k != 0:
         # 如果使用了 block wise 量化，分块大小不能超过 block size
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, block_size_k)
-        BLOCK_SIZE_K = triton.next_power_of_2(BLOCK_SIZE_K//2 + 1)
-        # assert BLOCK_SIZE_K == triton.next_power_of_2(BLOCK_SIZE_K)
+        assert BLOCK_SIZE_K == triton.next_power_of_2(BLOCK_SIZE_K)
 
     if use_fp8_w8a8:
         # 当权重使用 block wise 量化时，激活也使用 per token， group size 量化
