@@ -493,7 +493,7 @@ def grouped_matmul(
         if expert_to_weights_scale.ndim == 3:
             block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
-    
+
     if run_config is None:
         run_config = MoeGroupedGemmKernelConfig.try_to_get_best_config(
             M=token_inputs.shape[0],
@@ -626,18 +626,15 @@ def fused_experts_impl(
     topk_num = topk_ids.shape[1]
     M = min(num_tokens, CHUNK_SIZE)
 
-    cache = torch.empty(M*topk_num*max(N, w2.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype)
-    intermediate_cache1 = cache[:M * topk_num * N].view(M, topk_num, N)
+    cache = torch.empty(M * topk_num * max(N, w2.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype)
+    intermediate_cache1 = cache[: M * topk_num * N].view(M, topk_num, N)
     intermediate_cache2 = torch.empty((M, topk_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
-    intermediate_cache3 = cache[:M * topk_num * w2.shape[1]].view(M, topk_num, w2.shape[1])
-
+    intermediate_cache3 = cache[: M * topk_num * w2.shape[1]].view(M, topk_num, w2.shape[1])
 
     if inplace:
         out_hidden_states = hidden_states
     else:
-        out_hidden_states = torch.empty(
-            hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype
-        )
+        out_hidden_states = torch.empty(hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype)
 
     for chunk in range(triton.cdiv(num_tokens, CHUNK_SIZE)):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE, min((chunk + 1) * CHUNK_SIZE, num_tokens))
@@ -711,7 +708,7 @@ def inplace_fused_experts_impl(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-)-> None:
+) -> None:
     fused_experts_impl(
         hidden_states,
         w1,
@@ -727,6 +724,7 @@ def inplace_fused_experts_impl(
         a2_scale,
     )
 
+
 def inplace_fused_experts_impl_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -739,8 +737,9 @@ def inplace_fused_experts_impl_fake(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-)-> None:
+) -> None:
     pass
+
 
 direct_register_custom_op(
     "inplace_fused_experts_impl",
@@ -748,6 +747,7 @@ direct_register_custom_op(
     ["hidden_states"],
     inplace_fused_experts_impl_fake,
 )
+
 
 def outplace_fused_experts_impl(
     hidden_states: torch.Tensor,
@@ -761,7 +761,7 @@ def outplace_fused_experts_impl(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-)-> None:
+) -> None:
     return fused_experts_impl(
         hidden_states,
         w1,
@@ -777,6 +777,7 @@ def outplace_fused_experts_impl(
         a2_scale,
     )
 
+
 def outplace_fused_experts_impl_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -789,8 +790,9 @@ def outplace_fused_experts_impl_fake(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-)-> None:
+) -> None:
     return torch.empty_like(hidden_states)
+
 
 direct_register_custom_op(
     "outplace_fused_experts_impl",
@@ -798,6 +800,7 @@ direct_register_custom_op(
     [],
     outplace_fused_experts_impl_fake,
 )
+
 
 def fused_experts(
     hidden_states: torch.Tensor,
@@ -825,7 +828,7 @@ def fused_experts(
             w1_scale,
             w2_scale,
             a1_scale,
-            a2_scale,   
+            a2_scale,
         )
         return hidden_states
     else:
