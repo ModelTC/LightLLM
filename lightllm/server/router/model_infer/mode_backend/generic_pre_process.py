@@ -89,7 +89,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
         seq_len = req.get_cur_total_len()
-        assert req.cur_kv_len == seq_len - 1
+        assert req.cur_kv_len == seq_len - 1, f"{req.cur_kv_len} {seq_len}"
         b_seq_len.append(seq_len)
         total_token_num += seq_len
         max_len_in_batch = max(max_len_in_batch, seq_len)
