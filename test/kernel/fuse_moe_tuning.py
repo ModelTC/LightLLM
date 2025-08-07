@@ -273,11 +273,7 @@ def get_test_configs(split_id, split_count):
                 4,
                 8,
             ]:
-                for BLOCK_SIZE_M in [
-                    32,
-                    64,
-                    128
-                ]:
+                for BLOCK_SIZE_M in [32, 64, 128]:
                     for BLOCK_SIZE_N in [32, 64, 128]:
                         for BLOCK_SIZE_K in [32, 64, 128]:
                             t_config = {
