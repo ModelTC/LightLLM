@@ -160,7 +160,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 next_token_logprobs=next_token_logprobs_cpu,
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
-                call_post_handle_for_chunk=self.call_post_handle_for_chunk
+                call_post_handle_for_chunk=self.call_post_handle_for_chunk,
             )
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -291,7 +291,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 next_token_logprobs=next_token_logprobs_cpu,
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
-                call_post_handle_for_chunk=self.call_post_handle_for_chunk
+                call_post_handle_for_chunk=self.call_post_handle_for_chunk,
             )
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -664,7 +664,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 next_token_logprobs=next_token_logprobs_cpu,
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
-                call_post_handle_for_chunk=self.call_post_handle_for_chunk
+                call_post_handle_for_chunk=self.call_post_handle_for_chunk,
             )
             event_pack.notify_pre_post_handle()
         else:

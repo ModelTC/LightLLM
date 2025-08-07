@@ -32,8 +32,10 @@ class GroupReqObjs:
 class ReqCmd:
     req_id: int
 
+
 class AbortedReqCmd(ReqCmd):
     pass
+
 
 class NIXLRemotePrefillDoneCmd(ReqCmd):
     pass

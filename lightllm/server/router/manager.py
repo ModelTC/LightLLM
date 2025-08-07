@@ -334,7 +334,7 @@ class RouterManager:
         if aborted_reqs:
             filter_cmds.extend([AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs])
 
-        if self.args.run_mode == 'nixl_decode':
+        if self.args.run_mode == "nixl_decode":
             remote_prefill_done_reqs = self._get_nixl_rpd_reqs_from_running_batch()
             if remote_prefill_done_reqs:
                 filter_cmds.extend([NIXLRemotePrefillDoneCmd(req_id=r.request_id) for r in remote_prefill_done_reqs])

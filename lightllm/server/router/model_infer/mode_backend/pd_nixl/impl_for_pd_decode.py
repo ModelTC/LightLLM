@@ -73,7 +73,6 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBaseChunked):
 
         finished_reqs = new_finished_reqs
 
-
     def _get_classed_reqs(
         self,
         req_ids: List[int] = None,
@@ -81,7 +80,9 @@ class PDNIXLBackendForDecodeNode(PDNIXLBackendBaseChunked):
         strict_prefill: bool = False,
         recover_paused: bool = False,
     ):
-        prefill_reqs, decode_reqs = super(type(self), self)._get_classed_reqs(req_ids, no_decode, strict_prefill, recover_paused)
+        prefill_reqs, decode_reqs = super(type(self), self)._get_classed_reqs(
+            req_ids, no_decode, strict_prefill, recover_paused
+        )
         prefill_reqs, decode_reqs, failed_reqs, _ = self._decode_filter_reqs(prefill_reqs, decode_reqs)
 
         if failed_reqs:
