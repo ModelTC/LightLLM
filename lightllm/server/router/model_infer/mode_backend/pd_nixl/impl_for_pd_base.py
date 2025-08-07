@@ -345,7 +345,7 @@ class PDNIXLBackendBase(object):
                 del self.remote_prefill_requests[req_id]
                 del self.inflght_transfer_requests[req_id]
 
-            time.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
+            await asyncio.sleep(PDNIXLBackendBase._THREAD_WAIT_INTERVAL)
 
     async def _handle_prefill_loop(self):
         while True:
