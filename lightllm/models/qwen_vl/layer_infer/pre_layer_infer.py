@@ -40,7 +40,12 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             for img in p["images"] + p["audios"]:
                 if img.get("_prefill_", True):
                     image_data = img["image_data"].to("cuda", non_blocking=True)
-                    image_embed = layer_weight.visual_model.forward(image_data).view(img["token_num"], -1)
+                    image_grid_thw = img["image_grid_thw"]
+                    # image_embed = torch.zeros(
+                    # (img["token_num"],layer_weight.wte_weight_.shape[1]),device="cuda",dtype=torch.bfloat16)
+                    image_embed = layer_weight.visual_model.forward(image_data, image_grid_thw).view(
+                        img["token_num"], -1
+                    )
                     image_weight.append(image_embed)
         if len(image_weight) > 0:
             image_weight = torch.cat(image_weight, dim=0)
@@ -63,7 +68,6 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         img_weight = self._infer_image_embeds(infer_state, layer_weight)
 
         out = torch.zeros((len(input_ids), hidden_size), dtype=dtype, device="cpu").to("cuda", non_blocking=True)
-        img_weight = img_weight / self.tp_world_size_
         if infer_state.image_start_token_ids is not None:
             img_start_token_ids = infer_state.image_start_token_ids.to("cuda", non_blocking=True)
             img_token_lens = infer_state.image_token_lens.to("cuda", non_blocking=True)

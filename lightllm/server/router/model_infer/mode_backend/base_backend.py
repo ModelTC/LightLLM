@@ -481,8 +481,9 @@ class ModeBackend:
                 if not args.disable_extra_process_for_multimodal:
                     continue
                 # 预拉取已经存在的image data
-                image_data = self.model.pre_post_weight.visual_model.load_image(img)
+                image_data, image_grid_thw = self.model.pre_post_weight.visual_model.load_image(img)
                 img["image_data"] = image_data
+                img["image_grid_thw"] = image_grid_thw
         batch.image_start_locs = torch.tensor(image_start_locs, device="cpu", dtype=torch.long)
         batch.image_token_lens = torch.tensor(image_token_lens, device="cpu", dtype=torch.long)
         batch.image_start_token_ids = torch.tensor(image_start_token_ids, device="cpu", dtype=torch.long)

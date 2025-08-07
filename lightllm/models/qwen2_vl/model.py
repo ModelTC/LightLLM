@@ -16,6 +16,8 @@ from lightllm.models.qwen2_vl.flashattention_infer_struct import Qwen2VLFlashAtt
 from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
+from lightllm.models.qwen2_vl.layer_weights.pre_and_post_layer_weight import Qwen2VLPreAndPostLayerWeight
+from lightllm.models.qwen2_5_vl.layer_weights.pre_and_post_layer_weight import Qwen2_5VLPreAndPostLayerWeight
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
 import torch
@@ -93,11 +95,43 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry(["qwen2_vl", "qwen2_5_vl"], is_multimodal=True)
+@ModelRegistry(["qwen2_vl"], is_multimodal=True)
 class Qwen2VLTpPartModel(Qwen2TpPartModel):
 
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
     transformer_layer_infer_class = Qwen2VLTransformerLayerInfer
+
+    pre_and_post_weight_class = Qwen2VLPreAndPostLayerWeight
+
+    infer_state_class = Qwen2VLInferStateInfo
+
+    def __init__(self, kvargs):
+        super().__init__(kvargs)
+        return
+
+    def _init_inferstate_cls(self):
+        if get_env_start_args().enable_fa3:
+            self.infer_state_class = Qwen2VLFlashAttentionStateInfo
+
+    def _init_config(self):
+        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
+            self.config = json.load(json_file)
+        # rename keys
+        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
+        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
+        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        if self.finetune_config:
+            self.config["vocab_size"] = self.finetune_config.vocab_size
+        return
+
+
+@ModelRegistry(["qwen2_5_vl"], is_multimodal=True)
+class Qwen2_5VLTpPartModel(Qwen2TpPartModel):
+
+    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
+    transformer_layer_infer_class = Qwen2VLTransformerLayerInfer
+
+    pre_and_post_weight_class = Qwen2_5VLPreAndPostLayerWeight
 
     infer_state_class = Qwen2VLInferStateInfo
 

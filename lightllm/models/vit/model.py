@@ -48,7 +48,6 @@ class VisionTransformer:
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.load_image_func = get_load_image_func(self.weight_dir_)
         self.max_batch_size = kvargs.get("max_batch_size", 1)
-        self.enable_tensor_cache = not get_env_start_args().disable_extra_process_for_multimodal
 
         self._init_datatype()
         self._init_config()
@@ -60,20 +59,18 @@ class VisionTransformer:
         return
 
     def load_image(self, img: List[ImageItem]):
-        from lightllm.server.multimodal_params import ImageItem
-
-        img_tensor = None
+        pixel_values = None
         if isinstance(img, ImageItem):
             image_data = read_shm(get_shm_name_data(img.uuid))
             image_data = Image.open(BytesIO(image_data))
-            img_tensor = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
+            pixel_values = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
         elif isinstance(img, dict):
             image_data = read_shm(get_shm_name_data(img["uuid"]))
             image_data = Image.open(BytesIO(image_data))
-            img_tensor = self.load_image_func(image_data, max_num=img["extra_params"]["image_patch_max_num"])
+            pixel_values = self.load_image_func(image_data, max_num=img["extra_params"]["image_patch_max_num"])
         else:
             raise Exception("Unsupport input types: {} for {}".format(type(img), img))
-        return img_tensor.to(dtype=self.data_type)
+        return pixel_values.to(dtype=self.data_type), None
 
     @final
     @torch.no_grad()
@@ -81,13 +78,12 @@ class VisionTransformer:
         disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
         if disable_check_max_len_infer:
             return
-        self.enable_tensor_cache = True
 
         try:
             dummy_images = torch.randn(
                 (self.MAX_PATH_NUM * self.max_batch_size, 3, self.IMAGE_H, self.IMAGE_W), dtype=self.data_type
             ).cuda()
-            all_img_embeds = self.forward(dummy_images)
+            all_img_embeds = self.forward(dummy_images, image_gird_thw=None)
             del all_img_embeds
             del dummy_images
             logger.info(f"vit check max_len {self.max_batch_size} infer ok")
@@ -98,7 +94,6 @@ class VisionTransformer:
             )
             logger.error(exception_str)
             raise Exception(exception_str)
-        self.enable_tensor_cache = not get_env_start_args().disable_extra_process_for_multimodal
         return
 
     def _init_config(self):
@@ -183,15 +178,11 @@ class VisionTransformer:
             raise ValueError(f"Unsupport datatype {self.data_type}!")
 
     @torch.no_grad()
-    def forward(self, pixel_values):
-        if self.enable_tensor_cache:
-            g_cache_manager.cache_env_in()
+    def forward(self, pixel_values, image_gird_thw):
         input_embs = self.pre_infer.forward(pixel_values, self.pre_post_weight)
         for i in range(self.layers_num + self.select_layer + 1):
             input_embs = self.layers_infer[i].forward(input_embs, self.trans_layers_weight[i])
         input_embs = self.post_infer.forward(input_embs[:, 1:, :], self.pre_post_weight)
-        if self.enable_tensor_cache:
-            g_cache_manager.cache_env_out()
         return input_embs
 
     @torch.no_grad()
