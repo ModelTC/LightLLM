@@ -190,7 +190,6 @@ class PDNIXLBackendBase(object):
                     transfer_state.next_token_logprob = next_token_logprob
 
     async def _transfer_kv_to_remote_paged_batch(self, transfer_reqs: List[KVMoveRequest]):
-        start = time.time()
         requests_by_agents = dict()
         transfer_pages = self.page_scheduer.borrow(len(transfer_reqs))
         # first copy the kv to transfer pages & build notification
@@ -216,7 +215,9 @@ class PDNIXLBackendBase(object):
                     receive_page = transfer_state.free_page_ids.pop(0)
                     requests_by_agents[decode_id][0].append(page_index)
                     requests_by_agents[decode_id][1].append(receive_page)
-                    is_last = transfer_state.is_finished and start_kv_len + trans_kv_len == transfer_state.current_kv_len
+                    is_last = (
+                        transfer_state.is_finished and start_kv_len + trans_kv_len == transfer_state.current_kv_len
+                    )
 
                     requests_by_agents[decode_id][2].append(
                         RemotePrefillStatus(
@@ -240,8 +241,6 @@ class PDNIXLBackendBase(object):
             assert len(transfer_reqs) == len(receive_pages), "transfer_reqs and receive_pages should have same length"
             # transfer
             self.nixl_agent.write_blocks_paged(decode_id, transfer_pages, receive_pages, notifications)
-
-        # logger.info(f"transfer kv to remote paged batch: {len(transfer_reqs)} " f"took: {time.time() - start} seconds")
 
     async def _handle_transfer_loop(self):
         while True:
@@ -424,8 +423,7 @@ class PDNIXLBackendBase(object):
         assert group_req_id in self.request_to_first_token, f"{group_req_id} not in request_to_first_token dict"
         token_id, token_logprob = self.request_to_first_token.pop(group_req_id)
 
-
-        #(TODO) figure out how to update req_to_next_token_ids
+        # (TODO) figure out how to update req_to_next_token_ids
         # req.cur_output_len += 1
 
         # pack = InferReqUpdatePack(req, req.cur_output_len)
@@ -439,9 +437,7 @@ class PDNIXLBackendBase(object):
         # )
         return token_id
 
-    def _decode_filter_reqs(
-        self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
-    ):
+    def _decode_filter_reqs(self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]):
         new_prefill_reqs: List[InferReq] = []
         remote_prefill_reqs: List[InferReq] = []
         failed_prefill_reqs: List[InferReq] = []
@@ -533,6 +529,7 @@ class PDNIXLBackendBase(object):
 
 class PDNIXLBackendBaseChunked(PDNIXLBackendBase, ChunkedPrefillBackend):
     pass
+
 
 class PDNIXLBackendBaseDPChunked(PDNIXLBackendBase, DPChunkedPrefillBackend):
     pass

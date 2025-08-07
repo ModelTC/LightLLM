@@ -1,7 +1,6 @@
 from types import MethodType
 import torch.multiprocessing as mp
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
 
 from .impl_for_pd_base import PDNIXLBackendBaseDPChunked
 from .impl_for_pd_decode import PDNIXLBackendForDecodeNode
@@ -20,4 +19,3 @@ class PDNIXLDPBackendForDecodeNode(PDNIXLBackendBaseDPChunked):
         self._trigger_remote_prefill = MethodType(PDNIXLBackendForDecodeNode._trigger_remote_prefill, self)
         self._pre_handle_finished_reqs = MethodType(PDNIXLBackendForDecodeNode._pre_handle_finished_reqs, self)
         self._get_classed_reqs = MethodType(PDNIXLBackendForDecodeNode._get_classed_reqs, self)
-

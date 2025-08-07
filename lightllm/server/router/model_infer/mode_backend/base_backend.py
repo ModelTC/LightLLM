@@ -524,7 +524,7 @@ class ModeBackend:
                 eos_ids=self.eos_id,
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 is_master_in_dp=self.is_master_in_dp,
-                call_post_handle_for_chunk=call_post_handle_for_chunk
+                call_post_handle_for_chunk=call_post_handle_for_chunk,
             )
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
