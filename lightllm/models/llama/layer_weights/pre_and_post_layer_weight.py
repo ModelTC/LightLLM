@@ -23,7 +23,6 @@ class LlamaPreAndPostLayerWeight(PreAndPostLayerWeight):
             self.lm_head_weight_ = self._cuda(weights["lm_head.weight"][split_start:split_end, :])
         if "model.norm.weight" in weights:
             self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
-
         return
 
     def verify_load(self):

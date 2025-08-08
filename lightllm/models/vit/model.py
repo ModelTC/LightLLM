@@ -18,7 +18,8 @@ from typing import List, Union, final
 from io import BytesIO
 from rpyc.utils.classic import obtain
 from lightllm.common.quantization import Quantcfg
-from lightllm.utils.dist_utils import get_dp_world_size
+from lightllm.utils.dist_utils import get_dp_world_size, get_global_world_size
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
@@ -57,6 +58,20 @@ class VisionTransformer:
         self._check_max_len_infer()
         return
 
+    def load_image(self, img: List[ImageItem]):
+        pixel_values = None
+        if isinstance(img, ImageItem):
+            image_data = read_shm(get_shm_name_data(img.uuid))
+            image_data = Image.open(BytesIO(image_data))
+            pixel_values = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
+        elif isinstance(img, dict):
+            image_data = read_shm(get_shm_name_data(img["uuid"]))
+            image_data = Image.open(BytesIO(image_data))
+            pixel_values = self.load_image_func(image_data, max_num=img["extra_params"]["image_patch_max_num"])
+        else:
+            raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+        return pixel_values.to(dtype=self.data_type), None
+
     @final
     @torch.no_grad()
     def _check_max_len_infer(self):
@@ -68,8 +83,9 @@ class VisionTransformer:
             dummy_images = torch.randn(
                 (self.MAX_PATH_NUM * self.max_batch_size, 3, self.IMAGE_H, self.IMAGE_W), dtype=self.data_type
             ).cuda()
-            all_img_embeds = self.forward(dummy_images)
+            all_img_embeds = self.forward(dummy_images, image_gird_thw=None)
             del all_img_embeds
+            del dummy_images
             logger.info(f"vit check max_len {self.max_batch_size} infer ok")
         except (RuntimeError, torch.OutOfMemoryError) as e:
             logger.exception(str(e))
@@ -150,6 +166,8 @@ class VisionTransformer:
         return
 
     def _init_datatype(self):
+        if isinstance(self.data_type, torch.dtype):
+            return
         if self.data_type in ["fp16", "float16"]:
             self.data_type = torch.float16
         elif self.data_type in ["bf16", "bfloat16"]:
@@ -160,13 +178,11 @@ class VisionTransformer:
             raise ValueError(f"Unsupport datatype {self.data_type}!")
 
     @torch.no_grad()
-    def forward(self, pixel_values):
-        g_cache_manager.cache_env_in()
+    def forward(self, pixel_values, image_gird_thw):
         input_embs = self.pre_infer.forward(pixel_values, self.pre_post_weight)
         for i in range(self.layers_num + self.select_layer + 1):
             input_embs = self.layers_infer[i].forward(input_embs, self.trans_layers_weight[i])
         input_embs = self.post_infer.forward(input_embs[:, 1:, :], self.pre_post_weight)
-        g_cache_manager.cache_env_out()
         return input_embs
 
     @torch.no_grad()
@@ -181,6 +197,12 @@ class VisionTransformer:
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
                 t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
+                img_tensors.append(t)
+            elif isinstance(img, dict):
+                uuids.append(img["uuid"])
+                image_data = read_shm(get_shm_name_data(img["uuid"]))
+                image_data = Image.open(BytesIO(image_data))
+                t = self.load_image_func(image_data, max_num=img["extra_params"]["image_patch_max_num"])
                 img_tensors.append(t)
             else:
                 raise Exception("Unsupport input types: {} for {}".format(type(img), img))

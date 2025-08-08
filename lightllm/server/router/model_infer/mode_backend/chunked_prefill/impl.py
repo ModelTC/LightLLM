@@ -96,6 +96,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_prefill_inputs(
             prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
         )
+        self._preprocess_image(model_input)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             logits = model_output.logits

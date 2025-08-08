@@ -17,6 +17,16 @@ def set_unique_server_name(args):
     return
 
 
+def set_cache_port(cache_port):
+    os.environ["LIGHTLLM_CACHE_PORT"] = str(cache_port)
+    cache_port = os.environ.get("LIGHTLLM_CACHE_PORT")
+
+
+def get_cache_port():
+    _cache_port = os.environ.get("LIGHTLLM_CACHE_PORT")
+    return int(_cache_port)
+
+
 @lru_cache(maxsize=None)
 def get_unique_server_name():
     service_uni_name = os.getenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID")

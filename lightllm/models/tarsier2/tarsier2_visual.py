@@ -13,10 +13,10 @@ from transformers.activations import ACT2FN
 from transformers import AutoModel
 from safetensors import safe_open
 
-from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
+from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VLTransformer
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.multimodal_params import ImageItem
-from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, get_image
+from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, resize_image
 
 
 def add_split_tokens(image_features, image_newline_embed, image_new_embed):
@@ -165,7 +165,7 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.vision_tower = Qwen2VisionTransformerPretrainedModel(**vision_config)
+        self.vision_tower = Qwen2VLTransformer(**vision_config)
 
         if projection_head == "Pixel_Shuffle":
             self.multi_modal_projector = PixelShuffleMultiModalProjector(
@@ -253,7 +253,7 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
-                image_data = get_image(image_data)
+                image_data = resize_image(image_data)
                 image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
                 pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
                 image_grid_thw = image_inputs["image_grid_thw"]

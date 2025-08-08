@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.nn import LayerNorm
 from transformers.activations import ACT2FN
 import math
-from lightllm.models.qwen2_vl.vision_process import get_image, Qwen2VLImageProcessor
+from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from transformers import AutoProcessor
 from safetensors import safe_open
 from transformers.utils import TensorType
@@ -212,9 +212,10 @@ class Qwen2_5_VLPatchMerger(nn.Module):
         return x
 
 
-class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
+class Qwen2_5VLTransformer(nn.Module):
     def __init__(
         self,
+        weight_dir,
         depth=32,
         hidden_size=3584,
         hidden_act="silu",
@@ -277,6 +278,11 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         )
 
         self.gradient_checkpointing = False
+
+        processor_config_path = os.path.join(weight_dir, "preprocessor_config.json")
+        with open(processor_config_path, "r") as f:
+            processor_config_dict = json.load(f)
+        self.processor = Qwen2VLImageProcessor(**processor_config_dict)
 
         self.device = self.get_device()
         self.dtype = self.get_dtype()
@@ -416,12 +422,27 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
 
         return hidden_states
 
-    def load_model(self, weight_dir):
+    def load_image(self, img: List[ImageItem]):
+        pixel_values = None
+        if isinstance(img, ImageItem):
+            image_data = read_shm(get_shm_name_data(img.uuid))
+            image_data = Image.open(BytesIO(image_data))
+            image_data = resize_image(image_data)
+            image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
+            pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
+            image_grid_thw = image_inputs["image_grid_thw"]
+        elif isinstance(img, dict):
+            image_data = read_shm(get_shm_name_data(img["uuid"]))
+            image_data = Image.open(BytesIO(image_data))
+            image_data = resize_image(image_data)
+            image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
+            pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
+            image_grid_thw = image_inputs["image_grid_thw"]
+        else:
+            raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+        return pixel_values.to(dtype=self.get_dtype()), image_grid_thw
 
-        processor_config_path = os.path.join(weight_dir, "preprocessor_config.json")
-        with open(processor_config_path, "r") as f:
-            processor_config_dict = json.load(f)
-        self.processor = Qwen2VLImageProcessor(**processor_config_dict)
+    def load_model(self, weight_dir):
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:
@@ -455,7 +476,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
-                image_data = get_image(image_data)
+                image_data = resize_image(image_data)
                 image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
                 pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
                 image_grid_thw = image_inputs["image_grid_thw"]

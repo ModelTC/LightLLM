@@ -17,6 +17,9 @@ class ModelInput:
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
+    image_start_locs: torch.Tensor = None
+    image_token_lens: torch.Tensor = None
+    image_start_token_ids: torch.Tensor = None
     multimodal_params: list = field(default_factory=list)
 
     # cpu 变量

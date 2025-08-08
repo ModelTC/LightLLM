@@ -459,6 +459,36 @@ class ModeBackend:
 
         return prefill_reqs, decode_reqs
 
+    def _preprocess_image(self, batch: ModelInput):
+        # 如果不是多模态模型，或者单进程推理，直接跳过
+        args = get_env_start_args()
+        if not args.enable_multimodal:
+            return
+        # assert self.model.visual_model is not None, "visual_model is not initialized"
+        image_start_locs = []
+        image_token_lens = []
+        image_start_token_ids = []
+        image_start_loc = 0
+        for i, p in enumerate(batch.multimodal_params):
+            for img in p["images"]:
+                # 重复图片
+                if img["token_id"] in image_start_token_ids:
+                    continue
+                image_start_locs.append(image_start_loc)
+                image_token_lens.append(img["token_num"])
+                image_start_token_ids.append(img["token_id"])
+                image_start_loc += img["token_num"]
+                if not args.disable_extra_process_for_multimodal:
+                    continue
+                # 预拉取已经存在的image data
+                image_data, image_grid_thw = self.model.pre_post_weight.visual_model.load_image(img)
+                img["image_data"] = image_data
+                img["image_grid_thw"] = image_grid_thw
+        batch.image_start_locs = torch.tensor(image_start_locs, device="cpu", dtype=torch.long)
+        batch.image_token_lens = torch.tensor(image_token_lens, device="cpu", dtype=torch.long)
+        batch.image_start_token_ids = torch.tensor(image_start_token_ids, device="cpu", dtype=torch.long)
+        return batch
+
     def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
         """
         给 PD 分离模式下，prefill node 使用的继承钩子函数，用于发起 kv 传输任务。
