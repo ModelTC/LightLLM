@@ -539,6 +539,7 @@ async def _collect_generation_results(
                         earliest_stop_index = actual_stop_index
 
             if earliest_stop_index < len(final_text):
+                logger.info(f"removed stop sequence in tail: '{final_text[earliest_stop_index:]}'")
                 final_text = final_text[:earliest_stop_index]
 
     return {
