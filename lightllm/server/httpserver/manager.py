@@ -661,7 +661,7 @@ class HttpServerManager:
                         for _ in range(read_token_count):
                             if not req.out_tokens_queue.is_empty():
 
-                                text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
+                                text, src_index, special, count_output_tokens, force_stop = req.out_tokens_queue.peek()
                                 req.cumlogprob += float(req.shm_logprobs.arr[src_index])
                                 metadata = {
                                     "id": int(req.shm_prompt_ids.arr[src_index]),
@@ -679,10 +679,12 @@ class HttpServerManager:
 
                                 req.out_tokens_queue.pop_no_ret()
 
-                                if req.finish_token_index != src_index:
+                                if not force_stop and req.finish_token_index != src_index:
                                     token_list.append((req_id, text, metadata, FinishStatus()))
                                 else:
-                                    finish_status = FinishStatus(req.finish_status.status)
+                                    finish_status = FinishStatus(
+                                        req.finish_status.FINISHED_STOP if force_stop else req.finish_status.status
+                                    )
                                     token_list.append((req_id, text, metadata, finish_status))
                             else:
                                 break

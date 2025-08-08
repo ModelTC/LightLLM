@@ -14,6 +14,7 @@ class QueueItem(ctypes.Structure):
         ("special", ctypes.c_bool),
         ("count_output_tokens", ctypes.c_int),
         ("src_index", ctypes.c_int),  # 在源token队列的索引位置
+        ("force_stop", ctypes.c_bool),  # 强制停止所有推理并让客户端返回
     ]
 
     def __init__(self):
@@ -21,8 +22,9 @@ class QueueItem(ctypes.Structure):
         self.src_index = -1
         self.special = False
         self.count_output_tokens = -1
+        self.force_stop = False
 
-    def set(self, token_str: str, src_index: int, special: bool, count_output_tokens: int):
+    def set(self, token_str: str, src_index: int, special: bool, count_output_tokens: int, force_stop: bool):
         str_bytes = token_str.encode("utf-8")
         assert (
             len(str_bytes) <= LIGHTLLM_TOKEN_MAX_BYTES
@@ -32,6 +34,7 @@ class QueueItem(ctypes.Structure):
         self.src_index = src_index
         self.special = special
         self.count_output_tokens = count_output_tokens
+        self.force_stop = force_stop
         return
 
     def get(self):
@@ -40,6 +43,7 @@ class QueueItem(ctypes.Structure):
             self.src_index,
             self.special,
             self.count_output_tokens,
+            self.force_stop,
         )
 
 
@@ -62,13 +66,13 @@ class CircularQueue(ctypes.Structure):
     def is_full(self):
         return (self.tail + 1) % LIGHTLLM_OUT_TOKEN_QUEUE_SIZE == self.head
 
-    def push(self, token_str: str, src_index: int, special: bool, count_output_tokens: int):
+    def push(self, token_str: str, src_index: int, special: bool, count_output_tokens: int, force_stop: bool):
         if self.is_full():
             raise Exception("Queue is full")
 
         # 添加元素
         item: QueueItem = self.items[self.tail]
-        item.set(token_str, src_index, special, count_output_tokens)
+        item.set(token_str, src_index, special, count_output_tokens, force_stop)
 
         # 更新尾部
         self.tail = (self.tail + 1) % LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
@@ -85,7 +89,7 @@ class CircularQueue(ctypes.Structure):
         self.head = (self.head + 1) % LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
         return result
 
-    def peek(self) -> Tuple[str, int, bool, int]:
+    def peek(self) -> Tuple[str, int, bool, int, bool]:
         if self.is_empty():
             raise Exception("Queue is empty")
 

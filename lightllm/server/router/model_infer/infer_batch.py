@@ -319,6 +319,7 @@ class InferReq:
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
+        self.stop_sequences_str = self.sampling_param.shm_param.stop_sequences.to_string()
         # token healing mode 才被使用的管理对象
         if self.shm_req.prefix_token_ids.size != 0:
             self.prefix_token_ids = self.shm_req.prefix_token_ids.get_token_ids()
