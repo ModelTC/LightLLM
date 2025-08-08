@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.nn import LayerNorm
 from transformers.activations import ACT2FN
 import math
-from lightllm.models.qwen2_vl.vision_process import get_image, Qwen2VLImageProcessor
+from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from transformers import AutoProcessor
 from safetensors import safe_open
 from transformers.utils import TensorType
@@ -455,7 +455,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
-                image_data = get_image(image_data)
+                image_data = resize_image(image_data)
                 image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
                 pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
                 image_grid_thw = image_inputs["image_grid_thw"]
