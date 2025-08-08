@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.nn import LayerNorm
 from transformers.activations import ACT2FN
 import math
-from lightllm.models.qwen2_vl.vision_process import get_image, Qwen2VLImageProcessor
+from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from transformers import AutoProcessor
 from safetensors import safe_open
 from transformers.utils import TensorType
@@ -215,6 +215,7 @@ class Qwen2_5_VLPatchMerger(nn.Module):
 class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
     def __init__(
         self,
+        kvargs,
         depth=32,
         hidden_size=3584,
         hidden_act="silu",
@@ -256,7 +257,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         )
 
         head_dim = self.hidden_size // self.num_heads
-        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
+        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2).to("cuda", dtype=self.get_dtype(), non_blocking=True)
 
         self.blocks = nn.ModuleList(
             [
@@ -375,7 +376,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         rotary_pos_emb = rotary_pos_emb[window_index, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1).to("cuda", dtype=self.get_dtype(), non_blocking=True)
         position_embeddings = (emb.cos(), emb.sin())
 
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
@@ -395,20 +396,11 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 cu_seqlens_now = cu_seqlens
             else:
                 cu_seqlens_now = cu_window_seqlens
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    blk.__call__,
-                    hidden_states,
-                    cu_seqlens_now,
-                    None,
-                    position_embeddings,
-                )
-            else:
-                hidden_states = blk(
-                    hidden_states,
-                    cu_seqlens=cu_seqlens_now,
-                    position_embeddings=position_embeddings,
-                )
+            hidden_states = blk(
+                hidden_states,
+                cu_seqlens=cu_seqlens_now,
+                position_embeddings=position_embeddings,
+            )
 
         hidden_states = self.merger(hidden_states)
         reverse_indices = torch.argsort(window_index)
@@ -455,10 +447,8 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
-                image_data = get_image(image_data)
-                image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
-                pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
-                image_grid_thw = image_inputs["image_grid_thw"]
+                image_data = resize_image(image_data)
+                pixel_values, image_grid_thw = self.processor.preprocess(image_data)
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
@@ -476,10 +466,9 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.cuda().to(dtype=torch.float32)
-        image_grid_thw = grid_thw.cuda()
+        pixel_values = imgs.to("cuda", dtype=self.get_dtype(), non_blocking=True)
+        image_grid_thw = grid_thw.to("cuda", non_blocking=True)
 
-        pixel_values = pixel_values.type(self.get_dtype())
         all_img_embeds = self.forward(pixel_values, grid_thw=image_grid_thw)
 
         return all_img_embeds, uuids, valid_ids
