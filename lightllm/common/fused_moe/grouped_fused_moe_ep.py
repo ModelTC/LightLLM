@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 from typing import Any, Callable, Dict, Optional, Tuple
 import torch.distributed as dist
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.fused_moe.moe_silu_and_mul_mix_quant_ep import silu_and_mul_masked_post_quant_fwd
@@ -142,6 +143,15 @@ def fused_experts_impl(
 
         # scatter
         all_tokens = sum(num_recv_tokens_per_expert_list)  # calcu padding all nums.
+
+        if get_env_start_args().enable_ep_fake_balance:
+            rank = dist.get_rank()
+            if rank == 0:
+                logger.info(
+                    f"prefill, [{rank}], all_tokens = {all_tokens}, "
+                    f"num_recv_tokens_per_expert_list: {num_recv_tokens_per_expert_list}"
+                )
+
         # gather_out shape [recive_num_tokens, hidden]
         gather_out = torch.empty_like(recv_x[0], device=hidden_states.device, dtype=hidden_states.dtype)
         if all_tokens > 0:
@@ -219,6 +229,18 @@ def fused_experts_impl(
             async_finish=False,
             return_recv_hook=False,
         )
+
+        # NOTE: when decoding graph is open, we can not call logger. Thus it can only be used when --disable_cudagraph
+        args = get_env_start_args()
+        if args.enable_ep_fake_balance and args.disable_cudagraph:
+            rank = dist.get_rank()
+            all_tokens = sum(masked_m)
+            if rank == 0:
+                logger.info(
+                    f"decode, [{rank}], all_tokens = {all_tokens}, "
+                    f"expected_m = {expected_m}, num_recv_tokens_per_expert: {masked_m}"
+                )
+
         # deepgemm
         gemm_out_b = masked_group_gemm(recv_x, masked_m, hidden_states.dtype, w1, w1_scale, w2, w2_scale, expected_m)
         # low latency combine
