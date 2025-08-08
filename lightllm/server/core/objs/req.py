@@ -32,6 +32,9 @@ class FinishStatus(ctypes.Structure):
     def is_finished(self):
         return self.FINISHED_STOP <= self.status <= self.FINISHED_LENGTH
 
+    def is_stoped(self):
+        return self.status == self.FINISHED_STOP
+
     def get_finish_reason(self):
         if self.status == self.FINISHED_STOP:
             return "stop"
@@ -97,6 +100,8 @@ class Req(ctypes.Structure):
         ("mtp_accepted_token_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
+        # stop_str_matched用于判断停止字符串是否匹配成功
+        ("stop_str_matched", ctypes.c_bool),
     ]
 
     def get_str(self):
@@ -150,6 +155,7 @@ class Req(ctypes.Structure):
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
         self.mtp_accepted_token_num = 0
         self._mtp_step = get_env_start_args().mtp_step
+        self.stop_str_matched = False
 
         self.post_init()
 
@@ -207,7 +213,7 @@ class Req(ctypes.Structure):
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
 
-        if self.is_aborted and can_released_mark and ref_count_ok:
+        if (self.is_aborted or self.stop_str_matched) and can_released_mark and ref_count_ok:
             return True
 
         if self.finish_status.is_finished() and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():

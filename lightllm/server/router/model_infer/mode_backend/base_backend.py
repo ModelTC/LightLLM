@@ -19,19 +19,18 @@ from lightllm.common.basemodel.triton_kernel.mtp_verify import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
-from lightllm.server.core.objs.io_objs import AbortedReqCmd
+from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
 from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
 from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
-from lightllm.utils.envs_utils import get_env_start_args, enable_stop_string_match
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from lightllm.server.tokenizer import get_tokenizer
 
 
 class ModeBackend:
@@ -320,6 +319,12 @@ class ModeBackend:
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
+            elif isinstance(cmds[0], StopStrMatchedReqCmd):
+                for obj in cmds:
+                    obj: StopStrMatchedReqCmd = obj
+                    if obj.req_id in g_infer_context.requests_mapping:
+                        req: InferReq = g_infer_context.requests_mapping[obj.req_id]
+                        req.infer_aborted = True
             else:
                 self._init_reqs(reqs=cmds)
         return
@@ -505,14 +510,6 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
-        if enable_stop_string_match():
-            if not hasattr(self, "tokenizer"):
-                self.tokenizer = get_tokenizer(
-                    self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
-                )
-        else:
-            self.tokenizer = None
-
         for req_obj, next_token_id, next_token_logprob, pack in zip(
             run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs
         ):
@@ -524,7 +521,6 @@ class ModeBackend:
                 eos_ids=self.eos_id,
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 is_master_in_dp=self.is_master_in_dp,
-                tokenizer=self.tokenizer,
             )
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(

@@ -679,10 +679,14 @@ class HttpServerManager:
 
                                 req.out_tokens_queue.pop_no_ret()
 
-                                if req.finish_token_index != src_index:
+                                if not req.stop_str_matched and req.finish_token_index != src_index:
                                     token_list.append((req_id, text, metadata, FinishStatus()))
                                 else:
-                                    finish_status = FinishStatus(req.finish_status.status)
+                                    finish_status = FinishStatus(
+                                        req.finish_status.FINISHED_STOP
+                                        if req.stop_str_matched
+                                        else req.finish_status.status
+                                    )
                                     token_list.append((req_id, text, metadata, finish_status))
                             else:
                                 break

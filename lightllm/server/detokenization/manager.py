@@ -101,6 +101,32 @@ class DeTokenizationManager:
             logger.exception(f"detoken process has exception {str(e)}")
         return
 
+    def _stop_sequences_str_matched(self, decode_req, tokenizer):
+        stop_sequences_str = (
+            decode_req.req.sample_params.stop_sequences.to_string()
+            if decode_req.req.sample_params.stop_sequences
+            else []
+        )
+        if not stop_sequences_str or tokenizer is None:
+            return False
+
+        max_stop_str_len = max(len(stop_str) for stop_str in stop_sequences_str) if stop_sequences_str else 0
+        if max_stop_str_len == 0:
+            return False
+
+        output_len = len(decode_req.output_ids)
+        tail_token_len = min(decode_req.req.input_len + output_len, max_stop_str_len + 10)  # +10 for safety
+        if tail_token_len > 0:
+            tail_token_ids = decode_req.req.shm_prompt_ids.arr[
+                (decode_req.req.input_len + output_len - tail_token_len) : (decode_req.req.input_len + output_len)
+            ]
+            tail_str = tokenizer.decode(tail_token_ids, skip_special_tokens=False)
+            for stop_str in stop_sequences_str:
+                if stop_str in tail_str:
+                    logger.info(f"Found stop sequence in tail: stop_str='{stop_str}', " f"tail_str='{tail_str}'")
+                    return True
+        return False
+
     def gen_token_out(self):
         exist_need_detoken = False
         exist_decode = False
@@ -110,6 +136,9 @@ class DeTokenizationManager:
                 decode_req.output_ids.append(new_token_id)
                 special = new_token_id in self.all_special_ids
                 count_output_tokens = len(decode_req.output_ids)
+
+                if decode_req.req.stop_str_matched:
+                    continue
 
                 exist_decode = True
                 new_text = decode_token(
@@ -131,6 +160,13 @@ class DeTokenizationManager:
                         logger.error(
                             f"error token healing state, prefix_str {decode_req.prefix_str} new_text {new_text}"
                         )
+
+                # 停止字符串匹配
+                if not decode_req.req.finish_status.is_stoped() and self._stop_sequences_str_matched(
+                    decode_req, self.tokenizer
+                ):
+                    decode_req.req.stop_str_matched = True
+
                 decode_req.req.out_tokens_queue.push(new_text, src_index, special, count_output_tokens)
 
             if decode_req.need_detoken():

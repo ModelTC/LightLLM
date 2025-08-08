@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
-from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd
+from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd, StopStrMatchedReqCmd
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .shm_reqs_io_buffer import ShmReqsIOBuffer
@@ -277,8 +277,11 @@ class RouterManager:
 
         self._filter_reqs_from_running_batch()
         aborted_reqs = self._get_aborted_reqs_from_running_batch()
+        stop_str_matched_reqs = self._get_stop_str_reqs_from_running_batch()
         if aborted_reqs:
             await self._aborted_reqs(aborted_reqs=aborted_reqs)
+        if stop_str_matched_reqs:
+            await self._stop_str_matched_reqs(stop_str_matched_reqs=stop_str_matched_reqs)
         return
 
     async def _add_batch(self, batch: Batch):
@@ -294,6 +297,15 @@ class RouterManager:
 
     async def _aborted_reqs(self, aborted_reqs: List[Req]):
         cmds = [AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs]
+        while not self.shm_reqs_io_buffer.is_empty():
+            await asyncio.sleep(0.02)
+
+        self.shm_reqs_io_buffer.write_obj(cmds)
+        self.shm_reqs_io_buffer.set_ready()
+        return
+
+    async def _stop_str_matched_reqs(self, stop_str_matched_reqs: List[Req]):
+        cmds = [StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs]
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.02)
 
@@ -322,6 +334,15 @@ class RouterManager:
         for req in self.running_batch.reqs:
             if req.is_aborted and req.router_aborted is False:
                 req.router_aborted = True
+                ans.append(req)
+        return ans
+
+    def _get_stop_str_reqs_from_running_batch(self) -> List[Req]:
+        ans = []
+        if self.running_batch is None:
+            return ans
+        for req in self.running_batch.reqs:
+            if req.stop_str_matched:
                 ans.append(req)
         return ans
 

@@ -78,7 +78,7 @@ class ChunkedPrefillQueue(BaseQueue):
         waiting_queue = self.waiting_req_list
 
         for req in waiting_queue:
-            if req.is_aborted:
+            if req.is_aborted or req.stop_str_matched:
                 # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.
                 # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token的泄漏
                 aborted_count += 1
