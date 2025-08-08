@@ -43,6 +43,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="p d mode, decode node used for kv move manager rpyc server port",
     )
     parser.add_argument(
+        "--select_p_d_node_func",
+        type=str,
+        default="round_robin",
+        choices=["random", "round_robin", "memory"],
+        help="select p d node func, can be round_robin, random or memory",
+    )
+    parser.add_argument(
         "--config_server_host",
         type=str,
         default=None,
