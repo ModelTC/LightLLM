@@ -47,8 +47,8 @@ def set_environ(environ_name, value):
     os.environ[environ_name] = str(value)
 
 
-def get_environ(environ_name):
-    value = os.getenv(environ_name, None)
+def get_environ(environ_name, default_value=None):
+    value = os.getenv(environ_name, default_value)
     if value is None:
         raise RuntimeError(f"{environ_name} is not set")
     return value
@@ -182,7 +182,7 @@ def set_current_rank_in_node(rank: int):
 
 
 def get_current_rank_in_node():
-    return int(get_environ("LIGHTLLM_CURRENT_RANK_IN_NODE"))
+    return int(get_environ("LIGHTLLM_CURRENT_RANK_IN_NODE", 0))
 
 
 def set_node_world_size(node_world_size: int):
@@ -190,7 +190,7 @@ def set_node_world_size(node_world_size: int):
 
 
 def get_node_world_size():
-    return int(get_environ("LIGHTLLM_NODE_WORLD_SIZE"))
+    return int(get_environ("LIGHTLLM_NODE_WORLD_SIZE", 1))
 
 
 def create_new_group_for_current_dp(backend):

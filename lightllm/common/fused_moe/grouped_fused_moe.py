@@ -30,12 +30,15 @@ from lightllm.utils.device_utils import (
     get_device_sm_shared_mem_num,
     get_device_warp_size,
 )
+from lightllm.common.kernel_config import KernelConfigs
 from .moe_kernel_configs import MoeGroupedGemmKernelConfig
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
+from lightllm.common.triton.autotuner import autotune, nearest_power_of_2
+from frozendict import frozendict
 
-FFN_MOE_CHUNK_SIZE = 8 * 1024
+FFN_MOE_CHUNK_SIZE = 32 * 1024
 
 logger = init_logger(__name__)
 
@@ -64,8 +67,16 @@ def moe_align_kernel(
         mask=m_range < topk_m * topk_n,
     )
 
-
-def moe_align(topk_ids: torch.Tensor, out: torch.Tensor):
+@autotune(
+    configs=[
+         {"TOPK_BLOCK_M": m, "NUM_STAGE": ns, "NUM_WARPS": nw} 
+         for m in [256, 512, 1024] for ns in [1, 2, 4] for nw in [4, 8]
+    ],
+    default_config={"TOPK_BLOCK_M": 256, "NUM_STAGE": 1, "NUM_WARPS": 4},
+    static_key_func=lambda topk_ids, out, **kwargs: f"default",
+    run_key_func=lambda topk_ids, out, **kwargs: f"default",
+)
+def moe_align(topk_ids: torch.Tensor, out: torch.Tensor, run_config=None):
     """
     topk_ids is tensor like [[0, 1, 2], [0, 3, 1], [3, 1, 4]] shape is [token_num, topk_num],
     the topk_ids needs to be in contiguous memory.
@@ -82,7 +93,9 @@ def moe_align(topk_ids: torch.Tensor, out: torch.Tensor):
     [0, 0, 0, 0, 0, 0, 0, 0, 1],
     ]
     """
-    TOPK_BLOCK_M = 256
+    TOPK_BLOCK_M = run_config["TOPK_BLOCK_M"]
+    NUM_STAGE = run_config["NUM_STAGE"]
+    NUM_WARPS = run_config["NUM_WARPS"]
 
     token_num, topk = topk_ids.shape
     assert out.shape[1] == token_num * topk, f"out shape {out.shape} topk_ids shape {topk_ids.shape} "
@@ -97,8 +110,8 @@ def moe_align(topk_ids: torch.Tensor, out: torch.Tensor):
         out.stride(0),
         out.stride(1),
         TOPK_BLOCK_M=TOPK_BLOCK_M,
-        num_warps=4,
-        num_stages=1,
+        num_warps=NUM_WARPS,
+        num_stages=NUM_STAGE,
     )
 
 
@@ -147,13 +160,22 @@ def moe_align1_kernel(
     tl.store(expert_token_num_ptr + expert_id, pre_sum)
     return
 
-
+@autotune(  
+    configs=[
+         {"TOKEN_BLOCK_SIZE": m, "NUM_STAGE": ns, "NUM_WARPS": nw, "num_stages": nss} 
+         for m in [256, 512, 1024] for ns in [1, 2, 4] for nw in [4, 8] for nss in [1, 2, 4]
+    ],
+    default_config={"TOKEN_BLOCK_SIZE": 256, "NUM_STAGE": 1, "NUM_WARPS": 4, "num_stages": 1},
+    static_key_func=lambda experts_info, topk_weights, experts_weight_info, exports_token_num, **kwargs: f"default",
+    run_key_func=lambda experts_info, topk_weights, experts_weight_info, exports_token_num, **kwargs: f"default",
+)
 def moe_align1(
     experts_info: torch.Tensor,
     topk_weights: torch.Tensor,
     experts_weight_info: torch.Tensor,
     exports_token_num: torch.Tensor,
     topk: int,
+    run_config: Dict=None,
 ):
     """
     experts_info is tensor shape [expert_num, token_num * topk],
@@ -193,10 +215,10 @@ def moe_align1(
     assert token_num_mul_topk <= FFN_MOE_CHUNK_SIZE * topk_num, "need split to handle seq len too long"
     assert exports_token_num.shape[0] == expert_num
     assert topk_weights.is_contiguous()
-    if token_num_mul_topk <= 512:
-        TOKEN_BLOCK_SIZE = 256
-    else:
-        TOKEN_BLOCK_SIZE = 512 if token_num_mul_topk <= 4 * 1024 else 2048
+    TOKEN_BLOCK_SIZE = run_config["TOKEN_BLOCK_SIZE"]
+    NUM_STAGE = run_config["NUM_STAGE"]
+    NUM_WARPS = run_config["NUM_WARPS"]
+    num_stages = run_config["num_stages"]
 
     grid = (expert_num,)
     moe_align1_kernel[grid](
@@ -211,9 +233,9 @@ def moe_align1(
         experts_weight_info.stride(0),
         experts_weight_info.stride(1),
         TOKEN_BLOCK_SIZE=TOKEN_BLOCK_SIZE,
-        NUM_STAGE=4,
-        num_warps=8,
-        num_stages=1,
+        NUM_STAGE=NUM_STAGE,
+        num_warps=NUM_WARPS,
+        num_stages=num_stages,
     )
 
 
@@ -261,7 +283,16 @@ def moe_align2_kernel(
     return
 
 
-def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, block_m: int):
+@autotune(  
+    configs=[
+         {"NUM_WARPS": nw, "NUM_STAGE": ns} 
+         for nw in [1, 4, 8] for ns in [1, 2, 4]
+    ],
+    default_config={"NUM_WARPS": 4, "NUM_STAGE": 1},
+    static_key_func=lambda token_num_mul_topk_num, exports_token_num, block_m : f"default",
+    run_key_func=lambda token_num_mul_topk_num, exports_token_num, block_m : f"default",
+)
+def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, block_m: int, run_config: Dict =None):
     """
     exports_token_num is tensor shape [expert_num] , will get expert need handle token num.
     out tensor is a tensor that contain block schduel infos tensor.
@@ -272,6 +303,8 @@ def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, blo
     mblocks_to_m_index = torch.empty((max_num_m_blocks,), dtype=torch.int32, device="cuda")
     expert_num = exports_token_num.shape[0]
 
+    NUM_WARPS = run_config["NUM_WARPS"]
+    NUM_STAGE = run_config["NUM_STAGE"]
     grid = (expert_num,)
     moe_align2_kernel[grid](
         exports_token_num,
@@ -281,8 +314,8 @@ def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, blo
         max_num_m_blocks,
         BLOCK_M=block_m,
         BLOCK_EXPERT=triton.next_power_of_2(expert_num),
-        num_warps=4,
-        num_stages=1,
+        num_warps=NUM_WARPS,
+        num_stages=NUM_STAGE,
     )
 
     return mblocks_to_expert_id, mblocks_to_m_index
@@ -448,6 +481,62 @@ def grouped_matmul_kernel(
     return
 
 
+def get_grouped_matmul_static_key(
+    token_num_mul_topk_num: int,
+    token_inputs: torch.Tensor,
+    token_input_scale: torch.Tensor,  # for fp8
+    expert_to_token_num: torch.Tensor,
+    expert_to_token_index: torch.Tensor,
+    expert_to_weights: torch.Tensor,
+    expert_weights: torch.Tensor,
+    expert_to_weights_scale: torch.Tensor,  # for fp8
+    topk_num: int,
+    out: torch.Tensor,
+    mul_routed_weight: bool,
+    use_fp8_w8a8: bool,
+    alloc_tensor_func=torch.empty,
+    reused_mblock_infos=None,
+    run_config: Dict=None,
+):
+    expert_num, n, k = expert_weights.shape
+    return KernelConfigs.get_config_file_name({
+            "N": n,
+            "K": k,
+            "topk_num": topk_num,
+            "expert_num": expert_num,
+            "mul_routed_weight": mul_routed_weight,
+            "use_fp8_w8a8": use_fp8_w8a8,
+            "out_dtype": str(out.dtype)
+        })
+
+def get_grouped_matmul_run_key(
+    token_num_mul_topk_num: int,
+    token_inputs: torch.Tensor,
+    token_input_scale: torch.Tensor,  # for fp8
+    expert_to_token_num: torch.Tensor,
+    expert_to_token_index: torch.Tensor,
+    expert_to_weights: torch.Tensor,
+    expert_weights: torch.Tensor,
+    expert_to_weights_scale: torch.Tensor,  # for fp8
+    topk_num: int,
+    out: torch.Tensor,
+    mul_routed_weight: bool,
+    use_fp8_w8a8: bool,
+    alloc_tensor_func=torch.empty,
+    reused_mblock_infos=None,
+    run_config: Dict=None,
+):
+    return nearest_power_of_2(token_inputs.shape[0])
+
+@autotune(  
+    configs=[
+         {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk, "GROUP_SIZE_M": gm, "NUM_WARPS": nw, "NUM_STAGE": ns} 
+         for bm in [32, 64, 128] for bn in [32, 64, 128] for bk in [32, 64, 128] for gm in [1, 2, 4] for nw in [1, 4, 8] for ns in [1, 3, 4]
+    ],
+    default_config={"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "NUM_WARPS": 4, "NUM_STAGE": 1},
+    static_key_func=get_grouped_matmul_static_key,
+    run_key_func=get_grouped_matmul_run_key,
+)
 def grouped_matmul(
     token_num_mul_topk_num: int,
     token_inputs: torch.Tensor,
@@ -463,7 +552,7 @@ def grouped_matmul(
     use_fp8_w8a8: bool,
     alloc_tensor_func=torch.empty,
     reused_mblock_infos=None,
-    **run_config,
+    run_config: Dict=None,
 ):
     """
     token_num_mul_topk_num is int equal token_num * topk_num,
@@ -493,29 +582,20 @@ def grouped_matmul(
         if expert_to_weights_scale.ndim == 3:
             block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
-    if not run_config:
-        run_config = MoeGroupedGemmKernelConfig.try_to_get_best_config(
-            M=token_inputs.shape[0],
-            N=n,
-            K=k,
-            topk_num=topk_num,
-            expert_num=expert_num,
-            mul_routed_weight=mul_routed_weight,
-            use_fp8_w8a8=use_fp8_w8a8,
-            out_dtype=str(out.dtype),
-        )
+        
 
     BLOCK_SIZE_M = run_config["BLOCK_SIZE_M"]
     BLOCK_SIZE_N = run_config["BLOCK_SIZE_N"]
     BLOCK_SIZE_K = run_config["BLOCK_SIZE_K"]
     GROUP_SIZE_M = run_config["GROUP_SIZE_M"]
-    num_warps = run_config["num_warps"]
-    num_stages = run_config["num_stages"]
+    NUM_WARPS = run_config["NUM_WARPS"]
+    NUM_STAGE = run_config["NUM_STAGE"]
 
     if block_size_k != 0:
         # 如果使用了 block wise 量化，分块大小不能超过 block size
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, block_size_k)
-        assert BLOCK_SIZE_K == triton.next_power_of_2(BLOCK_SIZE_K)
+        BLOCK_SIZE_K = triton.next_power_of_2(BLOCK_SIZE_K)
+        # assert BLOCK_SIZE_K == triton.next_power_of_2(BLOCK_SIZE_K)
 
     if use_fp8_w8a8:
         # 当权重使用 block wise 量化时，激活也使用 per token， group size 量化
@@ -591,8 +671,8 @@ def grouped_matmul(
         GROUP_SIZE_M=GROUP_SIZE_M,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         NEED_K_MASK=NEED_K_MASK,
-        num_warps=num_warps,
-        num_stages=num_stages,
+        num_warps=NUM_WARPS,
+        num_stages=NUM_STAGE,
     )
     return (mblocks_to_expert_id, mblocks_to_m_index, BLOCK_SIZE_M)
 
