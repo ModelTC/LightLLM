@@ -46,7 +46,6 @@ from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImagePr
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
 # adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
@@ -136,12 +135,22 @@ class VisionFlashAttention(nn.Module):
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
+        self.has_vllm = False
+        try:
+            from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
+            self.has_vllm = True
+            self.apply_rotary_emb = apply_rotary_emb
+        except ImportError:
+            print("Failed to import _flash_attn_forward from hopper.flash_attn_interface.")
+            self.has_vllm = False
+            self.apply_rotary_emb = apply_rotary_pos_emb_triton
 
     def apply_rotary_pos_emb_vision(self, t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
         t_ = t.float()
         cos = freqs.cos()
         sin = freqs.sin()
-        output = apply_rotary_emb(t_, cos, sin).type_as(t)
+        output = self.apply_rotary_emb(t_, cos, sin).type_as(t)
         return output
 
     def forward(
@@ -321,13 +330,11 @@ class Qwen2VLTransformer(nn.Module):
             image_data = Image.open(BytesIO(image_data))
             image_data = resize_image(image_data)
             pixel_values, image_grid_thw = self.processor.preprocess(image_data)
-            # pixel_values, image_grid_thw = tensor["pixel_values"], tensor["image_grid_thw"]
         elif isinstance(img, dict):
             image_data = read_shm(get_shm_name_data(img["uuid"]))
             image_data = Image.open(BytesIO(image_data))
             image_data = resize_image(image_data)
             pixel_values, image_grid_thw = self.processor.preprocess(image_data)
-            # pixel_values, image_grid_thw = tensor["pixel_values"], tensor["image_grid_thw"]
         else:
             raise Exception("Unsupport input types: {} for {}".format(type(img), img))
         return pixel_values.to(dtype=self.data_type), image_grid_thw

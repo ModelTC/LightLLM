@@ -11,11 +11,13 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb_vision_ref(tensor: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+def apply_rotary_pos_emb_vision_ref(
+    tensor: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
     orig_dtype = tensor.dtype
     tensor = tensor.float()
-    cos = freqs.cos()
-    sin = freqs.sin()
     cos = cos.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
     sin = sin.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
     output = (tensor * cos) + (rotate_half(tensor) * sin)
@@ -76,15 +78,17 @@ def rotary_kernel(
     tl.store(out_ptr_, y, mask=mask)
 
 
-def apply_rotary_pos_emb_triton(tensor: torch.Tensor, freqs: torch.Tensor, BLOCK_D: int = 128) -> torch.Tensor:
-    assert tensor.is_cuda and freqs.is_cuda
+def apply_rotary_pos_emb_triton(
+    tensor: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, BLOCK_D: int = 128
+) -> torch.Tensor:
+    assert tensor.is_cuda and cos.is_cuda and sin.is_cuda
     if tensor.ndim != 4:
         raise RuntimeError("tensor shape should be [B, L, H, D]")
     orig_dtype = tensor.dtype
     x = tensor.float()
 
-    cos = freqs.cos().unsqueeze(1).repeat(1, 1, 2).view(freqs.size(0), -1).contiguous().float()
-    sin = freqs.sin().unsqueeze(1).repeat(1, 1, 2).view(freqs.size(0), -1).contiguous().float()
+    cos = cos.unsqueeze(1).repeat(1, 1, 2).view(cos.size(0), -1).contiguous().float()
+    sin = sin.unsqueeze(1).repeat(1, 1, 2).view(sin.size(0), -1).contiguous().float()
 
     B, L, H, D = x.shape
     HALF_D = D // 2
@@ -127,14 +131,14 @@ def test_accuracy_and_speed(
     x = torch.randn(B, L, H, D, device="cuda")
 
     # 误差
-    y_ref = apply_rotary_pos_emb_vision_ref(x, freqs)
-    y_tri = apply_rotary_pos_emb_triton(x, freqs)
+    y_ref = apply_rotary_pos_emb_vision_ref(x, freqs.cos(), freqs.sin())
+    y_tri = apply_rotary_pos_emb_triton(x, freqs.cos(), freqs.sin())
     print("max abs error:", (y_ref - y_tri).abs().max().item())
 
     # 预热
     for _ in range(warmup):
-        apply_rotary_pos_emb_vision_ref(x, freqs)
-        apply_rotary_pos_emb_triton(x, freqs)
+        apply_rotary_pos_emb_vision_ref(x, freqs.cos(), freqs.sin())
+        apply_rotary_pos_emb_triton(x, freqs.cos(), freqs.sin())
     torch.cuda.synchronize()
 
     # 计时
@@ -143,7 +147,7 @@ def test_accuracy_and_speed(
         end = torch.cuda.Event(True)
         start.record()
         for _ in range(repeats):
-            fn(x, freqs)
+            fn(x, freqs.cos(), freqs.sin())
         end.record()
         torch.cuda.synchronize()
         return start.elapsed_time(end) / repeats  # ms
@@ -152,5 +156,5 @@ def test_accuracy_and_speed(
     print(f"Triton   : {bench(apply_rotary_pos_emb_triton):.3f} ms")
 
 
-# if __name__ == "__main__":
-#     test_accuracy_and_speed()
+if __name__ == "__main__":
+    test_accuracy_and_speed()

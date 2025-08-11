@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 from typing import List, Optional, Union
 
-from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
+from transformers.image_processing_utils import BaseImageProcessor
 from transformers.image_transforms import (
     convert_to_rgb,
     resize,
