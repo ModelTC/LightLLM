@@ -91,6 +91,8 @@ class MultiLevelKVCacheManager:
             # diverse_mode 只有主请求一个初始化 cpu cache 信息。
             if self.args.diverse_mode and req.request_id != req.group_req_id:
                 continue
+            if req.is_aborted:
+                continue
 
             self.cpu_cache_client.lock.acquire_sleep1ms()
             req: Req = req
