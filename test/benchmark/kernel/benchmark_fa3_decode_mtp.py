@@ -22,7 +22,7 @@ import torch
 import argparse
 import math
 from typing import Callable, Optional, List, Literal, Union
-from lightllm.common.flash_attn import flash_attn_with_kvcache
+from lightllm.common.flash_attn import flash_attn_with_kvcache_mtp
 from lightllm.utils.bench_utils import do_bench
 
 def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
@@ -102,7 +102,7 @@ def run_fa3_mla_mtp(mtp_size, q, block_table, blocked_k, max_seqlen_pad, block_s
     BLOCK_H = h_q * mtp_size
 
     def flash_mla_fa3():
-        out = flash_attn_with_kvcache(
+        out = flash_attn_with_kvcache_mtp(
             q=q_pe.view(-1, BLOCK_H, dpe),
             k_cache=blocked_k_pe,
             v_cache=blocked_k_nope,
