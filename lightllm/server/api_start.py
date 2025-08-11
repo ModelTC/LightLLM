@@ -296,6 +296,16 @@ def normal_or_p_d_start(args):
                 ],
             )
 
+    if args.enable_cpu_cache:
+        from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
+
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_multi_level_kv_cache_manager,
+            ],
+            start_args=[(args,)],
+        )
+
     process_manager.start_submodule_processes(
         start_funcs=[
             start_metric_manager,
