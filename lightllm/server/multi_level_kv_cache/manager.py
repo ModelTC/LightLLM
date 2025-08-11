@@ -129,6 +129,12 @@ class MultiLevelKVCacheManager:
                         assert isinstance(recv_obj, GroupReqIndexes)
                         recv_objs.append(recv_obj)
 
+                        start_time = recv_obj.time_mark
+                        logger.info(
+                            f"multi_level_kv_cache recive group req id {recv_obj.group_req_id} "
+                            f"cost time {time.time() - start_time} s"
+                        )
+
                     # 当队列中存在较多的请求时，将一次接受的数量上调
                     recv_max_count = min(int(recv_max_count * 1.3), 256)
                 except zmq.ZMQError:
