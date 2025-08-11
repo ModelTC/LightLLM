@@ -12,7 +12,7 @@ from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
 
-class MultiLevelCacheModule(object):
+class MultiLevelKvCacheModule(object):
     def __init__(self, backend):
         self.args = get_env_start_args()
         from .base_backend import ModeBackend
