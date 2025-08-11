@@ -1,6 +1,5 @@
 import uvloop
 import asyncio
-import collections
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -9,7 +8,7 @@ import pickle
 import time
 import threading
 import concurrent.futures
-from typing import List, Deque
+from queue import Queue
 from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
@@ -30,7 +29,7 @@ class MultiLevelKVCacheManager:
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
 
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.bind(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
         logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
@@ -39,9 +38,7 @@ class MultiLevelKVCacheManager:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
         # 控制 cpu cache time out的时间，如果超过这个时间无法获取信号量则直接转发。
         self.cpu_cache_time_out = 0.3
-        # lock 用于控制对 recv_queue 和 transfer_queue 的访问。
-        self.queue_lock = threading.Lock()
-        self.recv_queue: Deque[GroupReqIndexes] = collections.deque()
+        self.recv_queue = Queue(maxsize=1024)
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
         return
@@ -49,12 +46,7 @@ class MultiLevelKVCacheManager:
     def cpu_cache_hanle_loop(self):
         while True:
             try:
-                if len(self.recv_queue) == 0:
-                    time.sleep(0.003)
-                    continue
-
-                with self.queue_lock:
-                    current_group_req = self.recv_queue.popleft()
+                current_group_req = self.recv_queue.get()
 
                 self.executor.submit(self._handle_group_req_cpu_cache_match, current_group_req, time.time())
             except BaseException as e:
@@ -75,8 +67,7 @@ class MultiLevelKVCacheManager:
 
             if self.semaphore.acquire(blocking=False):
                 break
-            else:
-                time.sleep(0.005)
+            time.sleep(0.005)
 
         reqs_shm_index = group_req_indexes.shm_req_indexes
         reqs = [self.shm_req_manager.get_req_obj_by_index(index) for index in reqs_shm_index]
@@ -141,10 +132,11 @@ class MultiLevelKVCacheManager:
                     # 当队列已经开始清空的时候，将一次接受的数量下调
                     recv_max_count = 128
 
-                with self.queue_lock:
-                    self.recv_queue.extend(recv_objs)
+                for recv_obj in recv_objs:
+                    self.recv_queue.put(recv_obj)
 
-                time.sleep(0.003)
+                if len(recv_objs) == 0:
+                    time.sleep(0.01)
 
         except Exception as e:
             logger.exception(f"detoken process has exception {str(e)}")
