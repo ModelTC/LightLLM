@@ -42,9 +42,6 @@ class MultiLevelKVCacheManager:
         # lock 用于控制对 recv_queue 和 transfer_queue 的访问。
         self.queue_lock = threading.Lock()
         self.recv_queue: Deque[GroupReqIndexes] = collections.deque()
-        self.transfer_queue: List[GroupReqIndexes] = []
-        self.transfer_thread = threading.Thread(target=self.transfer_loop, daemon=True)
-        self.transfer_thread.start()
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
         return
@@ -73,8 +70,7 @@ class MultiLevelKVCacheManager:
         while True:
             current_time = time.time()
             if current_time - start_time >= self.cpu_cache_time_out:
-                with self.queue_lock:
-                    self.transfer_queue.append(group_req_indexes)
+                self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
             if self.semaphore.acquire(blocking=False):
@@ -84,7 +80,6 @@ class MultiLevelKVCacheManager:
 
         reqs_shm_index = group_req_indexes.shm_req_indexes
         reqs = [self.shm_req_manager.get_req_obj_by_index(index) for index in reqs_shm_index]
-        req: Req = reqs[0]
 
         # 对每个请求进行cpu cache page 的匹配操作。
         for req in reqs:
@@ -118,23 +113,7 @@ class MultiLevelKVCacheManager:
         # 释放信号量
         self.semaphore.release()
 
-        # 将请求放入转发队列
-        with self.queue_lock:
-            self.transfer_queue.append(group_req_indexes)
-        return
-
-    def transfer_loop(self):
-        while True:
-            try:
-                if len(self.transfer_queue) != 0:
-                    with self.queue_lock:
-                        for e in self.transfer_queue:
-                            self.send_to_router.send_pyobj(e, protocol=pickle.HIGHEST_PROTOCOL)
-                        self.transfer_queue.clear()
-                else:
-                    time.sleep(0.005)
-            except BaseException as e:
-                logger.exception(str(e))
+        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
         return
 
     def recv_loop(self):
