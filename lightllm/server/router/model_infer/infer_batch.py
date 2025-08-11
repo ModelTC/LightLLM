@@ -1,6 +1,4 @@
-import os
-import copy
-import time
+import enum
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -284,6 +282,20 @@ class InferSamplingParams:
 
 
 class InferReq:
+    class _CpuCacheTaskStatus(enum.Enum):
+        NOT_STARTED = 0
+        RUNNING = 1
+        FINISHED = 2
+
+        def is_not_started(self):
+            return self.value == self.NOT_STARTED
+
+        def is_running(self):
+            return self.value == self.RUNNING
+
+        def is_finished(self):
+            return self.value == self.FINISHED
+
     def __init__(
         self,
         req_id: int,
@@ -310,8 +322,8 @@ class InferReq:
         self.out_token_id_count: Dict[int, int] = None
 
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
-        # 卸载到 cpu cache 中，该标志变量用于记录请求的卸载状态是否完成
-        self.cpu_cache_task_finished: bool = False
+        # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
+        self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量

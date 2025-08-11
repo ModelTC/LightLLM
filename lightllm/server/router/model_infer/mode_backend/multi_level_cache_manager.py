@@ -48,8 +48,12 @@ class MultiLevelCacheManager(object):
                     continue
 
                 # 如果请求已经完成了 cpu cache 的任务，则满足了退出条件
-                if req.cpu_cache_task_finished:
+                if req.cpu_cache_task_status.is_finished():
                     true_finished_reqs.append(req)
+                    continue
+
+                # 如果请求已经发起过卸载任务，则在当前轮不进行处理
+                if req.cpu_cache_task_status.is_running():
                     continue
 
                 # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
@@ -74,7 +78,7 @@ class MultiLevelCacheManager(object):
             block_size = req.cur_kv_len // self.args.cpu_cache_token_page_size
             move_block_size = min(block_size, len(all_token_hash_list))
             if move_block_size == 0:
-                req.cpu_cache_task_finished = True
+                req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                 return None
             if self.backend.is_master_in_dp:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
@@ -86,7 +90,7 @@ class MultiLevelCacheManager(object):
                 item_size = len(page_list)
                 dist.broadcast_object_list([item_size], group=self.gloo_group, group_src=0)
                 if item_size == 0:
-                    req.cpu_cache_task_finished = True
+                    req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
                 dist.broadcast_object_list(page_list, group=self.gloo_group, group_src=0)
                 dist.broadcast_object_list(ready_list, group=self.gloo_group, group_src=0)
@@ -95,7 +99,7 @@ class MultiLevelCacheManager(object):
                 dist.broadcast_object_list(recv_list, group=self.gloo_group, group_src=0)
                 item_size = recv_list[0]
                 if item_size == 0:
-                    req.cpu_cache_task_finished = True
+                    req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
                 page_list = [None] * item_size
                 ready_list = [None] * item_size
@@ -116,7 +120,7 @@ class MultiLevelCacheManager(object):
             dist.barrier(group=self.sync_group)
             sync_event = torch.cuda.Event()
             sync_event.record()
-
+            req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
             trans_task = TransTask(
                 page_indexes=page_indexes, page_readies=page_readies, req_obj=req, sync_event=sync_event
             )
@@ -125,25 +129,25 @@ class MultiLevelCacheManager(object):
 
     def update_cpu_cache_task_states(self):
         if self.backend.is_master_in_dp:
-            trans_ok_reqs = []
+            trans_ok_tasks = []
             while len(self.cpu_cache_handle_queue) != 0:
                 task: TransTask = self.cpu_cache_handle_queue.popleft()
                 if task.sync_event.query():
-                    trans_ok_reqs.append(task)
+                    trans_ok_tasks.append(task)
                 else:
                     self.cpu_cache_handle_queue.appendleft(task)
                     break
-            item_size = len(trans_ok_reqs)
+            item_size = len(trans_ok_tasks)
             dist.broadcast_object_list([item_size], group=self.filter_group, group_src=0)
 
         else:
             recv_list = [None]
             dist.broadcast_object_list(recv_list, group=self.filter_group, group_src=0)
             item_size = recv_list[0]
-            trans_ok_reqs: List[TransTask] = [self.cpu_cache_handle_queue.popleft() for _ in range(item_size)]
+            trans_ok_tasks: List[TransTask] = [self.cpu_cache_handle_queue.popleft() for _ in range(item_size)]
 
         if item_size > 0:
-            page_array_list = [task.page_indexes for task in trans_ok_reqs]
+            page_array_list = [task.page_indexes for task in trans_ok_tasks]
             page_list = torch.cat(page_array_list, dim=0).tolist()
             if self.backend.is_master_in_dp:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
@@ -151,8 +155,8 @@ class MultiLevelCacheManager(object):
                     page_list=page_list, deref=True, disk_offload_enable=self.args.enable_disk_cache
                 )
                 self.cpu_cache_client.lock.release()
-            for req in trans_ok_reqs:
-                req.req_obj.cpu_cache_task_finished = True
+            for task in trans_ok_tasks:
+                task.req_obj.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
         return
 
     def fill_cpu_cache_to_reqs(self, reqs: List[InferReq]):
