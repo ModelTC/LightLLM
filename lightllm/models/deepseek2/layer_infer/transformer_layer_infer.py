@@ -567,7 +567,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             q=q_rope.reshape(-1, self.tp_q_head_num_ * self.mtp_size, self.qk_rope_head_dim),
             k_cache=k_rope,
             v_cache=kv_nope,
-            qv=q_nope.reshape(-1, self.tp_q_head_num_ * self.mtp_size, self.qk_nope_head_dim),
+            qv=q_nope.reshape(-1, self.tp_q_head_num_ * self.mtp_size, self.kv_lora_rank),
             page_table=infer_state.page_table[self.mtp_size - 1 :: self.mtp_size],
             cache_seqlens=infer_state.b_seq_len[self.mtp_size - 1 :: self.mtp_size],
             cu_seqlens_q=infer_state.cu_seqlens_q,

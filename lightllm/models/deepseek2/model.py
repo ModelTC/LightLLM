@@ -69,7 +69,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         return
 
     def _init_inferstate_cls(self):
-        if get_env_start_args().enable_fa3:
+        if get_env_start_args().enable_fa3 or get_env_start_args().enable_fa3_mtp:
             self.infer_state_class = Deepseek2FlashAttentionStateInfo
         elif self.enable_flashinfer:
             self.infer_state_class = Deepseek2FlashInferStateInfo
