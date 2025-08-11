@@ -569,7 +569,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             v_cache=kv_nope,
             qv=q_nope.reshape(-1, self.tp_q_head_num_ * self.mtp_size, self.kv_lora_rank),
             page_table=infer_state.page_table[self.mtp_size - 1 :: self.mtp_size],
-            cache_seqlens=infer_state.b_seq_len[self.mtp_size - 1 :: self.mtp_size],
+            cache_seqlens=infer_state.b_seq_len[self.mtp_size - 1 :: self.mtp_size].contiguous(),
             cu_seqlens_q=infer_state.cu_seqlens_q,
             cu_seqlens_k_new=infer_state.cu_seqlens_k,
             max_seqlen_q=1,
@@ -582,7 +582,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             return_softmax_lse=False,
             mtp_step=self.mtp_step,
         )
-        return o_tensor
+        return o_tensor.view(-1, self.tp_q_head_num_, self.kv_lora_rank)
 
     def _token_gqa_decode_attention_flashattention(
         self, q, infer_state: Deepseek2FlashAttentionStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None

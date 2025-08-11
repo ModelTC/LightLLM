@@ -89,15 +89,15 @@ ShareGPT 数据集测试 (benchmark_sharegpt.py)
     python test/benchmark/service/benchmark_sharegpt.py \
         --dataset /path/to/sharegpt_dataset.json \
         --tokenizer /path/to/tokenizer \
-        --num_prompts 1000 \
-        --request_rate 10.0
+        --num-prompts 1000 \
+        --request-rate 10.0
 
 **主要参数：**
 
 - ``--dataset``: ShareGPT 格式数据集路径
 - ``--tokenizer``: 分词器路径
-- ``--num_prompts``: 测试提示数量
-- ``--request_rate``: 请求速率 (requests/s)
+- ``--num-prompts``: 测试提示数量
+- ``--request-rate``: 请求速率 (requests/s)
 
 
 Prompt Cache 测试

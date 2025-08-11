@@ -12,10 +12,12 @@ def gen_decode_params(b_seq_len: torch.Tensor):
     mtp_step = get_env_start_args().mtp_step
     mtp_size = mtp_step + 1
     enable_fa3_mtp = get_env_start_args().enable_fa3_mtp
+    b_q_seq_len = torch.ones_like(b_seq_len)
 
     if enable_fa3_mtp:
-        b_q_seq_len = torch.ones_like(b_seq_len[: len(b_seq_len) // mtp_size])
-        b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len[mtp_size - 1 :: mtp_size])
+        b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(
+            b_q_seq_len[: len(b_seq_len) // mtp_size], b_kv_seq_len[mtp_size - 1 :: mtp_size]
+        )
     else:
         b_q_seq_len = torch.ones_like(b_seq_len)
         b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)

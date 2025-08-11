@@ -15,6 +15,7 @@ from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
+from lightllm.common.flash_attn import flash_attn_with_kvcache_mtp
 
 logger = init_logger(__name__)
 
@@ -140,6 +141,9 @@ def normal_or_p_d_start(args):
 
     if args.enable_fa3_mtp:
         assert args.mtp_mode is not None, "enable_fa3_mtp must set mtp_mode"
+        assert (
+            flash_attn_with_kvcache_mtp is not None
+        ), "flash_attn_with_kvcache_mtp is None, please check if you have installed the fa3_mtp kernel"
 
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
