@@ -79,6 +79,9 @@ class HttpServerManager:
             self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
             self.send_to_visual = context.socket(zmq.PUSH)
             self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+        if args.enable_cpu_cache and not self.args.enable_multimodal:
+            self.send_to_multi_level_kv_cache = context.socket(zmq.PUSH)
+            self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
 
         self.shm_req_manager = ShmReqManager()
 
@@ -432,38 +435,33 @@ class HttpServerManager:
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
 
-        if self.pd_mode == NodeRole.P:
+        if self.pd_mode.is_P_or_NORMAL():
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
-            else:
-                self.send_to_router.send_pyobj(
+                return
+
+            if self.args.enable_cpu_cache:
+                self.send_to_multi_level_kv_cache.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
-            return
+                return
 
-        if self.pd_mode == NodeRole.D:
-            # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了, 传输一个空的即可
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
             return
 
-        if self.pd_mode == NodeRole.NORMAL:
-            if self.enable_multimodal:
-                self.send_to_visual.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
-            else:
-                self.send_to_router.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
+        if self.pd_mode == NodeRole.D:
+            # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
+            self.send_to_router.send_pyobj(
+                group_req_objs.to_group_req_index(),
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
             return
 
         assert False, "dead code path"

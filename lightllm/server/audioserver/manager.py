@@ -26,8 +26,13 @@ class AudioManager:
         infer_batch_size=4,
     ):
         context = zmq.asyncio.Context(2)
-        self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+
+        if args.enable_cpu_cache:
+            self.send_to_next_module = context.socket(zmq.PUSH)
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+        else:
+            self.send_to_next_module = context.socket(zmq.PUSH)
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
 
         self.zmq_recv_socket = context.socket(zmq.PULL)
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
@@ -87,7 +92,7 @@ class AudioManager:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
                         # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
                         # 需要一些一致的流程来保证不出现异步问题。
-                        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                         continue
 
                     multimodal_params = group_req_indexes.multimodal_params
@@ -103,18 +108,20 @@ class AudioManager:
                             await self.infer_audios(audios_need_infer)
                             audios_need_infer = []
                             for _group_req_indexes in processing_group_reqs:
-                                self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                                self.send_to_next_module.send_pyobj(
+                                    _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
+                                )
                             processing_group_reqs = []
 
                     if len(audios_need_infer) == 0:
-                        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
                 if len(audios_need_infer) > 0:
                     await self.infer_audios(audios_need_infer)
                     for _group_req_indexes in processing_group_reqs:
-                        self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     processing_group_reqs = []
                     audios_need_infer = []
 

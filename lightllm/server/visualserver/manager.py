@@ -28,12 +28,17 @@ class VisualManager:
         visual_model_rpc_ports,
     ):
         context = zmq.Context(2)
+
         if args.enable_multimodal_audio:
-            self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
+            self.send_to_next_module = context.socket(zmq.PUSH)
             self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
         else:
-            self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
-            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+            if args.enable_cpu_cache:
+                self.send_to_next_module = context.socket(zmq.PUSH)
+                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+            else:
+                self.send_to_next_module = context.socket(zmq.PUSH)
+                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
 
         self.zmq_recv_socket = context.socket(zmq.PULL)
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")

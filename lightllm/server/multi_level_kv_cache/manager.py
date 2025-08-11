@@ -1,5 +1,6 @@
 import uvloop
 import asyncio
+import collections
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -8,7 +9,7 @@ import pickle
 import time
 import threading
 import concurrent.futures
-from typing import List
+from typing import List, Deque
 from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
@@ -21,18 +22,16 @@ logger = init_logger(__name__)
 class MultiLevelKVCacheManager:
     def __init__(
         self,
-        args,
-        detokenization_port,
-        router_port,
+        args: StartArgs,
     ):
         self.args: StartArgs = args
         context = zmq.Context(2)
-        self.recv_from_pre_module = context.socket(zmq.PULL)
-        self.recv_from_pre_module.bind(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
+        self.zmq_recv_socket = context.socket(zmq.PULL)
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
 
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.bind(f"{args.zmq_mode}127.0.0.1:{router_port}")
-        logger.info(f"pub_to_httpserver sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
+        self.send_to_router.bind(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+        logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
         # 控制同时进行cpu cache 匹配操作的数量。
@@ -42,7 +41,7 @@ class MultiLevelKVCacheManager:
         self.cpu_cache_time_out = 0.3
         # lock 用于控制对 recv_queue 和 transfer_queue 的访问。
         self.queue_lock = threading.Lock()
-        self.recv_queue: List[GroupReqIndexes] = []
+        self.recv_queue: Deque[GroupReqIndexes] = collections.deque()
         self.transfer_queue: List[GroupReqIndexes] = []
         self.transfer_thread = threading.Thread(target=self.transfer_loop, daemon=True)
         self.transfer_thread.start()
@@ -58,8 +57,7 @@ class MultiLevelKVCacheManager:
                     continue
 
                 with self.queue_lock:
-                    current_group_req = self.recv_queue[0]
-                    self.recv_queue = self.recv_queue[1:]
+                    current_group_req = self.recv_queue.popleft()
 
                 self.executor.submit(self._handle_group_req_cpu_cache_match, current_group_req, time.time())
             except BaseException as e:
@@ -146,7 +144,7 @@ class MultiLevelKVCacheManager:
                 try:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
                     for _ in range(recv_max_count):
-                        recv_obj: GroupReqIndexes = self.recv_from_pre_module.recv_pyobj(zmq.NOBLOCK)
+                        recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                         assert isinstance(recv_obj, GroupReqIndexes)
                         recv_objs.append(recv_obj)
 
@@ -166,15 +164,13 @@ class MultiLevelKVCacheManager:
         return
 
 
-def start_detokenization_process(args, detokenization_port, router_port, pipe_writer):
+def start_multi_level_kv_cache_manager(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     try:
         manager = MultiLevelKVCacheManager(
             args=args,
-            detokenization_port=detokenization_port,
-            router_port=router_port,
         )
     except Exception as e:
         pipe_writer.send(str(e))

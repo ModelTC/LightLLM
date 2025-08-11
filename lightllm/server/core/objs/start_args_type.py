@@ -110,6 +110,7 @@ class StartArgs:
     cache_port: int = field(default=None)
     metric_port: int = field(default=None)
     multinode_httpmanager_port: int = field(default=12345)
+    multi_level_kv_cache_port: int = field(default=None)
     # multi_modal
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
