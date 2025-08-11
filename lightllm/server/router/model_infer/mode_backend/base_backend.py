@@ -31,7 +31,7 @@ from lightllm.distributed import dist_group_manager
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from .multi_level_cache_manager import MultiLevelCacheManager
+from .multi_level_cache import MultiLevelCacheModule
 
 
 class ModeBackend:
@@ -201,7 +201,7 @@ class ModeBackend:
         self.infer_loop_thread1.start()
 
         if self.args.enable_cpu_cache:
-            self.multi_level_cache_manager = MultiLevelCacheManager(self)
+            self.multi_level_cache_module = MultiLevelCacheModule(self)
         return
 
     def init_custom(self):
@@ -355,7 +355,7 @@ class ModeBackend:
     def _fill_cpu_cache_to_reqs(self, req_ids):
         req_objs: List[InferReq] = [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
         g_infer_state_lock.acquire()
-        self.multi_level_cache_manager.fill_cpu_cache_to_reqs(reqs=req_objs)
+        self.multi_level_cache_module.fill_cpu_cache_to_reqs(reqs=req_objs)
         g_infer_state_lock.release()
         return
 
@@ -386,7 +386,7 @@ class ModeBackend:
         5. decode_reqs 需要进行decode操作的请求
         """
         if self.args.enable_cpu_cache:
-            self.multi_level_cache_manager.update_cpu_cache_task_states()
+            self.multi_level_cache_module.update_cpu_cache_task_states()
 
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
@@ -469,7 +469,7 @@ class ModeBackend:
         self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
         # 如果使能了 cpu cache 功能，对于已经完成的请求，进行 gpu kv 卸载到 cpu cache的操作。
         if self.args.enable_cpu_cache:
-            true_finished_reqs = self.multi_level_cache_manager.handle_finished_reqs(finished_reqs=finished_reqs)
+            true_finished_reqs = self.multi_level_cache_module.handle_finished_reqs(finished_reqs=finished_reqs)
         else:
             true_finished_reqs = finished_reqs
 
