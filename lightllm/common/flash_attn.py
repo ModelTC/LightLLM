@@ -22,11 +22,14 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+
 def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
+
 try:
-    import flash_attn_3._C # Registers operators with PyTorch
+    import flash_attn_3._C  # Registers operators with PyTorch
+
     flash_attn_3_mtp = torch.ops.flash_attn_3
 
     def flash_attn_with_kvcache_mtp(
@@ -59,7 +62,7 @@ try:
         pack_gqa=None,  # Can be tuned for speed
         sm_margin=0,  # Can be tuned if some SMs are used for communication
         return_softmax_lse=False,
-        mtp_step=0
+        mtp_step=0,
     ):
         """
         If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
@@ -149,24 +152,14 @@ try:
         assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
         assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
         if softmax_scale is None:
-            softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (
-                -0.5
-            )
+            softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
         if cache_seqlens is not None and isinstance(cache_seqlens, int):
-            cache_seqlens = torch.full(
-                (k_cache.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
-            )
+            cache_seqlens = torch.full((k_cache.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device)
             cache_seqlens = maybe_contiguous(cache_seqlens)
 
         q, k_cache, k, v = [maybe_contiguous(x) for x in (q, k_cache, k, v)]
-        v_cache = (
-            v_cache.contiguous()
-            if v_cache.stride(-1) != 1 and v_cache.stride(-3) != 1
-            else v_cache
-        )
-        cu_seqlens_q, cu_seqlens_k_new = [
-            maybe_contiguous(x) for x in (cu_seqlens_q, cu_seqlens_k_new)
-        ]
+        v_cache = v_cache.contiguous() if v_cache.stride(-1) != 1 and v_cache.stride(-3) != 1 else v_cache
+        cu_seqlens_q, cu_seqlens_k_new = [maybe_contiguous(x) for x in (cu_seqlens_q, cu_seqlens_k_new)]
         page_table, cache_batch_idx, cache_leftpad = [
             maybe_contiguous(x) for x in (page_table, cache_batch_idx, cache_leftpad)
         ]
@@ -209,9 +202,10 @@ try:
             num_splits,
             pack_gqa,
             sm_margin,
-            mtp_step
+            mtp_step,
         )
         return (out, softmax_lse, *rest) if return_softmax_lse else out
+
 except:
     flash_attn_3_mtp = None
     flash_attn_with_kvcache_mtp = None

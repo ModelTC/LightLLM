@@ -95,4 +95,5 @@ class StartArgs:
     mtp_mode: Optional[str] = field(default=None)
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
+    enable_fa3_mtp: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)

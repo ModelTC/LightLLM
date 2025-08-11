@@ -138,6 +138,9 @@ def normal_or_p_d_start(args):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
+    if args.enable_fa3_mtp:
+        assert args.mtp_mode is not None, "enable_fa3_mtp must set mtp_mode"
+
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
