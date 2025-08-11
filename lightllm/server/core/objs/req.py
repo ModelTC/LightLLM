@@ -173,7 +173,7 @@ class Req(ctypes.Structure):
     def _fill_input_token_hash(self):
         self.token_hash_list = TokenHashList()
         self.token_hash_list.clear()
-        hash_values = compute_token_list_hash(self.get_prompt_ids(), chuncked_size=self.cpu_cache_token_page_size)
+        hash_values = compute_token_list_hash(self.get_prompt_ids(),self.cpu_cache_token_page_size)
         self.token_hash_list.fill(hash_values)
         self.cpu_cache_match_page_indexes = CpuCachePageList()
         return

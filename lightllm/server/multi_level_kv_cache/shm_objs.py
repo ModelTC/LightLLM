@@ -10,7 +10,7 @@ logger = init_logger(__name__)
 class IntList(object):
     def __init__(self, name: str, capacity: int, init_shm_data: bool):
         self.capacity: int = capacity
-        byte_size = np.int32.itemsize * (self.capacity + 1)
+        byte_size = np.dtype(np.int32).itemsize * (self.capacity + 1)
         shm_name = name
         shm = _create_shm(name=shm_name, byte_size=byte_size)
         self.shm = shm
@@ -62,8 +62,10 @@ class ShmLinkedList(object):
             self.shm = _create_shm(name=shm_name, byte_size=byte_size)
         # 构建 hash table 表
         self.linked_items: List[_LinkedListItem] = (item_class * (self.capacity + 2)).from_buffer(self.shm.buf)
+        # 如果不转变存储，set_list_obj 的对象上绑定的非shm信息在下一次从 shm 中获取对象时将丢失
+        self.linked_items = [item for item in self.linked_items]
         for e in self.linked_items:
-            e.set_list_obj(self.linked_items)
+            e.set_list_obj(self)
 
         if init_shm_data:
             for e in self.linked_items:
