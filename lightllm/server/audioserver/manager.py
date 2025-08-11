@@ -10,7 +10,7 @@ from typing import List
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
-from lightllm.server.core.objs.shm_req_manager import ShmReqManager
+from lightllm.server.core.objs.shm_req_manager import ShmReqManager, StartArgs
 from lightllm.server.multimodal_params import AudioItem
 from .model_infer.model_rpc import start_model_process, AudioModelRpcClient
 from lightllm.utils.graceful_utils import graceful_registry
@@ -22,20 +22,17 @@ logger = init_logger(__name__)
 class AudioManager:
     def __init__(
         self,
-        args,
-        router_port,
-        audio_port,
-        cache_port,
+        args: StartArgs,
         infer_batch_size=4,
     ):
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
 
-        self.recv_from_visualserver = context.socket(zmq.PULL)
-        self.recv_from_visualserver.bind(f"{args.zmq_mode}127.0.0.1:{audio_port}")
-        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
-        self.cache_port = cache_port
+        self.zmq_recv_socket = context.socket(zmq.PULL)
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+        self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+        self.cache_port = args.cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
@@ -123,7 +120,7 @@ class AudioManager:
 
     async def loop_for_netio_req(self):
         while True:
-            recv_req: GroupReqIndexes = await self.recv_from_visualserver.recv_pyobj()
+            recv_req: GroupReqIndexes = await self.zmq_recv_socket.recv_pyobj()
             if isinstance(recv_req, GroupReqIndexes):
                 self.waiting_reqs.append(recv_req)
             else:
@@ -137,12 +134,12 @@ class AudioManager:
         return
 
 
-def start_audio_process(args, router_port, audio_port, cache_port, pipe_writer):
+def start_audio_process(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     try:
-        audioserver = AudioManager(args, router_port, audio_port, cache_port)
+        audioserver = AudioManager(args=args)
         asyncio.run(audioserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))

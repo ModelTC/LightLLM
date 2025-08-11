@@ -101,3 +101,15 @@ class StartArgs:
     cpu_cache_token_page_size: int = field(default=256)
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
+    # zmp ports
+    router_port: int = field(default=None)
+    detokenization_port: int = field(default=None)
+    http_server_port: int = field(default=None)
+    visual_port: int = field(default=None)
+    audio_port: int = field(default=None)
+    cache_port: int = field(default=None)
+    metric_port: int = field(default=None)
+    multinode_httpmanager_port: int = field(default=12345)
+    # multi_modal
+    enable_multimodal: bool = field(default=False)
+    enable_multimodal_audio: bool = field(default=False)

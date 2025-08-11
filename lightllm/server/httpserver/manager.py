@@ -20,7 +20,7 @@ from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
-from lightllm.server.core.objs import Req, FinishStatus
+from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
@@ -40,18 +40,12 @@ logger = init_logger(__name__)
 class HttpServerManager:
     def __init__(
         self,
-        args,
-        router_port,
-        cache_port,
-        detokenization_pub_port,
-        visual_port,
-        metric_port,
-        enable_multimodal,
+        args: StartArgs,
     ):
         self.args = args
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
@@ -80,17 +74,18 @@ class HttpServerManager:
                     f"HttpServerManager listening for child node requests on *:{args.multinode_httpmanager_port}"
                 )
 
-        self.enable_multimodal = enable_multimodal
+        self.enable_multimodal = args.enable_multimodal
         if self.enable_multimodal:
-            self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
+            self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
             self.send_to_visual = context.socket(zmq.PUSH)
-            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
+            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
 
         self.shm_req_manager = ShmReqManager()
 
-        self.recv_from_detokenization = context.socket(zmq.SUB)
-        self.recv_from_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{detokenization_pub_port}")
-        self.recv_from_detokenization.setsockopt(zmq.SUBSCRIBE, b"")
+        # recv from detokenization
+        self.zmq_recv_socket = context.socket(zmq.SUB)
+        self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
+        self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -98,7 +93,7 @@ class HttpServerManager:
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
 
         self.max_req_total_len = args.max_req_total_len
-        self.metric_client = MetricClient(metric_port)
+        self.metric_client = MetricClient(args.metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL]
@@ -641,7 +636,7 @@ class HttpServerManager:
 
         while True:
             try:
-                await asyncio.wait_for(self.recv_from_detokenization.recv_pyobj(), timeout=0.05)
+                await asyncio.wait_for(self.zmq_recv_socket.recv_pyobj(), timeout=0.05)
             except asyncio.TimeoutError:
                 pass
 

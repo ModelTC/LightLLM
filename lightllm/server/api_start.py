@@ -223,7 +223,7 @@ def normal_or_p_d_start(args):
     (
         router_port,
         detokenization_port,
-        detokenization_pub_port,
+        http_server_port,
         visual_port,
         audio_port,
         cache_port,
@@ -240,7 +240,7 @@ def normal_or_p_d_start(args):
     # 将申请好的端口放入args参数中
     args.router_port = router_port
     args.detokenization_port = detokenization_port
-    args.detokenization_pub_port = detokenization_pub_port
+    args.http_server_port = http_server_port
     args.visual_port = visual_port
     args.audio_port = audio_port
     args.cache_port = cache_port
@@ -271,35 +271,26 @@ def normal_or_p_d_start(args):
             start_funcs=[
                 start_cache_manager,
             ],
-            start_args=[(cache_port, args)],
+            start_args=[(args,)],
         )
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_visual_process,
+            ],
+            start_args=[
+                (args, visual_model_tp_ports),
+            ],
+        )
+
         if args.enable_multimodal_audio:
             from .audioserver.manager import start_audio_process
 
             process_manager.start_submodule_processes(
                 start_funcs=[
-                    start_visual_process,
-                ],
-                start_args=[
-                    (args, audio_port, visual_port, cache_port, visual_model_tp_ports),
-                ],
-            )
-            process_manager.start_submodule_processes(
-                start_funcs=[
                     start_audio_process,
                 ],
                 start_args=[
-                    (args, router_port, audio_port, cache_port),
-                ],
-            )
-
-        else:
-            process_manager.start_submodule_processes(
-                start_funcs=[
-                    start_visual_process,
-                ],
-                start_args=[
-                    (args, router_port, visual_port, cache_port, visual_model_tp_ports),
+                    (args,),
                 ],
             )
 
@@ -307,14 +298,14 @@ def normal_or_p_d_start(args):
         start_funcs=[
             start_metric_manager,
         ],
-        start_args=[(metric_port, args)],
+        start_args=[(args,)],
     )
 
     process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[
-            (args, router_port, detokenization_port, metric_port),
-            (args, detokenization_port, detokenization_pub_port),
+            (args,),
+            (args,),
         ],
     )
 
@@ -384,7 +375,7 @@ def pd_master_start(args):
         start_funcs=[
             start_metric_manager,
         ],
-        start_args=[(metric_port, args)],
+        start_args=[(args,)],
     )
 
     command = [
