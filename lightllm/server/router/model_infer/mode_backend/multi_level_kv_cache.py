@@ -50,23 +50,22 @@ class MultiLevelKvCacheModule(object):
                 # 如果请求已经完成了 cpu cache 的任务，则满足了退出条件
                 if req.cpu_cache_task_status.is_finished():
                     true_finished_reqs.append(req)
+                elif req.cpu_cache_task_status.is_running():
+                    # 如果请求已经发起过卸载任务，则在当前轮不进行处理
                     continue
-
-                # 如果请求已经发起过卸载任务，则在当前轮不进行处理
-                if req.cpu_cache_task_status.is_running():
-                    continue
-
-                # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
-                trans_task = self._start_kv_cache_offload_task(
-                    req=req, cpu_kv_cache_stream=g_infer_context.get_cpu_kv_cache_stream()
-                )
-
-                if trans_task is not None:
-                    self.cpu_cache_handle_queue.append(trans_task)
                 else:
-                    true_finished_reqs.append(req)
+                    assert req.cpu_cache_task_status.is_not_started()
+                    # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
+                    trans_task = self._start_kv_cache_offload_task(
+                        req=req, cpu_kv_cache_stream=g_infer_context.get_cpu_kv_cache_stream()
+                    )
 
-                return true_finished_reqs
+                    if trans_task is not None:
+                        self.cpu_cache_handle_queue.append(trans_task)
+                    else:
+                        true_finished_reqs.append(req)
+
+            return true_finished_reqs
         else:
             return finished_reqs
 
