@@ -187,18 +187,21 @@ class ShmDict(object):
         # 找到对应key的元素，并设置对应的value
         while cur_link_item is not None:
             if cur_link_item.key == key:
-                # remove item
-                pre_item = cur_link_item.get_pre_item()
-                pre_item.next_index = cur_link_item.next_index
-                if cur_link_item.next_index != -1:
-                    next_item = cur_link_item.get_next_item()
-                    next_item.pre_index = pre_item.self_index
-
-                self.link_items.add_item_to_tail(index=cur_link_item.self_index)
+                break
             else:
                 cur_link_item = cur_link_item.get_next_item()
+        
+        if cur_link_item is not None:
+            # remove item
+            pre_item = cur_link_item.get_pre_item()
+            pre_item.next_index = cur_link_item.next_index
+            if cur_link_item.next_index != -1:
+                next_item = cur_link_item.get_next_item()
+                next_item.pre_index = pre_item.self_index
 
-        logger.warning(f"shm dict not contain key {key}")
+            self.link_items.add_item_to_tail(index=cur_link_item.self_index)
+        else:
+            logger.warning(f"shm dict not contain key {key}")
         return
 
 

@@ -10,7 +10,9 @@ from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.utils.log_utils import init_logger
 
+logger = init_logger(__name__)
 
 class MultiLevelKvCacheModule(object):
     def __init__(self, backend):

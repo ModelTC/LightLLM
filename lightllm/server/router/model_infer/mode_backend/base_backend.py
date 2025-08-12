@@ -385,7 +385,7 @@ class ModeBackend:
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
         """
-        if self.args.enable_cpu_cache:
+        if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
             self.multi_level_cache_module.update_cpu_cache_task_states()
 
         if req_ids is None:

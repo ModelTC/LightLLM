@@ -26,7 +26,7 @@ def _offload_gpu_kv_to_cpu(
     TOKEN_BLOCK: tl.constexpr,
 ):
     block_index = tl.program_id(0)
-    cpu_page_index = tl.load(page_indexes_ptr + block_index)
+    cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
     if cpu_page_index == -1:
         return
 
@@ -35,8 +35,10 @@ def _offload_gpu_kv_to_cpu(
         return
 
     token_range = block_index * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
-    token_indexes = tl.load(token_indexes_ptr + token_range)
+    token_indexes = tl.load(token_indexes_ptr + token_range).to(tl.int64)
     head_all_dim_range = tl.arange(0, BLOCK_HEAD_ALL_DIM)
+
+    gpu_stride0 = tl.cast(gpu_stride0, dtype=tl.int64)
 
     for layer_index in range(layer_num):
         gpu_ptr = (
@@ -61,6 +63,7 @@ def _offload_gpu_kv_to_cpu(
     return
 
 
+
 @torch.no_grad()
 def offload_gpu_kv_to_cpu(
     token_indexes: torch.Tensor,
@@ -74,18 +77,20 @@ def offload_gpu_kv_to_cpu(
     Args:
         token_indexes: (token_num,)
         gpu_kv_cache: (layer_num, token_num, head_num, head_dim)
-        cpu_kv_cache: (page_num, layer_num, token_block_size, head_num, head_dim)
+        cpu_kv_cache: (all_page_num, layer_num, token_block_size, head_num, head_dim)
         page_indexes: (page_num,)
         page_readies: (page_num,)
     """
     token_block_size = cpu_kv_cache.shape[2]
     token_num = page_indexes.shape[0] * token_block_size
     assert token_indexes.shape[0] >= token_num
+    assert page_indexes.shape == page_readies.shape
     page_num = page_indexes.shape[0]
+    head_all_dim = gpu_kv_cache.shape[-1] * gpu_kv_cache.shape[-2]
     BLOCK_HEAD_ALL_DIM = triton.next_power_of_2(gpu_kv_cache.shape[-1] * gpu_kv_cache.shape[-2])
 
     grid = (page_num,)
-    num_warps = 1
+    num_warps = 4
 
     _offload_gpu_kv_to_cpu[grid](
         token_indexes_ptr=token_indexes,
@@ -103,7 +108,7 @@ def offload_gpu_kv_to_cpu(
         page_indexes_ptr=page_indexes,
         page_readies_ptr=page_readies,
         layer_num=gpu_kv_cache.shape[0],
-        head_all_dim=gpu_kv_cache.shape[-1] * gpu_kv_cache.shape[-2],
+        head_all_dim=head_all_dim,
         BLOCK_HEAD_ALL_DIM=BLOCK_HEAD_ALL_DIM,
         TOKEN_BLOCK=token_block_size,
         num_warps=num_warps,
@@ -134,10 +139,11 @@ def _load_cpu_cache_to_gpu(
     TOKEN_BLOCK: tl.constexpr,
 ):
     block_index = tl.program_id(0)
-    cpu_page_index = tl.load(page_indexes_ptr + block_index)
+    cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
     if cpu_page_index == -1:
         return
-
+    
+    gpu_stride0 = tl.cast(gpu_stride0, dtype=tl.int64)
     padded_size = TOKEN_BLOCK * tl.num_programs(0) - all_move_token_num
     head_all_dim_range = tl.arange(0, BLOCK_HEAD_ALL_DIM)
     token_range = block_index * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
@@ -146,7 +152,7 @@ def _load_cpu_cache_to_gpu(
     token_mask = token_range >= 0
     head_dim_mask = head_all_dim_range < head_all_dim
 
-    token_indexes = tl.load(token_indexes_ptr + token_range, mask=token_mask, other=0)
+    token_indexes = tl.load(token_indexes_ptr + token_range, mask=token_mask, other=0).to(tl.int64)
 
     cpu_page_index = tl.load(page_indexes_ptr + block_index)
     for layer_index in range(layer_num):
