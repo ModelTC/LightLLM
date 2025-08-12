@@ -21,7 +21,10 @@ class MultiLevelKvCacheModule(object):
         self.gloo_group = create_new_group_for_current_dp("gloo")
         self.filter_group = create_new_group_for_current_dp("gloo")
         self.sync_group = create_new_group_for_current_dp("nccl")
+        dist.barrier(group=self.sync_group)
         self.init_sync_group = create_new_group_for_current_dp("nccl")
+        dist.barrier(group=self.init_sync_group)
+
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)

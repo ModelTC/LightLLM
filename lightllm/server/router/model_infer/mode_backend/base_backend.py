@@ -192,6 +192,9 @@ class ModeBackend:
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
+        
+        if self.args.enable_cpu_cache:
+            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
@@ -199,9 +202,6 @@ class ModeBackend:
         self.infer_loop_thread.start()
         self.infer_loop_thread1 = threading.Thread(target=self.infer_loop, daemon=True)
         self.infer_loop_thread1.start()
-
-        if self.args.enable_cpu_cache:
-            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
         return
 
     def init_custom(self):

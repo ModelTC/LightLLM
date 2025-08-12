@@ -148,13 +148,17 @@ class CpuKVCacheMeta:
         return self.page_num * self.layer_num * self.token_page_size * self.num_heads * self.head_dim * self.item_size
 
 
-def register_shm_ptr_to_pin(shm_ptr: int, size: int):
+def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
     # 加载 CUDA 库
     cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")  # Linux 下的 CUDA 库路径
 
     # 定义 cudaHostRegister 函数的参数和返回类型
     cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
     cuda.cudaHostRegister.restype = ctypes.c_int
+
+    # 定义 cudaHostGetDevicePointer 函数原型
+    cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
+    cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
 
     # 定义常量
     cudaHostRegisterDefault = 0  # 默认注册标志
@@ -166,4 +170,15 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int):
         raise Exception(f"Error registering host memory: {result}")
     else:
         logger.info("Host memory registered successfully.")
-    return
+
+    device_ptr = ctypes.c_void_p()  # 输出设备指针
+    host_ptr = ctypes.c_void_p(shm_ptr)  # 输入主机指针
+    
+    result = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+    
+    if result != 0:
+        raise RuntimeError(f"cudaHostGetDevicePointer failed with error code {result}")
+    
+    logger.info(f"get Host memory registered Device ptr {device_ptr.value}")
+    
+    return device_ptr.value
