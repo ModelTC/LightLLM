@@ -67,12 +67,12 @@ class ShmLinkedList(object):
         for e in self.linked_items:
             e.set_list_obj(self)
 
+        self.head = self.linked_items[self.capacity]
+        self.tail = self.linked_items[self.capacity + 1]
+
         if init_shm_data:
             for e in self.linked_items:
                 e.init()
-
-            self.head = self.linked_items[self.capacity]
-            self.tail = self.linked_items[self.capacity + 1]
 
             self.head.self_index = self.capacity
             self.tail.self_index = self.capacity + 1
