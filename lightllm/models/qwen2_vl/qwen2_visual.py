@@ -19,35 +19,23 @@
 # limitations under the License.
 
 import os
-import re
 import json
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from einops import rearrange
-from typing import List, Union
+from typing import List
 from torchvision import transforms as T
-from torchvision.transforms.functional import InterpolationMode
-from transformers import AutoModel, AutoTokenizer
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from io import BytesIO
-from transformers.configuration_utils import PretrainedConfig
-from transformers.utils import logging
-from transformers.modeling_utils import PreTrainedModel
 import torch.nn as nn
 from torch.nn import LayerNorm
 from transformers.activations import ACT2FN
-import time
 from safetensors import safe_open
-from transformers.utils import TensorType
-from lightllm.common.build_utils import repair_config
-from lightllm.server.multimodal_params import MultimodalParams, ImageItem
+from lightllm.server.multimodal_params import ImageItem
 from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
-
-# from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
 
 # adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
@@ -138,13 +126,6 @@ class VisionFlashAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
 
-    def apply_rotary_pos_emb_vision(self, t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-        t_ = t.float()
-        cos = freqs.cos()
-        sin = freqs.sin()
-        output = apply_rotary_emb(t_, cos, sin).type_as(t)
-        return output
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -154,8 +135,8 @@ class VisionFlashAttention(nn.Module):
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        q = self.apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb)
-        k = self.apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb)
+        q = apply_rotary_pos_emb_triton(q.unsqueeze(0), rotary_pos_emb.cos(), rotary_pos_emb.sin())
+        k = apply_rotary_pos_emb_triton(k.unsqueeze(0), rotary_pos_emb.cos(), rotary_pos_emb.sin())
         q = q.squeeze(0)
         k = k.squeeze(0)
 
