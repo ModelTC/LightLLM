@@ -162,9 +162,14 @@ class MultiLevelKvCacheModule(object):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
         token_page_size = self.args.cpu_cache_token_page_size
         all_page_list = []
+        is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
             match_tokens = len(page_list) * token_page_size
+            # 更新命中的 cpu kv cache 长度.
+            if is_master_in_dp:
+                req.shm_req.cpu_prompt_cache_len = match_tokens
+
             need_token_num = match_tokens - req.cur_kv_len
             # 多匹配了一定数量的token 才进行复制操作，不然操作效率不高
             if need_token_num > 256:

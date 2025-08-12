@@ -507,6 +507,7 @@ class HttpServerManager:
                         metadata["prompt_ids"] = prompt_ids
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
+                    cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
                         is_first_token = False
@@ -543,6 +544,7 @@ class HttpServerManager:
                             f"prompt_token_num:{prompt_tokens} "
                             f"prompt_cache_len:{prompt_cache_len} "
                             f"prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
                         if group_request_id < 0:
@@ -663,6 +665,7 @@ class HttpServerManager:
                                     "special": special,
                                     "count_output_tokens": count_output_tokens,
                                     "prompt_cache_len": req.prompt_cache_len,
+                                    "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
                                 }
                                 if self.args.return_all_prompt_logprobs:
