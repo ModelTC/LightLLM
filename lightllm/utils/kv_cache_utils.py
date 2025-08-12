@@ -53,10 +53,13 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     cpu_cache_meta = CpuKVCacheMeta(
         page_num=cpu_cache_page_num,
         layer_num=layer_num,
+        token_page_size=args.cpu_cache_token_page_size,
         num_heads=num_key_value_heads,
         head_dim=head_dim,
         item_size=item_size,
     )
+
+    logger.info(f"cpu kv cache page num: {cpu_cache_meta.page_num}")
 
     return cpu_cache_meta
 
@@ -136,12 +139,13 @@ def attach_shm_kv_cache_ptr() -> int:
 class CpuKVCacheMeta:
     page_num: int
     layer_num: int
+    token_page_size: int
     num_heads: int
     head_dim: int
     item_size: int
 
     def calcu_size(self):
-        return self.page_num * self.layer_num * self.num_heads * self.head_dim * self.item_size
+        return self.page_num * self.layer_num * self.token_page_size * self.num_heads * self.head_dim * self.item_size
 
 
 def register_shm_ptr_to_pin(shm_ptr: int, size: int):

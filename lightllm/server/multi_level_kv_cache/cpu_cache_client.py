@@ -204,6 +204,7 @@ class CpuKvCacheClient(object):
         shape = (
             self.kv_cache_tensor_meta.page_num,
             self.kv_cache_tensor_meta.layer_num,
+            self.kv_cache_tensor_meta.token_page_size,
             self.kv_cache_tensor_meta.num_heads,
             self.kv_cache_tensor_meta.head_dim,
         )
@@ -216,6 +217,7 @@ class CpuKvCacheClient(object):
         shape = (
             self.kv_cache_tensor_meta.page_num,
             self.kv_cache_tensor_meta.layer_num,
+            self.kv_cache_tensor_meta.token_page_size,
             self.kv_cache_tensor_meta.num_heads,
             self.kv_cache_tensor_meta.head_dim,
         )
