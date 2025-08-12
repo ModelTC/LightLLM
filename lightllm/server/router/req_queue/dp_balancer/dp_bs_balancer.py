@@ -7,7 +7,7 @@ from .dp_base_balancer import DpBalancer
 logger = init_logger(__name__)
 
 
-class DpBalancerForPd(DpBalancer):
+class DpBsBalancer(DpBalancer):
     """
     This balancer is main to balance the batch size of each dp rank.
     Because, for dp mode, if it exists a dp rank without any request, it will
