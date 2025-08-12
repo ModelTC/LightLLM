@@ -1,7 +1,7 @@
 from .dp_base_balancer import RoundRobinDpBalancer
 from typing import List
 from lightllm.server.router.req_queue.base_queue import BaseQueue
-from .dp_balancer_bs import DpBsBalancer
+from .dp_bs_balancer import DpBsBalancer
 
 
 def get_dp_balancer(args, dp_size_in_node: int, inner_queues: List[BaseQueue]):
