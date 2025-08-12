@@ -288,13 +288,13 @@ class InferReq:
         FINISHED = 2
 
         def is_not_started(self):
-            return self.value == self.NOT_STARTED
+            return self == self.NOT_STARTED
 
         def is_running(self):
-            return self.value == self.RUNNING
+            return self == self.RUNNING
 
         def is_finished(self):
-            return self.value == self.FINISHED
+            return self == self.FINISHED
 
     def __init__(
         self,
