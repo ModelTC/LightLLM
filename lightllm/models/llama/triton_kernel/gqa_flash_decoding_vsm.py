@@ -198,7 +198,7 @@ def _kernel_gqa_token_decode_attention_flash_decoding_vsm_stage1(
                     + cur_chunk_range * stride_req_to_token_seq,
                     mask=cur_chunk_mask,
                     other=0.0,
-                )
+                ).to(tl.int64)
 
                 k_off = (
                     cur_kv_loc[None, :] * stride_k_bs + cur_kv_head_idx * stride_k_h + d_off[:, None]
