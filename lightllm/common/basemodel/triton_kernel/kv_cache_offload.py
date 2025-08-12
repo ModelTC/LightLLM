@@ -45,7 +45,7 @@ def _offload_gpu_kv_to_cpu(
             + token_indexes[:, None] * gpu_stride1
             + head_all_dim_range[None, :]
         )
-        gpu_data = tl.load(gpu_ptr, mask=(head_all_dim_range[:, None] < head_all_dim), other=0.0)
+        gpu_data = tl.load(gpu_ptr, mask=(head_all_dim_range[None, :] < head_all_dim), other=0.0)
         cpu_ptr = (
             cpu_kv_cache_ptr
             + cpu_page_index * cpu_stride0
@@ -56,7 +56,7 @@ def _offload_gpu_kv_to_cpu(
         tl.store(
             cpu_ptr,
             gpu_data,
-            mask=(head_all_dim_range[:, None] < head_all_dim),
+            mask=(head_all_dim_range[None, :] < head_all_dim),
         )
     return
 
