@@ -25,9 +25,69 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ServerBusyError
+from .node_info_recorder import PredictNodeInfoRecorder
+from .pd_selector import (
+    create_selector,
+    PDSelector,
+)
 
 logger = init_logger(__name__)
 
+
+class PDManager:
+    def __init__(self, args):
+        self.args = args
+        self.prefill_nodes: List[PD_Client_Obj] = []
+        self.decode_nodes: List[PD_Client_Obj] = []
+        self.node_info_recorder: PredictNodeInfoRecorder = PredictNodeInfoRecorder()
+        self.selector: PDSelector = create_selector(args.select_p_d_node_func, self.prefill_nodes, self.decode_nodes, self)
+        return
+
+    async def register_pd(self, pd_info_json, websocket):
+        pd_client = PD_Client_Obj(**pd_info_json)
+        pd_client.websocket = websocket
+        self.node_info_recorder.register_node(pd_client)
+
+        if pd_client.mode == "prefill":
+            self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
+            self.prefill_nodes.append(pd_client)
+        elif pd_client.mode == "decode":
+            self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
+            self.decode_nodes.append(pd_client)
+        else:
+            assert False, f"mode must in ['prefill', 'decode'], but get {pd_client.mode}"
+
+        await self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
+
+        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} registed")
+        return
+
+    async def remove_pd(self, pd_info_json):
+        pd_client = PD_Client_Obj(**pd_info_json)
+        self.node_info_recorder.remove_node(pd_client)
+
+        self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
+        self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
+
+        await self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
+
+        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} removed")
+        return
+
+    def update_node_load_info(self, load_info: dict):
+        """更新节点负载信息"""
+        if load_info is None:
+            return
+        self.node_info_recorder.update_node_load_info(load_info)
+
+    def get_predict_node_infos(self):
+        """获取所有节点的预测负载信息"""
+        return self.node_info_recorder.get_predict_node_infos()
+
+    async def select_p_d_node(self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+        p_node, d_node = await self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)
+        self.node_info_recorder.update_predict_node_info(p_node, d_node, prompt, sampling_params, multimodal_params)
+        return p_node, d_node
 
 class HttpServerManagerForPDMaster:
     def __init__(
@@ -38,9 +98,8 @@ class HttpServerManagerForPDMaster:
         self.args = args
         self.metric_client = MetricClient(metric_port)
         self.id_gen = ReqIDGenerator()
-        self.prefill_nodes: List[PD_Client_Obj] = []
-        self.decode_nodes: List[PD_Client_Obj] = []
-        self.url_to_pd_nodes: Dict[str, PD_Client_Obj] = {}
+
+        self.pd_manager = PDManager(args)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
@@ -52,30 +111,11 @@ class HttpServerManagerForPDMaster:
         return
 
     async def register_pd(self, pd_info_json, websocket):
-        pd_client = PD_Client_Obj(**pd_info_json)
-        pd_client.websocket = websocket
-        self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
-        if pd_client.mode == "prefill":
-            self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
-            self.prefill_nodes.append(pd_client)
-        elif pd_client.mode == "decode":
-            self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
-            self.decode_nodes.append(pd_client)
-        else:
-            assert False
-
-        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} registed")
+        await self.pd_manager.register_pd(pd_info_json, websocket)
         return
 
     async def remove_pd(self, pd_info_json):
-        pd_client = PD_Client_Obj(**pd_info_json)
-        try:
-            del self.url_to_pd_nodes[pd_client.client_ip_port]
-        except:
-            pass
-        self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
-        self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
-        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} removed")
+        await self.pd_manager.remove_pd(pd_info_json)
         return
 
     async def update_req_status(self, upkv_status: UpKVStatus):
@@ -108,11 +148,7 @@ class HttpServerManagerForPDMaster:
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
-        import random
-
-        p_node = random.choice(self.prefill_nodes)
-        d_node = random.choice(self.decode_nodes)
-        return p_node, d_node
+        return await self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
 
     async def generate(
         self,
@@ -264,7 +300,7 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         out_token_counter = 0
-        first_token_cost_ms = sys.float_info.max
+        first_token_cost_ms = float('inf')
         group_request_id = sampling_params.group_request_id
         unfinished_count = sampling_params.best_of
         is_first_token = True
@@ -368,7 +404,16 @@ class HttpServerManagerForPDMaster:
             try:
                 for obj in objs:
                     if obj[0] == ObjType.TOKEN_PACKS:
-                        for sub_req_id, text, metadata, finish_status in obj[1]:
+                        # 检查是否包含节点信息
+                        if len(obj) >= 3:
+                            handle_list, load_info = obj[1], obj[2]
+                            # 更新节点负载信息
+                            self.pd_manager.update_node_load_info(load_info)
+                        else:
+                            # 兼容旧格式
+                            handle_list = obj[1]
+
+                        for sub_req_id, text, metadata, finish_status in handle_list:
                             finish_status: FinishStatus = finish_status
                             group_req_id = convert_sub_id_to_group_id(sub_req_id)
                             try:
