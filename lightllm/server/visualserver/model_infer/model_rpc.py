@@ -14,8 +14,8 @@ from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
-from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
-from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
+from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VLTransformer
+from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5VLTransformer
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
 from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
 from lightllm.utils.infer_utils import set_random_seed
@@ -46,33 +46,31 @@ class VisualModelRpcServer(rpyc.Service):
 
         try:
             self.model_type = model_cfg["model_type"]
+            kvargs = {
+                "weight_dir": weight_dir,
+                "data_type": self.data_type,
+                "quant_type": kvargs["quant_type"],
+                "quant_cfg": kvargs["quant_cfg"],
+                "max_batch_size": kvargs["max_batch_size"],
+            }
             if self.model_type == "qwen":
-                self.model = QWenVisionTransformer(**model_cfg["visual"]).eval().bfloat16()
+                self.model = QWenVisionTransformer(kvargs, **model_cfg["visual"]).eval().bfloat16()
             elif self.model_type == "qwen2_vl":
-                self.model = Qwen2VisionTransformerPretrainedModel(**model_cfg["vision_config"]).eval().bfloat16()
+                self.model = Qwen2VLTransformer(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
             elif self.model_type == "qwen2_5_vl":
-                self.model = Qwen2_5_VisionTransformerPretrainedModel(**model_cfg["vision_config"]).eval().bfloat16()
+                self.model = Qwen2_5VLTransformer(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
             elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
-                self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
+                self.model = TarsierVisionTransformerPretrainedModel(kvargs, **model_cfg).eval().bfloat16()
             elif self.model_type == "llava":
-                self.model = LlavaVisionModel()
+                self.model = LlavaVisionModel(kvargs)
             elif self.model_type == "internvl_chat":
-                kvargs = {
-                    "weight_dir": weight_dir,
-                    "data_type": self.data_type,
-                    "quant_type": kvargs["quant_type"],
-                    "quant_cfg": kvargs["quant_cfg"],
-                    "max_batch_size": kvargs["max_batch_size"],
-                }
                 self.model = VisionTransformer(kvargs)
                 # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
-                self.model = Gemma3VisionModel()
+                self.model = Gemma3VisionModel(kvargs)
             else:
                 raise Exception(f"can not support {self.model_type} now")
 
-            self.model.load_model(weight_dir)
-            self.model = self.model.cuda()
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
