@@ -209,8 +209,6 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         self.processor = Qwen2VLImageProcessor(**processor_config_dict)
 
         self._init_datatype()
-        self.load_model(kvargs["weight_dir"])
-        self.cuda()
 
     def _init_datatype(self):
         if isinstance(self.data_type, torch.dtype):
