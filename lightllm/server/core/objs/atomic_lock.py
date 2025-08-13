@@ -46,6 +46,7 @@ class AtomicShmLock:
     def acquire_sleep1ms(self):
         with atomics.atomicview(buffer=self.shm.buf, atype=atomics.INT) as a:
             while not a.cmpxchg_weak(0, 1):
+                logger.warning(f"acquire_sleep1ms wait for 1ms")
                 time.sleep(0.001)
                 pass
 

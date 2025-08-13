@@ -22,10 +22,12 @@ class MultiLevelKvCacheModule(object):
         self.backend: ModeBackend = backend
         self.gloo_group = create_new_group_for_current_dp("gloo")
         self.filter_group = create_new_group_for_current_dp("gloo")
-        self.sync_group = create_new_group_for_current_dp("nccl")
-        dist.barrier(group=self.sync_group)
         self.init_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.init_sync_group)
+        
+        self.sync_group = create_new_group_for_current_dp("nccl")
+        dist.barrier(group=self.sync_group)
+        self.sync_tensor = torch.zeros((1,), dtype=torch.int64, device="cuda")
 
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
@@ -121,7 +123,9 @@ class MultiLevelKvCacheModule(object):
                 page_indexes=page_indexes,
                 page_readies=page_readies,
             )
-            dist.barrier(group=self.sync_group)
+            
+            # 用一个allreduce 操作和 sync_event 来确保所有gpu worker都完成对cpu kv cache的写入。
+            dist.all_reduce(tensor=self.sync_tensor, group=self.sync_group, async_op=False)
             sync_event = torch.cuda.Event()
             sync_event.record()
             req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
