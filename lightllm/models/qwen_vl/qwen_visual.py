@@ -333,6 +333,7 @@ class TransformerBlock(nn.Module):
 class QWenVisionTransformer(nn.Module):
     def __init__(
         self,
+        kvargs,
         image_size: int,
         patch_size: int,
         width: int,
@@ -344,6 +345,7 @@ class QWenVisionTransformer(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        self.weight_dir = kvargs["weight_dir"]
         image_height, image_width = self.image_size = (image_size, image_size)
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
         self.grid_size = (image_height // patch_height, image_width // patch_width)
@@ -387,6 +389,9 @@ class QWenVisionTransformer(nn.Module):
         )
         self.ln_post = norm_layer(output_dim)
         self.proj = nn.Parameter((output_dim ** -0.5) * torch.randn(output_dim, output_dim))
+
+        self.load_model(self.weight_dir)
+        self.cuda()
 
     def forward(self, x: torch.Tensor):
         x = x.to(

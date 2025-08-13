@@ -33,20 +33,27 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         return
 
     def _infer_image_embeds(self, infer_state, layer_weight):
-        if layer_weight.visual_model is None:
-            return
         image_weight = []
-        for batch_id, p in enumerate(infer_state.multimodal_params):
-            for img in p["images"] + p["audios"]:
-                if img.get("_prefill_", True):
-                    image_data = img["image_data"].to("cuda", non_blocking=True)
-                    image_grid_thw = img["image_grid_thw"]
-                    # image_embed = torch.zeros(
-                    # (img["token_num"],layer_weight.wte_weight_.shape[1]),device="cuda",dtype=torch.bfloat16)
-                    image_embed = layer_weight.visual_model.forward(image_data, image_grid_thw).view(
-                        img["token_num"], -1
-                    )
-                    image_weight.append(image_embed)
+        if layer_weight.visual_model is None:
+            for batch_id, p in enumerate(infer_state.multimodal_params):
+                for img in p["images"] + p["audios"]:
+                    # skip the same image
+                    if img.get("_prefill_", True):
+                        # pull the img_embeds by uid from shm
+                        image_embed = read_shm(get_shm_name_embed(img["uuid"]))
+                        image_weight.append(bytes2tensor(image_embed).cuda().reshape(img["token_num"], -1))
+        else:
+            for batch_id, p in enumerate(infer_state.multimodal_params):
+                for img in p["images"] + p["audios"]:
+                    if img.get("_prefill_", True):
+                        image_data = img["image_data"].to("cuda", non_blocking=True)
+                        image_grid_thw = img["image_grid_thw"]
+                        # image_embed = torch.zeros(
+                        # (img["token_num"],layer_weight.wte_weight_.shape[1]),device="cuda",dtype=torch.bfloat16)
+                        image_embed = layer_weight.visual_model.forward(image_data, image_grid_thw).view(
+                            img["token_num"], -1
+                        )
+                        image_weight.append(image_embed)
         if len(image_weight) > 0:
             image_weight = torch.cat(image_weight, dim=0)
             image_weight = image_weight / self.tp_world_size_

@@ -352,9 +352,7 @@ class Qwen2VLTransformer(nn.Module):
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
                 image_data = resize_image(image_data)
-                tensor = self.processor.preprocess(images=image_data, return_tensors="pt")
-                pixel_values, image_grid_thw = tensor["pixel_values"], tensor["image_grid_thw"]
-                pixel_values = pixel_values.to(dtype=torch.bfloat16)
+                pixel_values, image_grid_thw = self.processor.preprocess(image_data)
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
@@ -372,8 +370,8 @@ class Qwen2VLTransformer(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.cuda().to(dtype=torch.float32)
-        image_grid_thw = grid_thw.cuda()
+        pixel_values = imgs.to("cuda", dtype=self.data_type, non_blocking=True)
+        image_grid_thw = grid_thw.to("cuda", non_blocking=True)
 
         all_img_embeds = self.forward(pixel_values, grid_thw=image_grid_thw)
 

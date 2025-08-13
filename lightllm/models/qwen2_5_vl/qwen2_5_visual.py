@@ -369,22 +369,6 @@ class Qwen2_5VLTransformer(nn.Module):
 
         return hidden_states
 
-    def load_image(self, img: List[ImageItem]):
-        pixel_values = None
-        if isinstance(img, ImageItem):
-            image_data = read_shm(get_shm_name_data(img.uuid))
-            image_data = Image.open(BytesIO(image_data))
-            image_data = resize_image(image_data)
-            pixel_values, image_grid_thw = self.processor.preprocess(image_data)
-        elif isinstance(img, dict):
-            image_data = read_shm(get_shm_name_data(img["uuid"]))
-            image_data = Image.open(BytesIO(image_data))
-            image_data = resize_image(image_data)
-            pixel_values, image_grid_thw = self.processor.preprocess(image_data)
-        else:
-            raise Exception("Unsupport input types: {} for {}".format(type(img), img))
-        return pixel_values.to(dtype=self.data_type), image_grid_thw
-
     def load_model(self, weight_dir):
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
@@ -407,6 +391,22 @@ class Qwen2_5VLTransformer(nn.Module):
 
         self.load_state_dict(weight_dict)
 
+    def load_image(self, img: List[ImageItem]):
+        pixel_values = None
+        if isinstance(img, ImageItem):
+            image_data = read_shm(get_shm_name_data(img.uuid))
+            image_data = Image.open(BytesIO(image_data))
+            image_data = resize_image(image_data)
+            pixel_values, image_grid_thw = self.processor.preprocess(image_data)
+        elif isinstance(img, dict):
+            image_data = read_shm(get_shm_name_data(img["uuid"]))
+            image_data = Image.open(BytesIO(image_data))
+            image_data = resize_image(image_data)
+            pixel_values, image_grid_thw = self.processor.preprocess(image_data)
+        else:
+            raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+        return pixel_values.to(dtype=self.data_type), image_grid_thw
+
     def encode(self, images: List[ImageItem]):
         img_tensors = []
         valid_ids = []
@@ -420,9 +420,7 @@ class Qwen2_5VLTransformer(nn.Module):
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
                 image_data = resize_image(image_data)
-                image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
-                pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
-                image_grid_thw = image_inputs["image_grid_thw"]
+                pixel_values, image_grid_thw = self.processor.preprocess(image_data)
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
@@ -440,10 +438,9 @@ class Qwen2_5VLTransformer(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.cuda().to(dtype=torch.float32)
-        image_grid_thw = grid_thw.cuda()
+        pixel_values = imgs.to("cuda", dtype=self.data_type, non_blocking=True)
+        image_grid_thw = grid_thw.to("cuda", non_blocking=True)
 
-        pixel_values = pixel_values.type(self.get_dtype())
         all_img_embeds = self.forward(pixel_values, grid_thw=image_grid_thw)
 
         return all_img_embeds, uuids, valid_ids

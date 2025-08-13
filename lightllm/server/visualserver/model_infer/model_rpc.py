@@ -54,25 +54,23 @@ class VisualModelRpcServer(rpyc.Service):
                 "max_batch_size": kvargs["max_batch_size"],
             }
             if self.model_type == "qwen":
-                self.model = QWenVisionTransformer(**model_cfg["visual"]).eval().bfloat16()
+                self.model = QWenVisionTransformer(kvargs, **model_cfg["visual"]).eval().bfloat16()
             elif self.model_type == "qwen2_vl":
-                self.model = Qwen2VLTransformer(**model_cfg["vision_config"]).eval().bfloat16()
+                self.model = Qwen2VLTransformer(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
             elif self.model_type == "qwen2_5_vl":
                 self.model = Qwen2_5VLTransformer(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
             elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
                 self.model = TarsierVisionTransformerPretrainedModel(kvargs, **model_cfg).eval().bfloat16()
             elif self.model_type == "llava":
-                self.model = LlavaVisionModel()
+                self.model = LlavaVisionModel(kvargs)
             elif self.model_type == "internvl_chat":
                 self.model = VisionTransformer(kvargs)
                 # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
-                self.model = Gemma3VisionModel()
+                self.model = Gemma3VisionModel(kvargs)
             else:
                 raise Exception(f"can not support {self.model_type} now")
 
-            self.model.load_model(weight_dir)
-            self.model = self.model.cuda()
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))

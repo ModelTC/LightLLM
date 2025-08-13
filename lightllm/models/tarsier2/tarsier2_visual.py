@@ -152,6 +152,7 @@ class LlavaMultiModalProjector(nn.Module):
 class TarsierVisionTransformerPretrainedModel(nn.Module):
     def __init__(
         self,
+        kvargs,
         vision_config=None,
         text_config=None,
         ignore_index=-100,
@@ -165,6 +166,7 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        self.weight_dir = kvargs["weight_dir"]
         self.vision_tower = Qwen2VLTransformer(**vision_config)
 
         if projection_head == "Pixel_Shuffle":
@@ -194,6 +196,9 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
 
         self.image_token_index = image_token_index
         self.merge_size = 1
+
+        self.load_model(self.weight_dir)
+        self.cuda()
 
     def forward(
         self,
