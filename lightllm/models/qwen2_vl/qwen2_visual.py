@@ -204,7 +204,7 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         )
 
         head_dim = self.embed_dim // self.num_heads
-        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2).to("cuda", non_blocking=True)
+        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2).cuda()
 
         self.blocks = nn.ModuleList(
             [
