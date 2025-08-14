@@ -25,14 +25,14 @@ def apply_rotary_pos_emb_vision(tensor: torch.Tensor, cos: torch.Tensor, sin: to
 @pytest.mark.parametrize(
     "shape",
     [
-        (16, 1296, 64, 80),
-        (2, 1024, 2, 192),
-        (1, 1024, 1, 256),
-        (2, 1024, 3, 160),
+        (1296, 64, 80),
+        (1024, 2, 192),
+        (1024, 1, 256),
+        (1024, 3, 160),
     ],
 )
 def test_triton_matches_reference(shape):
-    B, L, H, D = shape
+    L, H, D = shape
     assert D % 2 == 0
 
     torch.manual_seed(0)
@@ -41,9 +41,9 @@ def test_triton_matches_reference(shape):
     cos = freqs.cos()
     sin = freqs.sin()
 
-    tensor = torch.randn(B, L, H, D, device="cuda", dtype=torch.bfloat16)
+    tensor = torch.randn(L, H, D, device="cuda", dtype=torch.bfloat16)
 
-    ref = apply_rotary_pos_emb_vision(tensor, cos, sin)
+    ref = apply_rotary_pos_emb_vision(tensor.unsqueeze(0), cos, sin).squeeze(0)
     out = apply_rotary_pos_emb_triton(tensor, cos, sin)
 
     assert out.dtype == tensor.dtype, "输出 dtype 应与输入一致"

@@ -135,10 +135,8 @@ class VisionFlashAttention(nn.Module):
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        q = apply_rotary_pos_emb_triton(q.unsqueeze(0), rotary_pos_emb.cos(), rotary_pos_emb.sin())
-        k = apply_rotary_pos_emb_triton(k.unsqueeze(0), rotary_pos_emb.cos(), rotary_pos_emb.sin())
-        q = q.squeeze(0)
-        k = k.squeeze(0)
+        q = apply_rotary_pos_emb_triton(q, rotary_pos_emb.cos(), rotary_pos_emb.sin())
+        k = apply_rotary_pos_emb_triton(k, rotary_pos_emb.cos(), rotary_pos_emb.sin())
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
 
