@@ -131,7 +131,7 @@ class PDDecodeInferRpcServer(rpyc.Service):
         radix_cache = self.backend.radix_cache
         key = torch.tensor(move_task.input_tokens, dtype=torch.int64, device="cpu")
         value = torch.tensor(fused_token_indexes + move_task.decode_token_indexes, dtype=torch.int64, device="cpu")
-        prefix_len = radix_cache.insert(key, value)
+        prefix_len, _ = radix_cache.insert(key, value)
         assert len(fused_token_indexes) <= prefix_len
         self.backend.model.mem_manager.free(value[len(fused_token_indexes) : prefix_len])
         self.backend.radix_cache.dec_node_ref_counter(tree_node)
