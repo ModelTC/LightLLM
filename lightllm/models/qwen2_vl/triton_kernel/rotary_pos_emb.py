@@ -31,7 +31,7 @@ def rotary_kernel(
     
     base = pid_l * stride_l + pid_h * stride_h
     
-    in_ptr = inp_ptr + base + d
+    in_ptr = inp_ptr + base + d * stride_d
     cos_ptr_ = cos_ptr + pid_l * stride_cos_l + d
     sin_ptr_ = sin_ptr + pid_l * stride_sin_l + d
 
@@ -40,7 +40,7 @@ def rotary_kernel(
     sin = tl.load(sin_ptr_, mask=mask)
 
     partner_d = tl.where(d < HALF_D, d + HALF_D, d - HALF_D)
-    partner_ptr = inp_ptr + base + partner_d
+    partner_ptr = inp_ptr + base + partner_d * stride_d
     partner_val = tl.load(partner_ptr, mask=mask)
     rotated = tl.where(d < HALF_D, -partner_val, partner_val)
 
@@ -54,7 +54,7 @@ def apply_rotary_pos_emb_triton(
     tensor: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, BLOCK_D: int = 128
 ) -> torch.Tensor:
     assert tensor.is_cuda and cos.is_cuda and sin.is_cuda
-    assert tensor.is_contiguous() and cos.is_contiguous() and sin.is_contiguous()
+    assert cos.is_contiguous() and sin.is_contiguous()
     if tensor.ndim != 3:
         raise RuntimeError("tensor shape should be [L, H, D]")
     orig_dtype = tensor.dtype
