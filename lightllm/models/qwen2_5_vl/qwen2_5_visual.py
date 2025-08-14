@@ -65,12 +65,13 @@ class Qwen2_5_VLVisionFlashAttention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int = 0,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
+        rotary_cos: Optional[torch.Tensor] = None,
+        rotary_sin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        q = apply_rotary_pos_emb_triton(q, rotary_pos_emb.cos(), rotary_pos_emb.sin())
-        k = apply_rotary_pos_emb_triton(k, rotary_pos_emb.cos(), rotary_pos_emb.sin())
+        q = apply_rotary_pos_emb_triton(q, rotary_cos, rotary_sin)
+        k = apply_rotary_pos_emb_triton(k, rotary_cos, rotary_sin)
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
         flash_attention_fwd(q, k, v, attn_output, cu_seqlens, max_seqlen)
@@ -104,13 +105,15 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int = 0,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
+        rotary_cos: Optional[torch.Tensor] = None,
+        rotary_sin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
-            rotary_pos_emb=rotary_pos_emb,
+            rotary_cos=rotary_cos,
+            rotary_sin=rotary_sin,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -285,29 +288,28 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw)
         rotary_cos = rotary_cos.to("cuda", non_blocking=True)
         rotary_sin = rotary_sin.to("cuda", non_blocking=True)
+
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0, dtype=torch.int32
         )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0).to("cuda", non_blocking=True)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        cu_seqlens = cu_seqlens.to("cuda", non_blocking=True)
 
         window_index, cu_window_seqlens = self.get_window_index(grid_thw)
+
         cu_window_seqlens = torch.tensor(
             cu_window_seqlens,
             device=hidden_states.device,
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens).to("cuda", non_blocking=True)
         max_window_seqlen = (cu_window_seqlens[1:] - cu_window_seqlens[:-1]).max().item()
 
         seq_len, _ = hidden_states.size()
-        hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        rotary_pos_emb = rotary_pos_emb[window_index, :, :]
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        pos_shape = (seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        hidden_states = hidden_states.reshape(pos_shape)[window_index].view(seq_len, -1)
+        rotary_cos = rotary_cos.reshape(pos_shape)[window_index].view(seq_len, -1)
+        rotary_sin = rotary_sin.reshape(pos_shape)[window_index].view(seq_len, -1)
 
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
@@ -321,7 +323,8 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 hidden_states,
                 cu_seqlens=cu_seqlens_now,
                 max_seqlen=max_seqlen_now,
-                rotary_pos_emb=rotary_pos_emb,
+                rotary_cos=rotary_cos,
+                rotary_sin=rotary_sin,
             )
 
         hidden_states = self.merger(hidden_states)
