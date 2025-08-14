@@ -1,69 +1,21 @@
 import os
-import re
 import json
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from typing import Any, Dict, List, Optional, Tuple, Union
-from torchvision import transforms as T
-from torchvision.transforms.functional import InterpolationMode
-from transformers import AutoModel, AutoTokenizer
+from typing import List, Optional
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from io import BytesIO
-from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_utils import PreTrainedModel
 import torch.nn as nn
-from torch.nn import LayerNorm
 from transformers.activations import ACT2FN
-import math
-from lightllm.models.qwen2_vl.vision_process import get_image, Qwen2VLImageProcessor
-from transformers import AutoProcessor
+from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from safetensors import safe_open
-from transformers.utils import TensorType
-from lightllm.server.multimodal_params import MultimodalParams, ImageItem
+from lightllm.server.multimodal_params import ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import PatchEmbed, VisionRotaryEmbedding
+from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-
-# adapted from
-# https://github.com/huggingface/transformers/blob/
-# be37d34f44ff1bc928e59ffb8a30adecab8835a8/src
-# /transformers/models/qwen2_5_vl/configuration_qwen2_5_vl.py#L30C1-L31C1
-class Qwen2_5_VLVisionConfig(PretrainedConfig):
-    model_type = "qwen2_5_vl"
-
-    def __init__(
-        self,
-        depth=32,
-        hidden_size=3584,
-        hidden_act="silu",
-        intermediate_size=3420,
-        num_heads=16,
-        in_channels=3,
-        patch_size=14,
-        spatial_merge_size=2,
-        temporal_patch_size=2,
-        tokens_per_second=4,
-        window_size=112,
-        out_hidden_size=3584,
-        fullatt_block_indexes=[7, 15, 23, 31],
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-
-        self.depth = depth
-        self.hidden_size = hidden_size
-        self.hidden_act = hidden_act
-        self.intermediate_size = intermediate_size
-        self.num_heads = num_heads
-        self.in_channels = in_channels
-        self.patch_size = patch_size
-        self.spatial_merge_size = spatial_merge_size
-        self.temporal_patch_size = temporal_patch_size
-        self.tokens_per_second = tokens_per_second
-        self.window_size = window_size
-        self.fullatt_block_indexes = fullatt_block_indexes
-        self.out_hidden_size = out_hidden_size
+from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
 
 
 class Qwen2RMSNorm(nn.Module):
@@ -76,11 +28,7 @@ class Qwen2RMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        return rms_norm(hidden_states, self.weight, eps=self.variance_epsilon)
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -104,27 +52,6 @@ class Qwen2_5_VLMLP(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
 
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb_vision(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    orig_q_dtype = q.dtype
-    orig_k_dtype = k.dtype
-    q, k = q.float(), k.float()
-    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    q_embed = q_embed.to(orig_q_dtype)
-    k_embed = k_embed.to(orig_k_dtype)
-    return q_embed, k_embed
-
-
 class Qwen2_5_VLVisionFlashAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
@@ -137,21 +64,15 @@ class Qwen2_5_VLVisionFlashAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        max_seqlen: int = 0,
+        rotary_cos: Optional[torch.Tensor] = None,
+        rotary_sin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        if position_embeddings is None:
-            emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-        else:
-            cos, sin = position_embeddings
-        q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
+        q = apply_rotary_pos_emb_triton(q, rotary_cos, rotary_sin)
+        k = apply_rotary_pos_emb_triton(k, rotary_cos, rotary_sin)
 
-        cu_seqlens = cu_seqlens.to(q.device, torch.int32)
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
         flash_attention_fwd(q, k, v, attn_output, cu_seqlens, max_seqlen)
         attn_output = attn_output.reshape(seq_length, -1)
@@ -183,14 +104,16 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        max_seqlen: int = 0,
+        rotary_cos: Optional[torch.Tensor] = None,
+        rotary_sin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
-            rotary_pos_emb=rotary_pos_emb,
-            position_embeddings=position_embeddings,
+            max_seqlen=max_seqlen,
+            rotary_cos=rotary_cos,
+            rotary_sin=rotary_sin,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -215,6 +138,7 @@ class Qwen2_5_VLPatchMerger(nn.Module):
 class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
     def __init__(
         self,
+        kvargs,
         depth=32,
         hidden_size=3584,
         hidden_act="silu",
@@ -231,6 +155,8 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        self.weight_dir = kvargs["weight_dir"]
+        self.data_type = kvargs.get("data_type", "bfloat16")
 
         self.depth = depth
         self.hidden_size = hidden_size
@@ -278,43 +204,43 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
 
         self.gradient_checkpointing = False
 
-        self.device = self.get_device()
-        self.dtype = self.get_dtype()
+        processor_config_path = os.path.join(self.weight_dir, "preprocessor_config.json")
+        with open(processor_config_path, "r") as f:
+            processor_config_dict = json.load(f)
+        self.processor = Qwen2VLImageProcessor(**processor_config_dict)
 
-    def get_dtype(self) -> torch.dtype:
-        return self.blocks[0].mlp.down_proj.weight.dtype
+        self._init_datatype()
 
-    def get_device(self) -> torch.device:
-        return self.blocks[0].mlp.down_proj.weight.device
+    def _init_datatype(self):
+        if isinstance(self.data_type, torch.dtype):
+            return
+        if self.data_type in ["fp16", "float16"]:
+            self.data_type = torch.float16
+        elif self.data_type in ["bf16", "bfloat16"]:
+            self.data_type = torch.bfloat16
+        elif self.data_type in ["fp32", "float32"]:
+            self.data_type = torch.float32
+        else:
+            raise ValueError(f"Unsupport datatype {self.data_type}!")
+        return
 
     def rot_pos_emb(self, grid_thw):
         pos_ids = []
-        for t, h, w in grid_thw:
+        s = self.spatial_merge_size
+        for _, h, w in grid_thw:
+            pos_shape = (h // s, s, w // s, s)
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-            hpos_ids = hpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            hpos_ids = hpos_ids.permute(0, 2, 1, 3)
-            hpos_ids = hpos_ids.flatten()
-
             wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
-            wpos_ids = wpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            wpos_ids = wpos_ids.permute(0, 2, 1, 3)
-            wpos_ids = wpos_ids.flatten()
-            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+            hpos_ids = hpos_ids.reshape(pos_shape).permute(0, 2, 1, 3).flatten()
+            wpos_ids = wpos_ids.reshape(pos_shape).permute(0, 2, 1, 3).flatten()
+
+            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
-        return rotary_pos_emb
+        cos_full, sin_full = self.rotary_pos_emb(max_grid_size)
+        cos = cos_full[pos_ids].flatten(1)
+        sin = sin_full[pos_ids].flatten(1)
+        return cos, sin
 
     def get_window_index(self, grid_thw):
         window_index: list = []
@@ -359,56 +285,47 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         hidden_states = self.patch_embed(hidden_states)
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw)
+        rotary_cos = rotary_cos.to("cuda", non_blocking=True)
+        rotary_sin = rotary_sin.to("cuda", non_blocking=True)
+
+        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            dim=0, dtype=torch.int32
+        )
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0).to("cuda", non_blocking=True)
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+
         window_index, cu_window_seqlens = self.get_window_index(grid_thw)
+
         cu_window_seqlens = torch.tensor(
             cu_window_seqlens,
             device=hidden_states.device,
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens).to("cuda", non_blocking=True)
+        max_window_seqlen = (cu_window_seqlens[1:] - cu_window_seqlens[:-1]).max().item()
 
         seq_len, _ = hidden_states.size()
-        hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        rotary_pos_emb = rotary_pos_emb[window_index, :, :]
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        position_embeddings = (emb.cos(), emb.sin())
-
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            dim=0,
-            # Select dtype based on the following factors:
-            #  - FA2 requires that cu_seqlens_q must have dtype int32
-            #  - torch.onnx.export requires that cu_seqlens_q must have same
-            #      dtype as grid_thw
-            # See https://github.com/huggingface/transformers/pull/34852
-            #      for more information
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        pos_shape = (seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        hidden_states = hidden_states.reshape(pos_shape)[window_index].view(seq_len, -1)
+        rotary_cos = rotary_cos.reshape(pos_shape)[window_index].view(seq_len, -1)
+        rotary_sin = rotary_sin.reshape(pos_shape)[window_index].view(seq_len, -1)
 
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
+                max_seqlen_now = max_seqlen
             else:
                 cu_seqlens_now = cu_window_seqlens
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    blk.__call__,
-                    hidden_states,
-                    cu_seqlens_now,
-                    None,
-                    position_embeddings,
-                )
-            else:
-                hidden_states = blk(
-                    hidden_states,
-                    cu_seqlens=cu_seqlens_now,
-                    position_embeddings=position_embeddings,
-                )
+                max_seqlen_now = max_window_seqlen
+
+            hidden_states = blk(
+                hidden_states,
+                cu_seqlens=cu_seqlens_now,
+                max_seqlen=max_seqlen_now,
+                rotary_cos=rotary_cos,
+                rotary_sin=rotary_sin,
+            )
 
         hidden_states = self.merger(hidden_states)
         reverse_indices = torch.argsort(window_index)
@@ -416,12 +333,23 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
 
         return hidden_states
 
-    def load_model(self, weight_dir):
+    def load_image(self, img: List[ImageItem]):
+        pixel_values = None
+        if isinstance(img, ImageItem):
+            image_data = read_shm(get_shm_name_data(img.uuid))
+            image_data = Image.open(BytesIO(image_data))
+            image_data = resize_image(image_data)
+            pixel_values, image_grid_thw = self.processor.preprocess(image_data)
+        elif isinstance(img, dict):
+            image_data = read_shm(get_shm_name_data(img["uuid"]))
+            image_data = Image.open(BytesIO(image_data))
+            image_data = resize_image(image_data)
+            pixel_values, image_grid_thw = self.processor.preprocess(image_data)
+        else:
+            raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+        return pixel_values.to(dtype=self.data_type), image_grid_thw
 
-        processor_config_path = os.path.join(weight_dir, "preprocessor_config.json")
-        with open(processor_config_path, "r") as f:
-            processor_config_dict = json.load(f)
-        self.processor = Qwen2VLImageProcessor(**processor_config_dict)
+    def load_model(self, weight_dir):
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:
@@ -455,10 +383,8 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
-                image_data = get_image(image_data)
-                image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
-                pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
-                image_grid_thw = image_inputs["image_grid_thw"]
+                image_data = resize_image(image_data)
+                pixel_values, image_grid_thw = self.processor.preprocess(image_data)
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
@@ -476,10 +402,9 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.cuda().to(dtype=torch.float32)
-        image_grid_thw = grid_thw.cuda()
+        pixel_values = imgs.to("cuda", dtype=self.data_type, non_blocking=True)
+        image_grid_thw = grid_thw.to("cuda", non_blocking=True)
 
-        pixel_values = pixel_values.type(self.get_dtype())
         all_img_embeds = self.forward(pixel_values, grid_thw=image_grid_thw)
 
         return all_img_embeds, uuids, valid_ids
