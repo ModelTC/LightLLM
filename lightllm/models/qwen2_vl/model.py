@@ -55,8 +55,8 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
             height=height, width=width, min_pixels=self.min_pixel, max_pixels=self.max_pixel
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
-        self.token_num = (grid_h * grid_w) // (self.merge_size ** 2)
-        return self.token_num
+        token_num = (grid_h * grid_w) // (self.merge_size ** 2)
+        return token_num
 
     def get_audio_token_length(self, audio: AudioItem):
         raise NotImplementedError
