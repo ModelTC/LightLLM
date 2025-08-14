@@ -3,7 +3,7 @@ import math
 import torch
 import numpy as np
 from PIL import Image
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.image_transforms import (
@@ -103,7 +103,7 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
         self.merge_size = merge_size
         self.data_format = ChannelDimension.FIRST
 
-    def preprocess(self, image):
+    def preprocess(self, image) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.do_convert_rgb:
             image = convert_to_rgb(image)
         image = to_numpy_array(image)
@@ -136,11 +136,13 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
         patches = np.array([image])
 
         if patches.shape[0] == 1:
+            # why to copy image 2 times. use self.temporal_patch_size = 2.
             patches = np.tile(patches, (self.temporal_patch_size, 1, 1, 1))
         channel = patches.shape[1]
+        grid_t = patches.shape[0] // self.temporal_patch_size
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
         patches = patches.reshape(
-            1,
+            grid_t,
             self.temporal_patch_size,
             channel,
             grid_h // self.merge_size,
@@ -152,9 +154,9 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
         )
         patches = patches.transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
         flatten_patches = patches.reshape(
-            grid_h * grid_w, channel * self.temporal_patch_size * self.patch_size * self.patch_size
+            grid_t * grid_h * grid_w, channel * self.temporal_patch_size * self.patch_size * self.patch_size
         )
-        image_grid_thw = (1, grid_h, grid_w)
+        image_grid_thw = (grid_t, grid_h, grid_w)
         pixel_values = torch.as_tensor(flatten_patches)
         grid_thw = torch.as_tensor([image_grid_thw])
 
