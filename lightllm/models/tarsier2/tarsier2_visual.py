@@ -254,9 +254,8 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
                 image_data = resize_image(image_data)
-                image_inputs = self.processor.preprocess(images=image_data, return_tensors="pt")
-                pixel_values = image_inputs["pixel_values"].to(dtype=torch.bfloat16)
-                image_grid_thw = image_inputs["image_grid_thw"]
+                pixel_values, image_grid_thw = self.processor.preprocess(image=image_data)
+                pixel_values = pixel_values.to(dtype=torch.bfloat16)
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
