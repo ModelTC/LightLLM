@@ -160,9 +160,6 @@ Different Parallel Mode Setting Parameters
 .. option:: --dp
 
     Data parallelism size, default is ``1``
-    
-    This is a useful parameter for deepseekv2. When using deepseekv2 model, set dp equal to the tp parameter.
-    In other cases, please do not set it, keep the default value of 1.
 
 .. option:: --nccl_host
 
