@@ -28,9 +28,9 @@ def rotary_kernel(
     offs_d = tl.arange(0, BLOCK_D)
     d = pid_blk * BLOCK_D + offs_d
     mask = d < D
-    
+
     base = pid_l * stride_l + pid_h * stride_h
-    
+
     in_ptr = inp_ptr + base + d * stride_d
     cos_ptr_ = cos_ptr + pid_l * stride_cos_l + d
     sin_ptr_ = sin_ptr + pid_l * stride_sin_l + d
