@@ -31,10 +31,10 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
     def __init__(self, tokenizer=None, image_processor=None, **kwargs):
         super().__init__(tokenizer)
         self.image_processor = image_processor
-        self.min_pixel = self.image_processor.image_processor.min_pixels
-        self.max_pixel = self.image_processor.image_processor.max_pixels
-        self.patch_size = self.image_processor.image_processor.patch_size
-        self.merge_size = self.image_processor.image_processor.merge_size
+        self.min_pixel = self.image_processor.min_pixels
+        self.max_pixel = self.image_processor.max_pixels
+        self.patch_size = self.image_processor.patch_size
+        self.merge_size = self.image_processor.merge_size
         self.image_start_id = kwargs["model_cfg"]["vision_start_token_id"]
         self.image_end_id = kwargs["model_cfg"]["vision_end_token_id"]
         self.image_token_id = kwargs["model_cfg"]["image_token_id"]
