@@ -52,7 +52,7 @@ def smart_resize(
     return h_bar, w_bar
 
 
-def resize_image(image_file: str | Image.Image, size_factor: int = IMAGE_FACTOR) -> tuple[Image.Image, int, int]:
+def resize_image(image_file: Image.Image, size_factor: int = IMAGE_FACTOR) -> tuple[Image.Image, int, int]:
 
     image = image_file.convert("RGB")
     width, height = image.size
