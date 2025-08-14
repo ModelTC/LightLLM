@@ -101,7 +101,8 @@ class VisionRotaryEmbedding(nn.Module):
         self.theta = theta
         self.inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self._seq_len_cached = 0
-        self._freqs_cached = None
+        self._freqs_cos_cached = None
+        self._freqs_sin_cached = None
 
     def update_freqs_cache(self, seqlen: int) -> None:
         if seqlen > self._seq_len_cached:
@@ -112,11 +113,12 @@ class VisionRotaryEmbedding(nn.Module):
             )
             seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
             freqs = torch.outer(seq, self.inv_freq)
-            self._freqs_cached = freqs
+            self._freqs_cos_cached = freqs.cos()
+            self._freqs_sin_cached = freqs.sin()
 
     def forward(self, seqlen: int) -> torch.Tensor:
         self.update_freqs_cache(seqlen)
-        return self._freqs_cached[:seqlen]
+        return self._freqs_cos_cached[:seqlen], self._freqs_sin_cached[:seqlen]
 
 
 class VisionFlashAttention(nn.Module):
@@ -131,12 +133,13 @@ class VisionFlashAttention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int = 0,
-        rotary_pos_emb: torch.Tensor = None,
+        rotary_cos: torch.Tensor = None,
+        rotary_sin: torch.Tensor = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        q = apply_rotary_pos_emb_triton(q, rotary_pos_emb.cos(), rotary_pos_emb.sin())
-        k = apply_rotary_pos_emb_triton(k, rotary_pos_emb.cos(), rotary_pos_emb.sin())
+        q = apply_rotary_pos_emb_triton(q, rotary_cos, rotary_sin)
+        k = apply_rotary_pos_emb_triton(k, rotary_cos, rotary_sin)
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
 
@@ -156,9 +159,13 @@ class Qwen2VLVisionBlock(nn.Module):
         self.attn = VisionFlashAttention(embed_dim, num_heads=num_heads)
         self.mlp = VisionMlp(dim=embed_dim, hidden_dim=mlp_hidden_dim, hidden_act=hidden_act)
 
-    def forward(self, hidden_states, cu_seqlens, max_seqlen, rotary_pos_emb) -> torch.Tensor:
+    def forward(self, hidden_states, cu_seqlens, max_seqlen, rotary_cos, rotary_sin) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
-            self.norm1(hidden_states), cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, rotary_pos_emb=rotary_pos_emb
+            self.norm1(hidden_states),
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            rotary_cos=rotary_cos,
+            rotary_sin=rotary_sin,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -266,13 +273,16 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size).type(torch.float32)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
-        return rotary_pos_emb
+        cos_full, sin_full = self.rotary_pos_emb(max_grid_size)
+        cos = cos_full[pos_ids].flatten(1)
+        sin = sin_full[pos_ids].flatten(1)
+        return cos, sin
 
     def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         hidden_states = self.patch_embed(hidden_states)
-        rotary_pos_emb = self.rot_pos_emb(grid_thw).to("cuda", non_blocking=True)
+        rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw)
+        rotary_cos = rotary_cos.to("cuda", non_blocking=True)
+        rotary_sin = rotary_sin.to("cuda", non_blocking=True)
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0, dtype=torch.int32
         )
@@ -282,7 +292,11 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         cu_seqlens = cu_seqlens.to("cuda", non_blocking=True)
         for blk in self.blocks:
             hidden_states = blk(
-                hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, rotary_pos_emb=rotary_pos_emb
+                hidden_states,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                rotary_cos=rotary_cos,
+                rotary_sin=rotary_sin,
             )
         return self.merger(hidden_states)
 

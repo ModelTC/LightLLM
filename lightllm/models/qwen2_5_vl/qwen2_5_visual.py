@@ -234,9 +234,10 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size).type(torch.float32)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
-        return rotary_pos_emb
+        cos_full, sin_full = self.rotary_pos_emb(max_grid_size)
+        cos = cos_full[pos_ids].flatten(1)
+        sin = sin_full[pos_ids].flatten(1)
+        return cos, sin
 
     def get_window_index(self, grid_thw):
         window_index: list = []
@@ -281,7 +282,9 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         hidden_states = self.patch_embed(hidden_states)
-        rotary_pos_emb = self.rot_pos_emb(grid_thw).to("cuda", non_blocking=True)
+        rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw)
+        rotary_cos = rotary_cos.to("cuda", non_blocking=True)
+        rotary_sin = rotary_sin.to("cuda", non_blocking=True)
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0, dtype=torch.int32
         )
