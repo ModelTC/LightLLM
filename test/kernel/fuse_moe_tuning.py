@@ -62,7 +62,7 @@ def test_kernel(
     use_fp8_w8a8: bool,
     is_up: bool,
     block_shape,
-    num_fused_experts: int,
+    num_fused_shared_experts: int,
     **config,
 ):
     set_seed()
@@ -70,8 +70,8 @@ def test_kernel(
 
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1_scale = w2_scale = None
-    if num_fused_experts > 0:
-        expert_num += num_fused_experts
+    if num_fused_shared_experts > 0:
+        expert_num += num_fused_shared_experts
 
     if use_fp8_w8a8:
         init_dtype = dtype
@@ -95,28 +95,28 @@ def test_kernel(
         w1 = torch.randn(expert_num, 2 * n, k, dtype=dtype).cuda()
         w2 = torch.randn(expert_num, k, 2 * n // 2, dtype=dtype).cuda()
 
-    rnd_logics = torch.randn(m, expert_num - num_fused_experts, device="cuda")
+    rnd_logics = torch.randn(m, expert_num - num_fused_shared_experts, device="cuda")
     topk_values, topk_ids = torch.topk(rnd_logics, topk, dim=1)
-    topk_weights = torch.randn((m, topk + num_fused_experts), device="cuda", dtype=dtype) / 10
-
-    if num_fused_experts > 0:
+    if num_fused_shared_experts > 0:
+        # 存在融合共享专家的时候，需要pad 共享专家对应的id 到topk_ids 中
         pad_topk_ids = torch.arange(
-                start=expert_num - num_fused_experts, 
+                start=expert_num - num_fused_shared_experts, 
                 end=expert_num,
                 step=1,
                 dtype=topk_ids.dtype,
-                device="cuda").view(1, num_fused_experts).repeat(topk_ids.shape[0], 1)
+                device="cuda").view(1, num_fused_shared_experts).repeat(topk_ids.shape[0], 1)
         topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
+    topk_weights = torch.randn((m, topk + num_fused_shared_experts), device="cuda", dtype=dtype) / 10
 
-    expert_to_tokens = torch.empty((expert_num, (topk + num_fused_experts) * m), dtype=torch.int32, device="cuda")
-    expert_to_weights = torch.empty((expert_num, (topk + num_fused_experts) * m), dtype=torch.float32, device="cuda")
+    expert_to_tokens = torch.empty((expert_num, (topk + num_fused_shared_experts) * m), dtype=torch.int32, device="cuda")
+    expert_to_weights = torch.empty((expert_num, (topk + num_fused_shared_experts) * m), dtype=torch.float32, device="cuda")
     moe_align(topk_ids=topk_ids, out=expert_to_tokens)
     expert_to_token_num = torch.empty((expert_num,), dtype=torch.int32, device="cuda")
-    moe_align1(expert_to_tokens, topk_weights, expert_to_weights, expert_to_token_num, topk=topk + num_fused_experts)
+    moe_align1(expert_to_tokens, topk_weights, expert_to_weights, expert_to_token_num, topk=topk + num_fused_shared_experts)
 
-    out1 = torch.zeros((m * (topk + num_fused_experts), 2 * n), dtype=torch.bfloat16, device="cuda")
-    down_in = torch.zeros((m * (topk + num_fused_experts), n), dtype=torch.bfloat16, device="cuda")
-    out2 = torch.zeros((m * (topk + num_fused_experts), k), dtype=torch.bfloat16, device="cuda")
+    out1 = torch.zeros((m * (topk + num_fused_shared_experts), 2 * n), dtype=torch.bfloat16, device="cuda")
+    down_in = torch.zeros((m * (topk + num_fused_shared_experts), n), dtype=torch.bfloat16, device="cuda")
+    out2 = torch.zeros((m * (topk + num_fused_shared_experts), k), dtype=torch.bfloat16, device="cuda")
 
     for _ in range(test_count):
         input_tuples.append(
@@ -230,7 +230,7 @@ def worker(
     use_fp8_w8a8: bool,
     is_up: bool,
     block_shape,
-    num_fused_experts: int,
+    num_fused_shared_experts: int,
     test_configs,
     queue,
 ):
@@ -247,7 +247,7 @@ def worker(
                 use_fp8_w8a8=use_fp8_w8a8,
                 is_up=is_up,
                 block_shape=block_shape,
-                num_fused_experts=num_fused_experts,
+                num_fused_shared_experts=num_fused_shared_experts,
                 **test_configs[index],
             )
             queue.put(cost_time)  # Put result in queue
@@ -280,7 +280,7 @@ def get_test_configs(split_id, split_count):
                 4,
                 8,
             ]:
-                for BLOCK_SIZE_M in [32, 64, 128]:
+                for BLOCK_SIZE_M in [16, 32, 64, 128]:
                     for BLOCK_SIZE_N in [32, 64, 128]:
                         for BLOCK_SIZE_K in [32, 64, 128]:
                             t_config = {
@@ -311,7 +311,7 @@ def tuning_configs(
     use_fp8_w8a8: bool,
     is_up: bool,
     block_shape,
-    num_fused_experts: int,
+    num_fused_shared_experts: int,
 ):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
     best_config, best_cost_time = None, 10000000
@@ -335,7 +335,7 @@ def tuning_configs(
                 use_fp8_w8a8,
                 is_up,
                 block_shape,
-                num_fused_experts,
+                num_fused_shared_experts,
                 test_configs,
                 queue,
             ),
@@ -370,7 +370,7 @@ def tuning_configs(
                 use_fp8_w8a8,
                 is_up,
                 block_shape,
-                num_fused_experts,
+                num_fused_shared_experts,
                 test_configs,
                 queue,
             ),
@@ -437,7 +437,7 @@ def main(args):
                 "use_fp8_w8a8": use_fp8_w8a8,
                 "is_up": True,
                 "block_shape": block_shape,
-                "num_fused_experts": args.num_fused_experts,
+                "num_fused_shared_experts": args.num_fused_shared_experts,
             },
         )
         up_dict[m] = ans
@@ -445,7 +445,7 @@ def main(args):
             N=n * 2,
             K=hidden_dim,
             topk_num=topk_num,
-            expert_num=expert_num + args.num_fused_experts,
+            expert_num=expert_num + args.num_fused_shared_experts,
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
             out_dtype=str(torch.bfloat16),
@@ -467,7 +467,7 @@ def main(args):
                 "use_fp8_w8a8": use_fp8_w8a8,
                 "is_up": False,
                 "block_shape": block_shape,
-                "num_fused_experts": args.num_fused_experts,
+                "num_fused_shared_experts": args.num_fused_shared_experts,
             },
         )
         down_dict[m] = ans
@@ -476,7 +476,7 @@ def main(args):
             N=hidden_dim,
             K=n,
             topk_num=1,
-            expert_num=expert_num + args.num_fused_experts,
+            expert_num=expert_num + args.num_fused_shared_experts,
             mul_routed_weight=True,
             use_fp8_w8a8=use_fp8_w8a8,
             out_dtype=str(torch.bfloat16),
@@ -489,6 +489,6 @@ if __name__ == "__main__":
     parser.add_argument("--model_dir", type=str, default="deepseek-ai/DeepSeek-R1")
     parser.add_argument("--tp", type=int, default=8)
     parser.add_argument("--use_fp8_w8a8", action="store_true")
-    parser.add_argument("--num_fused_experts", type=int, default=0)
+    parser.add_argument("--num_fused_shared_experts", type=int, default=0)
     args = parser.parse_args()
     main(args)
