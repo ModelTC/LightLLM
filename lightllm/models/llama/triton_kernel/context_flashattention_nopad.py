@@ -84,7 +84,7 @@ def _fwd_kernel(
             Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * (start_n + offs_n),
             mask=(start_n + offs_n) < block_end_loc,
             other=0,
-        )
+        ).to(tl.int64)
         off_k = kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
         k = tl.load(K + off_k, mask=(start_n + offs_n[None, :]) < block_end_loc, other=0.0)
         qk = tl.dot(q, k)

@@ -136,7 +136,7 @@ def _fwd_kernel_destindex_copy_dequantize_kv(
 
     kv_loc = tl.load(
         req_to_token_indexs + cur_batch_req_idx * stride_req_to_tokens_b + offs_kv_loc, mask=offs_kv_loc < cur_seq_len
-    )
+    ).to(tl.int64)
     offs_kv = kv_loc[:, None] * stride_kv_b + cur_head * stride_kv_h + cur_group * stride_kv_g + offs_d[None, :]
 
     src_data = tl.load(

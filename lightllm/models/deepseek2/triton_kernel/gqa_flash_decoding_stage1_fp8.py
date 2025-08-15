@@ -108,7 +108,7 @@ def _fwd_kernel_flash_decode_stage1_padding_fp8(
                     req_to_tokens_ptr + offs_n_new,
                     mask=seq_n_mask,
                     other=0,
-                )
+                ).to(tl.int64)
                 off_kv = kv_loc[None, :] * stride_kv_bs + offs_d[:, None]
                 kv = tl.load(KV_nope + off_kv, mask=seq_n_mask[None, :], other=0.0)
                 off_rope_kv = kv_loc[None, :] * stride_kv_rope_bs + offs_rope_d[:, None]
