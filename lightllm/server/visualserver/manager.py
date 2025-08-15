@@ -30,9 +30,11 @@ class VisualManager:
         cache_port,
         visual_model_rpc_ports,
     ):
+        self.visual_only = True if args.run_mode == "visual_only" else False
         context = zmq.Context(2)
-        self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
-        self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
+        if not self.visual_only:
+            self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
 
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")

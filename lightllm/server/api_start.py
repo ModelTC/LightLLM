@@ -416,6 +416,108 @@ def pd_master_start(args):
     http_server_process.wait()
 
 
+def visual_only_start(args):
+    set_unique_server_name(args)
+    if args.run_mode != "visual_only":
+        return
+
+    can_use_ports = alloc_can_use_network_port(
+        num=5 + args.visual_dp * args.visual_tp,
+    )
+    logger.info(f"alloced ports: {can_use_ports}")
+    (
+        router_port,
+        visual_port,
+        audio_port,
+        cache_port,
+        metric_port,
+    ) = can_use_ports[0:5]
+    can_use_ports = can_use_ports[5:]
+
+    visual_model_tp_ports = []
+    for _ in range(args.visual_dp):
+        tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
+        can_use_ports = can_use_ports[args.visual_tp :]
+        visual_model_tp_ports.append(tp_ports_for_dp)
+
+    # 将申请好的端口放入args参数中
+    args.router_port = router_port
+    args.visual_port = visual_port
+    args.audio_port = audio_port
+    args.cache_port = cache_port
+    args.metric_port = metric_port
+
+    logger.info(f"all start args:{args}")
+
+    set_env_start_args(args)
+
+    from .visualserver.manager import start_visual_process
+
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_cache_manager,
+        ],
+        start_args=[(cache_port, args)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_visual_process,
+        ],
+        start_args=[
+            (args, audio_port, visual_port, cache_port, visual_model_tp_ports),
+        ],
+    )
+    if args.enable_multimodal_audio:
+        from .audioserver.manager import start_audio_process
+
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_audio_process,
+            ],
+            start_args=[
+                (args, router_port, audio_port, cache_port),
+            ],
+        )
+
+    # 启动 gunicorn
+    command = [
+        "gunicorn",
+        "--workers",
+        f"{args.httpserver_workers}",
+        "--worker-class",
+        "uvicorn.workers.UvicornWorker",
+        "--bind",
+        f"{args.host}:{args.port}",
+        "--log-level",
+        "info",
+        "--access-logfile",
+        "-",
+        "--error-logfile",
+        "-",
+        "lightllm.server.api_http:app",
+        "--timeout",
+        f"{get_lightllm_gunicorn_time_out_seconds()}",
+        "--keep-alive",
+        f"{get_lightllm_gunicorn_keep_alive()}",
+    ]
+
+    # 启动子进程
+    http_server_process = subprocess.Popen(command)
+
+    if "s3://" in args.model_dir:
+        from lightllm.utils.petrel_helper import s3_model_clear
+
+        s3_model_clear(args.model_dir)
+
+    if args.health_monitor:
+        from lightllm.server.health_monitor.manager import start_health_check_process
+
+        process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+    setup_signal_handlers(http_server_process, process_manager)
+    http_server_process.wait()
+    return
+
+
 def config_server_start(args):
     set_unique_server_name(args)
     if args.run_mode != "config_server":
