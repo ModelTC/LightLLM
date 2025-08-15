@@ -29,23 +29,25 @@ def _silu_and_mul_kernel_fast(
     m_end_index = tl.where(m_end_index < size_m, m_end_index, size_m)
     if NEED_MASK:
         mask = n_offsets[None, :] < size_n
+        other = 0.0
     else:
         mask = None
+        other = None
     
     for m_index in range(m_start_index, m_end_index):
         gate_offsets = m_index * stride_input_m + n_offsets[None, :]
         up_offsets = m_index * stride_input_m + (n_offsets[None, :] + size_n)
         out_offsets = m_index * stride_output_m + n_offsets[None, :]
-
+        
         up = tl.load(
             input_ptr + up_offsets,
             mask=mask,
-            other=0.0,
+            other=other,
         )
         gate = tl.load(
             input_ptr + gate_offsets,
             mask=mask,
-            other=0.0,
+            other=other,
         ).to(tl.float32)
 
         gate = gate / (1 + tl.exp(-gate))
