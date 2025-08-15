@@ -36,7 +36,11 @@ class DecodeReq:
         return
 
     def need_detoken(self):
-        if (not self.req.is_aborted) and len(self.output_ids) < self.req.candetoken_out_len:
+        if (
+            (not self.req.is_aborted)
+            and (not self.req.stop_str_matched)
+            and len(self.output_ids) < self.req.candetoken_out_len
+        ):
             return True
         return False
 
@@ -55,6 +59,9 @@ class DecodeReq:
     def can_set_release_mark(self):
         if self.req.is_aborted:
             return True
+        if self.req.stop_str_matched:
+            # httpserver那里必须先处理完请求, 这里才能释放
+            return self.req.out_tokens_queue.is_empty()
         if (
             self.req.finish_status.is_finished()
             and self.req.candetoken_out_len == len(self.output_ids)
