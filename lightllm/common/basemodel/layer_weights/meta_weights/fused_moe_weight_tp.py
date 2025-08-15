@@ -67,7 +67,6 @@ class FusedMoeWeightTP(BaseWeight):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             scoring_func=self.scoring_func,
-            num_fused_shared_experts=self.num_fused_shared_experts,
         )
         if self.num_fused_shared_experts > 0:
             topk_ids[:, -1] = self.n_routed_experts - 1

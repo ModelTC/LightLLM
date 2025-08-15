@@ -175,7 +175,6 @@ def select_experts(
     num_expert_group: Optional[int] = None,
     scoring_func: str = "softmax",
     custom_routing_function: Optional[Callable] = None,
-    num_fused_shared_experts: int = 0,
 ):
     from lightllm.common.fused_moe.topk_select import fused_topk
     from lightllm.common.fused_moe.grouped_topk import triton_grouped_topk
@@ -211,7 +210,6 @@ def select_experts(
                 topk_group=topk_group,
                 scoring_func=scoring_func,
                 group_score_used_topk_num=group_score_topk_num,
-                num_fused_shared_experts=num_fused_shared_experts,
             )
 
     elif custom_routing_function is None:
