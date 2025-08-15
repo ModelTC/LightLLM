@@ -81,7 +81,7 @@ def rotary_emb_fwd(q, k, cos, sin):
         BLOCK_SEQ = 16
 
     num_warps = 1
-    num_stages = 5
+    num_stages = 3
 
     grid = (triton.cdiv(total_len, BLOCK_SEQ),)
     _rotary_kernel[grid](
