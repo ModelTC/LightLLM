@@ -98,8 +98,15 @@ def test_kernel(
     rnd_logics = torch.randn(m, expert_num - num_fused_experts, device="cuda")
     topk_values, topk_ids = torch.topk(rnd_logics, topk, dim=1)
     topk_weights = torch.randn((m, topk + num_fused_experts), device="cuda", dtype=dtype) / 10
+
     if num_fused_experts > 0:
-        topk_ids = F.pad(topk_ids, (0, 1), mode="constant", value=expert_num)
+        pad_topk_ids = torch.arange(
+                start=expert_num - num_fused_experts, 
+                end=expert_num,
+                step=1,
+                dtype=topk_ids.dtype,
+                device="cuda").view(1, num_fused_experts).repeat(topk_ids.shape[0], 1)
+        topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
 
     expert_to_tokens = torch.empty((expert_num, (topk + num_fused_experts) * m), dtype=torch.int32, device="cuda")
     expert_to_weights = torch.empty((expert_num, (topk + num_fused_experts) * m), dtype=torch.float32, device="cuda")
@@ -107,9 +114,9 @@ def test_kernel(
     expert_to_token_num = torch.empty((expert_num,), dtype=torch.int32, device="cuda")
     moe_align1(expert_to_tokens, topk_weights, expert_to_weights, expert_to_token_num, topk=topk + num_fused_experts)
 
-    out1 = torch.zeros((m * (topk + 1), 2 * n), dtype=torch.bfloat16, device="cuda")
-    down_in = torch.zeros((m * (topk + 1), n), dtype=torch.bfloat16, device="cuda")
-    out2 = torch.zeros((m * (topk + 1), k), dtype=torch.bfloat16, device="cuda")
+    out1 = torch.zeros((m * (topk + num_fused_experts), 2 * n), dtype=torch.bfloat16, device="cuda")
+    down_in = torch.zeros((m * (topk + num_fused_experts), n), dtype=torch.bfloat16, device="cuda")
+    out2 = torch.zeros((m * (topk + num_fused_experts), k), dtype=torch.bfloat16, device="cuda")
 
     for _ in range(test_count):
         input_tuples.append(
