@@ -4,6 +4,7 @@ import time
 import uuid
 import subprocess
 import signal
+import shutil
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
@@ -15,6 +16,7 @@ from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
+from lightllm.utils.shm_size_check import check_recommended_shm_size
 
 logger = init_logger(__name__)
 
@@ -61,6 +63,8 @@ def setup_signal_handlers(http_server_process, process_manager):
 
 def normal_or_p_d_start(args):
     set_unique_server_name(args)
+
+    check_recommended_shm_size(args)
 
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
