@@ -3,7 +3,9 @@ import numpy as np
 from .mem_manager import MemoryManager
 from typing import List, Union
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_page_size
+from lightllm.utils.envs_utils import get_unique_server_name, get_page_size
+from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+from lightllm.utils.dist_utils import get_current_rank_in_node
 
 
 def cdiv(a, b):
@@ -23,6 +25,12 @@ class PageSizeVariableMemoryManager(MemoryManager):
         )
         self.mark_page_start = 0
         self.can_use_page_size = cdiv(self.size, page_size)
+
+        rank_in_node = get_current_rank_in_node()
+        self.shared_can_use_page_num = SharedInt(
+            f"{get_unique_server_name()}_mem_manger_can_use_page_num_{rank_in_node}"
+        )
+        self.shared_can_use_page_num.set_value(self.can_use_page_size)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.kv_buffer = torch.empty(
@@ -141,6 +149,7 @@ class PageSizeVariableMemoryManager(MemoryManager):
         token_idxs = self.get_paged_token_indexs(b_req_idx, page_size, b_seq_len, b_ready_cache_len, is_prefill)
         self.can_use_mem_size -= need_size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        self.shared_can_use_page_num.set_value(self.can_use_page_size)
         return token_idxs
 
     def free(self, free_index: Union[torch.Tensor, List[int]]):
@@ -154,12 +163,13 @@ class PageSizeVariableMemoryManager(MemoryManager):
         if len(free_index) == 0:
             return
 
-        page_indices = free_index // page_size
-        unique_pages = torch.unique(page_indices)
-        for page_idx in sorted(unique_pages, reverse=True):  # 逆序放回，保持池的相对顺序
+        base_free_index = free_index[free_index % page_size == 0]
+        page_indices = base_free_index // page_size
+        for page_idx in sorted(page_indices, reverse=True):  # 逆序放回，保持池的相对顺序
             self.mark_page_start -= 1
             self.page_idx_pool[self.mark_page_start] = page_idx
             self.can_use_page_size += 1
+        self.shared_can_use_page_num.set_value(self.can_use_page_size)
 
         return
 
@@ -168,6 +178,7 @@ class PageSizeVariableMemoryManager(MemoryManager):
         page_size = get_page_size()
         self.mark_page_start = 0
         self.can_use_page_size = cdiv(self.size, page_size)
+        self.shared_can_use_page_num.set_value(self.can_use_page_size)
         self.page_idx_pool = torch.arange(
             0, cdiv(self.size, page_size), dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
         )

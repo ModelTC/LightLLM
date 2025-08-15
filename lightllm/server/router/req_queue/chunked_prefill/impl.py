@@ -3,6 +3,11 @@ import numpy as np
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 from lightllm.common.basemodel.infer_lock import g_router_lock
+from lightllm.utils.envs_utils import get_page_size
+
+
+def cdiv(a, b):
+    return (a + b - 1) // b
 
 
 class ChunkedPrefillQueue(BaseQueue):
@@ -21,8 +26,9 @@ class ChunkedPrefillQueue(BaseQueue):
         return
 
     # @calculate_time(show=True, min_cost_ms=0.1)
-    def _can_add_new_req(self, req: Req, is_busy, new_batch_first_router_need_tokens):
-        self.cache_len_list.append(req.get_tuple_tokens(is_busy, self.router_max_new_token_len))  # hard to analysis
+    def _can_add_new_req(self, req: Req, is_busy, new_batch_first_router_need_tokens, new_batch_prefill_need_pages):
+        token_infos = req.get_tuple_tokens(is_busy, self.router_max_new_token_len)
+        self.cache_len_list.append(token_infos)  # hard to analysis
         self.cache_len_list.sort(key=lambda x: -x[1])
 
         left_out_len_array = np.array([e[1] for e in self.cache_len_list])
@@ -32,9 +38,11 @@ class ChunkedPrefillQueue(BaseQueue):
 
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
         with g_router_lock.obj:
+            page_size = get_page_size()
+            page_remaining = (len(self.cache_len_list) - 1) * page_size if page_size > 1 else 0
             ok_token_num = (
                 need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)
-                < self.max_total_tokens
+                < self.max_total_tokens - page_remaining
             )
 
             ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
@@ -49,9 +57,9 @@ class ChunkedPrefillQueue(BaseQueue):
                     / self.max_total_tokens,
                     self.dp_index,
                 )
-                return True, new_batch_first_router_need_tokens
+                return True, new_batch_first_router_need_tokens, new_batch_prefill_need_pages
             else:
-                return False, new_batch_first_router_need_tokens
+                return False, new_batch_first_router_need_tokens, new_batch_prefill_need_pages
 
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch):
@@ -77,6 +85,7 @@ class ChunkedPrefillQueue(BaseQueue):
 
         waiting_queue = self.waiting_req_list
 
+        new_batch_prefill_need_pages = cdiv(new_batch_first_router_need_tokens, get_page_size())
         for req in waiting_queue:
             if req.is_aborted:
                 # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.
@@ -84,8 +93,8 @@ class ChunkedPrefillQueue(BaseQueue):
                 aborted_count += 1
                 abort_req_list.append(req)
                 continue
-            ok_insert, new_batch_first_router_need_tokens = self._can_add_new_req(
-                req, is_busy, new_batch_first_router_need_tokens
+            ok_insert, new_batch_first_router_need_tokens, new_batch_prefill_need_pages = self._can_add_new_req(
+                req, is_busy, new_batch_first_router_need_tokens, new_batch_prefill_need_pages
             )
             if ok_insert:
                 can_run_list.append(req)
