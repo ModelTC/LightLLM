@@ -88,15 +88,15 @@ Performance testing using ShareGPT real conversation data.
     python test/benchmark/service/benchmark_sharegpt.py \
         --dataset /path/to/sharegpt_dataset.json \
         --tokenizer /path/to/tokenizer \
-        --num_prompts 1000 \
-        --request_rate 10.0
+        --num-prompts 1000 \
+        --request-rate 10.0
 
 **Main Parameters:**
 
 - ``--dataset``: ShareGPT format dataset path
 - ``--tokenizer``: Tokenizer path
-- ``--num_prompts``: Number of test prompts
-- ``--request_rate``: Request rate (requests/s)
+- ``--num-prompts``: Number of test prompts
+- ``--request-rate``: Request rate (requests/s)
 
 Prompt Cache Testing
 ~~~~~~~~~~~~~~~~~~~
