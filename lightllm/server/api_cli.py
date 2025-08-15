@@ -445,7 +445,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
-        help="""Whether to enable fused shared experts for deepseekv3 model.""",
+        help="""Whether to enable fused shared experts for deepseekv3 model. only work when MOE_MODE=TP """,
     )
     parser.add_argument(
         "--mtp_mode",
