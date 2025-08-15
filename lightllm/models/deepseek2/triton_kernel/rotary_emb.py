@@ -74,28 +74,32 @@ def rotary_emb_fwd(q, k, cos, sin):
     assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], f"q shape {q.shape} cos shape {cos.shape}"
     assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
     assert triton.next_power_of_2(head_dim) == head_dim
-    BLOCK_SEQ = 16
+
+    if total_len <= 512:
+        BLOCK_SEQ = 1
+    else:
+        BLOCK_SEQ = 16
 
     num_warps = 1
     num_stages = 5
 
     grid = (triton.cdiv(total_len, BLOCK_SEQ),)
     _rotary_kernel[grid](
-        q,
-        k,
-        cos,
-        sin,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        cos.stride(0),
-        cos.stride(1),
-        sin.stride(0),
-        sin.stride(1),
-        total_len,
+        Q=q,
+        K=k,
+        Cos=cos,
+        Sin=sin,
+        stride_qbs=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_qd=q.stride(2),
+        stride_kbs=k.stride(0),
+        stride_kh=k.stride(1),
+        stride_kd=k.stride(2),
+        stride_cosbs=cos.stride(0),
+        stride_cosd=cos.stride(1),
+        stride_sinbs=sin.stride(0),
+        stride_sind=sin.stride(1),
+        max_total_len=total_len,
         HEAD_Q=head_num_q,
         HEAD_K=head_num_k,
         BLOCK_SEQ=BLOCK_SEQ,
