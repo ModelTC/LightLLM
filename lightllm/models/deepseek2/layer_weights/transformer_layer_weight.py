@@ -99,12 +99,14 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 if weight_tensor is not None:
                     weights[f"{new_prefix}.{expert_id}.{proj}.weight"] = weight_tensor
                 if self.quant_cfg.quantized_weight:
+                    assert weight_scale_suffix is not None
                     scale_tensor = weights.get(f"{old_prefix}.{proj}." + weight_scale_suffix)
                     if scale_tensor is not None:
                         weights[f"{new_prefix}.{expert_id}.{proj}." + weight_scale_suffix] = scale_tensor
 
     def load_hf_weights(self, weights):
         kv_b_quant_method = self.quant_cfg.get_quant_method(self.layer_num_, "kv_b_proj")
+        weight_scale_suffix = None
         if self.quant_cfg.quantized_weight:
             weight_scale_suffix = kv_b_quant_method.weight_scale_suffix
 
