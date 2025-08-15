@@ -118,7 +118,8 @@ class VisualManager:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
                         # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
                         # 需要一些一致的流程来保证不出现异步问题。
-                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        if not self.visual_only:
+                            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                         continue
 
                     multimodal_params = group_req_indexes.multimodal_params
@@ -134,20 +135,23 @@ class VisualManager:
                             await self.infer_imgs(images_need_infer)
                             images_need_infer = []
                             for _group_req_indexes in processing_group_reqs:
-                                self.send_to_next_module.send_pyobj(
-                                    _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
-                                )
+                                if not self.visual_only:
+                                    self.send_to_next_module.send_pyobj(
+                                        _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
+                                    )
                             processing_group_reqs = []
 
                     if len(images_need_infer) == 0:
-                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        if not self.visual_only:
+                            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
                 if len(images_need_infer) > 0:
                     await self.infer_imgs(images_need_infer)
                     for _group_req_indexes in processing_group_reqs:
-                        self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        if not self.visual_only:
+                            self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     processing_group_reqs = []
                     images_need_infer = []
 

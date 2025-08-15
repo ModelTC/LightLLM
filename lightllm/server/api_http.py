@@ -42,6 +42,7 @@ from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .visualserver.manager import VisualManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
+from .httpserver_for_visual_only.manager import HttpServerManagerForVisualOnly
 from .api_lightllm import lightllm_get_score, lightllm_get_image_embedding
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
 from lightllm.utils.log_utils import init_logger
@@ -69,7 +70,7 @@ class G_Objs:
     args: object = None
     g_generate_func: Callable = None
     g_generate_stream_func: Callable = None
-    httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster] = None
+    httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster, HttpServerManagerForVisualOnly] = None
     visual_manager: VisualManager = None
     shared_token_load: TokenLoad = None
 
@@ -92,14 +93,12 @@ class G_Objs:
                 metric_port=args.metric_port,
             )
         elif args.run_mode == "visual_only":
-            self.metric_client = MetricClient(args.metric_port)
-            self.httpserver_manager = None
-            self.visual_manager = VisualManager(
+            # self.metric_client = MetricClient(args.metric_port)
+            self.httpserver_manager = HttpServerManagerForVisualOnly(
                 args,
-                next_module_port=args.next_module_port,
-                visual_port=args.visual_port,
                 cache_port=args.cache_port,
-                visual_model_rpc_ports=args.visual_model_rpc_ports,
+                visual_port=args.visual_port,
+                # metric_port=args.metric_port,
             )
         else:
             init_tokenizer(args)  # for openai api
@@ -221,10 +220,10 @@ async def get_score(request: Request) -> Response:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
 
-@app.post("/get_image_embed")
+@app.post("/get_image_embedding")
 async def get_image_embed(request: Request) -> Response:
     try:
-        return await lightllm_get_image_embedding(request, g_objs.visual_manager)
+        return await lightllm_get_image_embedding(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
         logger.error("%s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
@@ -358,6 +357,7 @@ async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
-    loop.create_task(g_objs.httpserver_manager.handle_loop())
+    if g_objs.httpserver_manager is not None:
+        loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return

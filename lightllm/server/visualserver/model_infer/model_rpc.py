@@ -74,7 +74,7 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = Gemma3VisionModel()
             else:
                 raise Exception(f"can not support {self.model_type} now")
-
+            print("begin load visual model weight")
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
         except Exception as e:
@@ -98,6 +98,7 @@ class VisualModelRpcServer(rpyc.Service):
         images = obtain(images)
         all_img_embeds, uuids, valid_ids = self.forward(images)
         all_img_embeds = all_img_embeds.to(torch.device("cpu"))
+        print(f"all_img_embeds is {all_img_embeds}")
 
         if self.tp_rank_id == 0:
             ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))

@@ -5,7 +5,8 @@ from fastapi.responses import Response, StreamingResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
-from .visualserver.manager import VisualManager
+from .httpserver_for_visual_only.manager import HttpServerManagerForVisualOnly
+from fastapi.responses import JSONResponse
 import ujson as json
 
 
@@ -139,8 +140,12 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
-async def lightllm_get_image_embedding(request: Request, visual_manager: VisualManager) -> Response:
+async def lightllm_get_image_embedding(
+    request: Request, httpserver_manager: HttpServerManagerForVisualOnly
+) -> Response:
     request_dict = await request.json()
+    # request_dict: {'parameters': {'max_new_tokens': 128},
+    # 'multimodal_params': {'images': [{'type': 'base64', 'data': 'base64'}]}}
     sample_params_dict = request_dict["parameters"]
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=None, **sample_params_dict)
@@ -148,7 +153,7 @@ async def lightllm_get_image_embedding(request: Request, visual_manager: VisualM
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
 
-    result_embeddings = VisualManager.generate(multimodal_params, sampling_params, request=request)
-
+    await httpserver_manager.generate(sampling_params, multimodal_params, request=request)
     # 5. Return JSON result
-    return {"embeddings": result_embeddings}
+    print("embedding OK")
+    return JSONResponse({"message": "OK"}, status_code=200)

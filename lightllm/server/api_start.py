@@ -420,9 +420,9 @@ def visual_only_start(args):
     set_unique_server_name(args)
     if args.run_mode != "visual_only":
         return
-
+    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
     can_use_ports = alloc_can_use_network_port(
-        num=5 + args.visual_dp * args.visual_tp,
+        num=5 + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -446,6 +446,7 @@ def visual_only_start(args):
     args.audio_port = audio_port
     args.cache_port = cache_port
     args.metric_port = metric_port
+    args.visual_model_rpc_ports = visual_model_tp_ports
 
     logger.info(f"all start args:{args}")
 
