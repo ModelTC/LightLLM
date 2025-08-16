@@ -3,8 +3,12 @@ import torch
 import numpy as np
 import torch.distributed as dist
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
+
+
+def cdiv(a, b):
+    return (a + b - 1) // b
 
 
 class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
@@ -13,6 +17,7 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
         self.prefill_wrapper = None
         self.decode_wrapper = None
         self.flashinfer_extra_state = None
+        self.page_size = get_page_size()
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         super().init_some_extra_state(model, input_ids)
@@ -23,24 +28,37 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
         if not self.is_prefill:
             if get_env_start_args().enable_flashinfer_decode:
                 self.q_indptr = torch.arange(self.batch_size + 1, dtype=torch.int32).to(input_ids.device)
+                length = cdiv(self.flashinfer_extra_state.max_seq_length, self.page_size)
                 if self.batch_size <= model.graph_max_batch_size:
                     self.kv_indices = self.flashinfer_extra_state.kv_indices_buffer[self.microbatch_index][
-                        : self.batch_size * self.flashinfer_extra_state.max_seq_length
+                        : self.batch_size * length
                     ]
                 else:
                     self.kv_indices = torch.empty(
-                        self.batch_size * self.flashinfer_extra_state.max_seq_length,
+                        self.batch_size * length,
                         dtype=torch.int32,
                         device=input_ids.device,
                     )
-                repack_kv_index(
-                    self.req_manager.req_to_token_indexs,
-                    self.b_req_idx,
-                    self.b_seq_len,
-                    self.b_start_loc,
-                    self.max_len_in_batch,
-                    self.kv_indices,
-                )
+                if "page_size_variable" in model.mode:
+                    b_page_len = cdiv(self.b_seq_len, self.page_size)
+                    self.kv_starts[1:] = b_page_len.cumsum(0)
+                    repack_kv_index(
+                        self.req_manager.req_to_page_indexs,
+                        self.b_req_idx,
+                        b_page_len,
+                        self.kv_starts[:-1],
+                        cdiv(self.max_len_in_batch, self.page_size),
+                        self.kv_indices,
+                    )
+                else:
+                    repack_kv_index(
+                        self.req_manager.req_to_token_indexs,
+                        self.b_req_idx,
+                        self.b_seq_len,
+                        self.b_start_loc,
+                        self.max_len_in_batch,
+                        self.kv_indices,
+                    )
                 if self.decode_wrapper is None:
                     self.decode_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
                         self.flashinfer_extra_state.workspace_buffer,
@@ -58,7 +76,7 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
                         self.flashinfer_extra_state.tp_q_head_num,
                         self.flashinfer_extra_state.kv_lora_rank,
                         self.flashinfer_extra_state.qk_rope_head_dim,
-                        1,
+                        self.page_size,
                         False,  # causal
                         self.flashinfer_extra_state.softmax_scale,
                         self.flashinfer_extra_state.q_data_type,
@@ -97,7 +115,7 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
                 new_infer_state.flashinfer_extra_state.tp_q_head_num,
                 new_infer_state.flashinfer_extra_state.kv_lora_rank,
                 new_infer_state.flashinfer_extra_state.qk_rope_head_dim,
-                1,
+                self.page_size,
                 False,  # causal
                 new_infer_state.flashinfer_extra_state.softmax_scale,
                 new_infer_state.flashinfer_extra_state.q_data_type,
