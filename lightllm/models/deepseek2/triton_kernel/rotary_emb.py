@@ -42,18 +42,18 @@ def _rotary_kernel(
         sin = tl.load(Sin + off_dimcos_sin)
 
         for q_head_index in tl.static_range(0, HEAD_Q, step=1):
-            off_q0 = (seq_index * stride_qbs + q_head_index * stride_qh + dim_range0 * stride_qd)
-            off_q1 = (seq_index * stride_qbs + q_head_index * stride_qh + dim_range1 * stride_qd)
+            off_q0 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range0 * stride_qd
+            off_q1 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range1 * stride_qd
             q0 = tl.load(Q + off_q0)
             q1 = tl.load(Q + off_q1)
             out_q0 = q0 * cos - q1 * sin
             out_q1 = q0 * sin + q1 * cos
             tl.store(Q + off_q0, out_q0)
             tl.store(Q + off_q1, out_q1)
-        
+
         for k_head_index in tl.static_range(0, HEAD_K, step=1):
-            off_k0 = (seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd)
-            off_k1 = (seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd)
+            off_k0 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd
+            off_k1 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd
 
             k0 = tl.load(K + off_k0)
             k1 = tl.load(K + off_k1)
@@ -67,7 +67,7 @@ def _rotary_kernel(
 
 
 @torch.no_grad()
-def rotary_emb_fwd(q, k, cos, sin):
+def rotary_emb_fwd(q, k, cos, sin, **run_config):
     total_len = q.shape[0]
     head_num_q, head_num_k = q.shape[1], k.shape[1]
     head_dim = q.shape[2]
@@ -75,13 +75,20 @@ def rotary_emb_fwd(q, k, cos, sin):
     assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
     assert triton.next_power_of_2(head_dim) == head_dim
 
-    if total_len <= 512:
-        BLOCK_SEQ = 1
-    else:
-        BLOCK_SEQ = 16
+    from .rotary_emb_config import DeepseekV3RotaryKernelConfig
 
-    num_warps = 1
-    num_stages = 3
+    if not run_config:
+        run_config = DeepseekV3RotaryKernelConfig.try_to_get_best_config(
+            M=total_len,
+            Q_HEAD_NUM=head_num_q,
+            K_HEAD_NUM=head_num_k,
+            HEAD_DIM=head_dim,
+            out_dtype=str(q.dtype),
+        )
+
+    BLOCK_SEQ = run_config["BLOCK_SEQ"]
+    num_warps = run_config["num_warps"]
+    num_stages = run_config["num_stages"]
 
     grid = (triton.cdiv(total_len, BLOCK_SEQ),)
     _rotary_kernel[grid](
