@@ -64,6 +64,15 @@ PD 分离模式参数
 
     配置服务器模式下的端口号
 
+
+.. option:: --chunked_max_new_token
+
+    分块解码最大 token 数量，默认为 ``0`` ，代表不使用分块解码
+
+.. option:: --pd_max_retry_count
+
+    PD 模式下 kv 传输失败的最大重试次数，默认为 ``3``
+
 模型配置参数
 -----------
 
