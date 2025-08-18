@@ -1,7 +1,7 @@
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/router/radix_cache.py
 import torch
 import numpy as np
-from typing import Tuple, Dict, Set, List
+from typing import Tuple, Dict, Set, List, Optional
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
 from lightllm.common.mem_manager import MemoryManager
@@ -123,16 +123,16 @@ class RadixCache:
         )
         self.tree_total_tokens_num.arr[0] = 0
 
-    def insert(self, key, value=None):
+    def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
         if value is None:
             value = key
 
         assert len(key) == len(value)  # and len(key) >= 1
         if len(key) == 0:
-            return 0
+            return 0, None
         return self._insert_helper(self.root_node, key, value)
 
-    def _insert_helper(self, node: TreeNode, key, value):
+    def _insert_helper(self, node: TreeNode, key, value) -> Tuple[int, Optional[TreeNode]]:
         if node.is_leaf():
             self.evict_tree_set.discard(node)
 
@@ -147,7 +147,7 @@ class RadixCache:
                     child.update_time()
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
-                    return prefix_len
+                    return prefix_len, child
 
                 elif prefix_len < len(key) and prefix_len < len(child.token_id_key):
                     if child.is_leaf():
@@ -167,9 +167,10 @@ class RadixCache:
 
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
-                    return prefix_len
+                    return prefix_len, new_node
                 elif prefix_len < len(key) and prefix_len == len(child.token_id_key):
-                    return prefix_len + self._insert_helper(child, key[prefix_len:], value[prefix_len:])
+                    _prefix_len, ans_node = self._insert_helper(child, key[prefix_len:], value[prefix_len:])
+                    return prefix_len + _prefix_len, ans_node
                 else:
                     assert False, "can not run to here"
 
@@ -179,7 +180,7 @@ class RadixCache:
                 self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
                 if new_node.is_leaf():
                     self.evict_tree_set.add(new_node)
-                return 0
+                return 0, new_node
         finally:
             node.update_time()
             if node.is_leaf():
@@ -306,6 +307,25 @@ class RadixCache:
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
             node.ref_counter -= 1
+            node = node.parent
+
+        # 加回。
+        if old_node.is_leaf():
+            self.evict_tree_set.add(old_node)
+        return
+
+    def add_node_ref_counter(self, node: TreeNode):
+        if node is None:
+            return
+        # 如果减引用的是叶节点，需要先从 evict_tree_set 中移除
+        old_node = node
+        if old_node.is_leaf():
+            self.evict_tree_set.discard(old_node)
+
+        while node is not None:
+            if node.ref_counter == 0:
+                self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
+            node.ref_counter += 1
             node = node.parent
 
         # 加回。

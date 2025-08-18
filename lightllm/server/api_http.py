@@ -38,6 +38,7 @@ from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
+from lightllm.server.core.objs import StartArgs
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
@@ -71,7 +72,7 @@ class G_Objs:
     httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster] = None
     shared_token_load: TokenLoad = None
 
-    def set_args(self, args):
+    def set_args(self, args: StartArgs):
         self.args = args
         from .api_lightllm import lightllm_generate, lightllm_generate_stream
         from .api_tgi import tgi_generate_impl, tgi_generate_stream_impl
@@ -86,22 +87,13 @@ class G_Objs:
         if args.run_mode == "pd_master":
             self.metric_client = MetricClient(args.metric_port)
             self.httpserver_manager = HttpServerManagerForPDMaster(
-                args,
-                metric_port=args.metric_port,
+                args=args,
             )
         else:
             init_tokenizer(args)  # for openai api
             SamplingParams.load_generation_cfg(args.model_dir)
             self.metric_client = MetricClient(args.metric_port)
-            self.httpserver_manager = HttpServerManager(
-                args,
-                router_port=args.router_port,
-                cache_port=args.cache_port,
-                detokenization_pub_port=args.detokenization_pub_port,
-                visual_port=args.visual_port,
-                enable_multimodal=args.enable_multimodal,
-                metric_port=args.metric_port,
-            )
+            self.httpserver_manager = HttpServerManager(args=args)
             dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
             self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", dp_size_in_node)
 
