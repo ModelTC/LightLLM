@@ -13,23 +13,30 @@ logger = init_logger(__name__)
 class NodeRole(enum.Enum):
     P = "prefill"
     D = "decode"
+
+    NP = "nixl_prefill"
+    ND = "nixl_decode"
+
     NORMAL = "normal"
     PD_MASTER = "pd_master"
 
     def is_D(self):
-        return self == NodeRole.D
+        return self == NodeRole.D or self == NodeRole.ND
 
     def is_P(self):
-        return self == NodeRole.P
+        return self == NodeRole.P or self == NodeRole.NP
 
     def is_normal(self):
         return self == NodeRole.NORMAL
 
     def is_P_or_NORMAL(self):
-        return (self == NodeRole.P) or (self == NodeRole.NORMAL)
+        return self.is_P() or self.is_normal()
 
     def is_P_or_D(self):
-        return (self == NodeRole.P) or (self == NodeRole.D)
+        return self.is_P() or self.is_D()
+
+    def is_NP_or_ND(self):
+        return self == NodeRole.NP or self == NodeRole.ND
 
 
 class ObjType(enum.Enum):
@@ -47,8 +54,8 @@ class PD_Client_Obj:
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
 
     def __post_init__(self):
-        if self.mode not in ["prefill", "decode"]:
-            error_info = f"""mode must in ["prefill", "decode"], but get {self.mode}"""
+        if self.mode not in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+            error_info = f"""mode must in ["prefill", "decode", "nixl_prefill", "nixl_decode"], but get {self.mode}"""
             logger.error(error_info)
             raise ValueError(error_info)
         return
@@ -112,6 +119,23 @@ class PDTransJoinInfo:
     # 用于标识一次唯一的连接，prefill_id 和 decode_id 相同时，可能因为网络原因重连，为了更好的区分
     # 一次连接，使用一个 uuid 为其标识
     connect_id: str
+
+
+@dataclass
+class RemotePrefillServerInfo:
+    perfill_server_id: int
+    prefill_server_ip: str
+    prefill_server_port: int
+
+
+@dataclass
+class DistInfo:
+    world_size: int
+    nnodes: int
+    dp_size: int
+    dp_world_size: int
+    dp_size_in_node: int
+    node_world_size: int
 
 
 @dataclass
