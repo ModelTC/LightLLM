@@ -21,7 +21,6 @@ class DeepseekV3RotaryKernelConfig(KernelConfigs):
         dtype: str,
     ) -> dict:
         key_params = {
-            "M": M,
             "Q_HEAD_NUM": Q_HEAD_NUM,
             "K_HEAD_NUM": K_HEAD_NUM,
             "HEAD_DIM": HEAD_DIM,
@@ -45,7 +44,6 @@ class DeepseekV3RotaryKernelConfig(KernelConfigs):
     @classmethod
     def save_config(
         cls,
-        M: int,
         Q_HEAD_NUM: int,
         K_HEAD_NUM: int,
         HEAD_DIM: int,
@@ -53,7 +51,6 @@ class DeepseekV3RotaryKernelConfig(KernelConfigs):
         config_json: dict,
     ):
         key_params = {
-            "M": M,
             "Q_HEAD_NUM": Q_HEAD_NUM,
             "K_HEAD_NUM": K_HEAD_NUM,
             "HEAD_DIM": HEAD_DIM,

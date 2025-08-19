@@ -235,7 +235,6 @@ if __name__ == "__main__":
             )
             json_dict[m] = ans
             DeepseekV3RotaryKernelConfig.save_config(
-                M=m,
                 Q_HEAD_NUM=q_head_num,
                 K_HEAD_NUM=k_head_num,
                 HEAD_DIM=head_dim,
