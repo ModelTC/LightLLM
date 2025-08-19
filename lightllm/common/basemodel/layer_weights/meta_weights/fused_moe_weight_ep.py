@@ -228,7 +228,7 @@ class FusedMoeWeightEP(BaseWeight):
         if w1.ndim == 3:
             block_size_k = w1.shape[2] // w1_scale.shape[2]
         assert block_size_k == 128, "block_size_k must be 128"
-        input_scale, qinput_tensor = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
+        qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
         return topk_weights, topk_idx.to(torch.long), (qinput_tensor, input_scale)
 
     def dispatch(
