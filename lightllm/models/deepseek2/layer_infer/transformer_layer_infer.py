@@ -255,7 +255,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         b_kv_start_loc,
         skip_sample=False,
     ):
-        if infer_state.use_dynamic_prompt_cache and not skip_sample:
+        if not skip_sample:
             if is_fp8:
                 kv = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, :-2].view(torch.float8_e4m3fn)
                 kv_scale = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, -2:].view(torch.bfloat16)

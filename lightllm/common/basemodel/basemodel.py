@@ -251,7 +251,6 @@ class TpPartBaseModel:
         infer_state.is_prefill = model_input.is_prefill
         infer_state.is_token_healing = self.is_token_healing
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
-        infer_state.use_dynamic_prompt_cache = self.use_dynamic_prompt_cache
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_len_in_batch = model_input.max_len_in_batch
