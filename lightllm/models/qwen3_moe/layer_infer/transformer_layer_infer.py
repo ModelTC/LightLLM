@@ -118,6 +118,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             num_expert_group=None,
             is_prefill=infer_state.is_prefill,
         )
+
         ep_output = ep_output.view(token_num, hidden_dim)
         return ep_output
 
