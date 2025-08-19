@@ -351,7 +351,7 @@ class HttpServerManager:
                 request,
             )
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
-                metadata["usage"] = input_usage
+                metadata["usage"] = {**input_usage, **metadata.get("usage", {})}
                 yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
@@ -539,7 +539,7 @@ class HttpServerManager:
                     if self.pd_mode == NodeRole.P and is_first_token:
                         metadata["prompt_ids"] = prompt_ids
 
-                    metadata["usage"]["output_tokens"] = out_token_counter
+                    metadata["usage"] = {"output_tokens": out_token_counter}
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     if is_first_token:
