@@ -49,7 +49,7 @@ class TritonFP8w8a8QuantizationMethod(TritonBaseQuantizationMethod):
         m = input_tensor.shape[0]
         n = qweight.shape[1]
         if out is None:
-            out = alloc_func((m, n), input_tensor.dtype, device=input_tensor.device)
+            out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         w8a8_block_fp8_matmul(
             input_tensor_q,
             qweight,

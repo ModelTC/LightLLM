@@ -38,7 +38,7 @@ class DeepseekV3RotaryKernelConfig(KernelConfigs):
                 config = {"BLOCK_SEQ": 1, "NUM_STAGE": 1, "num_warps": 1, "num_stages": 1, "HEAD_PARALLEL_NUM": 1}
             else:
                 config = {"BLOCK_SEQ": 16, "NUM_STAGE": 1, "num_warps": 1, "num_stages": 1, "HEAD_PARALLEL_NUM": 1}
-            
+
         return config
 
     @classmethod

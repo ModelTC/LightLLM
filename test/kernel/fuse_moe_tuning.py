@@ -99,20 +99,27 @@ def test_kernel(
     topk_values, topk_ids = torch.topk(rnd_logics, topk, dim=1)
     if num_fused_shared_experts > 0:
         # 存在融合共享专家的时候，需要pad 共享专家对应的id 到topk_ids 中
-        pad_topk_ids = torch.arange(
-                start=expert_num - num_fused_shared_experts, 
-                end=expert_num,
-                step=1,
-                dtype=topk_ids.dtype,
-                device="cuda").view(1, num_fused_shared_experts).repeat(topk_ids.shape[0], 1)
+        pad_topk_ids = (
+            torch.arange(
+                start=expert_num - num_fused_shared_experts, end=expert_num, step=1, dtype=topk_ids.dtype, device="cuda"
+            )
+            .view(1, num_fused_shared_experts)
+            .repeat(topk_ids.shape[0], 1)
+        )
         topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
     topk_weights = torch.randn((m, topk + num_fused_shared_experts), device="cuda", dtype=dtype) / 10
 
-    expert_to_tokens = torch.empty((expert_num, (topk + num_fused_shared_experts) * m), dtype=torch.int32, device="cuda")
-    expert_to_weights = torch.empty((expert_num, (topk + num_fused_shared_experts) * m), dtype=torch.float32, device="cuda")
+    expert_to_tokens = torch.empty(
+        (expert_num, (topk + num_fused_shared_experts) * m), dtype=torch.int32, device="cuda"
+    )
+    expert_to_weights = torch.empty(
+        (expert_num, (topk + num_fused_shared_experts) * m), dtype=torch.float32, device="cuda"
+    )
     moe_align(topk_ids=topk_ids, out=expert_to_tokens)
     expert_to_token_num = torch.empty((expert_num,), dtype=torch.int32, device="cuda")
-    moe_align1(expert_to_tokens, topk_weights, expert_to_weights, expert_to_token_num, topk=topk + num_fused_shared_experts)
+    moe_align1(
+        expert_to_tokens, topk_weights, expert_to_weights, expert_to_token_num, topk=topk + num_fused_shared_experts
+    )
 
     out1 = torch.zeros((m * (topk + num_fused_shared_experts), 2 * n), dtype=torch.bfloat16, device="cuda")
     down_in = torch.zeros((m * (topk + num_fused_shared_experts), n), dtype=torch.bfloat16, device="cuda")

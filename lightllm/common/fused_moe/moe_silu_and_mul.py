@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 from .moe_silu_and_mul_config import MoeSiluAndMulKernelConfig
 
+
 @triton.jit
 def _silu_and_mul_kernel_fast(
     input_ptr,
@@ -34,12 +35,12 @@ def _silu_and_mul_kernel_fast(
     else:
         mask = None
         other = None
-    
+
     for m_index in tl.range(m_start_index, m_end_index, num_stages=NUM_STAGES):
         gate_offsets = m_index * stride_input_m + n_offsets[None, :]
         up_offsets = m_index * stride_input_m + (n_offsets[None, :] + size_n)
         out_offsets = m_index * stride_output_m + n_offsets[None, :]
-        
+
         up = tl.load(
             input_ptr + up_offsets,
             mask=mask,

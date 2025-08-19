@@ -65,6 +65,6 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
             )
 
         if out is None:
-            out = alloc_func((m, n), input_tensor.dtype, device=input_tensor.device)
+            out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         deep_gemm.gemm_fp8_fp8_bf16_nt([qinput_tensor, input_scale], [qweight.t(), weight_scale.t()], out)
         return out

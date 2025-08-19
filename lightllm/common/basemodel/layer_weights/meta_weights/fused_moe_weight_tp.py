@@ -70,20 +70,27 @@ class FusedMoeWeightTP(BaseWeight):
         )
         topk_weights.mul_(self.routed_scaling_factor)
         if self.num_fused_shared_experts > 0:
-            pad_topk_ids = torch.arange(
-                         start=self.n_routed_experts - self.num_fused_shared_experts, 
-                         end=self.n_routed_experts,
-                         step=1,
-                         dtype=topk_ids.dtype,
-                         device="cuda").view(1, self.num_fused_shared_experts).repeat(topk_ids.shape[0], 1)
-            pad_topk_weights = torch.full((topk_weights.shape[0], self.num_fused_shared_experts),
-                                          fill_value=1.0,
-                                          device="cuda",
-                                          dtype=topk_weights.dtype)
-            
+            pad_topk_ids = (
+                torch.arange(
+                    start=self.n_routed_experts - self.num_fused_shared_experts,
+                    end=self.n_routed_experts,
+                    step=1,
+                    dtype=topk_ids.dtype,
+                    device="cuda",
+                )
+                .view(1, self.num_fused_shared_experts)
+                .repeat(topk_ids.shape[0], 1)
+            )
+            pad_topk_weights = torch.full(
+                (topk_weights.shape[0], self.num_fused_shared_experts),
+                fill_value=1.0,
+                device="cuda",
+                dtype=topk_weights.dtype,
+            )
+
             topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
             topk_weights = torch.cat([topk_weights, pad_topk_weights], dim=1)
-        
+
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2
         use_fp8_w8a8 = self.quant_method is not None
