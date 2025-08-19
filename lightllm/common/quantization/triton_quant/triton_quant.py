@@ -38,9 +38,7 @@ class TritonFP8w8a8QuantizationMethod(TritonBaseQuantizationMethod):
         qweight, weight_scale, input_scale = weights
         m, k = input_tensor.shape
         n = qweight.shape[1]
-        alloc_func = torch.empty
-        if use_custom_tensor_mananger:
-            alloc_func = self.cache_manager.alloc_tensor
+        alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         if input_scale is None:
             input_tensor_q, input_scale = per_token_group_quant_fp8(
                 input_tensor, self.block_size, dtype=qweight.dtype, alloc_func=alloc_func

@@ -51,9 +51,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         else:
             qweight, weight_scale = weights
             input_scale = None
-        alloc_func = torch.empty
-        if use_custom_tensor_mananger:
-            alloc_func = self.cache_manager.alloc_tensor
+        alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         m, k = input_tensor.shape
         n = weights[0].shape[1]
         if input_scale is None:

@@ -114,12 +114,7 @@ def per_token_group_quant_fp8(
     scale_tma_aligned: bool = False,
     alloc_func: Callable = torch.empty,
 ):
-    def inner_alloc_func(shape, device, dtype):
-        if alloc_func is torch.empty:
-            return torch.empty(shape, device=device, dtype=dtype)
-        return alloc_func(shape, data_type=dtype, device=device)
-
-    x_q = inner_alloc_func(x.shape, x.device, dtype)
+    x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
     x_s = None
     # Adapted from
     # https://github.com/sgl-project/sglang/blob/7e257cd666c0d639626487987ea8e590da1e9395/python/sglang/srt/layers/quantization/fp8_kernel.py#L290
@@ -132,19 +127,19 @@ def per_token_group_quant_fp8(
             if scale_tma_aligned:
                 # 对齐到4 * sizeof(float)
                 aligned_size = (x.shape[-2] + 3) // 4 * 4
-                x_s = inner_alloc_func(
+                x_s = alloc_func(
                     x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
                     device=x.device,
                     dtype=torch.float32,
                 ).permute(-1, -2)[: x.shape[-2], :]
             else:
-                x_s = inner_alloc_func(
+                x_s = alloc_func(
                     (x.shape[-1] // group_size,) + x.shape[:-1],
                     device=x.device,
                     dtype=torch.float32,
                 ).permute(-1, -2)
         else:
-            x_s = inner_alloc_func(
+            x_s = alloc_func(
                 x.shape[:-1] + (x.shape[-1] // group_size,),
                 device=x.device,
                 dtype=torch.float32,
@@ -154,7 +149,7 @@ def per_token_group_quant_fp8(
         sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max, False)
     else:
         # 使用LightLLM kernel进行量化
-        x_s = inner_alloc_func(
+        x_s = alloc_func(
             x.shape[:-1] + (x.shape[-1] // group_size,),
             device=x.device,
             dtype=torch.float32,

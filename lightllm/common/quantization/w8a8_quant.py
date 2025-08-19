@@ -131,9 +131,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         qweight, weight_scale, input_scale = weights
         m, k = input_tensor.shape
         n = weights[0].shape[1]
-        alloc_func = torch.empty
-        if use_custom_tensor_mananger:
-            alloc_func = self.cache_manager.alloc_tensor
+        alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         if input_scale is None:
             qinput_tensor, input_scale = per_token_group_quant_fp8(
                 input_tensor, self.block_size, dtype=qweight.dtype, alloc_func=alloc_func
