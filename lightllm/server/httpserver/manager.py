@@ -220,10 +220,8 @@ class HttpServerManager:
         if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
             for img in multimodal_params.images:
                 image_tokens += self.tokenizer.get_image_token_length(img)
-                # image_tokens += 1
             for audio in multimodal_params.audios:
                 audio_tokens += self.tokenizer.get_audio_token_length(audio)
-                # audio_tokens += 1
         else:
             image_tokens = len(multimodal_params.images)
             audio_tokens = len(multimodal_params.audios)
