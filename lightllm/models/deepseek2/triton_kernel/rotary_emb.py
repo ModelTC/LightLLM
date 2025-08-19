@@ -21,13 +21,15 @@ def _rotary_kernel(
     stride_sinbs,
     stride_sind,
     max_total_len,
+    HEAD_PARALLEL_NUM: tl.constexpr,
     HEAD_Q: tl.constexpr,
     HEAD_K: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     NUM_STAGE: tl.constexpr,
-):
-    seq_block_index = tl.program_id(0)
+):  
+    head_start_index = tl.program_id(0)
+    seq_block_index = tl.program_id(1)
     seq_start_index = seq_block_index * BLOCK_SEQ
     seq_end_index = (seq_block_index + 1) * BLOCK_SEQ
     seq_end_index = tl.where(seq_end_index < max_total_len, seq_end_index, max_total_len)
@@ -35,34 +37,58 @@ def _rotary_kernel(
     dim_range0 = tl.arange(0, BLOCK_DMODEL // 2) * 2
     dim_range1 = dim_range0 + 1
     cos_range = tl.arange(0, BLOCK_DMODEL // 2)
-    for seq_index in tl.range(seq_start_index, seq_end_index, num_stages=NUM_STAGE):
+    for seq_index in tl.range(seq_start_index, seq_end_index):
 
         off_dimcos_sin = seq_index * stride_cosbs + cos_range * stride_cosd
         cos = tl.load(Cos + off_dimcos_sin)
         sin = tl.load(Sin + off_dimcos_sin)
+        
+        if HEAD_PARALLEL_NUM == 1:
+            for q_head_index in tl.static_range(0, HEAD_Q, step=1):
+                off_q0 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range0 * stride_qd
+                off_q1 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range1 * stride_qd
+                q0 = tl.load(Q + off_q0)
+                q1 = tl.load(Q + off_q1)
+                out_q0 = q0 * cos - q1 * sin
+                out_q1 = q0 * sin + q1 * cos
+                tl.store(Q + off_q0, out_q0)
+                tl.store(Q + off_q1, out_q1)
 
-        for q_head_index in tl.static_range(0, HEAD_Q, step=1):
-            off_q0 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range0 * stride_qd
-            off_q1 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range1 * stride_qd
-            q0 = tl.load(Q + off_q0)
-            q1 = tl.load(Q + off_q1)
-            out_q0 = q0 * cos - q1 * sin
-            out_q1 = q0 * sin + q1 * cos
-            tl.store(Q + off_q0, out_q0)
-            tl.store(Q + off_q1, out_q1)
+            for k_head_index in tl.static_range(0, HEAD_K, step=1):
+                off_k0 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd
+                off_k1 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd
 
-        for k_head_index in tl.static_range(0, HEAD_K, step=1):
-            off_k0 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd
-            off_k1 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd
+                k0 = tl.load(K + off_k0)
+                k1 = tl.load(K + off_k1)
 
-            k0 = tl.load(K + off_k0)
-            k1 = tl.load(K + off_k1)
+                out_k0 = k0 * cos - k1 * sin
+                out_k1 = k0 * sin + k1 * cos
 
-            out_k0 = k0 * cos - k1 * sin
-            out_k1 = k0 * sin + k1 * cos
+                tl.store(K + off_k0, out_k0)
+                tl.store(K + off_k1, out_k1)
+        else:
+            for q_head_index in tl.range(head_start_index, HEAD_Q, step=HEAD_PARALLEL_NUM, num_stages=NUM_STAGE):
+                off_q0 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range0 * stride_qd
+                off_q1 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range1 * stride_qd
+                q0 = tl.load(Q + off_q0)
+                q1 = tl.load(Q + off_q1)
+                out_q0 = q0 * cos - q1 * sin
+                out_q1 = q0 * sin + q1 * cos
+                tl.store(Q + off_q0, out_q0)
+                tl.store(Q + off_q1, out_q1)
 
-            tl.store(K + off_k0, out_k0)
-            tl.store(K + off_k1, out_k1)
+            for k_head_index in tl.range(head_start_index, HEAD_K, step=HEAD_PARALLEL_NUM, num_stages=NUM_STAGE):
+                off_k0 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd
+                off_k1 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd
+
+                k0 = tl.load(K + off_k0)
+                k1 = tl.load(K + off_k1)
+
+                out_k0 = k0 * cos - k1 * sin
+                out_k1 = k0 * sin + k1 * cos
+
+                tl.store(K + off_k0, out_k0)
+                tl.store(K + off_k1, out_k1)
     return
 
 
@@ -87,10 +113,11 @@ def rotary_emb_fwd(q, k, cos, sin, **run_config):
         )
 
     BLOCK_SEQ = run_config["BLOCK_SEQ"]
+    HEAD_PARALLEL_NUM = run_config["HEAD_PARALLEL_NUM"]
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
 
-    grid = (triton.cdiv(total_len, BLOCK_SEQ),)
+    grid = (HEAD_PARALLEL_NUM, triton.cdiv(total_len, BLOCK_SEQ),)
     _rotary_kernel[grid](
         Q=q,
         K=k,
@@ -108,6 +135,7 @@ def rotary_emb_fwd(q, k, cos, sin, **run_config):
         stride_sind=sin.stride(1),
         max_total_len=total_len,
         HEAD_Q=head_num_q,
+        HEAD_PARALLEL_NUM=HEAD_PARALLEL_NUM,
         HEAD_K=head_num_k,
         BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=head_dim,

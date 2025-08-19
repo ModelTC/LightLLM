@@ -112,10 +112,11 @@ def worker(
 
 def get_test_configs(split_id, split_count):
     index = 0
-    result = itertools.product([1, 2, 4, 8, 16, 32], [1, 2, 4, 8], [1, 2, 3, 4, 5])
-    for BLOCK_SEQ, num_warps, num_stages in result:
+    result = itertools.product([1, 2, 4, 8, 16, 32], [1, 2, 4, 8], [1, 2, 3, 4, 5], [1, 2, 4, 8, 16])
+    for BLOCK_SEQ, num_warps, num_stages, HEAD_PARALLEL_NUM in result:
         t_config = {
             "BLOCK_SEQ": BLOCK_SEQ,
+            "HEAD_PARALLEL_NUM": HEAD_PARALLEL_NUM,
             "num_warps": num_warps,
             "num_stages": num_stages,
         }
@@ -212,31 +213,32 @@ def tuning_configs(
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn")
     from lightllm.utils.tuning_utils import mp_tuning
-
+     
     # for deepseekv3 600B
-    q_head_num = 128
-    k_head_num = 1
-    head_dim = 64
-    dtype = torch.bfloat16
-    for m in [1, 128, 256, 1024, 2048, 4096, 8192]:
-        json_dict = {}
-        ans = mp_tuning(
-            tuning_configs,
-            {
-                "M": m,
-                "Q_HEAD_NUM": q_head_num,
-                "K_HEAD_NUM": k_head_num,
-                "HEAD_DIM": head_dim,
-                "dtype": dtype,
-                "test_count": 20,
-            },
-        )
-        json_dict[m] = ans
-        DeepseekV3RotaryKernelConfig.save_config(
-            M=m,
-            Q_HEAD_NUM=q_head_num,
-            K_HEAD_NUM=k_head_num,
-            HEAD_DIM=head_dim,
-            dtype=str(dtype),
-            config_json=json_dict,
-        )
+
+    for q_head_num in [128, 64, 32, 16, 8]:
+        k_head_num = 1
+        head_dim = 64
+        dtype = torch.bfloat16
+        for m in [1, 128, 256, 1024, 2048, 4096, 8192]:
+            json_dict = {}
+            ans = mp_tuning(
+                tuning_configs,
+                {
+                    "M": m,
+                    "Q_HEAD_NUM": q_head_num,
+                    "K_HEAD_NUM": k_head_num,
+                    "HEAD_DIM": head_dim,
+                    "dtype": dtype,
+                    "test_count": 20,
+                },
+            )
+            json_dict[m] = ans
+            DeepseekV3RotaryKernelConfig.save_config(
+                M=m,
+                Q_HEAD_NUM=q_head_num,
+                K_HEAD_NUM=k_head_num,
+                HEAD_DIM=head_dim,
+                dtype=str(dtype),
+                config_json=json_dict,
+            )
