@@ -462,6 +462,7 @@ def grouped_matmul(
     out: torch.Tensor,
     mul_routed_weight: bool,
     use_fp8_w8a8: bool,
+    alloc_tensor_func=torch.empty,
     reused_mblock_infos=None,
     run_config: Optional[dict] = None,
 ):
@@ -525,8 +526,8 @@ def grouped_matmul(
         else:
             _m, _k = token_inputs.shape
             assert _k % block_size_k == 0
-            input_scale = torch.empty((_m, _k // block_size_k), dtype=torch.float32, device=token_inputs.device)
-            qinput_tensor = torch.empty((_m, _k), dtype=expert_weights.dtype, device=token_inputs.device)
+            input_scale = alloc_tensor_func((_m, _k // block_size_k), dtype=torch.float32, device=token_inputs.device)
+            qinput_tensor = alloc_tensor_func((_m, _k), dtype=expert_weights.dtype, device=token_inputs.device)
             per_token_group_quant_fp8(token_inputs, block_size_k, qinput_tensor, input_scale)
             token_inputs, token_input_scale = qinput_tensor, input_scale
 
@@ -611,6 +612,7 @@ def fused_experts_impl(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    alloc_tensor_func=torch.empty,
     run_config: Optional[dict] = None,
 ):
     # Check constraints.
@@ -625,26 +627,29 @@ def fused_experts_impl(
     CHUNK_SIZE = FFN_MOE_CHUNK_SIZE
     topk_num = topk_ids.shape[1]
     M = min(num_tokens, CHUNK_SIZE)
-
-    cache = torch.empty(M * topk_num * max(N, w2.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype)
-    intermediate_cache1 = cache[: M * topk_num * N].view(M, topk_num, N)
-    intermediate_cache2 = torch.empty((M, topk_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
-    intermediate_cache3 = cache[: M * topk_num * w2.shape[1]].view(M, topk_num, w2.shape[1])
+    
+    intermediate_cache13_shared = alloc_tensor_func((M, topk_num, max(N, w2.shape[1])), device=hidden_states.device, dtype=hidden_states.dtype)
+    intermediate_cache1 = intermediate_cache13_shared.view(-1)[:(M * topk_num * N)].view(M, topk_num, N)
+    intermediate_cache2 = alloc_tensor_func(
+        (M, topk_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype
+    )
+    intermediate_cache3 = intermediate_cache13_shared.view(-1)[:(M * topk_num * w2.shape[1])].view(M, topk_num, w2.shape[1])
 
     if inplace:
         out_hidden_states = hidden_states
     else:
-        out_hidden_states = torch.empty(hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype)
+        out_hidden_states = alloc_tensor_func(
+            hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype
+        )
 
     for chunk in range(triton.cdiv(num_tokens, CHUNK_SIZE)):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE, min((chunk + 1) * CHUNK_SIZE, num_tokens))
         curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
         tokens_in_chunk, _ = curr_hidden_states.shape
 
-        if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
-            intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
-            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk]
-            intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
+        intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
+        intermediate_cache2 = intermediate_cache2[:tokens_in_chunk]
+        intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
@@ -668,6 +673,7 @@ def fused_experts_impl(
             out=intermediate_cache1.view(-1, N),
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
+            alloc_tensor_func=alloc_tensor_func,
             run_config=run_config,
         )
 
@@ -686,6 +692,7 @@ def fused_experts_impl(
             out=intermediate_cache3.view(-1, w2.shape[1]),
             mul_routed_weight=True,
             use_fp8_w8a8=use_fp8_w8a8,
+            alloc_tensor_func=alloc_tensor_func,
             reused_mblock_infos=reused_mblock_infos,
             run_config=run_config,
         )
