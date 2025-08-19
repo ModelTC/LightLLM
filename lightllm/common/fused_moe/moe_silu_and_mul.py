@@ -61,7 +61,7 @@ def _silu_and_mul_kernel(
     ],
     default_config={"BLOCK_M": 128, "BLOCK_N": 128, "num_warps": 4, "num_stages": 1},
     static_key_func=lambda input, output : f"N={input.shape[-1] // 2},out_dtype={output.dtype}",
-    run_key_func=lambda input, output : f"{nearest_power_of_2(input.shape[0])}",
+    run_key_func=lambda input : str(nearest_power_of_2(input.shape[0])),
 )
 def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config: Dict=None):
     assert input.is_contiguous()

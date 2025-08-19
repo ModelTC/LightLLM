@@ -53,7 +53,7 @@ def _moe_sum_reduce_kernel(
     ],
     default_config={"BLOCK_M": 1,"BLOCK_DIM": 128,"NUM_STAGE": 1,"num_warps": 2},
     static_key_func=lambda input, output : f"topk_num={input.shape[1]},hidden_dim={input.shape[2]},out_dtype={output.dtype}",
-    run_key_func=lambda input : f"{nearest_power_of_2(input.shape[0])}",
+    run_key_func=lambda input : str(nearest_power_of_2(input.shape[0])),
 )
 def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict=None):
     assert input.is_contiguous()
