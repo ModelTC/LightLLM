@@ -330,7 +330,7 @@ class HttpServerManager:
             # 计算输入 token 使用量统计
             text_tokens = len(prompt_ids)
             image_tokens, audio_tokens = self._calculate_multimodal_tokens(multimodal_params)
-            req_status.input_usage = {
+            input_usage = {
                 "input_text_tokens": text_tokens,
                 "input_audio_tokens": audio_tokens,
                 "input_image_tokens": image_tokens
@@ -351,6 +351,7 @@ class HttpServerManager:
                 request,
             )
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                metadata["usage"] = input_usage
                 yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
@@ -538,11 +539,7 @@ class HttpServerManager:
                     if self.pd_mode == NodeRole.P and is_first_token:
                         metadata["prompt_ids"] = prompt_ids
 
-                    # 添加完整的 usage 信息
-                    metadata["usage"] = {
-                        **req_status.input_usage,
-                        "output_tokens": out_token_counter
-                    }
+                    metadata["usage"]["output_tokens"] = out_token_counter
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     if is_first_token:
@@ -740,12 +737,6 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
-        # 添加输入 token 使用量统计
-        self.input_usage = {
-            "input_text_tokens": 0,
-            "input_audio_tokens": 0,
-            "input_image_tokens": 0
-        }
 
     def can_release(self):
         for req in self.group_req_objs.shm_req_objs:
