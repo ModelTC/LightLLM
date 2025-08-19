@@ -4,7 +4,7 @@ import threading
 from typing import Optional, Tuple, List, Dict, Any
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_device_id
 from .base_weight import BaseWeight
-from lightllm.common.fused_moe.grouped_fused_moe_ep import fused_experts_impl, masked_group_gemm, tma_aligned_quantize
+from lightllm.common.fused_moe.grouped_fused_moe_ep import fused_experts_impl, masked_group_gemm
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.distributed import dist_group_manager
 from lightllm.common.fused_moe.topk_select import select_experts
@@ -228,9 +228,7 @@ class FusedMoeWeightEP(BaseWeight):
         if w1.ndim == 3:
             block_size_k = w1.shape[2] // w1_scale.shape[2]
         assert block_size_k == 128, "block_size_k must be 128"
-        input_scale = torch.empty((M, K // block_size_k), dtype=torch.float32, device=hidden_states.device)
-        qinput_tensor = torch.empty((M, K), dtype=w1.dtype, device=hidden_states.device)
-        per_token_group_quant_fp8(hidden_states, block_size_k, qinput_tensor, input_scale)
+        input_scale, qinput_tensor = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
         return topk_weights, topk_idx.to(torch.long), (qinput_tensor, input_scale)
 
     def dispatch(
@@ -340,7 +338,9 @@ class FusedMoeWeightEP(BaseWeight):
             silu_out = torch.empty((all_tokens, N // 2), device=device, dtype=hidden_dtype)
 
             silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
-            qsilu_out, qsilu_out_scale = tma_aligned_quantize(silu_out)
+            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
+                silu_out, self.block_size, dtype=w1.dtype, column_major_scales=True, scale_tma_aligned=True
+            )
 
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=device, dtype=hidden_dtype)

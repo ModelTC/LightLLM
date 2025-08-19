@@ -26,17 +26,6 @@ except:
     logger.warning("no deepep or deep_gemm")
 
 
-def tma_aligned_quantize(
-    input_tensor: torch.Tensor, block_size: int = 128, dtype: torch.dtype = torch.float8_e4m3fn
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    m, k = input_tensor.shape
-    input_scale = torch.empty((m, k // block_size), dtype=torch.float32, device=input_tensor.device)
-    qinput_tensor = torch.empty((m, k), dtype=dtype, device=input_tensor.device)
-    per_token_group_quant_fp8(input_tensor, block_size, qinput_tensor, input_scale)
-    input_scale = tma_align_input_scale(input_scale)
-    return qinput_tensor, input_scale
-
-
 def masked_group_gemm(
     recv_x: Tuple[torch.Tensor],
     masked_m: torch.Tensor,
@@ -106,9 +95,7 @@ def fused_experts_impl(
 
     combined_x = None
     if is_prefill:
-        input_scale = torch.empty((M, K // block_size_k), dtype=torch.float32, device=hidden_states.device)
-        qinput_tensor = torch.empty((M, K), dtype=w1.dtype, device=hidden_states.device)
-        per_token_group_quant_fp8(hidden_states, block_size_k, qinput_tensor, input_scale)
+        qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
 
         # get_dispatch_layout
         (
@@ -186,7 +173,9 @@ def fused_experts_impl(
             silu_out = torch.empty((all_tokens, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
 
             silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
-            qsilu_out, qsilu_out_scale = tma_aligned_quantize(silu_out)
+            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
+                silu_out, block_size_k, dtype=w1.dtype, column_major_scales=True, scale_tma_aligned=True
+            )
 
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=hidden_states.device, dtype=hidden_states.dtype)

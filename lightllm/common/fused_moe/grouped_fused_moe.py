@@ -526,10 +526,9 @@ def grouped_matmul(
         else:
             _m, _k = token_inputs.shape
             assert _k % block_size_k == 0
-            input_scale = alloc_tensor_func((_m, _k // block_size_k), dtype=torch.float32, device=token_inputs.device)
-            qinput_tensor = alloc_tensor_func((_m, _k), dtype=expert_weights.dtype, device=token_inputs.device)
-            per_token_group_quant_fp8(token_inputs, block_size_k, qinput_tensor, input_scale)
-            token_inputs, token_input_scale = qinput_tensor, input_scale
+            token_inputs, token_input_scale = per_token_group_quant_fp8(
+                token_inputs, block_size_k, dtype=expert_weights.dtype
+            )
 
     if reused_mblock_infos is None:
         mblocks_to_expert_id, mblocks_to_m_index = moe_align2(token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M)
@@ -627,13 +626,17 @@ def fused_experts_impl(
     CHUNK_SIZE = FFN_MOE_CHUNK_SIZE
     topk_num = topk_ids.shape[1]
     M = min(num_tokens, CHUNK_SIZE)
-    
-    intermediate_cache13_shared = alloc_tensor_func((M, topk_num, max(N, w2.shape[1])), device=hidden_states.device, dtype=hidden_states.dtype)
-    intermediate_cache1 = intermediate_cache13_shared.view(-1)[:(M * topk_num * N)].view(M, topk_num, N)
+
+    intermediate_cache13_shared = alloc_tensor_func(
+        (M, topk_num, max(N, w2.shape[1])), device=hidden_states.device, dtype=hidden_states.dtype
+    )
+    intermediate_cache1 = intermediate_cache13_shared.view(-1)[: (M * topk_num * N)].view(M, topk_num, N)
     intermediate_cache2 = alloc_tensor_func(
         (M, topk_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype
     )
-    intermediate_cache3 = intermediate_cache13_shared.view(-1)[:(M * topk_num * w2.shape[1])].view(M, topk_num, w2.shape[1])
+    intermediate_cache3 = intermediate_cache13_shared.view(-1)[: (M * topk_num * w2.shape[1])].view(
+        M, topk_num, w2.shape[1]
+    )
 
     if inplace:
         out_hidden_states = hidden_states
