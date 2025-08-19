@@ -23,8 +23,8 @@ def _silu_and_mul_kernel_fast(
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
     stride_output_m = tl.cast(stride_output_m, dtype=tl.int64)
 
-    m_block_index = tl.program_id(0)
-    n_block_index = tl.program_id(1)
+    n_block_index = tl.program_id(0)
+    m_block_index = tl.program_id(1)
     n_offsets = n_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
     m_start_index = m_block_index * BLOCK_M
     m_end_index = (m_block_index + 1) * BLOCK_M
@@ -82,8 +82,8 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, **run_config):
     NUM_STAGES = run_config["NUM_STAGES"]
 
     grid = (
-        triton.cdiv(size_m, BLOCK_M),
         triton.cdiv(size_n, BLOCK_N),
+        triton.cdiv(size_m, BLOCK_M),
     )
     NEED_MASK = (size_n % BLOCK_N) != 0
     _silu_and_mul_kernel_fast[grid](
