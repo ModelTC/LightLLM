@@ -223,6 +223,16 @@ else:
         def cache_env_out(self):
             return
 
+        def empty(
+            self,
+            shape: Union[torch.Size, Iterable[int]],
+            dtype: torch.dtype,
+            device: str = "cuda",
+            is_graph_out: bool = False,
+            microbatch_index: int = 0,
+        ) -> torch.Tensor:
+            return torch.empty(shape, dtype=dtype, device=device, requires_grad=False)
+
         def alloc_tensor(
             self,
             shape: Union[torch.Size, Iterable[int]],
