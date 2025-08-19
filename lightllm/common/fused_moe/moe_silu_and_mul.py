@@ -80,6 +80,9 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, **run_config):
     BLOCK_N = run_config["BLOCK_N"]
     num_warps = run_config["num_warps"]
     NUM_STAGES = run_config["NUM_STAGES"]
+    # limit the grid size to avoid the invalid argument error of triton
+    while triton.cdiv(size_m, BLOCK_M) > 8192:
+        BLOCK_M *= 2
 
     grid = (
         triton.cdiv(size_n, BLOCK_N),
