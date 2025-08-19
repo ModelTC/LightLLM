@@ -155,11 +155,27 @@ class ReqSamplingParamsManager:
         else:
             self.req_to_out_token_id_counter[req.req_idx].fill_(0)
             if req.sampling_param.shm_param.input_penalty and req.need_out_token_id_statistics:
-                prompt_ids = torch.from_numpy(req.shm_req.get_prompt_ids()).pin_memory().cuda(non_blocking=True)
+                prompt_ids = torch.from_numpy(req.shm_req.get_prompt_ids_numpy()).pin_memory().cuda(non_blocking=True)
                 token_id_counter(
                     prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
                 )
 
+        return
+
+    def update_reqs_out_token_counter_gpu(
+        self, b_req_idx: torch.Tensor, next_token_ids: torch.Tensor, mask: torch.Tensor = None
+    ):
+        if self.penalty_counter_mode not in ["gpu_counter", "pin_mem_counter"]:
+            return
+
+        assert b_req_idx.is_cuda and next_token_ids.is_cuda and b_req_idx.shape[0] == next_token_ids.shape[0]
+
+        update_req_to_token_id_counter(
+            b_req_idx=b_req_idx,
+            next_token_ids=next_token_ids,
+            req_to_out_token_id_counter=self.req_to_out_token_id_counter,
+            mask=mask,
+        )
         return
 
     def update_reqs_token_counter(
@@ -169,22 +185,12 @@ class ReqSamplingParamsManager:
 
         req_objs: List[InferReq] = req_objs
 
-        if self.penalty_counter_mode == "cpu_counter":
-            for req_obj, next_token_id in zip(req_objs, next_token_ids):
-                if req_obj.need_out_token_id_statistics and req_obj.cur_output_len > 0:
-                    req_obj.out_token_id_count[next_token_id] += 1
-        else:
-            b_req_idx = torch.tensor(
-                [req.req_idx for req in req_objs], dtype=torch.int32, device="cpu", pin_memory=True
-            ).cuda(non_blocking=True)
-            next_token_ids = (
-                torch.tensor(next_token_ids, dtype=torch.int32, device="cpu").pin_memory().cuda(non_blocking=True)
-            )
-            update_req_to_token_id_counter(
-                b_req_idx=b_req_idx,
-                next_token_ids=next_token_ids,
-                req_to_out_token_id_counter=self.req_to_out_token_id_counter,
-            )
+        if self.penalty_counter_mode != "cpu_counter":
+            return
+
+        for req_obj, next_token_id in zip(req_objs, next_token_ids):
+            if req_obj.need_out_token_id_statistics and req_obj.cur_output_len > 0:
+                req_obj.out_token_id_count[next_token_id] += 1
         return
 
     def gen_cpu_out_token_counter_sampling_params(self, req_objs: List):

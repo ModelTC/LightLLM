@@ -57,7 +57,7 @@ def start_cache_manager(port: int, args, pipe_writer):
     service = CacheServer(manager)
     from rpyc.utils.server import ThreadedServer
 
-    t = ThreadedServer(service, port=port)
+    t = ThreadedServer(service, port=port, protocol_config={"allow_pickle": True})
     pipe_writer.send("init ok")
     t.start()
 

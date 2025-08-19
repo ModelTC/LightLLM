@@ -15,6 +15,7 @@ from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
+from lightllm.utils.shm_size_check import check_recommended_shm_size
 
 logger = init_logger(__name__)
 
@@ -61,6 +62,9 @@ def setup_signal_handlers(http_server_process, process_manager):
 
 def normal_or_p_d_start(args):
     set_unique_server_name(args)
+
+    if not args.disable_shm_warning:
+        check_recommended_shm_size(args)
 
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
@@ -157,6 +161,16 @@ def normal_or_p_d_start(args):
         )
     else:
         args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
+
+    if args.visual_dp <= 0:
+        raise ValueError("visual_dp must be a positive integer.")
+
+    # 检查visual_infer_batch_size是否合理
+    if args.visual_infer_batch_size // args.visual_dp < 1 or args.visual_infer_batch_size % args.visual_dp != 0:
+        raise ValueError(
+            f"visual_infer_batch_size ({args.visual_infer_batch_size}) must be "
+            f"a positive integer multiple of visual_dp ({args.visual_dp})"
+        )
 
     if args.disable_chunked_prefill:
         args.chunked_prefill_size = args.max_req_total_len

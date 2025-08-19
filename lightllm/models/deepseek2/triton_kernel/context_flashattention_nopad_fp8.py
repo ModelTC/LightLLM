@@ -96,7 +96,7 @@ def _fwd_kernel_fp8(
             Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * (start_n + offs_n),
             mask=(start_n + offs_n) < block_end_loc,
             other=0,
-        )
+        ).to(tl.int64)
         off_kv = kv_loc[None, :] * stride_kv_bs + cur_kv_head * stride_kv_h + offs_d[:, None] * stride_kv_d
         off_kv_rope = (
             kv_loc[None, :] * stride_kv_rope_bs
