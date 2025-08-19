@@ -27,7 +27,7 @@ def _rotary_kernel(
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     NUM_STAGE: tl.constexpr,
-):  
+):
     head_start_index = tl.program_id(0)
     seq_block_index = tl.program_id(1)
     seq_start_index = seq_block_index * BLOCK_SEQ
@@ -42,7 +42,7 @@ def _rotary_kernel(
         off_dimcos_sin = seq_index * stride_cosbs + cos_range * stride_cosd
         cos = tl.load(Cos + off_dimcos_sin)
         sin = tl.load(Sin + off_dimcos_sin)
-        
+
         if HEAD_PARALLEL_NUM == 1:
             for q_head_index in tl.static_range(0, HEAD_Q, step=1):
                 off_q0 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range0 * stride_qd
@@ -109,7 +109,7 @@ def rotary_emb_fwd(q, k, cos, sin, **run_config):
             Q_HEAD_NUM=head_num_q,
             K_HEAD_NUM=head_num_k,
             HEAD_DIM=head_dim,
-            out_dtype=str(q.dtype),
+            dtype=str(q.dtype),
         )
 
     BLOCK_SEQ = run_config["BLOCK_SEQ"]
@@ -117,7 +117,10 @@ def rotary_emb_fwd(q, k, cos, sin, **run_config):
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
 
-    grid = (HEAD_PARALLEL_NUM, triton.cdiv(total_len, BLOCK_SEQ),)
+    grid = (
+        HEAD_PARALLEL_NUM,
+        triton.cdiv(total_len, BLOCK_SEQ),
+    )
     _rotary_kernel[grid](
         Q=q,
         K=k,
