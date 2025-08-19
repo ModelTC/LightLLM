@@ -30,7 +30,7 @@ class MoeSiluAndMulKernelConfig(KernelConfigs):
             config = finded_config[min(finded_config.keys(), key=lambda x: abs(int(x) - M))]
             return config
         else:
-            config = {"BLOCK_M": 128, "BLOCK_N": 128, "num_warps": 4}
+            config = {"BLOCK_M": 128, "BLOCK_N": 128, "num_warps": 4, "NUM_STAGES": 3}
 
         return config
 
