@@ -16,6 +16,7 @@ def _silu_and_mul_kernel_fast(
     size_n,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
     NEED_MASK: tl.constexpr,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
@@ -34,7 +35,7 @@ def _silu_and_mul_kernel_fast(
         mask = None
         other = None
     
-    for m_index in range(m_start_index, m_end_index):
+    for m_index in tl.range(m_start_index, m_end_index, num_stages=NUM_STAGES):
         gate_offsets = m_index * stride_input_m + n_offsets[None, :]
         up_offsets = m_index * stride_input_m + (n_offsets[None, :] + size_n)
         out_offsets = m_index * stride_output_m + n_offsets[None, :]
@@ -77,6 +78,7 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, **run_config):
     BLOCK_M = run_config["BLOCK_M"]
     BLOCK_N = run_config["BLOCK_N"]
     num_warps = run_config["num_warps"]
+    NUM_STAGES = run_config["NUM_STAGES"]
 
     grid = (
         triton.cdiv(size_m, BLOCK_M),
@@ -94,6 +96,7 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, **run_config):
         size_n=size_n,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        NUM_STAGES=NUM_STAGES,
         NEED_MASK=NEED_MASK,
         num_warps=num_warps,
     )

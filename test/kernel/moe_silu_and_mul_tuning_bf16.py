@@ -100,12 +100,13 @@ def worker(
 
 def get_test_configs(split_id, split_count):
     index = 0
-    result = itertools.product([1, 2, 4, 8, 16, 32], [64, 128, 256, 512, 1024], [1, 2, 4, 8, 16])
-    for BLOCK_M, BLOCK_N, num_warps in result:
+    result = itertools.product([1, 2, 4, 8, 16, 32], [64, 128, 256, 512, 1024], [1, 2, 4, 8], [1, 2, 4, 8, 16])
+    for BLOCK_M, BLOCK_N, num_warps, NUM_STAGES in result:
         t_config = {
             "BLOCK_M": BLOCK_M,
             "BLOCK_N": BLOCK_N,
             "num_warps": num_warps,
+            "NUM_STAGES": NUM_STAGES,
         }
         if index % split_count == split_id:
             yield t_config
