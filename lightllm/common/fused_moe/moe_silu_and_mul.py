@@ -3,7 +3,8 @@ import torch
 import triton
 import triton.language as tl
 from .moe_silu_and_mul_config import MoeSiluAndMulKernelConfig
-
+from typing import Any, Callable, Dict, Optional, Tuple
+from lightllm.common.triton.autotuner import autotune, nearest_power_of_2
 
 @triton.jit
 def _silu_and_mul_kernel(
@@ -53,8 +54,16 @@ def _silu_and_mul_kernel(
         mask=(output_n_offsets < size_n)[None, :] * (output_m_offsets < size_m)[:, None],
     )
 
-
-def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, **run_config):
+@autotune(  
+    configs=[
+         {"BLOCK_M": bm, "BLOCK_N": bn, "num_warps": nw, "num_stages": ns} 
+         for ns in [1, 2, 4] for nw in [1, 4, 8] for bm in [32, 64, 128, 256] for bn in [32, 64, 128, 256] 
+    ],
+    default_config={"BLOCK_M": 128, "BLOCK_N": 128, "num_warps": 4, "num_stages": 1},
+    static_key_func=lambda input, output : f"N={input.shape[-1] // 2},out_dtype={output.dtype}",
+    run_key_func=lambda input, output : f"{nearest_power_of_2(input.shape[0])}",
+)
+def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config: Dict=None):
     assert input.is_contiguous()
     assert output.is_contiguous()
 
@@ -65,12 +74,10 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, **run_config):
     size_m = input.shape[0]
     size_n = input.shape[-1] // 2
 
-    if not run_config:
-        run_config = MoeSiluAndMulKernelConfig.try_to_get_best_config(M=size_m, N=size_n, out_dtype=str(output.dtype))
-
     BLOCK_M = run_config["BLOCK_M"]
     BLOCK_N = run_config["BLOCK_N"]
     num_warps = run_config["num_warps"]
+    num_stages = run_config["num_stages"]
 
     grid = (
         triton.cdiv(size_m, BLOCK_M),
@@ -88,5 +95,6 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, **run_config):
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         num_warps=num_warps,
+        num_stages=num_stages,
     )
     return

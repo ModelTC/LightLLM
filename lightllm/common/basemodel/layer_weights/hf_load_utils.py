@@ -2,8 +2,10 @@ import torch
 import os
 import gc
 from safetensors import safe_open
+from tqdm import tqdm
+import torch.distributed as dist
 import lightllm.utils.petrel_helper as utils
-from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.dist_utils import get_current_device_id, get_global_rank
 
 
 def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_layer_list=None, weight_dir=None):
@@ -61,6 +63,17 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
     )  # noqa
     worker = int(os.environ.get("LOADWORKER", 1))
     with Pool(worker) as p:
-        _ = p.map(partial_func, candidate_files)
+        iterator = p.imap_unordered(partial_func, candidate_files, chunksize=1)
+        rank = get_global_rank()
+        iterator = tqdm(
+            iterator,
+            total=len(candidate_files),
+            desc=f"Rank {rank} loading model weights with {worker} workers",
+            position=rank,
+            dynamic_ncols=True,
+        )
+
+        for _ in iterator:
+            pass
 
     return
