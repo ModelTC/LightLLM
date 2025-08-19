@@ -68,6 +68,7 @@ class FusedMoeWeightTP(BaseWeight):
             num_expert_group=num_expert_group,
             scoring_func=self.scoring_func,
         )
+        topk_weights.mul_(self.routed_scaling_factor)
         if self.num_fused_shared_experts > 0:
             pad_topk_ids = torch.arange(
                          start=self.n_routed_experts - self.num_fused_shared_experts, 
@@ -76,7 +77,7 @@ class FusedMoeWeightTP(BaseWeight):
                          dtype=topk_ids.dtype,
                          device="cuda").view(1, self.num_fused_shared_experts).repeat(topk_ids.shape[0], 1)
             pad_topk_weights = torch.full((topk_weights.shape[0], self.num_fused_shared_experts),
-                                          fill_value=1.0 / self.routed_scaling_factor,
+                                          fill_value=1.0,
                                           device="cuda",
                                           dtype=topk_weights.dtype)
             

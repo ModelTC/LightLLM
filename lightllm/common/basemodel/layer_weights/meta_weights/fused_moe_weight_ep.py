@@ -95,7 +95,7 @@ class FusedMoeWeightEP(BaseWeight):
         self.n_group = network_config["n_group"]
         network_config["topk_group"] = network_config.get("topk_group", 0)
         self.topk_group = network_config["topk_group"]
-        network_config["routed_scaling_factor"] = network_config.get("routed_scaling_factor", 0)
+        network_config["routed_scaling_factor"] = network_config.get("routed_scaling_factor", 1.0)
         self.routed_scaling_factor = network_config["routed_scaling_factor"]
 
         self.lock = threading.Lock()
@@ -126,6 +126,7 @@ class FusedMoeWeightEP(BaseWeight):
             num_expert_group=num_expert_group,
             scoring_func=self.scoring_func,
         )
+        topk_weights.mul_(self.routed_scaling_factor)
 
         if self.redundancy_expert_num > 0:
             redundancy_topk_ids_repair(
@@ -173,6 +174,7 @@ class FusedMoeWeightEP(BaseWeight):
             num_expert_group=self.n_group,
             scoring_func=self.scoring_func,
         )
+        topk_weights.mul_(self.routed_scaling_factor)
 
         if self.redundancy_expert_num > 0:
             redundancy_topk_ids_repair(
@@ -213,6 +215,7 @@ class FusedMoeWeightEP(BaseWeight):
             num_expert_group=self.n_group,
             scoring_func=self.scoring_func,
         )
+        topk_weights.mul_(self.routed_scaling_factor)
         if self.redundancy_expert_num > 0:
             redundancy_topk_ids_repair(
                 topk_ids=topk_idx,
