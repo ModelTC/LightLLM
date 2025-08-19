@@ -52,6 +52,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     prompt_tokens = 0
     prompt_token_ids = None
     is_first_metadata = True
+    usage = None
     async for sub_req_id, request_output, metadata, finish_status in results_generator:
         # when set "--return_all_prompt_logprobs", the first token metadata will contains
         # prompt_logprobs and prompt_token_ids
@@ -64,6 +65,8 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
             if prompt_token_ids is not None:
                 del metadata["prompt_token_ids"]
             is_first_metadata = False
+
+        usage = metadata.get("usage", None)
 
         count_output_tokens_dict[sub_req_id] += 1
         final_output_dict[sub_req_id].append(request_output)
@@ -95,6 +98,8 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
         ret["prompt_token_ids"] = prompt_token_ids
     if prompt_logprobs is not None:
         ret["prompt_logprobs"] = prompt_logprobs
+    if usage is not None:
+        ret["usage"] = usage
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
 
 
@@ -130,6 +135,7 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
                 "finished": finish_status.is_finished(),
                 "finish_reason": finish_status.get_finish_reason(),
                 "details": None,
+                "usage": metadata.get("usage", None),
             }
 
             yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")
