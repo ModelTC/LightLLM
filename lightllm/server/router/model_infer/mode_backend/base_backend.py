@@ -19,7 +19,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_verify import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
-from lightllm.server.core.objs.io_objs import AbortedReqCmd
+from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
@@ -316,6 +316,12 @@ class ModeBackend:
             if isinstance(cmds[0], AbortedReqCmd):
                 for obj in cmds:
                     obj: AbortedReqCmd = obj
+                    if obj.req_id in g_infer_context.requests_mapping:
+                        req: InferReq = g_infer_context.requests_mapping[obj.req_id]
+                        req.infer_aborted = True
+            elif isinstance(cmds[0], StopStrMatchedReqCmd):
+                for obj in cmds:
+                    obj: StopStrMatchedReqCmd = obj
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
