@@ -524,18 +524,12 @@ async def _collect_generation_results(
     final_text = "".join(final_output)
     if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
         valid_stop_strings = sampling_params.stop_sequences.to_strings()
-        if valid_stop_strings:
-            max_stop_len = len(valid_stop_strings[0])
-            search_len = min(len(final_text), max_stop_len + 20)  # 搜索长度为最长停止序列长度加20
-            tail_text = final_text[-search_len:] if search_len > 0 else final_text
-            tail_start_pos = len(final_text) - search_len
-            for stop_str in valid_stop_strings:
-                stop_index = tail_text.rfind(stop_str)
-                if stop_index != -1:
-                    earliest_stop_index = tail_start_pos + stop_index
-                    logger.info(f"removed stop sequence in tail: '{final_text[earliest_stop_index:]}'")
-                    final_text = final_text[:earliest_stop_index]
-                    break
+        for stop_str in valid_stop_strings:
+            stop_index = final_text.rfind(stop_str, max(0, len(final_text) - len(stop_str) - 20), len(final_text))
+            if stop_index != -1:
+                logger.debug(f"removed stop sequence in tail: '{final_text[stop_index:]}'")
+                final_text = final_text[:stop_index]
+                break
 
     return {
         "index": prompt_index,
