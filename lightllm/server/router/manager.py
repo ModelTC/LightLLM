@@ -332,8 +332,8 @@ class RouterManager:
         if self.running_batch is None:
             return ans
         for req in self.running_batch.reqs:
-            if req.is_aborted and req.router_aborted is False:
-                req.router_aborted = True
+            if req.is_aborted and req._router_aborted is False:
+                req._router_aborted = True
                 ans.append(req)
         return ans
 
@@ -342,7 +342,8 @@ class RouterManager:
         if self.running_batch is None:
             return ans
         for req in self.running_batch.reqs:
-            if req.stop_str_matched:
+            if req.stop_str_matched and req._router_stop_str_matched is False:
+                req._router_stop_str_matched = True
                 ans.append(req)
         return ans
 
@@ -382,6 +383,11 @@ class RouterManager:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
             req.multimodal_params = group_req_indexes.multimodal_params
             req.start_time = group_req_indexes.time_mark
+            # 附加一个私有标记变量，标记请求是否已经被router发送过abort命令给推理进程，
+            # 防止反复发送abort命令给推理进程
+            req._router_aborted = False
+            # 作用同 _router_aborted 类似
+            req._router_stop_str_matched = False
             req_group.append(req)
 
             logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
