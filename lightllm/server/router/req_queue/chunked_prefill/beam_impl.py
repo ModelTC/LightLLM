@@ -91,7 +91,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
         aborted_count = 0
         cur_group_reqs = []
         for req in self.waiting_req_list:
-            if req.is_aborted or req.stop_str_matched:
+            if req.is_aborted:
                 aborted_count += 1
                 abort_req_list.append(req)
                 continue
