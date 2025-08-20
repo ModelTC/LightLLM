@@ -338,6 +338,10 @@ class RouterManager:
         return ans
 
     def _get_stop_str_reqs_from_running_batch(self) -> List[Req]:
+        # to do, 多节点tp模式，暂时不能支持 stop str 匹配退出
+        if self.is_multinode_tp:
+            return []
+
         ans = []
         if self.running_batch is None:
             return ans
