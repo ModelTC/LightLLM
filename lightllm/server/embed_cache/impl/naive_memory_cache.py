@@ -7,7 +7,7 @@ import torch
 import time
 from collections import deque
 import multiprocessing.shared_memory as shm
-from ..utils import get_shm_name_data, get_shm_name_embed, free_shm
+from ..utils import get_shm_name_data, get_shm_name_embed, free_shm, free_afs
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -65,7 +65,7 @@ class InMemoryCache:
                     except BaseException as e:
                         logger.exception(str(e))
                         time.sleep(3)
-        return
+        return self.token_id_range_start
 
     def _clear(self, free_max_count: int):
         deleted = 0
@@ -77,7 +77,10 @@ class InMemoryCache:
                 if record.data:
                     free_shm(get_shm_name_data(id))
                 if record.embed:
-                    free_shm(get_shm_name_embed(id))
+                    if self.args.run_mode == "visual_only":
+                        free_afs(get_shm_name_embed(id))
+                    else:
+                        free_shm(get_shm_name_embed(id))
                 del self._md5_to_record[record.md5sum]
                 del self._records[id]
                 self.occupied -= 1
@@ -103,7 +106,7 @@ class InMemoryCache:
                     rec.visittime = now
                     rec.ref += 1
                 else:
-                    uid_int = uuid.uuid1().int
+                    uid_int = int(md5sum, 16)
                     self._check_and_set_new_id_range(token_num)
                     rec = Record(
                         id=uid_int,

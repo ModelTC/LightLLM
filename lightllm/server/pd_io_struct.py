@@ -15,6 +15,7 @@ class NodeRole(enum.Enum):
     D = "decode"
     NORMAL = "normal"
     PD_MASTER = "pd_master"
+    LLM_ONLY = "llm_only"
 
     def is_D(self):
         return self == NodeRole.D
@@ -23,10 +24,10 @@ class NodeRole(enum.Enum):
         return self == NodeRole.P
 
     def is_normal(self):
-        return self == NodeRole.NORMAL
+        return (self == NodeRole.NORMAL) or (self == NodeRole.LLM_ONLY)
 
     def is_P_or_NORMAL(self):
-        return (self == NodeRole.P) or (self == NodeRole.NORMAL)
+        return (self == NodeRole.P) or (self == NodeRole.NORMAL) or (self == NodeRole.LLM_ONLY)
 
     def is_P_or_D(self):
         return (self == NodeRole.P) or (self == NodeRole.D)

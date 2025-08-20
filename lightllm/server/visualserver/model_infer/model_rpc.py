@@ -17,7 +17,14 @@ from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
-from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
+from lightllm.server.embed_cache.utils import (
+    tensor2bytes,
+    read_shm,
+    create_shm,
+    create_afs,
+    get_shm_name_data,
+    get_shm_name_embed,
+)
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.dist_utils import init_vision_distributed_env
@@ -31,6 +38,7 @@ class VisualModelRpcServer(rpyc.Service):
         import torch
         import torch.distributed as dist
 
+        self.args = get_env_start_args()
         self.vit_dp = kvargs["vit_dp"]
         self.vit_tp = kvargs["vit_tp"]
         self.dp_rank_id = kvargs["dp_rank_id"]
@@ -74,7 +82,6 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = Gemma3VisionModel()
             else:
                 raise Exception(f"can not support {self.model_type} now")
-            print("begin load visual model weight")
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
         except Exception as e:
@@ -98,7 +105,6 @@ class VisualModelRpcServer(rpyc.Service):
         images = obtain(images)
         all_img_embeds, uuids, valid_ids = self.forward(images)
         all_img_embeds = all_img_embeds.to(torch.device("cpu"))
-        print(f"all_img_embeds is {all_img_embeds}")
 
         if self.tp_rank_id == 0:
             ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
@@ -109,7 +115,10 @@ class VisualModelRpcServer(rpyc.Service):
                 uid = uuids[i]
                 start, end = valid_ids[i]
                 cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                if self.args.run_mode == "visual_only":
+                    create_afs(get_shm_name_embed(uid), cur_embed_bytes)
+                else:
+                    create_shm(get_shm_name_embed(uid), cur_embed_bytes)
                 ids_to_set.append(uid)
             if ids_to_set:
                 self.cache_client.root.set_items_embed(ids_to_set)

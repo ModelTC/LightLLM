@@ -5,6 +5,7 @@ import asyncio
 import uvloop
 import rpyc
 import time
+import json
 import copy
 import hashlib
 import datetime
@@ -16,7 +17,7 @@ from typing import Union, List, Tuple, Dict, Optional
 from fastapi import Request
 from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole
-from ..embed_cache.utils import get_shm_name_data, create_shm
+from ..embed_cache.utils import get_shm_name_data, create_shm, afs_embed_exists
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from lightllm.server.core.objs import Req, FinishStatus
@@ -52,7 +53,6 @@ class HttpServerManagerForVisualOnly:
         self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
         self.send_to_visual = context.socket(zmq.PUSH)
         self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
-        print("self.send_to_visual")
         self.shm_req_manager = ShmReqManager()
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
@@ -95,7 +95,6 @@ class HttpServerManagerForVisualOnly:
         # 这里的锁是为了 防止多个含有多张图片的请求 同时申请的record数量 大于cache_capacity，从而造成死锁的问题。
         # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
         # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
-        print("in alloc_multimodal_resoueces")
         async with self._resource_lock:
             items, md5sums, tokens_nums, datas = [], [], [], []
             for img in multimodal_params.images:
@@ -103,7 +102,10 @@ class HttpServerManagerForVisualOnly:
                 data = img.read()
                 # must after init_imageitem_extral_params
                 token_num = self.tokenizer.get_image_token_length(img)
-                md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
+                md5sum = "{}_{}".format(
+                    hashlib.md5(data).hexdigest(),
+                    hashlib.md5(pickle.dumps(img.extra_params, protocol=4)).hexdigest(),
+                )
                 md5sums.append(md5sum)
                 tokens_nums.append(token_num)
                 datas.append(data)
@@ -112,7 +114,10 @@ class HttpServerManagerForVisualOnly:
                 self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
                 data = audio.read()
                 token_num = self.tokenizer.get_audio_token_length(audio)
-                md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
+                md5sum = "{}_{}".format(
+                    hashlib.md5(data).hexdigest(),
+                    hashlib.md5(pickle.dumps(audio.extra_params, protocol=4)).hexdigest(),
+                )
                 md5sums.append(md5sum)
                 tokens_nums.append(token_num)
                 datas.append(data)
@@ -192,7 +197,6 @@ class HttpServerManagerForVisualOnly:
         request: Request,
         is_health_req: bool = False,
     ) -> Tuple[int, str, dict, FinishStatus]:
-        print(" in generate")
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)

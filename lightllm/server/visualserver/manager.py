@@ -102,6 +102,17 @@ class VisualManager:
         await asyncio.gather(*tasks)
         return
 
+    async def _send_to_next_module_or_release(self, group_req_indexes: GroupReqIndexes):
+        if self.visual_only:
+            for idx in group_req_indexes.shm_req_indexes:
+                shm_req = self.shm_req_manager.get_req_obj_by_index(idx)
+                shm_req.can_released_mark = True
+                shm_req.finish_status.set_status(1)
+                self.shm_req_manager.put_back_req_obj(shm_req)
+                logger.info(f"router release req id {shm_req.request_id}")
+        else:
+            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+
     async def loop_for_fwd(self):
         while True:
             if len(self.waiting_reqs) == 0:
@@ -118,13 +129,12 @@ class VisualManager:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
                         # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
                         # 需要一些一致的流程来保证不出现异步问题。
-                        if not self.visual_only:
-                            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        await self._send_to_next_module_or_release(group_req_indexes)
                         continue
 
                     multimodal_params = group_req_indexes.multimodal_params
 
-                    img_uuids = [img.uuid for img in multimodal_params.images]
+                    img_uuids = [img.uuid for img in multimodal_params.images if not img.afs_embed]
                     ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
 
                     for img, ready in zip(multimodal_params.images, ready_image):
@@ -135,23 +145,18 @@ class VisualManager:
                             await self.infer_imgs(images_need_infer)
                             images_need_infer = []
                             for _group_req_indexes in processing_group_reqs:
-                                if not self.visual_only:
-                                    self.send_to_next_module.send_pyobj(
-                                        _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
-                                    )
+                                await self._send_to_next_module_or_release(group_req_indexes)
                             processing_group_reqs = []
 
                     if len(images_need_infer) == 0:
-                        if not self.visual_only:
-                            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        await self._send_to_next_module_or_release(group_req_indexes)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
                 if len(images_need_infer) > 0:
                     await self.infer_imgs(images_need_infer)
                     for _group_req_indexes in processing_group_reqs:
-                        if not self.visual_only:
-                            self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        await self._send_to_next_module_or_release(group_req_indexes)
                     processing_group_reqs = []
                     images_need_infer = []
 

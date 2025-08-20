@@ -22,6 +22,10 @@ class CacheServer(rpyc.Service):
         # (to finalize the service, if needed)
         pass
 
+    def exposed__check_and_set_new_id_range(self, token_num: int) -> int:
+        token_num = obtain(token_num)
+        return self._impl._check_and_set_new_id_range(token_num)
+
     def exposed_alloc(self, md5sum_list: list[str], token_num_list: list[int]) -> Optional[list[dict]]:
         md5sum_list = obtain(md5sum_list)
         token_num_list = obtain(token_num_list)

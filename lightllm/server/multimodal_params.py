@@ -24,6 +24,7 @@ class AudioItem:
         self.token_num = None
         # the audio length
         self.audio_length = None
+        self.afs_embed = False
 
         self._preload_data = None
         self.extra_params = {}
@@ -77,6 +78,7 @@ class ImageItem:
         self.token_num = None
         self.image_w = 0
         self.image_h = 0
+        self.afs_embed = False
 
         self._preload_data = None
         self.extra_params = {}

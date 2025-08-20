@@ -59,7 +59,7 @@ def setup_signal_handlers(http_server_process, process_manager):
     return
 
 
-def normal_or_p_d_start(args):
+def check_and_set_args(args):
     set_unique_server_name(args)
 
     if args.enable_mps:
@@ -67,7 +67,7 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "llm_only", "visual_only"]:
         return
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
@@ -138,6 +138,11 @@ def normal_or_p_d_start(args):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
+    # visual_only模式下才需要设置visual_embed_path
+    if args.visual_embed_path is not None:
+        assert (
+            args.run_mode == "visual_only" or args.run_mode == "llm_only"
+        ), "only visual_only or llm_only mode need visual_embed_path"
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -202,6 +207,10 @@ def normal_or_p_d_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
+
+def normal_or_p_d_start(args):
+
+    check_and_set_args(args)
     already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
     if args.run_mode == "decode":
         already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port, args.pd_decode_rpyc_port]
@@ -269,7 +278,7 @@ def normal_or_p_d_start(args):
             ],
             start_args=[(cache_port, args)],
         )
-        if args.enable_multimodal_audio:
+        if args.enable_multimodal_audio and args.run_mode != "llm_only":
             from .audioserver.manager import start_audio_process
 
             process_manager.start_submodule_processes(
@@ -289,7 +298,7 @@ def normal_or_p_d_start(args):
                 ],
             )
 
-        else:
+        elif args.run_mode != "llm_only":
             process_manager.start_submodule_processes(
                 start_funcs=[
                     start_visual_process,
@@ -417,7 +426,7 @@ def pd_master_start(args):
 
 
 def visual_only_start(args):
-    set_unique_server_name(args)
+    check_and_set_args(args)
     if args.run_mode != "visual_only":
         return
     already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
