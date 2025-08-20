@@ -208,10 +208,12 @@ class Req(ctypes.Structure):
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
 
-        if (self.is_aborted or self.stop_str_matched) and can_released_mark and ref_count_ok:
+        if self.is_aborted and can_released_mark and ref_count_ok:
             return True
 
-        if self.finish_status.is_finished() and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
+        ok_finished_gen_req = self.finish_status.is_finished() or self.stop_str_matched
+
+        if ok_finished_gen_req and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
             return True
 
         return False
