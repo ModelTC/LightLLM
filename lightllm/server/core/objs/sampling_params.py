@@ -1,6 +1,6 @@
 import os
 import ctypes
-from typing import List, Tuple, Union
+from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
 
@@ -27,21 +27,24 @@ class StopSequence(ctypes.Structure):
         ("sequence_str_len", ctypes.c_int),
     ]
 
-    def initialize(self, sequence: List[int], sequence_str: str = ""):
+    def initialize(self, sequence: List[int], sequence_str: Optional[str] = None):
         self.size = len(sequence)
         assert self.size <= STOP_SEQUENCE_MAX_LENGTH, "stop token length too long."
         assert all(isinstance(e, int) for e in sequence), "all must be int"
         self.sequence[: self.size] = sequence[:]
 
-        sequence_str_bytes = sequence_str.encode("utf-8")
-        assert len(sequence_str_bytes) < STOP_SEQUENCE_STR_MAX_LENGTH, "stop sequence string too long."
-        self.sequence_str = sequence_str_bytes
-        self.sequence_str_len = len(sequence_str_bytes)
+        if sequence_str is not None:
+            sequence_str_bytes = sequence_str.encode("utf-8")
+            assert len(sequence_str_bytes) < STOP_SEQUENCE_STR_MAX_LENGTH, "stop sequence string too long."
+            self.sequence_str = sequence_str_bytes
+            self.sequence_str_len = len(sequence_str_bytes)
+        else:
+            self.sequence_str_len = 0
 
-    def to_list(self):
+    def to_list(self) -> List[int]:
         return list(self.sequence[0 : self.size])
 
-    def to_string(self):
+    def to_string(self) -> str:
         return bytes(self.sequence_str[0 : self.sequence_str_len]).decode("utf-8")
 
 
@@ -52,45 +55,51 @@ class StopSequenceGroups(ctypes.Structure):
         ("size", ctypes.c_int),
     ]
 
-    def initialize(self, stop_sequences: Union[str, List], tokenizer):
+    def initialize(self, stop_sequences: Union[str, List[Union[List[int], str]]], tokenizer):
+        if stop_sequences is None:
+            stop_sequences = []
+        elif isinstance(stop_sequences, str):
+            stop_sequences = [stop_sequences]
+
         groups: List[List[int]] = self.stop_sentences_to_token_ids(stop_sequences, tokenizer)
         self.size = len(groups)
         assert self.size <= MAX_STOP_SEQUENCES, "Too many stop sequence groups."
-        if isinstance(stop_sequences, str):
-            stop_sequences = [stop_sequences]
+
         for group_idx in range(self.size):
-            self.groups[group_idx].initialize(groups[group_idx], stop_sequences[group_idx])
+            if isinstance(stop_sequences[group_idx], str):
+                self.groups[group_idx].initialize(groups[group_idx], sequence_str=stop_sequences[group_idx])
+            else:
+                self.groups[group_idx].initialize(groups[group_idx])
 
-    def stop_sentences_to_token_ids(self, stop_sequences, tokenizer):
-        if stop_sequences is None:
-            stop_sequences = []
-        else:
-            if isinstance(stop_sequences, str):
-                stop_sequences = [stop_sequences]
+    def stop_sentences_to_token_ids(self, stop_sequences: List[Union[List[int], str]], tokenizer) -> List[List[int]]:
+        new_stop_sequences = []
+        for stop_info in stop_sequences:
+            if isinstance(stop_info, str):
+                stop_str_ids = self._stop_str_to_token_ids(stop_info, tokenizer)
+                if stop_str_ids is not None and len(stop_str_ids) > 0:
+                    new_stop_sequences.append(stop_str_ids)
+            if isinstance(stop_info, list):
+                if all(isinstance(x, int) for x in stop_info):
+                    if len(stop_info) > 0:
+                        new_stop_sequences.append(stop_info)
+                else:
+                    assert False, "stop_sequences item must be type List[int] when it is a list."
+        return new_stop_sequences
 
-            new_stop_sequences = []
-            for stop_info in stop_sequences:
-                if isinstance(stop_info, str):
-                    stop_str_ids = self._stop_str_to_token_ids(stop_info, tokenizer)
-                    if stop_str_ids is not None and len(stop_str_ids) > 0:
-                        new_stop_sequences.append(stop_str_ids)
-                if isinstance(stop_info, list):
-                    if all(isinstance(x, int) for x in stop_info):
-                        if len(stop_info) > 0:
-                            new_stop_sequences.append(stop_info)
-            stop_sequences = new_stop_sequences
-        return stop_sequences
-
-    def _stop_str_to_token_ids(self, stop_str: str, tokenizer):
+    def _stop_str_to_token_ids(self, stop_str: str, tokenizer) -> List[int]:
         stop_str_ids = tokenizer.encode(stop_str, add_special_tokens=False)
         return stop_str_ids
 
-    def to_list(self):
+    def to_list(self) -> List[List[int]]:
         return [self.groups[i].to_list() for i in range(self.size)]
 
-    def to_string(self):
+    def to_strings(self) -> List[str]:
         # 降序匹配，在出现"\n\n"和"\n"情况时，优先匹配“\n\n”
-        return sorted([self.groups[i].to_string() for i in range(self.size)], key=len, reverse=True)
+        return sorted(
+            [self.groups[i].to_string() for i in range(self.size) if self.groups[i].sequence_str_len > 0],
+            key=len,
+            reverse=True,
+        )
 
 
 class RegularConstraint(ctypes.Structure):
