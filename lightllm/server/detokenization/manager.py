@@ -105,14 +105,15 @@ class DeTokenizationManager:
         exist_need_detoken = False
         exist_decode = False
         for decode_req in self.req_id_to_out.values():
+            # 已经满足停止字符串停止条件，则不再处理后续生成 token
+            if decode_req.req.stop_str_matched:
+                continue
+
             if decode_req.need_detoken() and not decode_req.out_queue_is_full():
                 new_token_id, src_index = decode_req.get_next_token_id_and_index()
                 decode_req.output_ids.append(new_token_id)
                 special = new_token_id in self.all_special_ids
                 count_output_tokens = len(decode_req.output_ids)
-
-                if decode_req.req.stop_str_matched:
-                    continue
 
                 exist_decode = True
                 new_text = decode_token(
