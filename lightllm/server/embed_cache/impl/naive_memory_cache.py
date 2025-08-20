@@ -65,7 +65,7 @@ class InMemoryCache:
                     except BaseException as e:
                         logger.exception(str(e))
                         time.sleep(3)
-        return self.token_id_range_start
+        return
 
     def _clear(self, free_max_count: int):
         deleted = 0

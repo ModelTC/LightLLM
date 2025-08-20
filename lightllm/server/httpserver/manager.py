@@ -81,11 +81,13 @@ class HttpServerManager:
                 )
 
         self.enable_multimodal = enable_multimodal
-        if self.enable_multimodal:
+        if self.enable_multimodal and self.args.run_mode != "llm_only":
             self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
-            if self.args.run_mode != "llm_only":
-                self.send_to_visual = context.socket(zmq.PUSH)
-                self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
+            self.send_to_visual = context.socket(zmq.PUSH)
+            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
+
+        self.token_id_range_start = 100000000
+        self.token_id_range_end = 2 ** 63 - 1
 
         self.shm_req_manager = ShmReqManager()
 
@@ -114,6 +116,10 @@ class HttpServerManager:
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
+
+    async def _check_and_set_new_id_range(self, token_num):
+        assert self.token_id_range_start + token_num < self.token_id_range_end
+        self.token_id_range_start += token_num
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
 
@@ -199,7 +205,7 @@ class HttpServerManager:
                 await self._wait_for_afs_embed(md5sum)
             img.uuid = uid_int
             img.afs_embed = True
-            token_id_range_start = self.cache_client.root._check_and_set_new_id_range(token_num)
+            token_id_range_start = self.token_id_range_start
             img.token_id = token_id_range_start
             img.token_num = token_num
 
@@ -216,7 +222,7 @@ class HttpServerManager:
             uid_int = int(md5sum, 16)
             audio.uuid = uid_int
             audio.afs_embed = True
-            token_id_range_start = self.cache_client.root._check_and_set_new_id_range(token_num)
+            token_id_range_start = self.token_id_range_start
             audio.token_id = token_id_range_start
             audio.token_num = token_num
         return

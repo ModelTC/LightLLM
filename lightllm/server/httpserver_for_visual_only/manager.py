@@ -238,7 +238,7 @@ class HttpServerManagerForVisualOnly:
                 req_obj.init(
                     group_request_id + i,
                     #  随便写的，后面改掉
-                    [24, 67],
+                    [21456],
                     sampling_params,
                     self.tokenizer,
                     chunked_prefill_size=self.args.chunked_prefill_size,
