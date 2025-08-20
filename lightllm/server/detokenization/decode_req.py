@@ -60,8 +60,7 @@ class DecodeReq:
         if self.req.is_aborted:
             return True
         if self.req.stop_str_matched:
-            # httpserver那里必须先处理完请求, 这里才能释放
-            return self.req.out_tokens_queue.is_empty()
+            return True
         if (
             self.req.finish_status.is_finished()
             and self.req.candetoken_out_len == len(self.output_ids)
