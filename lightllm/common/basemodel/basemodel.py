@@ -742,6 +742,8 @@ class TpPartBaseModel:
         if self.batch_max_tokens not in warmup_lengths:
             warmup_lengths.append(self.batch_max_tokens)
 
+        layer_num_bak = self.layers_num
+        self.layers_num = 1
         for input_len in warmup_lengths:
             try:
                 logger.info(f"autotune warmup for length {input_len}")
@@ -778,7 +780,7 @@ class TpPartBaseModel:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
-
+        self.layers_num = layer_num_bak
         torch.distributed.barrier()
         logger.info("======end autotune warmup=======")
 

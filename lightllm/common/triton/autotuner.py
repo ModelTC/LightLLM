@@ -35,6 +35,10 @@ def dict_to_filename(data):
     # 用下划线连接所有键值对
     return ",".join(parts)
 
+def nearest_power_of_2(x):
+    if x <= 1:
+        return 1
+    return triton.next_power_of_2(x - triton.next_power_of_2(x)//4) 
 
 class Autotuner():
 
@@ -154,7 +158,6 @@ class Autotuner():
             if self.enable_autotune:
                 os.makedirs(self.cache_dir, exist_ok=True)
 
-        # 懒加载缓存，避免初始化时遍历大量 json 文件
         self._loaded_static_keys = set()
 
     @lru_cache(maxsize=None)
@@ -180,16 +183,13 @@ class Autotuner():
 
         full_nargs = {**self.nargs, **kwargs}
 
-        # 快路径：未定义自定义 hook 时，避免在每次迭代中重复 clone/copy
         can_use_fast_reset = (not self.user_defined_pre_hook) and (not self.user_defined_post_hook)
         bench_fn = self._do_bench if bench == "full" else self._do_bench_quick
 
         if can_use_fast_reset and (len(self.reset_to_zero) > 0 or len(self.restore_value) > 0):
-            # 预先准备需要的拷贝
             restore_copies = {name: full_nargs[name].clone() for name in self.restore_value}
 
             def fast_kernel_call():
-                # 恢复到初始状态并按需清零，避免每次迭代都 clone
                 for name in self.restore_value:
                     full_nargs[name].copy_(restore_copies[name])
                 for name in self.reset_to_zero:
@@ -198,19 +198,10 @@ class Autotuner():
 
             try:
                 result = bench_fn(fast_kernel_call, quantiles=(0.5,))
-                # bench 结束后做一次最终恢复
                 for name in self.restore_value:
                     full_nargs[name].copy_(restore_copies[name])
                 return result
-            except OutOfResources:
-                return float("inf")
-            except PTXASError:
-                return float("inf")
-            except CompileTimeAssertionFailure:
-                return float("inf")
-            except RuntimeError:
-                return float("inf")
-            except Exception:
+            except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
                 return float("inf")
         else:
             def kernel_call():
@@ -228,15 +219,7 @@ class Autotuner():
 
         try:
             return bench_fn(kernel_call, quantiles=(0.5,))  
-        except OutOfResources:
-            return float("inf")
-        except PTXASError:
-            return float("inf")
-        except CompileTimeAssertionFailure:
-            return float("inf")
-        except RuntimeError:
-            return float("inf")
-        except Exception:
+        except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
             return float("inf")
 
     def __call__(self, *args, **kwargs):
@@ -245,7 +228,8 @@ class Autotuner():
 
         static_key = self._static_key(*args, **kwargs)
         run_key = self._run_key(*args, **kwargs)
-        # 懒加载对应的缓存
+        
+        # 懒加载
         self._ensure_cache_loaded(static_key)
         best_config = None
         self.nargs = dict(zip(self.arg_names, args))
@@ -314,7 +298,6 @@ class Autotuner():
                 self.cached_configs[static_key] = {}
             self.cached_configs[static_key][run_key] = _best_config
             
-            # 只在rank 0进行持久化
             if not dist.is_initialized() or get_global_rank() == 0:
                 if self.enable_autotune:
                     cache_file = os.path.join(self.cache_dir, f"{static_key}.json")
@@ -350,7 +333,6 @@ class Autotuner():
             if pos is not None and pos < len(args):
                 values.append(args[pos])
             else:
-                # Missing argument; let it fail early with clear error
                 raise KeyError(f"Missing argument '{name}' required by key function")
         return tuple(values)
 
@@ -360,7 +342,6 @@ class Autotuner():
                 params = self._select_args(self._static_param_names, args, kwargs)
                 key = self.static_key_func(*params) if self._static_param_names is not None else self.static_key_func(*args, **kwargs)
             except Exception:
-                # Fallback: try full args if selection failed
                 key = self.static_key_func(*args, **kwargs)
             if isinstance(key, dict):
                 return dict_to_filename(key)
@@ -389,8 +370,3 @@ def autotune(configs, default_config, static_key_func=None, run_key_func=None, r
 
     return decorator
 
-
-def nearest_power_of_2(x):
-    if x <= 1:
-        return 1
-    return triton.next_power_of_2(x - triton.next_power_of_2(x)//4) 

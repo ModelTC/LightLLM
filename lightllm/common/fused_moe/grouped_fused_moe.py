@@ -32,7 +32,7 @@ from lightllm.utils.device_utils import (
     get_device_warp_size,
 )
 from lightllm.common.kernel_config import KernelConfigs
-from .moe_kernel_configs import MoeGroupedGemmKernelConfig
+# from .moe_kernel_configs import MoeGroupedGemmKernelConfig
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
@@ -493,7 +493,7 @@ def get_grouped_matmul_static_key(
 @autotune(  
     configs=[
          {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk, "GROUP_SIZE_M": gm, "NUM_WARPS": nw, "NUM_STAGE": ns} 
-         for ns in [1, 2, 3, 4, 5] for gm in [1, 2, 4]  for nw in [2, 4, 8] for bm in [16, 32, 64, 128] for bn in [16, 32, 64, 128] for bk in [16, 32, 64, 128]     
+         for ns in [1, 2, 3, 4, 5] for gm in [1, 2, 4, 8]  for nw in [2, 4, 8] for bm in [16, 32, 64, 128] for bn in [16, 32, 64, 128] for bk in [16, 32, 64, 128]     
     ],
     default_config={"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "NUM_WARPS": 4, "NUM_STAGE": 1},
     static_key_func=get_grouped_matmul_static_key,
