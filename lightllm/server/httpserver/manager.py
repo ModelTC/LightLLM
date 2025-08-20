@@ -333,7 +333,7 @@ class HttpServerManager:
             input_usage = {
                 "input_text_tokens": text_tokens,
                 "input_audio_tokens": audio_tokens,
-                "input_image_tokens": image_tokens
+                "input_image_tokens": image_tokens,
             }
 
             self.req_id_to_out_inf[group_request_id] = req_status
