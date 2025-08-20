@@ -140,6 +140,7 @@ class DeTokenizationManager:
 
                 # 停止字符串匹配
                 if decode_req.stop_sequences_str_match():
+                    decode_req.req.stop_str_matched_token_index = src_index
                     decode_req.req.stop_str_matched = True
 
                 decode_req.req.out_tokens_queue.push(new_text, src_index, special, count_output_tokens)

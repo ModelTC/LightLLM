@@ -98,6 +98,9 @@ class Req(ctypes.Structure):
         # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
         # 然后router发停止命令给推理进程，推理进程停止输出
         ("stop_str_matched", ctypes.c_bool),
+        # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。
+        # 该变量为 detokenization 进程写入，http_server 读取
+        ("stop_str_matched_token_index", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -151,6 +154,7 @@ class Req(ctypes.Structure):
         self.mtp_accepted_token_num = 0
         self._mtp_step = get_env_start_args().mtp_step
         self.stop_str_matched = False
+        self.stop_str_matched_token_index = -1
 
         self.post_init()
 
