@@ -93,12 +93,12 @@ class G_Objs:
                 metric_port=args.metric_port,
             )
         elif args.run_mode == "visual_only":
-            # self.metric_client = MetricClient(args.metric_port)
+            self.metric_client = MetricClient(args.metric_port)
             self.httpserver_manager = HttpServerManagerForVisualOnly(
                 args,
                 cache_port=args.cache_port,
                 visual_port=args.visual_port,
-                # metric_port=args.metric_port,
+                metric_port=args.metric_port,
             )
         elif args.run_mode == "llm_only":
             init_tokenizer(args)  # for openai api

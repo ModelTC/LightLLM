@@ -560,6 +560,13 @@ def visual_only_start(args):
 
     set_env_start_args(args)
 
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_metric_manager,
+        ],
+        start_args=[(metric_port, args)],
+    )
+
     from .visualserver.manager import start_visual_process
 
     process_manager.start_submodule_processes(
