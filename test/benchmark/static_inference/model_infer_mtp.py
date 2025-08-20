@@ -27,7 +27,6 @@ def init_mtp_model(args: StartArgs, kvargs, main_model):
         {
             "weight_dir": args.mtp_draft_model_dir,
             "max_total_token_num": main_model.mem_manager.size,
-            "use_dynamic_prompt_cache": False,
             "disable_chunked_prefill": True,
             "mtp_mode": args.mtp_mode,
             "main_model": main_model,
@@ -39,7 +38,6 @@ def init_mtp_model(args: StartArgs, kvargs, main_model):
             {
                 "weight_dir": args.spec_model_dir,
                 "max_total_token_num": main_model.mem_manager.size,
-                "use_dynamic_prompt_cache": False,
                 "disable_chunked_prefill": True,
                 "mtp_mode": args.mtp_mode,
                 "main_model": main_model,
