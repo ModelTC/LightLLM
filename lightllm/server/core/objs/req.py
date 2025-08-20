@@ -32,9 +32,6 @@ class FinishStatus(ctypes.Structure):
     def is_finished(self):
         return self.FINISHED_STOP <= self.status <= self.FINISHED_LENGTH
 
-    def is_stoped(self):
-        return self.status == self.FINISHED_STOP
-
     def get_finish_reason(self):
         if self.status == self.FINISHED_STOP:
             return "stop"
