@@ -34,8 +34,9 @@ from .moe_kernel_configs import MoeGroupedGemmKernelConfig
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
+from lightllm.utils.torch_ops_utils import direct_register_custom_op
 
-FFN_MOE_CHUNK_SIZE = 8 * 1024
+FFN_MOE_CHUNK_SIZE = 32 * 1024
 
 logger = init_logger(__name__)
 
@@ -355,7 +356,7 @@ def grouped_matmul_kernel(
     tile_n_idx = pid_n
 
     # get the gemm size of the current problem
-    cur_m = tl.load(expert_to_token_num + expert_id, eviction_policy="evict_last")
+    cur_m = tl.load(expert_to_token_num + expert_id)
 
     # do regular gemm here
     offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -463,7 +464,7 @@ def grouped_matmul(
     use_fp8_w8a8: bool,
     alloc_tensor_func=torch.empty,
     reused_mblock_infos=None,
-    **run_config,
+    run_config: Optional[dict] = None,
 ):
     """
     token_num_mul_topk_num is int equal token_num * topk_num,
@@ -493,7 +494,8 @@ def grouped_matmul(
         if expert_to_weights_scale.ndim == 3:
             block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
-    if not run_config:
+
+    if run_config is None:
         run_config = MoeGroupedGemmKernelConfig.try_to_get_best_config(
             M=token_inputs.shape[0],
             N=n,
@@ -524,10 +526,9 @@ def grouped_matmul(
         else:
             _m, _k = token_inputs.shape
             assert _k % block_size_k == 0
-            input_scale = alloc_tensor_func((_m, _k // block_size_k), dtype=torch.float32, device=token_inputs.device)
-            qinput_tensor = alloc_tensor_func((_m, _k), dtype=expert_weights.dtype, device=token_inputs.device)
-            per_token_group_quant_fp8(token_inputs, block_size_k, qinput_tensor, input_scale)
-            token_inputs, token_input_scale = qinput_tensor, input_scale
+            token_inputs, token_input_scale = per_token_group_quant_fp8(
+                token_inputs, block_size_k, dtype=expert_weights.dtype
+            )
 
     if reused_mblock_infos is None:
         mblocks_to_expert_id, mblocks_to_m_index = moe_align2(token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M)
@@ -611,7 +612,7 @@ def fused_experts_impl(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     alloc_tensor_func=torch.empty,
-    **run_config,
+    run_config: Optional[dict] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -626,12 +627,15 @@ def fused_experts_impl(
     topk_num = topk_ids.shape[1]
     M = min(num_tokens, CHUNK_SIZE)
 
-    intermediate_cache1 = alloc_tensor_func((M, topk_num, N), device=hidden_states.device, dtype=hidden_states.dtype)
+    intermediate_cache13_shared = alloc_tensor_func(
+        (M, topk_num, max(N, w2.shape[1])), device=hidden_states.device, dtype=hidden_states.dtype
+    )
+    intermediate_cache1 = intermediate_cache13_shared.view(-1)[: (M * topk_num * N)].view(M, topk_num, N)
     intermediate_cache2 = alloc_tensor_func(
         (M, topk_num, N // 2), device=hidden_states.device, dtype=hidden_states.dtype
     )
-    intermediate_cache3 = alloc_tensor_func(
-        (M, topk_num, w2.shape[1]), device=hidden_states.device, dtype=hidden_states.dtype
+    intermediate_cache3 = intermediate_cache13_shared.view(-1)[: (M * topk_num * w2.shape[1])].view(
+        M, topk_num, w2.shape[1]
     )
 
     if inplace:
@@ -673,7 +677,7 @@ def fused_experts_impl(
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
             alloc_tensor_func=alloc_tensor_func,
-            **run_config,
+            run_config=run_config,
         )
 
         silu_and_mul_fwd(intermediate_cache1.view(-1, N), intermediate_cache2.view(-1, N // 2))
@@ -693,10 +697,161 @@ def fused_experts_impl(
             use_fp8_w8a8=use_fp8_w8a8,
             alloc_tensor_func=alloc_tensor_func,
             reused_mblock_infos=reused_mblock_infos,
-            **run_config,
+            run_config=run_config,
         )
 
         moe_sum_reduce(
             intermediate_cache3.view(*intermediate_cache3.shape), out_hidden_states[begin_chunk_idx:end_chunk_idx]
         )
     return out_hidden_states
+
+
+def inplace_fused_experts_impl(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+) -> None:
+    fused_experts_impl(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        True,
+        use_fp8_w8a8,
+        use_int8_w8a16,
+        w1_scale,
+        w2_scale,
+        a1_scale,
+        a2_scale,
+    )
+
+
+def inplace_fused_experts_impl_fake(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+) -> None:
+    pass
+
+
+direct_register_custom_op(
+    "inplace_fused_experts_impl",
+    inplace_fused_experts_impl,
+    ["hidden_states"],
+    inplace_fused_experts_impl_fake,
+)
+
+
+def outplace_fused_experts_impl(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+) -> None:
+    return fused_experts_impl(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        False,
+        use_fp8_w8a8,
+        use_int8_w8a16,
+        w1_scale,
+        w2_scale,
+        a1_scale,
+        a2_scale,
+    )
+
+
+def outplace_fused_experts_impl_fake(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+) -> None:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    "outplace_fused_experts_impl",
+    outplace_fused_experts_impl,
+    [],
+    outplace_fused_experts_impl_fake,
+)
+
+
+def fused_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool = False,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+):
+    if inplace:
+        torch.ops.lightllm.inplace_fused_experts_impl(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            use_fp8_w8a8,
+            use_int8_w8a16,
+            w1_scale,
+            w2_scale,
+            a1_scale,
+            a2_scale,
+        )
+        return hidden_states
+    else:
+        return torch.ops.lightllm.outplace_fused_experts_impl(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            use_fp8_w8a8,
+            use_int8_w8a16,
+            w1_scale,
+            w2_scale,
+            a1_scale,
+            a2_scale,
+        )

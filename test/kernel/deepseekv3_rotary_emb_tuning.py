@@ -3,7 +3,8 @@ import torch
 import time
 import torch.multiprocessing as mp
 import itertools
-from lightllm.common.fused_moe.moe_silu_and_mul import MoeSiluAndMulKernelConfig, silu_and_mul_fwd
+from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.models.deepseek2.triton_kernel.rotary_emb_config import DeepseekV3RotaryKernelConfig
 from lightllm.utils.watchdog_utils import Watchdog
 from typing import List
 from lightllm.utils.log_utils import init_logger
@@ -28,8 +29,10 @@ def set_seed():
 
 @torch.no_grad()
 def test_kernel(
-    m: int,
-    n: int,
+    M: int,
+    Q_HEAD_NUM: int,
+    K_HEAD_NUM: int,
+    HEAD_DIM: int,
     dtype: torch.dtype,
     test_count: int,
     **config,
@@ -37,39 +40,46 @@ def test_kernel(
     set_seed()
     input_tuples = []
 
-    input = torch.randn((m, 2 * n), device="cuda", dtype=dtype) / 10
-    output = torch.randn((m, n), device="cuda", dtype=dtype)
+    q = torch.randn((M, Q_HEAD_NUM, HEAD_DIM), device="cuda", dtype=dtype) / 10
+    k = torch.randn((M, K_HEAD_NUM, HEAD_DIM), device="cuda", dtype=dtype) / 10
+    cos = torch.randn((M, HEAD_DIM // 2), device="cuda", dtype=dtype)
+    sin = torch.randn((M, HEAD_DIM // 2), device="cuda", dtype=dtype)
 
     for _ in range(test_count):
-        input_tuples.append((input.clone(), output.clone()))
+        input_tuples.append((q.clone(), k.clone(), cos.clone(), sin.clone()))
 
     # warm_up
-    silu_and_mul_fwd(input, output, **config)
+    rotary_emb_fwd(q=q, k=k, cos=cos, sin=sin, **config)
 
     graph = torch.cuda.CUDAGraph()
 
     with torch.cuda.graph(graph):
         for index in range(test_count):
-            input, output = input_tuples[index]
-            silu_and_mul_fwd(input, output, **config)
+            q, k, cos, sin = input_tuples[index]
+            rotary_emb_fwd(q=q, k=k, cos=cos, sin=sin, **config)
 
     graph.replay()
 
     torch.cuda.synchronize()
-    start = time.time()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
     graph.replay()
-    torch.cuda.synchronize()
+    end_event.record()
+    end_event.synchronize()
 
-    cost_time = (time.time() - start) * 1000
+    cost_time = start_event.elapsed_time(end_event)
 
     logger.info(str(config))
-    logger.info(f"bf16 {m} cost time: {cost_time} ms")
+    logger.info(f"bf16 {M} cost time: {cost_time} ms")
     return cost_time
 
 
 def worker(
-    m: int,
-    n: int,
+    M: int,
+    Q_HEAD_NUM: int,
+    K_HEAD_NUM: int,
+    HEAD_DIM: int,
     dtype: torch.dtype,
     test_count: int,
     test_configs,
@@ -80,8 +90,10 @@ def worker(
     try:
         for index in range(len(test_configs)):
             cost_time = test_kernel(
-                m=m,
-                n=n,
+                M=M,
+                Q_HEAD_NUM=Q_HEAD_NUM,
+                K_HEAD_NUM=K_HEAD_NUM,
+                HEAD_DIM=HEAD_DIM,
                 dtype=dtype,
                 test_count=test_count,
                 **test_configs[index],
@@ -100,13 +112,13 @@ def worker(
 
 def get_test_configs(split_id, split_count):
     index = 0
-    result = itertools.product([1, 2, 4, 8, 16, 32], [64, 128, 256, 512, 1024], [1, 2, 4, 8, 16], [1, 2, 4, 8, 16])
-    for BLOCK_M, BLOCK_N, num_warps, NUM_STAGES in result:
+    result = itertools.product([1, 2, 4, 8, 16, 32], [1, 2, 4, 8], [1, 2, 3, 4, 5], [1, 2, 4, 8, 16])
+    for BLOCK_SEQ, num_warps, num_stages, HEAD_PARALLEL_NUM in result:
         t_config = {
-            "BLOCK_M": BLOCK_M,
-            "BLOCK_N": BLOCK_N,
+            "BLOCK_SEQ": BLOCK_SEQ,
+            "HEAD_PARALLEL_NUM": HEAD_PARALLEL_NUM,
             "num_warps": num_warps,
-            "NUM_STAGES": NUM_STAGES,
+            "num_stages": num_stages,
         }
         if index % split_count == split_id:
             yield t_config
@@ -118,8 +130,10 @@ def get_test_configs(split_id, split_count):
 def tuning_configs(
     device_id: int,  # use for mult mp tunning
     device_count: int,
-    m: int,
-    n: int,
+    M: int,
+    Q_HEAD_NUM: int,
+    K_HEAD_NUM: int,
+    HEAD_DIM: int,
     dtype: torch.dtype,
     test_count: int,
 ):
@@ -135,8 +149,10 @@ def tuning_configs(
         p = mp.Process(
             target=worker,
             args=(
-                m,
-                n,
+                M,
+                Q_HEAD_NUM,
+                K_HEAD_NUM,
+                HEAD_DIM,
                 dtype,
                 test_count,
                 test_configs,
@@ -163,8 +179,10 @@ def tuning_configs(
         p = mp.Process(
             target=worker,
             args=(
-                m,
-                n,
+                M,
+                Q_HEAD_NUM,
+                K_HEAD_NUM,
+                HEAD_DIM,
                 dtype,
                 test_count,
                 test_configs,
@@ -188,7 +206,7 @@ def tuning_configs(
                 logger.info(f"cur best : {best_config} {best_cost_time}")
                 break
 
-    logger.info(f"{best_config} best cost: {best_cost_time}")
+    logger.info(f"M {M} {best_config} best cost: {best_cost_time}")
     return best_config, best_cost_time
 
 
@@ -196,22 +214,30 @@ if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn")
     from lightllm.utils.tuning_utils import mp_tuning
 
-    # tuning to get silu and mul
-    for n in [128, 2304, 192, 256, 512, 1024, 1408, 2048, 4096, 8192]:
-        json_dict = {}
-        for m in [1, 8, 64, 128, 200, 256, 512, 1024, 2048, 4096, 8192]:
+    # for deepseekv3 600B
+
+    for q_head_num in [128, 64, 32, 16, 8]:
+        k_head_num = 1
+        head_dim = 64
+        dtype = torch.bfloat16
+        for m in [1, 128, 256, 1024, 2048, 4096, 8192]:
+            json_dict = {}
             ans = mp_tuning(
                 tuning_configs,
                 {
-                    "m": m,
-                    "n": n,
-                    "dtype": torch.bfloat16,
+                    "M": m,
+                    "Q_HEAD_NUM": q_head_num,
+                    "K_HEAD_NUM": k_head_num,
+                    "HEAD_DIM": head_dim,
+                    "dtype": dtype,
                     "test_count": 20,
                 },
             )
             json_dict[m] = ans
-            MoeSiluAndMulKernelConfig.save_config(
-                N=n,
-                out_dtype=str(torch.bfloat16),
+            DeepseekV3RotaryKernelConfig.save_config(
+                Q_HEAD_NUM=q_head_num,
+                K_HEAD_NUM=k_head_num,
+                HEAD_DIM=head_dim,
+                dtype=str(dtype),
                 config_json=json_dict,
             )

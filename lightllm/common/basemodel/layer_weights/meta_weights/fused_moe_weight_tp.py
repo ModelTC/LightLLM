@@ -16,6 +16,7 @@ class FusedMoeWeightTP(BaseWeight):
         e_score_correction_bias_name: str,
         weight_prefix: str,
         n_routed_experts: int,
+        num_fused_shared_experts: int,
         split_inter_size: int,
         data_type: torch.dtype,
         network_config: Dict[str, Any],
@@ -34,7 +35,10 @@ class FusedMoeWeightTP(BaseWeight):
 
         self.e_score_correction_bias_name = e_score_correction_bias_name
         self.weight_prefix = weight_prefix
-        self.n_routed_experts = n_routed_experts
+        assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
+        self.n_routed_experts = n_routed_experts + num_fused_shared_experts
+        self.num_fused_shared_experts = num_fused_shared_experts
+        self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.split_inter_size = split_inter_size
         self.data_type_ = data_type
         self.tp_rank_ = get_current_rank_in_dp()
@@ -64,13 +68,36 @@ class FusedMoeWeightTP(BaseWeight):
             num_expert_group=num_expert_group,
             scoring_func=self.scoring_func,
         )
+        topk_weights.mul_(self.routed_scaling_factor)
+        if self.num_fused_shared_experts > 0:
+            pad_topk_ids = (
+                torch.arange(
+                    start=self.n_routed_experts - self.num_fused_shared_experts,
+                    end=self.n_routed_experts,
+                    step=1,
+                    dtype=topk_ids.dtype,
+                    device="cuda",
+                )
+                .view(1, self.num_fused_shared_experts)
+                .repeat(topk_ids.shape[0], 1)
+            )
+            pad_topk_weights = torch.full(
+                (topk_weights.shape[0], self.num_fused_shared_experts),
+                fill_value=1.0,
+                device="cuda",
+                dtype=topk_weights.dtype,
+            )
+
+            topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
+            topk_weights = torch.cat([topk_weights, pad_topk_weights], dim=1)
+
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2
         use_fp8_w8a8 = self.quant_method is not None
 
-        from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
+        from lightllm.common.fused_moe.grouped_fused_moe import fused_experts
 
-        fused_experts_impl(
+        fused_experts(
             hidden_states=input_tensor,
             w1=w1,
             w2=w2,
@@ -93,16 +120,18 @@ class FusedMoeWeightTP(BaseWeight):
                 and None not in self.experts_gate_projs
                 and None not in self.w2_list
             ):
-                w1_list = []
-                for i_experts in range(self.n_routed_experts):
-                    expert_gate_up_proj = torch.cat(
-                        [self.experts_gate_projs[i_experts], self.experts_up_projs[i_experts]], dim=0
-                    )
-                    expert_gate_up_proj = expert_gate_up_proj
-                    w1_list.append(expert_gate_up_proj)
+                gate_out_dim, gate_in_dim = self.experts_gate_projs[0].shape
+                up_out_dim, up_in_dim = self.experts_up_projs[0].shape
+                assert gate_in_dim == up_in_dim
+                dtype = self.experts_gate_projs[0].dtype
+                total_expert_num = self.n_routed_experts
 
-                inter_shape, hidden_size = w1_list[0].shape[0], w1_list[0].shape[1]
-                w1 = torch._utils._flatten_dense_tensors(w1_list).view(len(w1_list), inter_shape, hidden_size)
+                w1 = torch.empty((total_expert_num, gate_out_dim + up_out_dim, gate_in_dim), dtype=dtype, device="cpu")
+
+                for i_experts in range(self.n_routed_experts):
+                    w1[i_experts, 0:gate_out_dim:, :] = self.experts_gate_projs[i_experts]
+                    w1[i_experts, gate_out_dim:, :] = self.experts_up_projs[i_experts]
+
                 inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
                 w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(len(self.w2_list), inter_shape, hidden_size)
                 if not self.quantized_weight and self.quant_method is not None:
@@ -123,17 +152,19 @@ class FusedMoeWeightTP(BaseWeight):
                 and None not in self.experts_gate_proj_scales
                 and None not in self.w2_scale_list
             ):
-                w1_scale_list = []
-                for i_experts in range(self.n_routed_experts):
-                    expert_gate_up_proj_scale = torch.cat(
-                        [self.experts_gate_proj_scales[i_experts], self.experts_up_proj_scales[i_experts]], dim=0
-                    )
-                    w1_scale_list.append(expert_gate_up_proj_scale)
+                gate_out_dim, gate_in_dim = self.experts_gate_proj_scales[0].shape
+                up_out_dim, up_in_dim = self.experts_up_proj_scales[0].shape
+                assert gate_in_dim == up_in_dim
+                dtype = self.experts_gate_proj_scales[0].dtype
+                total_expert_num = self.n_routed_experts
 
-                inter_shape, hidden_size = w1_scale_list[0].shape[0], w1_scale_list[0].shape[1]
-                w1_scale = torch._utils._flatten_dense_tensors(w1_scale_list).view(
-                    len(w1_scale_list), inter_shape, hidden_size
+                w1_scale = torch.empty(
+                    (total_expert_num, gate_out_dim + up_out_dim, gate_in_dim), dtype=dtype, device="cpu"
                 )
+
+                for i_experts in range(self.n_routed_experts):
+                    w1_scale[i_experts, 0:gate_out_dim:, :] = self.experts_gate_proj_scales[i_experts]
+                    w1_scale[i_experts, gate_out_dim:, :] = self.experts_up_proj_scales[i_experts]
                 inter_shape, hidden_size = self.w2_scale_list[0].shape[0], self.w2_scale_list[0].shape[1]
                 w2_scale = torch._utils._flatten_dense_tensors(self.w2_scale_list).view(
                     len(self.w2_scale_list), inter_shape, hidden_size

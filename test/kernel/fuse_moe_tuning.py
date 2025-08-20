@@ -7,6 +7,7 @@ from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl, moe_
 from typing import List
 from lightllm.utils.log_utils import init_logger
 from transformers import AutoConfig
+import torch.nn.functional as F
 
 logger = init_logger(__name__)
 
@@ -61,6 +62,7 @@ def test_kernel(
     use_fp8_w8a8: bool,
     is_up: bool,
     block_shape,
+    num_fused_shared_experts: int,
     **config,
 ):
     set_seed()
@@ -68,6 +70,8 @@ def test_kernel(
 
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1_scale = w2_scale = None
+    if num_fused_shared_experts > 0:
+        expert_num += num_fused_shared_experts
 
     if use_fp8_w8a8:
         init_dtype = dtype
@@ -91,19 +95,35 @@ def test_kernel(
         w1 = torch.randn(expert_num, 2 * n, k, dtype=dtype).cuda()
         w2 = torch.randn(expert_num, k, 2 * n // 2, dtype=dtype).cuda()
 
-    rnd_logics = torch.randn(m, expert_num, device="cuda")
+    rnd_logics = torch.randn(m, expert_num - num_fused_shared_experts, device="cuda")
     topk_values, topk_ids = torch.topk(rnd_logics, topk, dim=1)
-    topk_weights = torch.randn((m, topk), device="cuda", dtype=dtype) / 10
+    if num_fused_shared_experts > 0:
+        # 存在融合共享专家的时候，需要pad 共享专家对应的id 到topk_ids 中
+        pad_topk_ids = (
+            torch.arange(
+                start=expert_num - num_fused_shared_experts, end=expert_num, step=1, dtype=topk_ids.dtype, device="cuda"
+            )
+            .view(1, num_fused_shared_experts)
+            .repeat(topk_ids.shape[0], 1)
+        )
+        topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
+    topk_weights = torch.randn((m, topk + num_fused_shared_experts), device="cuda", dtype=dtype) / 10
 
-    expert_to_tokens = torch.empty((expert_num, topk * m), dtype=torch.int32, device="cuda")
-    expert_to_weights = torch.empty((expert_num, topk * m), dtype=torch.float32, device="cuda")
+    expert_to_tokens = torch.empty(
+        (expert_num, (topk + num_fused_shared_experts) * m), dtype=torch.int32, device="cuda"
+    )
+    expert_to_weights = torch.empty(
+        (expert_num, (topk + num_fused_shared_experts) * m), dtype=torch.float32, device="cuda"
+    )
     moe_align(topk_ids=topk_ids, out=expert_to_tokens)
     expert_to_token_num = torch.empty((expert_num,), dtype=torch.int32, device="cuda")
-    moe_align1(expert_to_tokens, topk_weights, expert_to_weights, expert_to_token_num, topk=topk)
+    moe_align1(
+        expert_to_tokens, topk_weights, expert_to_weights, expert_to_token_num, topk=topk + num_fused_shared_experts
+    )
 
-    out1 = torch.zeros((m * topk, 2 * n), dtype=torch.bfloat16, device="cuda")
-    down_in = torch.zeros((m * topk, n), dtype=torch.bfloat16, device="cuda")
-    out2 = torch.zeros((m * topk, k), dtype=torch.bfloat16, device="cuda")
+    out1 = torch.zeros((m * (topk + num_fused_shared_experts), 2 * n), dtype=torch.bfloat16, device="cuda")
+    down_in = torch.zeros((m * (topk + num_fused_shared_experts), n), dtype=torch.bfloat16, device="cuda")
+    out2 = torch.zeros((m * (topk + num_fused_shared_experts), k), dtype=torch.bfloat16, device="cuda")
 
     for _ in range(test_count):
         input_tuples.append(
@@ -111,8 +131,8 @@ def test_kernel(
                 a.clone(),
                 w1.clone(),
                 w2.clone(),
-                w1_scale.clone(),
-                w2_scale.clone(),
+                w1_scale.clone() if w1_scale is not None else None,
+                w2_scale.clone() if w2_scale is not None else None,
                 topk_ids.clone(),
                 topk_weights.clone(),
                 out1.clone(),
@@ -135,7 +155,7 @@ def test_kernel(
             out=out1,
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
-            **config,
+            run_config=config,
         )
     else:
         grouped_matmul(
@@ -151,7 +171,7 @@ def test_kernel(
             out=out2,
             mul_routed_weight=True,
             use_fp8_w8a8=use_fp8_w8a8,
-            **config,
+            run_config=config,
         )
 
     graph = torch.cuda.CUDAGraph()
@@ -171,10 +191,9 @@ def test_kernel(
                     expert_to_weights_scale=w1_scale,
                     topk_num=topk,
                     out=out1,
-                    expert_token_limit=2 ** 31 - 1,
                     mul_routed_weight=False,
                     use_fp8_w8a8=use_fp8_w8a8,
-                    **config,
+                    run_config=config,
                 )
             else:
                 grouped_matmul(
@@ -188,10 +207,9 @@ def test_kernel(
                     expert_to_weights_scale=w2_scale,
                     topk_num=1,
                     out=out2,
-                    expert_token_limit=2 ** 31 - 1,
                     mul_routed_weight=True,
                     use_fp8_w8a8=use_fp8_w8a8,
-                    **config,
+                    run_config=config,
                 )
 
     graph.replay()
@@ -219,6 +237,7 @@ def worker(
     use_fp8_w8a8: bool,
     is_up: bool,
     block_shape,
+    num_fused_shared_experts: int,
     test_configs,
     queue,
 ):
@@ -235,6 +254,7 @@ def worker(
                 use_fp8_w8a8=use_fp8_w8a8,
                 is_up=is_up,
                 block_shape=block_shape,
+                num_fused_shared_experts=num_fused_shared_experts,
                 **test_configs[index],
             )
             queue.put(cost_time)  # Put result in queue
@@ -267,12 +287,8 @@ def get_test_configs(split_id, split_count):
                 4,
                 8,
             ]:
-                for BLOCK_SIZE_M in [
-                    16,
-                    32,
-                    64,
-                ]:
-                    for BLOCK_SIZE_N in [64, 128]:
+                for BLOCK_SIZE_M in [16, 32, 64, 128]:
+                    for BLOCK_SIZE_N in [32, 64, 128]:
                         for BLOCK_SIZE_K in [32, 64, 128]:
                             t_config = {
                                 "BLOCK_SIZE_M": BLOCK_SIZE_M,
@@ -302,6 +318,7 @@ def tuning_configs(
     use_fp8_w8a8: bool,
     is_up: bool,
     block_shape,
+    num_fused_shared_experts: int,
 ):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
     best_config, best_cost_time = None, 10000000
@@ -325,6 +342,7 @@ def tuning_configs(
                 use_fp8_w8a8,
                 is_up,
                 block_shape,
+                num_fused_shared_experts,
                 test_configs,
                 queue,
             ),
@@ -359,6 +377,7 @@ def tuning_configs(
                 use_fp8_w8a8,
                 is_up,
                 block_shape,
+                num_fused_shared_experts,
                 test_configs,
                 queue,
             ),
@@ -393,15 +412,16 @@ def main(args):
     if config.architectures[0] == "Qwen3MoeForCausalLM":
         expert_num = config.num_experts
         topk_num = config.num_experts_per_tok
-        n = 2 * config.moe_intermediate_size // args.tp
+        n = config.moe_intermediate_size // args.tp
     elif config.architectures[0] in ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM"]:
         expert_num = config.n_routed_experts
         topk_num = config.num_experts_per_tok
-        n = 2 * config.moe_intermediate_size // args.tp
+        n = config.moe_intermediate_size // args.tp
     else:
         pass
 
     hidden_dim = getattr(config, "hidden_size", None) or config.text_config.hidden_size
+    print(n, hidden_dim)
     use_fp8_w8a8 = args.use_fp8_w8a8
     block_shape = None
     if hasattr(config, "quantization_config") and "weight_block_size" in config.quantization_config:
@@ -424,6 +444,7 @@ def main(args):
                 "use_fp8_w8a8": use_fp8_w8a8,
                 "is_up": True,
                 "block_shape": block_shape,
+                "num_fused_shared_experts": args.num_fused_shared_experts,
             },
         )
         up_dict[m] = ans
@@ -431,7 +452,7 @@ def main(args):
             N=n * 2,
             K=hidden_dim,
             topk_num=topk_num,
-            expert_num=expert_num,
+            expert_num=expert_num + args.num_fused_shared_experts,
             mul_routed_weight=False,
             use_fp8_w8a8=use_fp8_w8a8,
             out_dtype=str(torch.bfloat16),
@@ -439,7 +460,7 @@ def main(args):
         )
 
     down_dict = {}
-    for m in [1, 8, 64, 128, 256, 512, 1024, 4096, 8192]:
+    for m in [1, 8, 64, 128, 256, 512, 1024, 4096, 8192, 16384, 32768]:
         ans = mp_tuning(
             tuning_configs,
             {
@@ -453,6 +474,7 @@ def main(args):
                 "use_fp8_w8a8": use_fp8_w8a8,
                 "is_up": False,
                 "block_shape": block_shape,
+                "num_fused_shared_experts": args.num_fused_shared_experts,
             },
         )
         down_dict[m] = ans
@@ -461,7 +483,7 @@ def main(args):
             N=hidden_dim,
             K=n,
             topk_num=1,
-            expert_num=expert_num,
+            expert_num=expert_num + args.num_fused_shared_experts,
             mul_routed_weight=True,
             use_fp8_w8a8=use_fp8_w8a8,
             out_dtype=str(torch.bfloat16),
@@ -474,5 +496,6 @@ if __name__ == "__main__":
     parser.add_argument("--model_dir", type=str, default="deepseek-ai/DeepSeek-R1")
     parser.add_argument("--tp", type=int, default=8)
     parser.add_argument("--use_fp8_w8a8", action="store_true")
+    parser.add_argument("--num_fused_shared_experts", type=int, default=0)
     args = parser.parse_args()
     main(args)
