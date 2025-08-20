@@ -139,7 +139,7 @@ class DeTokenizationManager:
                 decode_req.output_strs.append(new_text)
 
                 # 停止字符串匹配
-                if decode_req.stop_sequences_str_match():
+                if not decode_req.req.finish_status.is_stopped() and decode_req.stop_sequences_str_match():
                     decode_req.req.stop_str_matched_token_index = src_index
                     decode_req.req.stop_str_matched = True
 
