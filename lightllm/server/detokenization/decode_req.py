@@ -53,7 +53,7 @@ class DecodeReq:
 
         for stop_str in stop_strs:
             if stop_str in tail_str:
-                logger.info(
+                logger.debug(
                     f"req_id {self.request_id} Found stop sequence in tail: stop_str='{stop_str}', "
                     f"tail_str='{tail_str}'"
                 )
