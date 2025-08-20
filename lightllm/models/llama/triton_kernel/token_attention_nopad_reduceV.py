@@ -51,7 +51,7 @@ def _fwd_kernel_token_att2(
             Req_to_tokens + v_loc_off + start_n * stride_req_to_tokens_s,
             mask=(start_n + offs_n) < cur_batch_seq_len,
             other=0.0,
-        )
+        ).to(tl.int64)
         v_value = tl.load(
             V + v_offs + v_loc[:, None] * stride_vbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0
         )
@@ -154,7 +154,7 @@ def _fwd_kernel_token_att2_int8v(
             Req_to_tokens + v_loc_off + start_n * stride_req_to_tokens_s,
             mask=(start_n + offs_n) < cur_batch_seq_len,
             other=0.0,
-        )
+        ).to(tl.int64)
         v_value = tl.load(
             V + v_offs + v_loc[:, None] * stride_vbs, mask=(start_n + offs_n[:, None]) < cur_batch_seq_len, other=0.0
         )

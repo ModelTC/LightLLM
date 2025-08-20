@@ -57,7 +57,7 @@ def _fwd_kernel_token_att1(
             Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * offs_n_new,
             mask=offs_n_new < cur_batch_end_index,
             other=0,
-        )
+        ).to(tl.int64)
         off_k = k_loc[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :] * stride_kd
         k = tl.load(K + off_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
         att_value = tl.sum(q[None, :] * k, 1)
@@ -171,7 +171,7 @@ def _fwd_kernel_token_att1_int8(
             Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * offs_n_new,
             mask=offs_n_new < cur_batch_end_index,
             other=0,
-        )
+        ).to(tl.int64)
         off_k = k_loc[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :] * stride_kd
         k = tl.load(K + off_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
         off_ks = k_loc[:, None] * stride_ksbs + cur_kv_head * stride_ksh
