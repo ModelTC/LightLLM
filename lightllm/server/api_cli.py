@@ -345,6 +345,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"
     )
+
+    parser.add_argument("--enable_ep_fake_balance", action="store_true", help="Enable the fake balance of the EP mode")
+
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
 
     parser.add_argument(
