@@ -32,7 +32,7 @@ class DecodeReq:
         self.input_len = self.req.input_len
         self.prefix_str = ""
         self.stop_strs: List[str] = self.req.sample_params.stop_sequences.to_strings()
-        self.stop_str_max_len = max([len(e) for e in self.stop_strs])
+        self.stop_str_max_len = max([len(e) for e in self.stop_strs] + [0])
 
     def init_token_healing_prefix_str(self, token_id_to_token: Dict[int, str], tokenizer):
         tokens = [token_id_to_token[token_id] for token_id in self.req.prefix_token_ids.get_token_ids()]
