@@ -325,7 +325,23 @@ class HttpServerManager:
                 req_status,
                 request,
             )
+
+            # 计算输入 token 使用量统计
+            image_tokens, audio_tokens = self._count_multimodal_tokens(multimodal_params)
+            text_tokens = len(prompt_ids) - (image_tokens + audio_tokens)
+            input_usage = {
+                "input_text_tokens": text_tokens,
+                "input_audio_tokens": audio_tokens,
+                "input_image_tokens": image_tokens,
+            }
+
+            is_first_gen_token = True
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                # 只有第一个生成的 token 的 metadata 中包含 input_usage
+                if is_first_gen_token:
+                    metadata["input_usage"] = input_usage
+                    is_first_gen_token = False
+
                 yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
@@ -339,6 +355,20 @@ class HttpServerManager:
             await self.abort(group_request_id)
             raise e
         return
+
+    def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
+        image_tokens = 0
+        audio_tokens = 0
+
+        if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL() and multimodal_params is not None:
+            for img in multimodal_params.images:
+                if img.token_num is not None:
+                    image_tokens += img.token_num
+            for audio in multimodal_params.audios:
+                if audio.token_num is not None:
+                    audio_tokens += audio.token_num
+
+        return image_tokens, audio_tokens
 
     async def _log_req_header(self, request_headers, group_request_id: int):
 
