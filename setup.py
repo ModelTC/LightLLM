@@ -26,6 +26,7 @@ setup(
         "ninja",
         "safetensors",
         "triton",
+        "orjson",
     ],
     package_data=package_data,
 )
