@@ -10,6 +10,9 @@ from functools import lru_cache
 from lightllm.utils.device_utils import get_current_device_name
 import math
 import fcntl
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 @lru_cache(maxsize=1)
 def get_triton_version():
@@ -165,8 +168,7 @@ class Autotuner():
     def __init__(self, fn, arg_names, name,configs, default_config, static_key_func, run_key_func, reset_to_zero, restore_value, pre_hook=None, post_hook=None,
                  warmup=None, rep=None, use_cuda_graph=True):
         
-        self.enable_autotune = os.environ.get("LIGHTLLM_ENABLE_AUTOTUNE", "0") == "1"
-        self.print_autotune = os.environ.get("LIGHTLLM_PRINT_AUTOTUNE", "0") == "1"
+        self.print_autotune = os.environ.get("LIGHTLLM_TRITON_PRINT_AUTOTUNE", "0") == "1"
         self.all_configs = configs
         self.configs = None
         self.default_config = default_config
@@ -224,7 +226,7 @@ class Autotuner():
         
         if use_cuda_graph:
             _rep_full = rep if rep is not None else 50
-            _rep_quick = _rep_full // 2
+            _rep_quick = _rep_full // 4
             self._do_bench = lambda kernel_call, current_best_ms: do_bench_cudagraph(
                 kernel_call,
                 rep=_rep_full,
@@ -237,10 +239,10 @@ class Autotuner():
                 current_best_ms=current_best_ms,
             )
         else:
-            _warmup_full = warmup if warmup is not None else 50
-            _rep_full = rep if rep is not None else 200
-            _warmup_quick = _warmup_full // 2
-            _rep_quick = _rep_full // 2
+            _warmup_full = warmup if warmup is not None else 25
+            _rep_full = rep if rep is not None else 100
+            _warmup_quick = _warmup_full // 4
+            _rep_quick = _rep_full // 4
             self._do_bench = lambda kernel_call, current_best_ms=None: do_bench(
                 kernel_call,
                 warmup=_warmup_full,
@@ -256,7 +258,7 @@ class Autotuner():
             )
 
         if not os.path.exists(self.cache_dir):
-            if self.enable_autotune:
+            if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
                 os.makedirs(self.cache_dir, exist_ok=True)
 
         self._loaded_static_keys = set()
@@ -280,7 +282,7 @@ class Autotuner():
         from triton.runtime.errors import OutOfResources, PTXASError
         
         if self.print_autotune:
-            print(f"Autotuning kernel {self.name} with config {kwargs['run_config']}")
+            logger.info(f"Autotuning kernel {self.name} with config {kwargs['run_config']}")
 
         full_nargs = {**self.nargs, **kwargs}
 
@@ -321,11 +323,13 @@ class Autotuner():
 
             # Phase 1: quick bench all configs, keep top 60%
             times_phase1 = []  # (config, time)
+            current_best_ms = float('inf')
             enum_configs = enumerate(tqdm(self.configs, desc=f"Autotuning {self.fn.__name__} (phase 1:60%) for {_run_key}")) if rank0 else enumerate(self.configs)
             for i, config in enum_configs:
                 kwargs_with_config = kwargs.copy()
                 kwargs_with_config["run_config"] = config
-                run_time = self._bench(*args, bench="quick", current_best_ms=float('inf'), **kwargs_with_config)
+                run_time = self._bench(*args, bench="quick", current_best_ms=current_best_ms, **kwargs_with_config)
+                current_best_ms = min(current_best_ms, run_time)
                 times_phase1.append((config, run_time))
 
             times_phase1.sort(key=lambda x: x[1])
@@ -338,7 +342,8 @@ class Autotuner():
             for i, config in enum_configs:
                 kwargs_with_config = kwargs.copy()
                 kwargs_with_config["run_config"] = config
-                run_time = self._bench(*args, bench="quick", current_best_ms=float('inf'), **kwargs_with_config)
+                run_time = self._bench(*args, bench="quick", current_best_ms=current_best_ms, **kwargs_with_config)
+                current_best_ms = min(current_best_ms, run_time)
                 times_phase2.append((config, run_time))
 
             times_phase2.sort(key=lambda x: x[1])
@@ -359,7 +364,7 @@ class Autotuner():
                 run_time = self._bench(*args, bench="full", current_best_ms=best_time, **kwargs_with_config)
                 if run_time < best_time:
                     if rank0 and self.print_autotune and best_time != float("inf"):
-                        print(f"Best config for {self.name} is {_best_config} with time {best_time:.5f} -> {run_time:.5f}")
+                        logger.info(f"Best config for {self.name} is {_best_config} with time {best_time:.5f} -> {run_time:.5f}")
                     best_time = run_time
                     _best_config = config
                     
@@ -379,7 +384,7 @@ class Autotuner():
             self.cached_configs[static_key][run_key] = _best_config
             
             if not dist.is_initialized() or get_global_rank() == 0:
-                if self.enable_autotune:
+                if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
                     cache_file = os.path.join(self.cache_dir, f"{static_key}.json")
                     with open(cache_file, "wb") as f:
                         fcntl.flock(f, fcntl.LOCK_EX)
@@ -388,7 +393,7 @@ class Autotuner():
                         finally:
                             fcntl.flock(f, fcntl.LOCK_UN)
                     if self.print_autotune:
-                        print(f"Saved configs for {self.name} - {static_key} - {run_key}")
+                        logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
             
             kwargs["run_config"] = self.cached_configs[static_key][run_key]
             full_nargs = {**self.nargs, **kwargs}
@@ -398,11 +403,20 @@ class Autotuner():
             if run_key in self.cached_configs[static_key]:
                 best_config = self.cached_configs[static_key][run_key]
 
-        if best_config is None and self.enable_autotune:
-            _benchmark(run_key)
+        if best_config is None:
+            if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
+                _benchmark(run_key)
+            else:
+                if static_key in self.cached_configs:
+                    self.cached_configs[static_key][run_key] = self.default_config
+                else:
+                    logger.warning(f"No kernel config for {self.name} in {self.cache_dir}/{static_key}, using default config")
+                    self.cached_configs[static_key] = {}
+                    self.cached_configs[static_key][run_key] = self.default_config
+
             best_config = self.cached_configs[static_key][run_key]
             
-        kwargs["run_config"] = best_config if best_config is not None else self.default_config
+        kwargs["run_config"] = best_config
         return self.fn(*args, **kwargs)
         
     def _select_args(self, param_names, args, kwargs):
