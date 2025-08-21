@@ -360,7 +360,7 @@ class HttpServerManager:
         image_tokens = 0
         audio_tokens = 0
 
-        if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
+        if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL() and multimodal_params is not None:
             for img in multimodal_params.images:
                 if img.token_num is not None:
                     image_tokens += img.token_num
