@@ -311,7 +311,6 @@ class HttpServerManager:
                 req_objs.append(req_obj)
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
-
             self.req_id_to_out_inf[group_request_id] = req_status
 
             await self.transfer_to_next_module_or_node(
