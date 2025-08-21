@@ -213,6 +213,21 @@ class HttpServerManager:
             audio_tokens += self.tokenizer.get_audio_token_length(audio)
         return len(prompt_ids) + image_tokens + img_count + audio_tokens + audio_count
 
+    def _calculate_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
+        image_tokens = 0
+        audio_tokens = 0
+
+        if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
+            for img in multimodal_params.images:
+                image_tokens += self.tokenizer.get_image_token_length(img)
+            for audio in multimodal_params.audios:
+                audio_tokens += self.tokenizer.get_audio_token_length(audio)
+        else:
+            image_tokens = len(multimodal_params.images)
+            audio_tokens = len(multimodal_params.audios)
+
+        return image_tokens, audio_tokens
+
     async def loop_for_request(self):
         assert self.args.node_rank > 0
         while True:
@@ -311,6 +326,16 @@ class HttpServerManager:
                 req_objs.append(req_obj)
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
+
+            # 计算输入 token 使用量统计
+            text_tokens = len(prompt_ids)
+            image_tokens, audio_tokens = self._calculate_multimodal_tokens(multimodal_params)
+            input_usage = {
+                "input_text_tokens": text_tokens,
+                "input_audio_tokens": audio_tokens,
+                "input_image_tokens": image_tokens,
+            }
+
             self.req_id_to_out_inf[group_request_id] = req_status
 
             await self.transfer_to_next_module_or_node(
@@ -326,6 +351,7 @@ class HttpServerManager:
                 request,
             )
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                metadata["usage"] = {**input_usage, **metadata.get("usage", {})}
                 yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
@@ -512,6 +538,8 @@ class HttpServerManager:
                     # p 节点返回 prompt_ids 信息，防止 d 节点重新 encode
                     if self.pd_mode == NodeRole.P and is_first_token:
                         metadata["prompt_ids"] = prompt_ids
+
+                    metadata["usage"] = {"output_tokens": out_token_counter}
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     if is_first_token:
