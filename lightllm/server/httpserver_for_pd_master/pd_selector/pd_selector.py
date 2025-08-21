@@ -12,18 +12,22 @@ class PDSelector:
         self.decode_nodes: List[PD_Client_Obj] = decode_nodes
         self.pd_manager = pd_manager
 
-    async def update_nodes(self, prefill_nodes, decode_nodes):
+    def update_nodes(self, prefill_nodes, decode_nodes):
         self.prefill_nodes = prefill_nodes
         self.decode_nodes = decode_nodes
 
-    async def select_p_d_node(self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+    def select_p_d_node(
+        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
         raise NotImplementedError("Subclass must implement this method")
 
 
 class RandomSelector(PDSelector):
     """随机选择器"""
 
-    async def select_p_d_node(self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+    def select_p_d_node(
+        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
         p_node = random.choice(self.prefill_nodes)
         d_node = random.choice(self.decode_nodes)
         return p_node, d_node
@@ -37,7 +41,9 @@ class RoundRobinSelector(PDSelector):
         self.prefill_node_index: int = 0
         self.decode_node_index: int = 0
 
-    async def select_p_d_node(self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+    def select_p_d_node(
+        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
         p_node = self.prefill_nodes[self.prefill_node_index]
         d_node = self.decode_nodes[self.decode_node_index]
         self.prefill_node_index = (self.prefill_node_index + 1) % len(self.prefill_nodes)
@@ -48,7 +54,9 @@ class RoundRobinSelector(PDSelector):
 class MemorySelector(PDSelector):
     """基于内存使用情况的选择器"""
 
-    async def select_p_d_node(self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+    def select_p_d_node(
+        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
         def _get_min_node(nodes: List[PD_Client_Obj], node_infos: Dict[str, dict], key: str) -> PD_Client_Obj:
             min_node, min_node_value = None, float("inf")
             for node in nodes:
