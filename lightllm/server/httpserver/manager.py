@@ -335,8 +335,13 @@ class HttpServerManager:
                 "input_image_tokens": image_tokens,
             }
 
+            is_first_gen_token = True
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
-                metadata["input_usage"] = input_usage
+                # 只有第一个生成的 token 的 metadata 中包含 input_usage
+                if is_first_gen_token:
+                    metadata["input_usage"] = input_usage
+                    is_first_gen_token = False
+
                 yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
