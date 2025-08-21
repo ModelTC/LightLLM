@@ -197,7 +197,9 @@ def _get_load_info() -> dict:
 
     # 获取当前每个 dp 的负载，数值含义为当前的 token 总容量使用率， 上报给 PD_Master 用于做
     # 调度决策。
-    current_load = [float(g_objs.shared_token_load.get_dynamic_max_load(dp_index)) for dp_index in dp_size_in_node]
+    current_load = [
+        float(g_objs.shared_token_load.get_dynamic_max_load(dp_index)) for dp_index in range(dp_size_in_node)
+    ]
     mean_node_load = sum(current_load) / len(current_load)
     load_info = {
         "total_token_usage_rate": mean_node_load,
