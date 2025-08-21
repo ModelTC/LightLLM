@@ -44,10 +44,12 @@ class RoundRobinSelector(PDSelector):
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+        self.prefill_node_index = self.prefill_node_index % len(self.prefill_nodes)
+        self.decode_node_index = self.decode_node_index % len(self.decode_nodes)
         p_node = self.prefill_nodes[self.prefill_node_index]
         d_node = self.decode_nodes[self.decode_node_index]
-        self.prefill_node_index = (self.prefill_node_index + 1) % len(self.prefill_nodes)
-        self.decode_node_index = (self.decode_node_index + 1) % len(self.decode_nodes)
+        self.prefill_node_index += 1
+        self.decode_node_index += 1
         return p_node, d_node
 
 
