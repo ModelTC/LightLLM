@@ -101,6 +101,7 @@ class TpPartBaseModel:
         self._init_custom()
         self._init_inferstate_cls()
         self._init_padded_req()
+        self._autotune_warmup()
         self._init_cudagraph()
         self._check_max_len_infer()
         torch.cuda.empty_cache()
@@ -720,6 +721,70 @@ class TpPartBaseModel:
             logger.error(exception_str)
             raise Exception(exception_str)
         return
+
+    def autotune_layers(self):
+        return self.config.get("first_k_dense_replace", 0) + 1
+    
+    @final
+    @torch.no_grad()
+    def _autotune_warmup(self):
+        if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") != "1":
+            return
+
+        logger.info("======start autotune warmup=======")
+        torch.distributed.barrier()
+
+        warmup_lengths = []
+        cur_len = 1
+        while cur_len <= self.batch_max_tokens:
+            warmup_lengths.append(cur_len)
+            cur_len *= 2
+
+        if self.batch_max_tokens not in warmup_lengths:
+            warmup_lengths.append(self.batch_max_tokens)
+
+        layer_num_bak = self.layers_num
+        self.layers_num = self.autotune_layers()
+        for input_len in warmup_lengths:
+            try:
+                logger.info(f"autotune warmup for length {input_len}")
+                dummy_input_ids = torch.ones(input_len, dtype=torch.int32, device="cuda")
+                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+                mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+                b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+                b_seq_len[:] = input_len
+                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+                total_token_num = input_len
+                b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+                model_input = ModelInput(
+                    batch_size=1,
+                    total_token_num=total_token_num,
+                    max_len_in_batch=input_len,
+                    input_ids=dummy_input_ids,
+                    mem_indexes=mem_indexes,
+                    b_req_idx=b_req_idx,
+                    b_seq_len=b_seq_len,
+                    b_mtp_index=b_mtp_index,
+                    is_prefill=True,
+                    b_ready_cache_len=b_ready_cache_len,
+                    multimodal_params=[],
+                    **self._gen_special_model_input(total_token_num),
+                )
+                model_output = self.forward(
+                    model_input,
+                )
+                del model_output
+                self.req_manager.free_all()
+                self.mem_manager.free_all()
+                logger.info(f"autotune warmup for length {input_len} ok")
+            except Exception as e:
+                logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
+                self.req_manager.free_all()
+                self.mem_manager.free_all()
+        self.layers_num = layer_num_bak
+        torch.distributed.barrier()
+        os.environ["LIGHTLLM_TRITON_AUTOTUNE"] = "0"
+        logger.info("======end autotune warmup=======")
 
     @final
     @torch.no_grad()
