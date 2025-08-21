@@ -12,7 +12,7 @@ import ujson as json
 import pickle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Union, List, Tuple, Dict
+from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
 from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType
 from lightllm.server.core.objs import SamplingParams
@@ -405,6 +405,7 @@ class PDManager:
         self.args = args
         self.prefill_nodes: List[PD_Client_Obj] = []
         self.decode_nodes: List[PD_Client_Obj] = []
+        self.url_to_pd_nodes: Dict[str, PD_Client_Obj] = {}
         self.selector: PDSelector = create_selector(
             args.select_p_d_node_func, self.prefill_nodes, self.decode_nodes, self
         )
@@ -413,7 +414,7 @@ class PDManager:
     async def register_pd(self, pd_info_json, websocket):
         pd_client = PD_Client_Obj(**pd_info_json)
         pd_client.websocket = websocket
-        self.node_info_recorder.register_node(pd_client)
+        self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
 
         if pd_client.mode == "prefill":
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
@@ -431,8 +432,8 @@ class PDManager:
 
     async def remove_pd(self, pd_info_json):
         pd_client = PD_Client_Obj(**pd_info_json)
-        self.node_info_recorder.remove_node(pd_client)
 
+        self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
         self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
         self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
 
@@ -441,11 +442,24 @@ class PDManager:
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} removed")
         return
 
-    def update_node_load_info(self, load_info: dict):
-        """更新节点负载信息"""
-        if load_info is None:
-            return
-        self.node_info_recorder.update_node_load_info(load_info)
+    def update_node_load_info(self, load_info: Optional[dict]):
+        """更新节点负载信息
+        load_info: 节点负载信息字典，内容格式如下，可以为 None
+        {
+        "total_token_usage_rate": xxxx,
+        "client_ip_port": xxxx,
+        }
+        """
+        try:
+            if load_info is None:
+                return
+            client_ip_port = load_info["client_ip_port"]
+            total_token_usage_rate = load_info["total_token_usage_rate"]
+            pd_client = self.url_to_pd_nodes.get(client_ip_port)
+            pd_client.run_status.total_token_usage_rate = total_token_usage_rate
+        except BaseException as e:
+            logger.warning(f"udpate node load info failed, load_info: {load_info} error: {str(e)}")
+        return
 
     def get_predict_node_infos(self):
         """获取所有节点的预测负载信息"""
