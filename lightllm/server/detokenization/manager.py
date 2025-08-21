@@ -105,6 +105,10 @@ class DeTokenizationManager:
         exist_need_detoken = False
         exist_decode = False
         for decode_req in self.req_id_to_out.values():
+            # 已经满足停止字符串停止条件，则不再处理后续生成 token
+            if decode_req.req.stop_str_matched:
+                continue
+
             if decode_req.need_detoken() and not decode_req.out_queue_is_full():
                 new_token_id, src_index = decode_req.get_next_token_id_and_index()
                 decode_req.output_ids.append(new_token_id)
@@ -131,6 +135,14 @@ class DeTokenizationManager:
                         logger.error(
                             f"error token healing state, prefix_str {decode_req.prefix_str} new_text {new_text}"
                         )
+
+                decode_req.output_strs.append(new_text)
+
+                # 停止字符串匹配
+                if not decode_req.req.finish_status.is_stopped() and decode_req.stop_sequences_str_match():
+                    decode_req.req.stop_str_matched_token_index = src_index
+                    decode_req.req.stop_str_matched = True
+
                 decode_req.req.out_tokens_queue.push(new_text, src_index, special, count_output_tokens)
 
             if decode_req.need_detoken():

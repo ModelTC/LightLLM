@@ -123,6 +123,22 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self.cache_env_ok = False
             return
 
+        def empty(
+            self,
+            shape: Union[torch.Size, Iterable[int]],
+            dtype: torch.dtype,
+            device: str = "cuda",
+            is_graph_out: bool = False,
+            microbatch_index: int = 0,
+        ) -> torch.Tensor:
+            return self.alloc_tensor(
+                shape=shape,
+                data_type=dtype,
+                device=device,
+                is_graph_out=is_graph_out,
+                microbatch_index=microbatch_index,
+            )
+
         def alloc_tensor(
             self,
             shape: Union[torch.Size, Tuple[int, ...]],
@@ -206,6 +222,16 @@ else:
 
         def cache_env_out(self):
             return
+
+        def empty(
+            self,
+            shape: Union[torch.Size, Iterable[int]],
+            dtype: torch.dtype,
+            device: str = "cuda",
+            is_graph_out: bool = False,
+            microbatch_index: int = 0,
+        ) -> torch.Tensor:
+            return torch.empty(shape, dtype=dtype, device=device, requires_grad=False)
 
         def alloc_tensor(
             self,

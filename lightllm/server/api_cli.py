@@ -186,6 +186,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable_log_stats", action="store_true", help="disable logging throughput stats.")
     parser.add_argument("--log_stats_interval", type=int, default=10, help="log stats interval in second.")
+    parser.add_argument(
+        "--disable_shm_warning",
+        action="store_true",
+        default=False,
+        help="""Disable periodic shared memory (/dev/shm) warning logs.
+        Our system requires sufficient available shared memory in /dev/shm,
+        so a monitoring thread is enabled to check if the capacity is adequate.
+        This setting allows you to turn off these warning checks.""",
+    )
 
     parser.add_argument("--router_token_ratio", type=float, default=0.0, help="token ratio to control router dispatch")
     parser.add_argument(
@@ -441,6 +450,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--auto_update_redundancy_expert",
         action="store_true",
         help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
+    )
+    parser.add_argument(
+        "--enable_fused_shared_experts",
+        action="store_true",
+        help="""Whether to enable fused shared experts for deepseekv3 model. only work when MOE_MODE=TP """,
     )
     parser.add_argument(
         "--mtp_mode",

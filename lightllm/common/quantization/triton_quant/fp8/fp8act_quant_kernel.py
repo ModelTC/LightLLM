@@ -6,7 +6,7 @@ from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 from frozendict import frozendict
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     from deep_gemm import ceil_div
@@ -108,17 +108,56 @@ def lightllm_per_token_group_quant_fp8(
 def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
-    x_q: torch.Tensor,
-    x_s: torch.Tensor,
     eps: float = 1e-10,
     dtype: torch.dtype = torch.float8_e4m3fn,
+    column_major_scales: bool = False,
+    scale_tma_aligned: bool = False,
+    alloc_func: Callable = torch.empty,
 ):
+    x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
+    x_s = None
+    # Adapted from
+    # https://github.com/sgl-project/sglang/blob/7e257cd666c0d639626487987ea8e590da1e9395/python/sglang/srt/layers/quantization/fp8_kernel.py#L290
     if HAS_SGL_KERNEL:
         finfo = torch.finfo(dtype)
         fp8_max, fp8_min = finfo.max, finfo.min
+
+        # 创建scale张量
+        if column_major_scales:
+            if scale_tma_aligned:
+                # 对齐到4 * sizeof(float)
+                aligned_size = (x.shape[-2] + 3) // 4 * 4
+                x_s = alloc_func(
+                    x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
+                    device=x.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)[: x.shape[-2], :]
+            else:
+                x_s = alloc_func(
+                    (x.shape[-1] // group_size,) + x.shape[:-1],
+                    device=x.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)
+        else:
+            x_s = alloc_func(
+                x.shape[:-1] + (x.shape[-1] // group_size,),
+                device=x.device,
+                dtype=torch.float32,
+            )
+
+        # 使用SGL kernel进行量化
         sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max, False)
     else:
+        # 使用LightLLM kernel进行量化
+        x_s = alloc_func(
+            x.shape[:-1] + (x.shape[-1] // group_size,),
+            device=x.device,
+            dtype=torch.float32,
+        )
         lightllm_per_token_group_quant_fp8(x, group_size, x_q, x_s, eps=1e-10, dtype=torch.float8_e4m3fn)
+        if column_major_scales and scale_tma_aligned:
+            x_s = tma_align_input_scale(x_s)
+    return x_q, x_s
 
 
 # copy from
@@ -208,9 +247,9 @@ def test_tma_align():
     m = 576
     k = 8192
     x = torch.randn((m, k // 128), dtype=torch.float32).cuda()
+
     for _ in range(10):
         x_padded = tma_align_input_scale(x)
-    print(x_padded.shape)
     import time
 
     torch.cuda.synchronize()
@@ -226,11 +265,9 @@ def test_tma_align():
 def test_per_token_group_quant_fp8():
     group_size = 128
     x = torch.randn((1024, 8192), dtype=torch.bfloat16).cuda()
-
-    x_q = torch.randn((1024, 8192)).cuda().to(torch.float8_e4m3fn)
     # x_s = torch.randn((1024, 8192 // group_size), dtype=torch.float32).cuda()
-    x_s = torch.randn((8192 // group_size, 1024 + 10), dtype=torch.float32).cuda().t()
-    per_token_group_quant_fp8(x, group_size, x_q, x_s)
+    # x_s = torch.randn((8192 // group_size, 1024 + 10), dtype=torch.float32).cuda().t()
+    x_q, x_s = per_token_group_quant_fp8(x, group_size, column_major_scales=True, scale_tma_aligned=True)
     x_s = x_s[:1024]
     th_x_q, th_x_s = torch_quant(x, group_size)
     print("th_x_s - x_s", torch.abs(th_x_s - x_s.reshape(-1)).max())
@@ -238,4 +275,5 @@ def test_per_token_group_quant_fp8():
 
 
 if __name__ == "__main__":
+    test_per_token_group_quant_fp8()
     test_tma_align()

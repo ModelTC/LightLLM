@@ -31,7 +31,7 @@ def _fwd_kernel_destindex_copy_quantize_kv(
     offs_g = tl.arange(0, BLOCK_GROUP_NUM)
     offs_d = tl.arange(0, BLOCK_GROUP_DIM)
 
-    dest_index = tl.load(Dest_loc + cur_index)
+    dest_index = tl.load(Dest_loc + cur_index).to(tl.int64)
 
     src_data = tl.load(
         K + cur_index * stride_k_bs + cur_head * stride_k_h + offs_g[:, None] * stride_k_g + offs_d[None, :],

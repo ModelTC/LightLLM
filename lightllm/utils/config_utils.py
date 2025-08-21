@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Optional
 from functools import lru_cache
 from .envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
@@ -11,6 +12,25 @@ def get_config_json(model_path: str):
     with open(os.path.join(model_path, "config.json"), "r") as file:
         json_obj = json.load(file)
     return json_obj
+
+
+def get_hidden_size(model_path: str) -> Optional[int]:
+    # try to get hidden_size in config.json
+    config_json = get_config_json(model_path)
+    try:
+        hidden_size = config_json["hidden_size"]
+    except:
+        # for some multimodal model
+        try:
+            hidden_size = config_json["llm_config"]["hidden_size"]
+        except:
+            hidden_size = config_json.get("text_config", {}).get("hidden_size")
+
+    if isinstance(hidden_size, int):
+        return hidden_size
+
+    logger.error("cannot get hidden size from config.json, return None instead")
+    return None
 
 
 def get_eos_token_ids(model_path: str):
