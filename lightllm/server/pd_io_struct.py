@@ -1,6 +1,6 @@
 import enum
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from fastapi import WebSocket
@@ -39,12 +39,18 @@ class ObjType(enum.Enum):
 
 
 @dataclass
+class _PD_Client_RunStatus:
+    total_token_usage_rate: float = 0.0  # pd 节点上的 token 使用率
+
+
+@dataclass
 class PD_Client_Obj:
     node_id: int
     client_ip_port: str
     mode: str  # 只能是 prefill 或者 decode 节点
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
+    run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:
