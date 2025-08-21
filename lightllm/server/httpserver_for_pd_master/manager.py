@@ -25,10 +25,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ServerBusyError
-from .pd_selector import (
-    create_selector,
-    PDSelector,
-)
+from .pd_selector import create_selector
 
 logger = init_logger(__name__)
 
@@ -406,9 +403,7 @@ class PDManager:
         self.prefill_nodes: List[PD_Client_Obj] = []
         self.decode_nodes: List[PD_Client_Obj] = []
         self.url_to_pd_nodes: Dict[str, PD_Client_Obj] = {}
-        self.selector: PDSelector = create_selector(
-            args.select_p_d_node_func, self.prefill_nodes, self.decode_nodes, self
-        )
+        self.selector = create_selector(args.select_p_d_node_func, self)
         return
 
     def register_pd(self, pd_info_json, websocket):

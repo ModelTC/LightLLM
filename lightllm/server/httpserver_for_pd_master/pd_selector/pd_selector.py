@@ -6,9 +6,9 @@ from lightllm.server.multimodal_params import MultimodalParams
 
 
 class PDSelector:
-    def __init__(self, prefill_nodes: List[PD_Client_Obj], decode_nodes: List[PD_Client_Obj], pd_manager):
-        self.prefill_nodes: List[PD_Client_Obj] = prefill_nodes
-        self.decode_nodes: List[PD_Client_Obj] = decode_nodes
+    def __init__(self, pd_manager):
+        self.prefill_nodes: List[PD_Client_Obj] = []
+        self.decode_nodes: List[PD_Client_Obj] = []
         self.pd_manager = pd_manager
 
     def update_nodes(self, prefill_nodes, decode_nodes):
@@ -35,8 +35,8 @@ class RandomSelector(PDSelector):
 class RoundRobinSelector(PDSelector):
     """轮询选择器"""
 
-    def __init__(self, prefill_nodes: List[PD_Client_Obj], decode_nodes: List[PD_Client_Obj], pd_manager):
-        super().__init__(prefill_nodes, decode_nodes, pd_manager)
+    def __init__(self, pd_manager):
+        super().__init__(pd_manager)
         self.prefill_node_index: int = 0
         self.decode_node_index: int = 0
 
