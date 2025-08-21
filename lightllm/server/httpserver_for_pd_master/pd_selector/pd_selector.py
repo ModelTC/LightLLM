@@ -52,8 +52,8 @@ class RoundRobinSelector(PDSelector):
         return p_node, d_node
 
 
-class MemorySelector(PDSelector):
-    """基于内存使用情况的选择器"""
+class AdaptiveLoadSelector(PDSelector):
+    """基于负载使用情况的选择器"""
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams

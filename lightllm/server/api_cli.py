@@ -46,8 +46,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--select_p_d_node_func",
         type=str,
         default="round_robin",
-        choices=["random", "round_robin", "memory"],
-        help="select p d node func, can be round_robin, random or memory",
+        choices=["random", "round_robin", "adaptive_load"],
+        help="select p d node func, can be round_robin, random or adaptive_load",
     )
     parser.add_argument(
         "--config_server_host",
