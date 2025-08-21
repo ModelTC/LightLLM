@@ -176,6 +176,16 @@ async def _pd_process_generate(
         logger.error(str(e))
 
 
+# 转发token的task
+async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket):
+    while True:
+        handle_list = await forwarding_queue.wait_to_get_all_data()
+
+        if handle_list:
+            load_info: dict = _get_load_info()
+            await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
+
+
 # 获取节点负载信息
 def _get_load_info() -> dict:
 
@@ -194,13 +204,3 @@ def _get_load_info() -> dict:
         "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{g_objs.args.port}",
     }
     return load_info
-
-
-# 转发token的task
-async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket):
-    while True:
-        handle_list = await forwarding_queue.wait_to_get_all_data()
-
-        if handle_list:
-            load_info: dict = _get_load_info()
-            await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
