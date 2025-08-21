@@ -64,7 +64,8 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
 
     if is_all_greedy:
         batch_next_token_ids = torch.argmax(logits, -1)
-        batch_next_token_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+        batch_next_token_probs = torch.gather(log_probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), batch_next_token_probs.view(-1)
 
     elif get_env_start_args().sampling_backend == "triton":
