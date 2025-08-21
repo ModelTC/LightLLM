@@ -40,7 +40,9 @@ class PDManager:
         self.prefill_nodes: List[PD_Client_Obj] = []
         self.decode_nodes: List[PD_Client_Obj] = []
         self.node_info_recorder: PredictNodeInfoRecorder = PredictNodeInfoRecorder()
-        self.selector: PDSelector = create_selector(args.select_p_d_node_func, self.prefill_nodes, self.decode_nodes, self)
+        self.selector: PDSelector = create_selector(
+            args.select_p_d_node_func, self.prefill_nodes, self.decode_nodes, self
+        )
         return
 
     async def register_pd(self, pd_info_json, websocket):
@@ -84,10 +86,13 @@ class PDManager:
         """获取所有节点的预测负载信息"""
         return self.node_info_recorder.get_predict_node_infos()
 
-    async def select_p_d_node(self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+    async def select_p_d_node(
+        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
         p_node, d_node = await self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)
         self.node_info_recorder.update_predict_node_info(p_node, d_node, prompt, sampling_params, multimodal_params)
         return p_node, d_node
+
 
 class HttpServerManagerForPDMaster:
     def __init__(
@@ -300,7 +305,7 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         out_token_counter = 0
-        first_token_cost_ms = float('inf')
+        first_token_cost_ms = float("inf")
         group_request_id = sampling_params.group_request_id
         unfinished_count = sampling_params.best_of
         is_first_token = True
@@ -404,16 +409,10 @@ class HttpServerManagerForPDMaster:
             try:
                 for obj in objs:
                     if obj[0] == ObjType.TOKEN_PACKS:
-                        # 检查是否包含节点信息
-                        if len(obj) >= 3:
-                            handle_list, load_info = obj[1], obj[2]
-                            # 更新节点负载信息
-                            self.pd_manager.update_node_load_info(load_info)
-                        else:
-                            # 兼容旧格式
-                            handle_list = obj[1]
+                        token_list, node_load_info = obj[1], obj[2]
+                        self.pd_manager.update_node_load_info(node_load_info)
 
-                        for sub_req_id, text, metadata, finish_status in handle_list:
+                        for sub_req_id, text, metadata, finish_status in token_list:
                             finish_status: FinishStatus = finish_status
                             group_req_id = convert_sub_id_to_group_id(sub_req_id)
                             try:

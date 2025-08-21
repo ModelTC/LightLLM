@@ -177,18 +177,21 @@ async def _pd_process_generate(
 
 
 # 获取节点负载信息
-def _get_load_info(have_finished_req: bool) -> dict:
-    if not have_finished_req:
-        return None
+def _get_load_info() -> dict:
 
     from lightllm.server.api_http import g_objs
+
     assert g_objs.shared_token_load is not None, "shared_token_load is not initialized"
-    current_load = [
-        float(g_objs.shared_token_load.get_dynamic_max_load(dp_index)) for dp_index in range(g_objs.args.dp)
-    ]
+    args = g_objs.args
+    dp_size_in_node = max(1, args.dp // args.nnodes)
+
+    # 获取当前每个 dp 的负载，数值含义为当前的 token 总容量使用率， 上报给 PD_Master 用于做
+    # 调度决策。
+    current_load = [float(g_objs.shared_token_load.get_dynamic_max_load(dp_index)) for dp_index in dp_size_in_node]
+    mean_node_load = sum(current_load) / len(current_load)
     load_info = {
-        "mem_len": min(current_load),
-        "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{g_objs.args.port}"
+        "total_token_usage_rate": mean_node_load,
+        "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{g_objs.args.port}",
     }
     return load_info
 
@@ -199,6 +202,5 @@ async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket):
         handle_list = await forwarding_queue.wait_to_get_all_data()
 
         if handle_list:
-            have_finished_req = any(finish_status.is_finished() for _, _, _, finish_status in handle_list)
-            load_info: dict = _get_load_info(have_finished_req)
+            load_info: dict = _get_load_info()
             await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
