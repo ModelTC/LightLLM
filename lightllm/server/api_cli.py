@@ -416,7 +416,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--sampling_backend",
         type=str,
         choices=["triton", "sglang_kernel"],
-        default="sglang_kernel",
+        default="triton",
         help="""sampling used impl. 'triton' is use torch and triton kernel,
         sglang_kernel use sglang_kernel impl""",
     )
