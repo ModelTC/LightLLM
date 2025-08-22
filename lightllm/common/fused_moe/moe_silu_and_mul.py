@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 from .moe_silu_and_mul_config import MoeSiluAndMulKernelConfig
 from lightllm.common.triton_utils.autotuner import autotune, nearest_power_of_2
-
+ 
 @triton.jit
 def _silu_and_mul_kernel_fast(
     input_ptr,

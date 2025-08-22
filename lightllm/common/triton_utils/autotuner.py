@@ -241,7 +241,7 @@ class Autotuner():
                 local_best = torch.tensor([best_time], device="cuda")
                 all_best_times = [torch.zeros_like(local_best) for _ in range(world_size)]
                 dist.all_gather(all_best_times, local_best)
-                all_times = [t.item() for t in all_best_times]
+                all_times = [t.item() for t in all_best_times] 
                 min_idx = int(torch.tensor(all_times).argmin().item())
                 obj_list = [_best_config]
                 dist.broadcast_object_list(obj_list, src=min_idx)

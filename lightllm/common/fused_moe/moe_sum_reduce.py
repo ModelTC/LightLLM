@@ -11,7 +11,7 @@ def _moe_sum_reduce_kernel(
     input_ptr,
     input_stride_0,
     input_stride_1,
-    input_stride_2,
+    input_stride_2, 
     output_ptr,
     output_stride_0,
     output_stride_1,
