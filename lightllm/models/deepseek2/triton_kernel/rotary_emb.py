@@ -2,7 +2,7 @@ import torch
 
 import triton
 import triton.language as tl
-
+import itertools
 from lightllm.common.triton_utils.autotuner import autotune, nearest_power_of_2
 
 @triton.jit
@@ -95,35 +95,15 @@ def _rotary_kernel(
 
 def get_test_configs():
     configs = []
-    for num_stages in [
-        1,
-        2,
-        3,
-        4,
-        5,
-    ]:
-        for GROUP_SIZE_M in [
-            1,
-            2,
-            4,
-        ]:
-            for num_warps in [
-                2,
-                4,
-                8,
-            ]:
-                for BLOCK_SIZE_M in [16, 32, 64, 128]:
-                    for BLOCK_SIZE_N in [32, 64, 128]:
-                        for BLOCK_SIZE_K in [32, 64, 128]:
-                            t_config = {
-                                "BLOCK_SIZE_M": BLOCK_SIZE_M,
-                                "BLOCK_SIZE_N": BLOCK_SIZE_N,
-                                "BLOCK_SIZE_K": BLOCK_SIZE_K,
-                                "GROUP_SIZE_M": GROUP_SIZE_M,
-                                "num_warps": num_warps,
-                                "num_stages": num_stages,
-                            }
-                            configs.append(t_config)
+    result = itertools.product([1, 2, 4, 8, 16, 32], [1, 2, 4, 8], [1, 2, 3, 4, 5], [1, 2, 4, 8, 16])
+    for BLOCK_SEQ, num_warps, num_stages, HEAD_PARALLEL_NUM in result:
+        t_config = {
+            "BLOCK_SEQ": BLOCK_SEQ,
+            "HEAD_PARALLEL_NUM": HEAD_PARALLEL_NUM,
+            "num_warps": num_warps,
+            "num_stages": num_stages,
+        }
+        configs.append(t_config)
     return configs
 
 def get_static_key(q, k):
