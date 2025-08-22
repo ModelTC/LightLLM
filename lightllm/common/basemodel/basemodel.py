@@ -731,7 +731,6 @@ class TpPartBaseModel:
         if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") != "1":
             return
 
-        logger.info("======start autotune warmup=======")
         torch.distributed.barrier()
 
         warmup_lengths = []
@@ -743,6 +742,8 @@ class TpPartBaseModel:
         if self.batch_max_tokens not in warmup_lengths:
             warmup_lengths.append(self.batch_max_tokens)
 
+        warmup_lengths.sort(reverse=True)
+        
         layer_num_bak = self.layers_num
         self.layers_num = self.autotune_layers()
         for input_len in warmup_lengths:
@@ -784,7 +785,6 @@ class TpPartBaseModel:
         self.layers_num = layer_num_bak
         torch.distributed.barrier()
         os.environ["LIGHTLLM_TRITON_AUTOTUNE"] = "0"
-        logger.info("======end autotune warmup=======")
 
     @final
     @torch.no_grad()

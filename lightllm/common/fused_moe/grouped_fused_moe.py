@@ -30,11 +30,11 @@ from lightllm.utils.device_utils import (
     get_device_sm_shared_mem_num,
     get_device_warp_size,
 )
-from .moe_kernel_configs import MoeGroupedGemmKernelConfig
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.torch_ops_utils import direct_register_custom_op
+from lightllm.common.triton_utils.autotuner import autotune, dict_to_filename, nearest_power_of_2
 
 FFN_MOE_CHUNK_SIZE = 32 * 1024
 
@@ -448,7 +448,35 @@ def grouped_matmul_kernel(
 
     return
 
+def get_grouped_matmul_static_key(
+    expert_weights: torch.Tensor,
+    topk_num: int,
+    out: torch.Tensor,
+    mul_routed_weight: bool,
+    use_fp8_w8a8: bool,
+):
+    expert_num, n, k = expert_weights.shape
+    return dict_to_filename({
+            "N": n,
+            "K": k,
+            "topk_num": topk_num,
+            "expert_num": expert_num,
+            "mul_routed_weight": mul_routed_weight,
+            "use_fp8_w8a8": use_fp8_w8a8,
+            "out_dtype": str(out.dtype)
+        })
 
+
+@autotune(
+    name="grouped_matmul:v1",
+    configs=[
+         {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk, "GROUP_SIZE_M": gm, "NUM_WARPS": nw, "NUM_STAGE": ns} 
+         for ns in [1, 2, 3, 4, 5] for gm in [1, 2, 4, 8]  for nw in [2, 4, 8] for bm in [16, 32, 64, 128] for bn in [16, 32, 64, 128] for bk in [16, 32, 64, 128]     
+    ],
+    default_config={"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "NUM_WARPS": 4, "NUM_STAGE": 1},
+    static_key_func=get_grouped_matmul_static_key,
+    run_key_func=lambda token_num_mul_topk_num : str(nearest_power_of_2(token_num_mul_topk_num)),
+)
 def grouped_matmul(
     token_num_mul_topk_num: int,
     token_inputs: torch.Tensor,
@@ -486,7 +514,8 @@ def grouped_matmul(
     assert expert_to_token_num.is_contiguous()
     assert expert_to_weights.is_contiguous()
     assert expert_weights.is_contiguous()
-
+    assert run_config is not None
+    
     # for deepseek_v3 block-wise quant
     block_size_n = 0
     block_size_k = 0
@@ -495,24 +524,12 @@ def grouped_matmul(
             block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
 
-    if run_config is None:
-        run_config = MoeGroupedGemmKernelConfig.try_to_get_best_config(
-            M=token_inputs.shape[0],
-            N=n,
-            K=k,
-            topk_num=topk_num,
-            expert_num=expert_num,
-            mul_routed_weight=mul_routed_weight,
-            use_fp8_w8a8=use_fp8_w8a8,
-            out_dtype=str(out.dtype),
-        )
-
     BLOCK_SIZE_M = run_config["BLOCK_SIZE_M"]
     BLOCK_SIZE_N = run_config["BLOCK_SIZE_N"]
     BLOCK_SIZE_K = run_config["BLOCK_SIZE_K"]
     GROUP_SIZE_M = run_config["GROUP_SIZE_M"]
-    num_warps = run_config["num_warps"]
-    num_stages = run_config["num_stages"]
+    num_warps = run_config["NUM_WARPS"]
+    num_stages = run_config["NUM_STAGE"]
 
     if block_size_k != 0:
         # 如果使用了 block wise 量化，分块大小不能超过 block size
