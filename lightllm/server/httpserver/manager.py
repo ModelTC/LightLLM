@@ -16,7 +16,7 @@ from typing import Union, List, Tuple, Dict, Optional
 from fastapi import Request
 from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole
-from ..embed_cache.utils import get_shm_name_data, create_shm
+from ..embed_cache.utils import get_shm_name_data, create_shm, afs_embed_exists
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
@@ -81,10 +81,13 @@ class HttpServerManager:
                 )
 
         self.enable_multimodal = enable_multimodal
-        if self.enable_multimodal:
+        if self.enable_multimodal and self.args.run_mode != "llm_only":
             self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
             self.send_to_visual = context.socket(zmq.PUSH)
             self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
+
+        self.token_id_range_start = 100000000
+        self.token_id_range_end = 2 ** 63 - 1
 
         self.shm_req_manager = ShmReqManager()
 
@@ -101,7 +104,7 @@ class HttpServerManager:
         self.metric_client = MetricClient(metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
-        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL]
+        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL, NodeRole.LLM_ONLY]
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -113,6 +116,10 @@ class HttpServerManager:
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
+
+    async def _check_and_set_new_id_range(self, token_num):
+        assert self.token_id_range_start + token_num < self.token_id_range_end
+        self.token_id_range_start += token_num
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
 
@@ -155,7 +162,10 @@ class HttpServerManager:
                     data = img.read()
                     # must after init_imageitem_extral_params
                     token_num = self.tokenizer.get_image_token_length(img)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
+                    md5sum = "{}_{}".format(
+                        hashlib.md5(data).hexdigest(),
+                        hashlib.md5(pickle.dumps(img.extra_params, protocol=4)).hexdigest(),
+                    )
                     md5sums.append(md5sum)
                     tokens_nums.append(token_num)
                     datas.append(data)
@@ -164,13 +174,57 @@ class HttpServerManager:
                     self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
                     data = audio.read()
                     token_num = self.tokenizer.get_audio_token_length(audio)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
+                    md5sum = "{}_{}".format(
+                        hashlib.md5(data).hexdigest(),
+                        hashlib.md5(pickle.dumps(audio.extra_params, protocol=4)).hexdigest(),
+                    )
                     md5sums.append(md5sum)
                     tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(audio)
 
                 await self._alloc_resource(items, md5sums, tokens_nums, datas)
+        return
+
+    async def _wait_for_afs_embed(self, md5sum_hex: str, interval_sec: float = 0.01) -> None:
+        while not afs_embed_exists(md5sum_hex):
+            await asyncio.sleep(interval_sec)
+
+    async def _get_image_embedding_from_afs(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
+        for img in multimodal_params.images:
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
+            data = img.read()
+            # must after init_imageitem_extral_params
+            token_num = self.tokenizer.get_image_token_length(img)
+            md5sum = "{}_{}".format(
+                hashlib.md5(data).hexdigest(),
+                hashlib.md5(pickle.dumps(img.extra_params, protocol=4)).hexdigest(),
+            )
+            uid_int = int(md5sum, 16)
+            if not afs_embed_exists(md5sum):
+                await self._wait_for_afs_embed(md5sum)
+            img.uuid = uid_int
+            img.afs_embed = True
+            token_id_range_start = self.token_id_range_start
+            img.token_id = token_id_range_start
+            img.token_num = token_num
+
+        for audio in multimodal_params.audios:
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
+            data = audio.read()
+            token_num = self.tokenizer.get_audio_token_length(audio)
+            md5sum = "{}_{}".format(
+                hashlib.md5(data).hexdigest(),
+                hashlib.md5(pickle.dumps(audio.extra_params, protocol=4)).hexdigest(),
+            )
+            if not afs_embed_exists(md5sum):
+                await self._wait_for_afs_embed(md5sum)
+            uid_int = int(md5sum, 16)
+            audio.uuid = uid_int
+            audio.afs_embed = True
+            token_id_range_start = self.token_id_range_start
+            audio.token_id = token_id_range_start
+            audio.token_num = token_num
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
@@ -236,7 +290,7 @@ class HttpServerManager:
         # health 请求 request_id 为负数，直接返回
         if is_health_req:
             return sampling_params.group_request_id
-        if self.pd_mode == NodeRole.NORMAL:
+        if self.pd_mode == NodeRole.NORMAL or self.pd_mode == NodeRole.LLM_ONLY:
             if not self.is_multinode_tp:
                 group_request_id = self.id_gen.generate_id()
             else:
@@ -350,7 +404,7 @@ class HttpServerManager:
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
             # 进行回收。
-            if group_request_id not in self.req_id_to_out_inf:
+            if group_request_id not in self.req_id_to_out_inf and self.args.run_mode != "llm_only":
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
@@ -393,7 +447,10 @@ class HttpServerManager:
                 ), "too many multimodal items!"
                 if multimodal_params.audios:
                     assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
-                await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                if self.args.run_mode == "llm_only":
+                    await self._get_image_embedding_from_afs(multimodal_params, sampling_params)
+                else:
+                    await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
                 )
@@ -468,7 +525,7 @@ class HttpServerManager:
     ):
 
         if self.pd_mode == NodeRole.P:
-            if self.enable_multimodal:
+            if self.enable_multimodal and self.args.run_mode != "llm_only":
                 self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
@@ -488,8 +545,8 @@ class HttpServerManager:
             )
             return
 
-        if self.pd_mode == NodeRole.NORMAL:
-            if self.enable_multimodal:
+        if self.pd_mode == NodeRole.NORMAL or self.pd_mode == NodeRole.LLM_ONLY:
+            if self.enable_multimodal and self.args.run_mode != "llm_only":
                 self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
@@ -638,7 +695,8 @@ class HttpServerManager:
                 for req in req_status.group_req_objs.shm_req_objs:
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
-                await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
+                if self.args.run_mode != "llm_only":
+                    await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
 
             # 先保留这个关键得日志，用于方便定位重构中的问题。
             if time.time() - pre_time_mark > 120:

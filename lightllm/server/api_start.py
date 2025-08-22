@@ -60,7 +60,7 @@ def setup_signal_handlers(http_server_process, process_manager):
     return
 
 
-def normal_or_p_d_start(args):
+def check_and_set_args(args):
     set_unique_server_name(args)
 
     if not args.disable_shm_warning:
@@ -71,7 +71,7 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "llm_only", "visual_only"]:
         return
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
@@ -139,6 +139,11 @@ def normal_or_p_d_start(args):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
+    # visual_only模式下才需要设置visual_embed_path
+    if args.visual_embed_path is not None:
+        assert (
+            args.run_mode == "visual_only" or args.run_mode == "llm_only"
+        ), "only visual_only or llm_only mode need visual_embed_path"
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -203,6 +208,10 @@ def normal_or_p_d_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
+
+def normal_or_p_d_start(args):
+
+    check_and_set_args(args)
     already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
     if args.run_mode == "decode":
         already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port, args.pd_decode_rpyc_port]
@@ -270,7 +279,7 @@ def normal_or_p_d_start(args):
             ],
             start_args=[(cache_port, args)],
         )
-        if args.enable_multimodal_audio:
+        if args.enable_multimodal_audio and args.run_mode != "llm_only":
             from .audioserver.manager import start_audio_process
 
             process_manager.start_submodule_processes(
@@ -290,7 +299,7 @@ def normal_or_p_d_start(args):
                 ],
             )
 
-        else:
+        elif args.run_mode != "llm_only":
             process_manager.start_submodule_processes(
                 start_funcs=[
                     start_visual_process,
@@ -299,6 +308,105 @@ def normal_or_p_d_start(args):
                     (args, router_port, visual_port, cache_port, visual_model_tp_ports),
                 ],
             )
+
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_metric_manager,
+        ],
+        start_args=[(metric_port, args)],
+    )
+
+    process_manager.start_submodule_processes(
+        start_funcs=[start_router_process, start_detokenization_process],
+        start_args=[
+            (args, router_port, detokenization_port, metric_port),
+            (args, detokenization_port, detokenization_pub_port),
+        ],
+    )
+
+    # 启动 gunicorn
+    command = [
+        "gunicorn",
+        "--workers",
+        f"{args.httpserver_workers}",
+        "--worker-class",
+        "uvicorn.workers.UvicornWorker",
+        "--bind",
+        f"{args.host}:{args.port}",
+        "--log-level",
+        "info",
+        "--access-logfile",
+        "-",
+        "--error-logfile",
+        "-",
+        "lightllm.server.api_http:app",
+        "--timeout",
+        f"{get_lightllm_gunicorn_time_out_seconds()}",
+        "--keep-alive",
+        f"{get_lightllm_gunicorn_keep_alive()}",
+    ]
+
+    # 启动子进程
+    http_server_process = subprocess.Popen(command)
+
+    if "s3://" in args.model_dir:
+        from lightllm.utils.petrel_helper import s3_model_clear
+
+        s3_model_clear(args.model_dir)
+
+    if args.health_monitor:
+        from lightllm.server.health_monitor.manager import start_health_check_process
+
+        process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+    setup_signal_handlers(http_server_process, process_manager)
+    http_server_process.wait()
+    return
+
+
+def llm_only_start(args):
+
+    check_and_set_args(args)
+    already_uesd_ports = [args.nccl_port, args.port]
+
+    # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
+    # 捕获到端口设置冲突的问题
+    ports_locker = PortLocker(already_uesd_ports)
+    ports_locker.lock_port()
+
+    node_world_size = args.tp // args.nnodes
+    can_use_ports = alloc_can_use_network_port(num=4 + node_world_size, used_nccl_ports=already_uesd_ports)
+    logger.info(f"alloced ports: {can_use_ports}")
+    (
+        router_port,
+        detokenization_port,
+        detokenization_pub_port,
+        metric_port,
+    ) = can_use_ports[0:4]
+    can_use_ports = can_use_ports[4:]
+
+    # 将申请好的端口放入args参数中
+    args.router_port = router_port
+    args.detokenization_port = detokenization_port
+    args.detokenization_pub_port = detokenization_pub_port
+    args.metric_port = metric_port
+
+    # 申请在 p d 分离模式下，会用的端口
+    args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
+    # p d 分离模式下用于标识节点的id
+    args.pd_node_id = uuid.uuid4().int
+    # p 节点用来建立torch kv 传输分布组的可用端口范围
+    args.pd_p_allowed_port_min = 20000
+    args.pd_p_allowed_port_max = 30000
+
+    # p d 分离模式下，decode节点的调度间隙是0
+    if args.run_mode == "decode":
+        args.router_max_wait_tokens = 0
+
+    send_and_receive_node_ip(args)  # 多机用于收发node ip
+    set_env_start_args(args)
+    logger.info(f"all start args:{args}")
+
+    ports_locker.release_port()
 
     process_manager.start_submodule_processes(
         start_funcs=[
@@ -415,6 +523,116 @@ def pd_master_start(args):
 
     setup_signal_handlers(http_server_process, process_manager)
     http_server_process.wait()
+
+
+def visual_only_start(args):
+    check_and_set_args(args)
+    if args.run_mode != "visual_only":
+        return
+    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
+    can_use_ports = alloc_can_use_network_port(
+        num=5 + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+    )
+    logger.info(f"alloced ports: {can_use_ports}")
+    (
+        router_port,
+        visual_port,
+        audio_port,
+        cache_port,
+        metric_port,
+    ) = can_use_ports[0:5]
+    can_use_ports = can_use_ports[5:]
+
+    visual_model_tp_ports = []
+    for _ in range(args.visual_dp):
+        tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
+        can_use_ports = can_use_ports[args.visual_tp :]
+        visual_model_tp_ports.append(tp_ports_for_dp)
+
+    # 将申请好的端口放入args参数中
+    args.router_port = router_port
+    args.visual_port = visual_port
+    args.audio_port = audio_port
+    args.cache_port = cache_port
+    args.metric_port = metric_port
+    args.visual_model_rpc_ports = visual_model_tp_ports
+
+    logger.info(f"all start args:{args}")
+
+    set_env_start_args(args)
+
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_metric_manager,
+        ],
+        start_args=[(metric_port, args)],
+    )
+
+    from .visualserver.manager import start_visual_process
+
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_cache_manager,
+        ],
+        start_args=[(cache_port, args)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_visual_process,
+        ],
+        start_args=[
+            (args, audio_port, visual_port, cache_port, visual_model_tp_ports),
+        ],
+    )
+    if args.enable_multimodal_audio:
+        from .audioserver.manager import start_audio_process
+
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_audio_process,
+            ],
+            start_args=[
+                (args, router_port, audio_port, cache_port),
+            ],
+        )
+
+    # 启动 gunicorn
+    command = [
+        "gunicorn",
+        "--workers",
+        f"{args.httpserver_workers}",
+        "--worker-class",
+        "uvicorn.workers.UvicornWorker",
+        "--bind",
+        f"{args.host}:{args.port}",
+        "--log-level",
+        "info",
+        "--access-logfile",
+        "-",
+        "--error-logfile",
+        "-",
+        "lightllm.server.api_http:app",
+        "--timeout",
+        f"{get_lightllm_gunicorn_time_out_seconds()}",
+        "--keep-alive",
+        f"{get_lightllm_gunicorn_keep_alive()}",
+    ]
+
+    # 启动子进程
+    http_server_process = subprocess.Popen(command)
+
+    if "s3://" in args.model_dir:
+        from lightllm.utils.petrel_helper import s3_model_clear
+
+        s3_model_clear(args.model_dir)
+
+    if args.health_monitor:
+        from lightllm.server.health_monitor.manager import start_health_check_process
+
+        process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+    setup_signal_handlers(http_server_process, process_manager)
+    http_server_process.wait()
+    return
 
 
 def config_server_start(args):
