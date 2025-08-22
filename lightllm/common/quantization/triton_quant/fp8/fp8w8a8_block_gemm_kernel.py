@@ -7,6 +7,7 @@ from frozendict import frozendict
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from triton import Config
+from lightllm.common.triton_utils.autotuner import autotune, nearest_power_of_2
 
 
 class Fp8BlockMMKernelConfig(KernelConfigs):
@@ -142,6 +143,44 @@ def _block_scaled_block_gemm(
     tl.store(c_ptrs, acc, mask=mask)
 
 
+def get_test_configs():
+    fp8_gemm_configs = [
+        {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8, "num_stages": 3, "num_warps": 8},
+        {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 128, "BLOCK_N": 32, "BLOCK_K": 32, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 64, "BLOCK_N": 32, "BLOCK_K": 32, "GROUP_M": 8, "num_stages": 5, "num_warps": 2},
+        {"BLOCK_M": 32, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_M": 8, "num_stages": 5, "num_warps": 2},
+        {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 128, "GROUP_M": 8, "num_stages": 3, "num_warps": 8},
+        {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8, "num_stages": 3, "num_warps": 8},
+        {"BLOCK_M": 256, "BLOCK_N": 64, "BLOCK_K": 128, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 128, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_M": 128, "BLOCK_N": 32, "BLOCK_K": 64, "GROUP_M": 8, "num_stages": 4, "num_warps": 4},
+    ]
+    return fp8_gemm_configs
+
+def get_static_key(A, B, block_size, dtype):
+    M, K = A.shape
+    _, N = B.shape
+    return {
+        "N": N,
+        "K": K,
+        "block_size": block_size,
+        "dtype": str(dtype),
+    }
+
+@autotune(
+    name="w8a8_block_fp8_matmul:v1",
+    configs=get_test_configs(),
+    default_config={"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 32, "num_stages": 3, "num_warps": 4},
+    static_key_func=get_static_key,
+    run_key_func=lambda M: str(nearest_power_of_2(M)),
+)
 def w8a8_block_fp8_matmul(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -150,7 +189,7 @@ def w8a8_block_fp8_matmul(
     C: torch.Tensor,
     block_size: List[int],
     dtype: torch.dtype = torch.bfloat16,
-    **run_config,
+    run_config=None,
 ) -> torch.Tensor:
     """w8a8fp8 block-wise quantization mm.
 
@@ -173,8 +212,6 @@ def w8a8_block_fp8_matmul(
     _, N = B.shape
     assert triton.cdiv(K, block_k) == Ascale.shape[-1] and Ascale.shape[-1] == Bscale.shape[0]
     assert triton.cdiv(N, block_n) == Bscale.shape[1]
-    if not run_config:
-        run_config = Fp8BlockMMKernelConfig.try_to_get_best_config(M, N, K, block_size, dtype)
     grid = (triton.cdiv(M, run_config["BLOCK_M"]) * triton.cdiv(N, run_config["BLOCK_N"]),)
     _block_scaled_block_gemm[grid](
         A,

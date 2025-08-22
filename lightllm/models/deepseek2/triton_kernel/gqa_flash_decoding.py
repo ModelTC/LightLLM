@@ -7,10 +7,73 @@ from typing import List
 from lightllm.utils.log_utils import init_logger
 from .gqa_flash_decoding_config import MlaDecodeAttentionKernelConfig
 from lightllm.utils.device_utils import get_device_sm_count
+from lightllm.common.triton_utils.autotuner import autotune, nearest_power_of_2
 
 logger = init_logger(__name__)
+MAX_BATCH_SIZE = 1000000
 
+def get_test_configs():
+    configs = []
+    for block_n in [16, 32]:
+        for block_q_head in [16,32]:
+            for stage1_num_warps in [2, 4, 8, 16]:
+                for stage1_num_stages in [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    12,
+                    15,
+                ]:
+                    for stage2_num_warps in [1, 2, 4]:
+                        for stage2_num_stages in [
+                            1,
+                            3,
+                        ]:
+                            t_config = {
+                                "BLOCK_N": block_n,
+                                "BLOCK_Q_HEAD": block_q_head,
+                                "stage1_num_warps": stage1_num_warps,
+                                "stage1_num_stages": stage1_num_stages,
+                                "stage2_num_warps": stage2_num_warps,
+                                "stage2_num_stages": stage2_num_stages,
+                            }
+                            configs.append(t_config)
+    return configs
 
+def get_static_key(q_head_num, kv_lora_rank, q_rope_dim):
+    return {
+        "q_head_num": q_head_num,
+        "q_head_dim": kv_lora_rank,
+        "q_rope_dim": q_rope_dim,
+        "out_dtype": str(torch.bfloat16),
+    }
+
+def get_run_key(infer_state):
+    if torch.cuda.is_current_stream_capturing():
+        avg_seq_len_in_batch = infer_state.max_len_in_batch
+    else:
+        avg_seq_len_in_batch = infer_state.total_token_num // infer_state.batch_size
+    return str(nearest_power_of_2(avg_seq_len_in_batch)*MAX_BATCH_SIZE + nearest_power_of_2(infer_state.batch_size))
+
+@autotune(
+    name="gqa_token_decode_attention_flash_decoding:v1",
+    configs=get_test_configs(),
+    default_config={
+        "BLOCK_N": 16,
+        "BLOCK_Q_HEAD": 16,
+        "stage1_num_warps": 4,
+        "stage1_num_stages": 2,
+        "stage2_num_warps": 4,
+        "stage2_num_stages": 2,
+    },
+    static_key_func=get_static_key,
+    run_key_func=get_run_key,
+)
 def gqa_token_decode_attention_flash_decoding(
     q_nope,
     q_rope,
@@ -24,7 +87,7 @@ def gqa_token_decode_attention_flash_decoding(
     softmax_scale,
     out=None,
     alloc_tensor_func=torch.empty,
-    **run_config
+    run_config=None,
 ):
     batch_size = infer_state.batch_size
     max_len_in_batch = infer_state.max_len_in_batch
