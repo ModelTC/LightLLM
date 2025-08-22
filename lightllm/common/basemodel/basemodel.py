@@ -724,7 +724,7 @@ class TpPartBaseModel:
 
     def autotune_layers(self):
         return self.config.get("first_k_dense_replace", 0) + 1
-    
+
     @final
     @torch.no_grad()
     def _autotune_warmup(self):
@@ -743,7 +743,7 @@ class TpPartBaseModel:
             warmup_lengths.append(self.batch_max_tokens)
 
         warmup_lengths.sort(reverse=True)
-         
+
         layer_num_bak = self.layers_num
         self.layers_num = self.autotune_layers()
         for input_len in warmup_lengths:

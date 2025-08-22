@@ -1,6 +1,6 @@
 import triton
 import orjson
-import os 
+import os
 from pathlib import Path
 from tqdm import tqdm
 import inspect
@@ -15,6 +15,7 @@ import traceback
 
 logger = init_logger(__name__)
 
+
 @lru_cache(maxsize=1)
 def get_triton_version():
     return f"triton_{triton.__version__}"
@@ -23,6 +24,7 @@ def get_triton_version():
 def split_configs(configs):
     from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
     import random
+
     random.shuffle(configs)
     rank_in_node = get_current_rank_in_node()
     node_world_size = get_node_world_size()
@@ -32,8 +34,8 @@ def split_configs(configs):
 def dict_to_filename(data):
     parts = []
     for k, v in sorted(data.items(), key=lambda x: str(x[0])):
-        safe_k = str(k).replace(' ', '_').replace(':', '_')
-        safe_v = str(v).replace(' ', '_').replace(':', '_')
+        safe_k = str(k).replace(" ", "_").replace(":", "_")
+        safe_v = str(v).replace(" ", "_").replace(":", "_")
         parts.append(f"{safe_k}={safe_v}")
     return ",".join(parts)
 
@@ -42,7 +44,8 @@ def nearest_power_of_2(x):
     # 返回最接近 x 的 2 的幂次方
     if x <= 1:
         return 1
-    return triton.next_power_of_2(x - triton.next_power_of_2(x)//4) 
+    return triton.next_power_of_2(x - triton.next_power_of_2(x) // 4)
+
 
 class BenchmarkState:
     def __init__(self):
@@ -58,8 +61,7 @@ class BenchmarkState:
         self.avg = self.sum / self.count
 
 
-class Autotuner():
-
+class Autotuner:
     @staticmethod
     def _get_param_names(func):
         if not callable(func):
@@ -67,27 +69,47 @@ class Autotuner():
         try:
             sig = inspect.signature(func)
             return [
-                name for name, p in sig.parameters.items()
-                if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
-                              inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                              inspect.Parameter.KEYWORD_ONLY)
+                name
+                for name, p in sig.parameters.items()
+                if p.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
             ]
         except (ValueError, TypeError):
             return None
-        
-    def __init__(self, fn, arg_names, name,configs, default_config, static_key_func, run_key_func, reset_to_zero, restore_value, pre_hook=None, post_hook=None,
-                 warmup=None, rep=None):
-        
+
+    def __init__(
+        self,
+        fn,
+        arg_names,
+        name,
+        configs,
+        default_config,
+        static_key_func,
+        run_key_func,
+        reset_to_zero,
+        restore_value,
+        pre_hook=None,
+        post_hook=None,
+        warmup=None,
+        rep=None,
+    ):
+
         self.print_autotune = os.environ.get("LIGHTLLM_TRITON_PRINT_AUTOTUNE", "0") == "1"
         self.all_configs = configs
         self.configs = None
         self.default_config = default_config
         self.name = name
-        self.cache_dir = os.path.join(Path(__file__).parent, "all_kernel_configs", get_triton_version(), get_current_device_name(), self.name)
+        self.cache_dir = os.path.join(
+            Path(__file__).parent, "all_kernel_configs", get_triton_version(), get_current_device_name(), self.name
+        )
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
-        
+
         self.cached_configs = {}
         self.arg_names = arg_names
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
@@ -109,7 +131,7 @@ class Autotuner():
         if pre_hook:
             self.pre_hook = pre_hook
             self.user_defined_pre_hook = True
-        elif (len(self.reset_to_zero) > 0 or len(self.restore_value) > 0):
+        elif len(self.reset_to_zero) > 0 or len(self.restore_value) > 0:
 
             def _pre_hook(kwargs, reset_only=False):
                 for name in self.reset_to_zero:
@@ -130,7 +152,7 @@ class Autotuner():
                 self.restore_copies = {}
 
             self.post_hook = _post_hook
-        
+
         if not os.path.exists(self.cache_dir):
             if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
                 os.makedirs(self.cache_dir, exist_ok=True)
@@ -138,7 +160,7 @@ class Autotuner():
         self._loaded_static_keys = set()
         self.sorted_cached_configs = {}
         self.early_stop_cnt = 0
-        
+
     @lru_cache(maxsize=None)
     def _ensure_cache_loaded(self, static_key: str):
         if static_key in self._loaded_static_keys:
@@ -148,7 +170,9 @@ class Autotuner():
             try:
                 with open(cache_file, "rb") as f:
                     self.cached_configs[static_key] = orjson.loads(f.read())
-                    self.sorted_cached_configs[static_key] = [(int(k), v) for k, v in self.cached_configs[static_key].items()]
+                    self.sorted_cached_configs[static_key] = [
+                        (int(k), v) for k, v in self.cached_configs[static_key].items()
+                    ]
                     self.sorted_cached_configs[static_key].sort(key=lambda x: x[0])
             except Exception:
                 # 若缓存损坏，忽略并在之后覆盖
@@ -158,7 +182,7 @@ class Autotuner():
     def _bench(self, *args, n_repeat=5, n_retries=10, current_best_ms=None, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
-        
+
         full_nargs = {**self.nargs, **kwargs}
 
         def kernel_call():
@@ -176,14 +200,14 @@ class Autotuner():
         try:
             # warmup
             kernel_call()
-            
+
             torch.cuda.synchronize()
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
                 for _ in range(n_repeat):
                     kernel_call()
             torch.cuda.synchronize()
-            
+
             state = BenchmarkState()
             for i in range(n_retries):
                 start_event = torch.cuda.Event(enable_timing=True)
@@ -193,7 +217,7 @@ class Autotuner():
                 end_event.record()
                 torch.cuda.synchronize()
                 state.update(start_event.elapsed_time(end_event) / n_repeat)
-                
+
                 # early stop
                 if current_best_ms is not None and i >= 3:
                     remaining_retries = n_retries - (i + 1)
@@ -204,21 +228,22 @@ class Autotuner():
                         return state.avg
             del g
             return state.avg
-        except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception) as e:
+        except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
             return float("inf")
 
     @torch.no_grad()
     def __call__(self, *args, **kwargs):
         static_key = self._static_key(*args, **kwargs)
         run_key = self._run_key(*args, **kwargs)
-        
+
         # 懒加载
         self._ensure_cache_loaded(static_key)
         best_config = None
         self.nargs = dict(zip(self.arg_names, args))
-        
+
         def _benchmark(_run_key):
             from lightllm.utils.dist_utils import get_global_rank
+
             if self.configs is None:
                 self.configs = split_configs(self.all_configs)
 
@@ -226,7 +251,12 @@ class Autotuner():
             _best_config = self.default_config
             best_time = float("inf")
             self.early_stop_cnt = 0
-            bar = tqdm(self.configs, desc=f"Autotuning {self.name} for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}", position=get_global_rank(), dynamic_ncols=True)
+            bar = tqdm(
+                self.configs,
+                desc=f"Autotuning {self.name} for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}",
+                position=get_global_rank(),
+                dynamic_ncols=True,
+            )
             enum_configs = enumerate(bar)
             for i, config in enum_configs:
                 kwargs_with_config = kwargs.copy()
@@ -234,41 +264,49 @@ class Autotuner():
                 run_time = self._bench(*args, current_best_ms=best_time, **kwargs_with_config)
                 if run_time < best_time:
                     best_time = run_time
-                    _best_config = config   
-                bar.set_description(f"Autotuning {self.name} [rank:{rank_id}] for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}, best_time: {best_time:.5f}")
+                    _best_config = config
+                bar.set_description(
+                    f"Autotuning {self.name} [rank:{rank_id}] \
+                        for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}, \
+                        best_time: {best_time:.5f}"
+                )
             world_size = dist.get_world_size() if dist.is_initialized() else 1
             if world_size > 1:
                 local_best = torch.tensor([best_time], device="cuda")
                 all_best_times = [torch.zeros_like(local_best) for _ in range(world_size)]
                 dist.all_gather(all_best_times, local_best)
-                all_times = [t.item() for t in all_best_times] 
+                all_times = [t.item() for t in all_best_times]
                 min_idx = int(torch.tensor(all_times).argmin().item())
                 obj_list = [_best_config]
                 dist.broadcast_object_list(obj_list, src=min_idx)
                 _best_config = obj_list[0]
-            
+
             if static_key not in self.cached_configs:
                 self.cached_configs[static_key] = {}
             self.cached_configs[static_key][run_key] = _best_config
             self.sorted_cached_configs[static_key] = [(int(k), v) for k, v in self.cached_configs[static_key].items()]
             self.sorted_cached_configs[static_key].sort(key=lambda x: x[0])
-            
+
             if not dist.is_initialized() or get_global_rank() == 0:
                 if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
                     cache_file = os.path.join(self.cache_dir, f"{static_key}.json")
                     with open(cache_file, "wb") as f:
                         fcntl.flock(f, fcntl.LOCK_EX)
                         try:
-                            f.write(orjson.dumps(self.cached_configs[static_key], option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS))
+                            f.write(
+                                orjson.dumps(
+                                    self.cached_configs[static_key], option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
+                                )
+                            )
                         finally:
                             fcntl.flock(f, fcntl.LOCK_UN)
                     if self.print_autotune:
                         logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
-            
+
             kwargs["run_config"] = self.cached_configs[static_key][run_key]
             full_nargs = {**self.nargs, **kwargs}
             self.pre_hook(full_nargs, reset_only=True)
-            
+
         if static_key in self.cached_configs:
             if run_key in self.cached_configs[static_key]:
                 best_config = self.cached_configs[static_key][run_key]
@@ -279,18 +317,22 @@ class Autotuner():
             else:
                 if static_key in self.sorted_cached_configs:
                     sorted_configs = self.sorted_cached_configs[static_key]
-                    self.cached_configs[static_key][run_key] = min(sorted_configs, key=lambda x: abs(x[0] - int(run_key)))[1]
+                    self.cached_configs[static_key][run_key] = min(
+                        sorted_configs, key=lambda x: abs(x[0] - int(run_key))
+                    )[1]
                 else:
                     if static_key not in self.cached_configs:
-                        logger.warning(f"No kernel config for {self.name} in {self.cache_dir}/{static_key}, using default config")
+                        logger.warning(
+                            f"No kernel config for {self.name} in {self.cache_dir}/{static_key}, using default config"
+                        )
                         self.cached_configs[static_key] = {}
                     self.cached_configs[static_key][run_key] = self.default_config
 
             best_config = self.cached_configs[static_key][run_key]
-            
+
         kwargs["run_config"] = best_config
         return self.fn(*args, **kwargs)
-        
+
     def _select_args(self, param_names, args, kwargs):
         if not param_names:
             return ()
@@ -310,7 +352,11 @@ class Autotuner():
         if callable(self.static_key_func):
             try:
                 params = self._select_args(self._static_param_names, args, kwargs)
-                key = self.static_key_func(*params) if self._static_param_names is not None else self.static_key_func(*args, **kwargs)
+                key = (
+                    self.static_key_func(*params)
+                    if self._static_param_names is not None
+                    else self.static_key_func(*args, **kwargs)
+                )
             except Exception:
                 key = self.static_key_func(*args, **kwargs)
             if isinstance(key, dict):
@@ -322,7 +368,11 @@ class Autotuner():
         if callable(self.run_key_func):
             try:
                 params = self._select_args(self._run_param_names, args, kwargs)
-                key = self.run_key_func(*params) if self._run_param_names is not None else self.run_key_func(*args, **kwargs)
+                key = (
+                    self.run_key_func(*params)
+                    if self._run_param_names is not None
+                    else self.run_key_func(*args, **kwargs)
+                )
             except Exception:
                 key = self.run_key_func(*args, **kwargs)
             if isinstance(key, dict):
@@ -330,11 +380,32 @@ class Autotuner():
             return str(key)
         return "default"
 
-def autotune(name, configs, default_config, static_key_func=None, run_key_func=None, reset_to_zero=None, restore_value=None, pre_hook=None, post_hook=None,):
+
+def autotune(
+    name,
+    configs,
+    default_config,
+    static_key_func=None,
+    run_key_func=None,
+    reset_to_zero=None,
+    restore_value=None,
+    pre_hook=None,
+    post_hook=None,
+):
     def decorator(fn):
         arg_names = [param.name for param in inspect.signature(fn).parameters.values()]
-        return Autotuner(fn, arg_names, name, configs, default_config, static_key_func, run_key_func, reset_to_zero, restore_value, pre_hook=pre_hook,
-                         post_hook=post_hook)
+        return Autotuner(
+            fn,
+            arg_names,
+            name,
+            configs,
+            default_config,
+            static_key_func,
+            run_key_func,
+            reset_to_zero,
+            restore_value,
+            pre_hook=pre_hook,
+            post_hook=post_hook,
+        )
 
     return decorator
-

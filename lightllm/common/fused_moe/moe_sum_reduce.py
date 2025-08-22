@@ -6,12 +6,13 @@ from .moe_sum_recude_config import MoeSumReduceKernelConfig
 from typing import Any, Callable, Dict, Optional, Tuple
 from lightllm.common.triton_utils.autotuner import autotune, nearest_power_of_2
 
+
 @triton.jit
 def _moe_sum_reduce_kernel(
     input_ptr,
     input_stride_0,
     input_stride_1,
-    input_stride_2, 
+    input_stride_2,
     output_ptr,
     output_stride_0,
     output_stride_1,
@@ -46,17 +47,25 @@ def _moe_sum_reduce_kernel(
         store_t_ptr = output_ptr + token_index * output_stride_0 + offs_dim
         tl.store(store_t_ptr, accumulator.to(input_ptr.dtype.element_ty), mask=offs_dim < dim_end)
 
+
+def get_static_key(input, output):
+    return f"topk_num={input.shape[1]},hidden_dim={input.shape[2]},out_dtype={output.dtype}"
+
+
 @autotune(
     name="moe_sum_reduce:v1",
     configs=[
-        {"BLOCK_M": bm, "BLOCK_DIM": bd, "NUM_STAGE": ns, "num_warps": nw} 
-        for ns in [1, 2, 4] for nw in [1, 2, 4, 8, 16] for bm in [1, 2, 4, 8, 16, 32] for bd in [64, 128, 256, 512, 1024] 
+        {"BLOCK_M": bm, "BLOCK_DIM": bd, "NUM_STAGE": ns, "num_warps": nw}
+        for ns in [1, 2, 4]
+        for nw in [1, 2, 4, 8, 16]
+        for bm in [1, 2, 4, 8, 16, 32]
+        for bd in [64, 128, 256, 512, 1024]
     ],
-    default_config={"BLOCK_M": 1,"BLOCK_DIM": 128,"NUM_STAGE": 1,"num_warps": 2},
-    static_key_func=lambda input, output : f"topk_num={input.shape[1]},hidden_dim={input.shape[2]},out_dtype={output.dtype}",
-    run_key_func=lambda input : str(nearest_power_of_2(input.shape[0])),
+    default_config={"BLOCK_M": 1, "BLOCK_DIM": 128, "NUM_STAGE": 1, "num_warps": 2},
+    static_key_func=get_static_key,
+    run_key_func=lambda input: str(nearest_power_of_2(input.shape[0])),
 )
-def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict=None):
+def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict = None):
     assert input.is_contiguous()
     assert output.is_contiguous()
 

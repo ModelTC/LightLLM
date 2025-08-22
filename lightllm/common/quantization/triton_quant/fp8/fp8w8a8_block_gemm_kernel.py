@@ -164,6 +164,7 @@ def get_test_configs():
     ]
     return fp8_gemm_configs
 
+
 def get_static_key(A, B, block_size, dtype):
     M, K = A.shape
     _, N = B.shape
@@ -173,6 +174,7 @@ def get_static_key(A, B, block_size, dtype):
         "block_size": block_size,
         "dtype": str(dtype),
     }
+
 
 @autotune(
     name="w8a8_block_fp8_matmul:v1",

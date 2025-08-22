@@ -5,6 +5,7 @@ import triton.language as tl
 import itertools
 from lightllm.common.triton_utils.autotuner import autotune, nearest_power_of_2
 
+
 @triton.jit
 def _rotary_kernel(
     Q,
@@ -106,6 +107,7 @@ def get_test_configs():
         configs.append(t_config)
     return configs
 
+
 def get_static_key(q, k):
     head_num_q, head_num_k, head_dim = q.shape[1], k.shape[1], q.shape[2]
     return {
@@ -113,12 +115,13 @@ def get_static_key(q, k):
         "K_HEAD_NUM": head_num_k,
         "HEAD_DIM": head_dim,
         "dtype": str(q.dtype),
-        }
-    
+    }
+
+
 @autotune(
     name="rotary_emb_fwd:v1",
     configs=get_test_configs(),
-    default_config = {"BLOCK_SEQ": 16, "NUM_STAGE": 1, "num_warps": 1, "num_stages": 1, "HEAD_PARALLEL_NUM": 1},
+    default_config={"BLOCK_SEQ": 16, "NUM_STAGE": 1, "num_warps": 1, "num_stages": 1, "HEAD_PARALLEL_NUM": 1},
     static_key_func=get_static_key,
     run_key_func=lambda q: str(nearest_power_of_2(q.shape[0])),
 )

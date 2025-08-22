@@ -17,7 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
- 
+
 import torch
 import triton
 import triton.language as tl
@@ -448,6 +448,7 @@ def grouped_matmul_kernel(
 
     return
 
+
 def get_grouped_matmul_static_key(
     expert_weights: torch.Tensor,
     topk_num: int,
@@ -456,26 +457,47 @@ def get_grouped_matmul_static_key(
     use_fp8_w8a8: bool,
 ):
     expert_num, n, k = expert_weights.shape
-    return dict_to_filename({
+    return dict_to_filename(
+        {
             "N": n,
             "K": k,
             "topk_num": topk_num,
             "expert_num": expert_num,
             "mul_routed_weight": mul_routed_weight,
             "use_fp8_w8a8": use_fp8_w8a8,
-            "out_dtype": str(out.dtype)
-        })
+            "out_dtype": str(out.dtype),
+        }
+    )
 
 
 @autotune(
     name="grouped_matmul:v1",
     configs=[
-         {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk, "GROUP_SIZE_M": gm, "NUM_WARPS": nw, "NUM_STAGE": ns} 
-         for ns in [1, 2, 3, 4, 5] for gm in [1, 2, 4, 8]  for nw in [2, 4, 8] for bm in [16, 32, 64, 128] for bn in [16, 32, 64, 128] for bk in [16, 32, 64, 128]     
+        {
+            "BLOCK_SIZE_M": bm,
+            "BLOCK_SIZE_N": bn,
+            "BLOCK_SIZE_K": bk,
+            "GROUP_SIZE_M": gm,
+            "NUM_WARPS": nw,
+            "NUM_STAGE": ns,
+        }
+        for ns in [1, 2, 3, 4, 5]
+        for gm in [1, 2, 4, 8]
+        for nw in [2, 4, 8]
+        for bm in [16, 32, 64, 128]
+        for bn in [16, 32, 64, 128]
+        for bk in [16, 32, 64, 128]
     ],
-    default_config={"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "NUM_WARPS": 4, "NUM_STAGE": 1},
+    default_config={
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 8,
+        "NUM_WARPS": 4,
+        "NUM_STAGE": 1,
+    },
     static_key_func=get_grouped_matmul_static_key,
-    run_key_func=lambda token_num_mul_topk_num : str(nearest_power_of_2(token_num_mul_topk_num)),
+    run_key_func=lambda token_num_mul_topk_num: str(nearest_power_of_2(token_num_mul_topk_num)),
 )
 def grouped_matmul(
     token_num_mul_topk_num: int,
@@ -515,7 +537,7 @@ def grouped_matmul(
     assert expert_to_weights.is_contiguous()
     assert expert_weights.is_contiguous()
     assert run_config is not None
-    
+
     # for deepseek_v3 block-wise quant
     block_size_n = 0
     block_size_k = 0
