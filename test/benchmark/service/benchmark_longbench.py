@@ -63,100 +63,75 @@ def sample_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
-    max_history_turns: int = 6,
     max_total_tokens: int = 16384,
 ) -> List[Tuple[List[dict], str, int, int]]:
-    # Load the dataset.
+    # Load the dataset (jsonl)
+    dataset = []
     with open(dataset_path) as f:
-        dataset = json.load(f)
-    # Filter out the conversations with at least 2 turns.
-    dataset = [data for data in dataset if len(data["conversations"]) >= max_history_turns]
-
-    print("read data set finish")
-    dataset = dataset[: num_requests * 3]
-
-    def to_openai_role(role_value: str) -> str:
-        lower_value = role_value.lower()
-        if lower_value in ["human", "user", "system"]:
-            return "user" if lower_value != "system" else "system"
-        return "assistant"
-
-    # Build messages and targets
-    built_examples: List[Tuple[List[dict], str]] = []
-    for data in dataset:
-        convs = data.get("conversations", [])
-        if not convs:
-            continue
-        # Find the last assistant turn to be used as the completion target
-        last_assistant_idx = -1
-        for idx in range(len(convs) - 1, -1, -1):
-            role_val = convs[idx].get("from") or convs[idx].get("role") or "assistant"
-            if to_openai_role(role_val) == "assistant":
-                last_assistant_idx = idx
-                break
-        if last_assistant_idx <= 0:
-            # Need at least one prompt message before the assistant response
-            continue
-        # Determine how many turns of history to keep before the target assistant turn
-        start_idx = max(0, last_assistant_idx - max_history_turns)
-        context_convs = convs[start_idx:last_assistant_idx]
-        completion_text = convs[last_assistant_idx].get("value") or convs[last_assistant_idx].get("content") or ""
-        if not completion_text:
-            continue
-        messages: List[dict] = []
-        for turn in context_convs:
-            role_val = turn.get("from") or turn.get("role") or "user"
-            content_val = turn.get("value") or turn.get("content") or ""
-            if not content_val:
+        for line in f.readlines():
+            if not line.strip():
                 continue
-            messages.append({"role": to_openai_role(role_val), "content": content_val})
-        if not messages:
-            continue
-        built_examples.append((messages, completion_text))
+            dataset.append(json.loads(line))
+    print("read data set finish")
 
-    # Render prompts using chat template when possible
-    rendered_prompts: List[str] = []
-    for messages, _ in built_examples:
-        rendered_text = None
+    def render_with_template(messages: List[dict]) -> str:
         try:
-            # Prefer using the tokenizer's chat template
-            rendered_text = tokenizer.apply_chat_template(
+            return tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
             )
         except Exception:
-            # Fallback rendering if chat template is unavailable
             parts = []
             for m in messages:
                 parts.append(f"{m['role']}: {m['content']}")
             parts.append("assistant:")
-            rendered_text = "\n".join(parts)
-        rendered_prompts.append(rendered_text)
+            return "\n".join(parts)
 
-    # Tokenize the prompts and completions.
-    prompt_token_ids = tokenizer(rendered_prompts).input_ids if rendered_prompts else []
-    completion_texts = [completion for _, completion in built_examples]
-    completion_token_ids = tokenizer(completion_texts).input_ids if completion_texts else []
+    built_examples: List[Tuple[List[dict], str, int, int]] = []
 
-    tokenized_dataset: List[Tuple[List[dict], str, int, int]] = []
-    for i in range(len(built_examples)):
-        messages, _ = built_examples[i]
-        prompt_len = len(prompt_token_ids[i])
-        output_len = len(completion_token_ids[i])
-        tokenized_dataset.append((messages, rendered_prompts[i], prompt_len, output_len))
-
-    # Filter out too long or too short sequences.
-    filtered_dataset: List[Tuple[List[dict], str, int, int]] = []
-    for messages, rendered_prompt, prompt_len, output_len in tokenized_dataset:
-        if prompt_len < 4 or output_len < 4:
+    for data in dataset:
+        context = data.get("context") or ""
+        question = data.get("input") or "Summarizing government work reports"
+        answers = data.get("answers")
+        if not isinstance(context, str) or not isinstance(question, str):
             continue
-        if (prompt_len + output_len) >= max_total_tokens:
-            continue
-        filtered_dataset.append((messages, rendered_prompt, prompt_len, output_len))
 
-    # Sample the requests.
-    sampled_requests = filtered_dataset[:num_requests]
+        # Build messages: system + user with context and question
+        system_prompt = "You are a helpful assistant. Read the context and answer the question concisely."
+        user_content = f"Context:\n{context}\nInput:\n{question}"
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        rendered_prompt = render_with_template(messages)
+        prompt_len = len(tokenizer(rendered_prompt).input_ids)
+
+        # Estimate output length from reference answer if available
+        target_text = ""
+        if isinstance(answers, list) and len(answers) > 0:
+            first_ans = answers[0]
+            if isinstance(first_ans, str):
+                target_text = first_ans
+            else:
+                target_text = str(first_ans)
+        elif isinstance(answers, str):
+            target_text = answers
+
+        estimated_out = len(tokenizer(target_text).input_ids) if target_text else 128
+
+        # Fit within max_total_tokens
+        available_out = max_total_tokens - 1 - prompt_len
+        if available_out < 4:
+            # Skip samples that are too long
+            continue
+        output_len = min(estimated_out, available_out)
+
+        built_examples.append((messages, rendered_prompt, prompt_len, output_len))
+
+    # Take the first N valid samples
+    sampled_requests = built_examples[:num_requests]
     sum_len = 0
     for _, _, prompt_len, output_len in sampled_requests:
         sum_len += prompt_len + output_len
@@ -280,9 +255,7 @@ def main(args: argparse.Namespace):
     random.seed(args.seed)
     np.random.seed(args.seed)
     tokenizer = get_tokenizer(args.tokenizer, "slow")
-    input_requests = sample_requests(
-        args.dataset, args.num_prompts, tokenizer, args.history_turns, args.max_total_tokens
-    )
+    input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer, args.max_total_tokens)
 
     benchmark_start_time = time.time()
     asyncio.run(benchmark(input_requests, args.request_rate, args.use_openai_api))
@@ -325,10 +298,7 @@ if __name__ == "__main__":
         "Otherwise, we use Poisson process to synthesize "
         "the request arrival times.",
     )
-    parser.add_argument("--num-prompts", type=int, default=1000, help="Number of prompts to process.")
-    parser.add_argument(
-        "--history-turns", type=int, default=6, help="Max number of context turns before the target assistant reply."
-    )
+    parser.add_argument("--num-prompts", type=int, default=1, help="Number of prompts to process.")
     parser.add_argument("--max-total-tokens", type=int, default=16384, help="Max total tokens (input + output).")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
