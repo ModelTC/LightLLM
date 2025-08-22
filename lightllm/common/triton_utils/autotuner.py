@@ -232,8 +232,6 @@ class Autotuner():
                 kwargs_with_config["run_config"] = config
                 run_time = self._bench(*args, current_best_ms=best_time, **kwargs_with_config)
                 if run_time < best_time:
-                    if rank0 and best_time != float("inf"):
-                        logger.info(f"Best config for {self.name} is {_best_config} with time {best_time:.5f} -> {run_time:.5f}")
                     best_time = run_time
                     _best_config = config   
                 bar.set_description(f"Autotuning {self.name} [rank:{rank_id}] for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}, best_time: {best_time:.5f}")
