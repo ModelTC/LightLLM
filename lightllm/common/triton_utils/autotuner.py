@@ -215,6 +215,7 @@ class Autotuner():
         # 懒加载
         self._ensure_cache_loaded(static_key)
         best_config = None
+        self.nargs = dict(zip(self.arg_names, args))
         
         def _benchmark(_run_key):
             from lightllm.utils.dist_utils import get_global_rank
@@ -265,7 +266,6 @@ class Autotuner():
                         logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
             
             kwargs["run_config"] = self.cached_configs[static_key][run_key]
-            self.nargs = dict(zip(self.arg_names, args))
             full_nargs = {**self.nargs, **kwargs}
             self.pre_hook(full_nargs, reset_only=True)
             
