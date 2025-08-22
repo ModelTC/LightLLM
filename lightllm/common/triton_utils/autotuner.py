@@ -207,6 +207,7 @@ class Autotuner():
         except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception) as e:
             return float("inf")
 
+    @torch.no_grad()
     def __call__(self, *args, **kwargs):
         static_key = self._static_key(*args, **kwargs)
         run_key = self._run_key(*args, **kwargs)
