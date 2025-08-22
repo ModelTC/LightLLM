@@ -89,6 +89,7 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
                 network_config=self.network_config_,
                 layer_num=self.layer_num_,
                 quant_cfg=self.quant_cfg,
+                num_fused_shared_experts=0,
             )
         elif moe_mode == "EP":
             self.experts = FusedMoeWeightEP(

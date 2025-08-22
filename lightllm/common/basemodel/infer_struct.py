@@ -35,7 +35,6 @@ class InferStateInfo:
 
         self.is_token_healing: bool = False
         self.return_all_prompt_logics: bool = False
-        self.use_dynamic_prompt_cache: bool = False
         self.multimodal_params: dict = None
         self.is_cuda_graph: bool = False  # 标记是否是cuda graph的捕获推理
         self.dist_group: CustomProcessGroup = None

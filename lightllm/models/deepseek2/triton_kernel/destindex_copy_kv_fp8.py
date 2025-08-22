@@ -36,7 +36,7 @@ def _fwd_kernel_destindex_copy_kv_fp8(
     offs_d_nope = tl.arange(0, BLOCK_DMODEL_NOPE)
     offs_d_rope = tl.arange(0, BLOCK_DMODEL_ROPE)
 
-    dest_index = tl.load(Dest_loc + cur_index)
+    dest_index = tl.load(Dest_loc + cur_index).to(tl.int64)
 
     kv_nope_ptrs = KV_nope + cur_index * stride_kv_nope_bs + stride_kv_nope_d * offs_d_nope[None, :]
     kv_rope_ptrs = KV_rope + cur_index * stride_kv_rope_bs + stride_kv_rope_d * offs_d_rope[None, :]

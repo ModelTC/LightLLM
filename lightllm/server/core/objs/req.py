@@ -32,6 +32,9 @@ class FinishStatus(ctypes.Structure):
     def is_finished(self):
         return self.FINISHED_STOP <= self.status <= self.FINISHED_LENGTH
 
+    def is_stopped(self):
+        return self.status == self.FINISHED_STOP
+
     def get_finish_reason(self):
         if self.status == self.FINISHED_STOP:
             return "stop"
@@ -74,10 +77,8 @@ class Req(ctypes.Structure):
         ("prompt_cache_len", ctypes.c_int),  # 用于记录prompt cache 的命中长度，用于统计
         ("is_paused", ctypes.c_bool),  # 标记一个Req因为显存资源管理的原因被临时暂停了。
         ("finish_status", FinishStatus),
+        # 这个标记变量是http_server 写入，其他进程读取，用于标记该请求是否因为断网被aborted。
         ("is_aborted", ctypes.c_bool),
-        # 这个标记变量是router进程读取到is_aborted信息后，router 进程标记该请求已经被abort处理
-        # 等待推理进程处理，防止router进程反复给推理进程发送abort指令。
-        ("router_aborted", ctypes.c_bool),
         # 当FinishStatus 是正常结束状态时，finish_token_index 用于标识结束的
         # token 的index位置
         ("finish_token_index", ctypes.c_int),
@@ -97,6 +98,12 @@ class Req(ctypes.Structure):
         ("mtp_accepted_token_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
+        # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
+        # 然后router发停止命令给推理进程，推理进程停止输出
+        ("stop_str_matched", ctypes.c_bool),
+        # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。
+        # 该变量为 detokenization 进程写入，http_server 读取
+        ("stop_str_matched_token_index", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -124,7 +131,6 @@ class Req(ctypes.Structure):
         self.is_paused = False
         self.finish_status = FinishStatus()
         self.is_aborted = False
-        self.router_aborted = False
         self.shm_infer_released = False
         self.shm_cur_kv_len = 0
         self.shm_cur_output_len = 0
@@ -150,6 +156,8 @@ class Req(ctypes.Structure):
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
         self.mtp_accepted_token_num = 0
         self._mtp_step = get_env_start_args().mtp_step
+        self.stop_str_matched = False
+        self.stop_str_matched_token_index = -1
 
         self.post_init()
 
@@ -210,7 +218,9 @@ class Req(ctypes.Structure):
         if self.is_aborted and can_released_mark and ref_count_ok:
             return True
 
-        if self.finish_status.is_finished() and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
+        ok_finished_gen_req = self.finish_status.is_finished() or self.stop_str_matched
+
+        if ok_finished_gen_req and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
             return True
 
         return False

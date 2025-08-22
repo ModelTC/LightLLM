@@ -19,10 +19,10 @@ from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding import gqa_token
 from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding_fp8 import gqa_token_decode_attention_flash_decoding_fp8
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
-from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.flashinfer_struct import Deepseek2FlashInferStateInfo
+from lightllm.models.deepseek2.flashattention_infer_struct import Deepseek2FlashAttentionStateInfo
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor, all_reduce, reduce_scatter_tensor
@@ -57,7 +57,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.norm_topk_prob = network_config["norm_topk_prob"]
         self.n_group = network_config["n_group"]
         self.topk_group = network_config["topk_group"]
-        self.routed_scaling_factor = network_config["routed_scaling_factor"]
 
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
         if network_config.get("rope_scaling", None) is not None:
@@ -254,7 +253,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         b_kv_start_loc,
         skip_sample=False,
     ):
-        if infer_state.use_dynamic_prompt_cache and not skip_sample:
+        if not skip_sample:
             if is_fp8:
                 kv = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, :-2].view(torch.float8_e4m3fn)
                 kv_scale = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, -2:].view(torch.bfloat16)
@@ -302,7 +301,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         self,
         q: torch.Tensor,
         kv,
-        infer_state: Deepseek2FlashInferStateInfo,
+        infer_state: Deepseek2FlashAttentionStateInfo,
         layer_weight: Deepseek2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
@@ -323,7 +322,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             k=k.view(-1, self.tp_k_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
             v=v.view(-1, self.tp_v_head_num_, self.v_head_dim),
             cu_seqlens_q=infer_state.cu_seqlens_q,
-            cu_seqlens_k=infer_state.cu_seqlens_k,
+            cu_seqlens_k=infer_state.cu_seqlens_q,
             max_seqlen_q=infer_state.q_max_seq_len,
             max_seqlen_k=infer_state.max_seq_len,
             softmax_scale=self.softmax_scale,
@@ -547,7 +546,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         return o_tensor
 
     def _token_gqa_decode_attention_flashattention(
-        self, q, infer_state: Deepseek2FlashInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
+        self, q, infer_state: Deepseek2FlashAttentionStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
@@ -666,7 +665,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
-        if self.n_shared_experts is not None:
+        # if fused_shared_experts is not enabled, compute shared_output
+        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 
         router_logits = layer_weight.moe_gate.mm(hidden_states)
@@ -680,9 +680,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             num_expert_group=self.n_group,
         )
 
-        hidden_states.mul_(self.routed_scaling_factor)
-
-        if self.n_shared_experts is not None:
+        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             hidden_states.add_(shared_output)
 
         return hidden_states.view(num_tokens, hidden_dim)
@@ -707,7 +705,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             num_expert_group=self.n_group,
             is_prefill=infer_state.is_prefill,
         )
-        ep_output.mul_(self.routed_scaling_factor)
 
         if self.n_shared_experts is not None:
             ep_output.add_(shared_output)
@@ -819,7 +816,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         # 0 hook
         if getattr(infer_state, "hook", None) is not None:
             infer_state.hook()
-            _0_ffn_out *= self.routed_scaling_factor
             if self.n_shared_experts is not None:
                 _0_ffn_out.add_(_0_shared_output)
             input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
@@ -833,7 +829,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         def _1_hook_post():
             _1_hook()
             nonlocal _1_ffn_out
-            _1_ffn_out *= self.routed_scaling_factor
             if self.n_shared_experts is not None:
                 _1_ffn_out.add_(_1_shared_output)
             input_embdings1.add_(_1_ffn_out.view(-1, self.embed_dim_))
@@ -965,7 +960,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         _1_combine_event = Buffer.capture()
 
-        _0_ffn_out *= self.routed_scaling_factor
         if self.n_shared_experts is not None:
             _0_ffn_out.add_(_0_shared_output)
         input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
@@ -976,7 +970,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         def _1_hook_post():
             _1_hook()
             nonlocal _1_ffn_out
-            _1_ffn_out *= self.routed_scaling_factor
             if self.n_shared_experts is not None:
                 _1_ffn_out.add_(_1_shared_output)
             input_embdings1.add_(_1_ffn_out.view(-1, self.embed_dim_))

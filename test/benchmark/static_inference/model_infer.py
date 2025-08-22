@@ -66,6 +66,7 @@ def overlap_prefill(
     input_ids,
     mem_indexes,
     b_req_idx,
+    b_mtp_index,
     b_seq_len,
     total_token_num,
     b_ready_cache_len,
@@ -76,6 +77,7 @@ def overlap_prefill(
     _0_input_ids = input_ids[: total_token_num // 2]
     _0_mem_indexes = mem_indexes[: total_token_num // 2]
     _0_b_req_idx = b_req_idx[: batch_size // 2]
+    _0_b_mtp_index = b_mtp_index[: batch_size // 2]
     _0_b_seq_len = b_seq_len[: batch_size // 2]
     _o_b_ready_cache_len = b_ready_cache_len[: batch_size // 2]
     micro_batch1 = ModelInput(
@@ -84,6 +86,7 @@ def overlap_prefill(
         max_len_in_batch=_0_max_len_in_batch,
         input_ids=_0_input_ids,
         b_req_idx=_0_b_req_idx,
+        b_mtp_index=_0_b_mtp_index,
         b_seq_len=_0_b_seq_len,
         is_prefill=True,
         b_ready_cache_len=_o_b_ready_cache_len,
@@ -97,6 +100,7 @@ def overlap_prefill(
     _1_input_ids = input_ids[total_token_num // 2 :]
     _1_mem_indexes = mem_indexes[total_token_num // 2 :]
     _1_b_req_idx = b_req_idx[batch_size // 2 :]
+    _1_b_mtp_index = b_mtp_index[batch_size // 2 :]
     _1_b_seq_len = b_seq_len[batch_size // 2 :]
     _1_b_ready_cache_len = b_ready_cache_len[batch_size // 2 :]
 
@@ -106,6 +110,7 @@ def overlap_prefill(
         max_len_in_batch=_1_max_len_in_batch,
         input_ids=_1_input_ids,
         b_req_idx=_1_b_req_idx,
+        b_mtp_index=_1_b_mtp_index,
         b_seq_len=_1_b_seq_len,
         is_prefill=True,
         b_ready_cache_len=_1_b_ready_cache_len,
@@ -120,7 +125,7 @@ def overlap_prefill(
 
 
 def overlap_decode(
-    model_part, batch_size, max_len_in_batch, input_ids, mem_indexes, b_req_idx, b_seq_len, total_token_num
+    model_part, batch_size, max_len_in_batch, input_ids, mem_indexes, b_req_idx, b_mtp_index, b_seq_len, total_token_num
 ):
     _0_batch_size = batch_size // 2
     _0_total_token_num = total_token_num // 2
@@ -128,6 +133,7 @@ def overlap_decode(
     _0_input_ids = input_ids[: batch_size // 2]
     _0_mem_indexes = mem_indexes[: batch_size // 2]
     _0_b_req_idx = b_req_idx[: batch_size // 2]
+    _0_b_mtp_index = b_mtp_index[: batch_size // 2]
     _0_b_seq_len = b_seq_len[: batch_size // 2]
     micro_batch1 = ModelInput(
         batch_size=_0_batch_size,
@@ -135,6 +141,7 @@ def overlap_decode(
         max_len_in_batch=_0_max_len_in_batch,
         input_ids=_0_input_ids,
         b_req_idx=_0_b_req_idx,
+        b_mtp_index=_0_b_mtp_index,
         b_seq_len=_0_b_seq_len,
         mem_indexes_cpu=_0_mem_indexes,
     )
@@ -145,6 +152,7 @@ def overlap_decode(
     _1_input_ids = input_ids[batch_size // 2 :]
     _1_mem_indexes = mem_indexes[batch_size // 2 :]
     _1_b_req_idx = b_req_idx[batch_size // 2 :]
+    _1_b_mtp_index = b_mtp_index[batch_size // 2 :]
     _1_b_seq_len = b_seq_len[batch_size // 2 :]
 
     micro_batch2 = ModelInput(
@@ -153,6 +161,7 @@ def overlap_decode(
         max_len_in_batch=_1_max_len_in_batch,
         input_ids=_1_input_ids,
         b_req_idx=_1_b_req_idx,
+        b_mtp_index=_1_b_mtp_index,
         b_seq_len=_1_b_seq_len,
         mem_indexes_cpu=_1_mem_indexes,
     )
@@ -170,6 +179,7 @@ def prefill(
     input_ids,
     mem_indexes,
     b_req_idx,
+    b_mtp_index,
     b_seq_len,
     total_token_num,
     b_ready_cache_len,
@@ -187,12 +197,14 @@ def prefill(
         is_prefill=True,
         b_ready_cache_len=b_ready_cache_len,  # b_ready_cache_len
     )
+
     model_output = model_part.forward(model_input)
     return model_output.logits
 
 
-def decode(model_part, batch_size, max_len_in_batch, input_ids, mem_indexes, b_req_idx, b_seq_len, total_token_num):
-    b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
+def decode(
+    model_part, batch_size, max_len_in_batch, input_ids, mem_indexes, b_req_idx, b_mtp_index, b_seq_len, total_token_num
+):
     model_input = ModelInput(
         batch_size=batch_size,
         total_token_num=total_token_num,
@@ -247,7 +259,7 @@ def run_forward_once(
 
     total_token_num = batch_size * input_len
     mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0])
-
+    b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
     rank_id = model_kvargs["rank_id"]
 
     if enable_overlap:
@@ -264,6 +276,7 @@ def run_forward_once(
         test_data,
         mem_indexes,
         b_req_idx,
+        b_mtp_index,
         b_seq_len,
         total_token_num,
         b_ready_cache_len,  # b_ready_cache_len
@@ -292,6 +305,7 @@ def run_forward_once(
                     test_data,
                     mem_indexes,
                     b_req_idx,
+                    b_mtp_index,
                     b_seq_len,
                     total_token_num,
                     b_ready_cache_len,  # b_ready_cache_len
@@ -316,6 +330,7 @@ def run_forward_once(
             predict_ids.view(-1),
             mem_indexes,
             b_req_idx,
+            b_mtp_index,
             b_seq_len,
             total_token_num,
         )
@@ -329,6 +344,7 @@ def run_forward_once(
                         predict_ids.view(-1),
                         mem_indexes,
                         b_req_idx,
+                        b_mtp_index,
                         b_seq_len,
                         total_token_num,
                     ),
