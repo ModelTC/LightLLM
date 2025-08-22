@@ -136,6 +136,7 @@ class Autotuner():
                 os.makedirs(self.cache_dir, exist_ok=True)
 
         self._loaded_static_keys = set()
+        self.sorted_cached_configs = {}
         self.early_stop_cnt = 0
         
     @lru_cache(maxsize=None)
@@ -147,6 +148,8 @@ class Autotuner():
             try:
                 with open(cache_file, "rb") as f:
                     self.cached_configs[static_key] = orjson.loads(f.read())
+                    self.sorted_cached_configs[static_key] = [(int(k), v) for k, v in self.cached_configs[static_key].items()]
+                    self.sorted_cached_configs[static_key].sort(key=lambda x: x[0])
             except Exception:
                 # 若缓存损坏，忽略并在之后覆盖
                 self.cached_configs[static_key] = {}
@@ -205,22 +208,18 @@ class Autotuner():
             return float("inf")
 
     def __call__(self, *args, **kwargs):
-        if self.configs is None:
-            self.configs = split_configs(self.all_configs)
-
         static_key = self._static_key(*args, **kwargs)
         run_key = self._run_key(*args, **kwargs)
         
         # 懒加载
         self._ensure_cache_loaded(static_key)
         best_config = None
-        self.nargs = dict(zip(self.arg_names, args))
         
         def _benchmark(_run_key):
             from lightllm.utils.dist_utils import get_global_rank
+            if self.configs is None:
+                self.configs = split_configs(self.all_configs)
 
-            
-            rank0 = (not dist.is_initialized()) or (get_global_rank() == 0)
             rank_id = get_global_rank()
             _best_config = self.default_config
             best_time = float("inf")
@@ -249,6 +248,8 @@ class Autotuner():
             if static_key not in self.cached_configs:
                 self.cached_configs[static_key] = {}
             self.cached_configs[static_key][run_key] = _best_config
+            self.sorted_cached_configs[static_key] = [(int(k), v) for k, v in self.cached_configs[static_key].items()]
+            self.sorted_cached_configs[static_key].sort(key=lambda x: x[0])
             
             if not dist.is_initialized() or get_global_rank() == 0:
                 if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
@@ -263,6 +264,7 @@ class Autotuner():
                         logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
             
             kwargs["run_config"] = self.cached_configs[static_key][run_key]
+            self.nargs = dict(zip(self.arg_names, args))
             full_nargs = {**self.nargs, **kwargs}
             self.pre_hook(full_nargs, reset_only=True)
             
@@ -274,11 +276,13 @@ class Autotuner():
             if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
                 _benchmark(run_key)
             else:
-                if static_key in self.cached_configs:
-                    self.cached_configs[static_key][run_key] = self.default_config
+                if static_key in self.sorted_cached_configs:
+                    sorted_configs = self.sorted_cached_configs[static_key]
+                    self.cached_configs[static_key][run_key] = min(sorted_configs, key=lambda x: abs(x[0] - int(run_key)))[1]
                 else:
-                    logger.warning(f"No kernel config for {self.name} in {self.cache_dir}/{static_key}, using default config")
-                    self.cached_configs[static_key] = {}
+                    if static_key not in self.cached_configs:
+                        logger.warning(f"No kernel config for {self.name} in {self.cache_dir}/{static_key}, using default config")
+                        self.cached_configs[static_key] = {}
                     self.cached_configs[static_key][run_key] = self.default_config
 
             best_config = self.cached_configs[static_key][run_key]
