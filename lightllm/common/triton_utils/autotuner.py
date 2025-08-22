@@ -11,6 +11,7 @@ from lightllm.utils.device_utils import get_current_device_name
 import math
 import fcntl
 from lightllm.utils.log_utils import init_logger
+import traceback
 
 logger = init_logger(__name__)
 
@@ -21,6 +22,8 @@ def get_triton_version():
 
 def split_configs(configs):
     from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
+    import random
+    random.shuffle(configs)
     rank_in_node = get_current_rank_in_node()
     node_world_size = get_node_world_size()
     return configs[rank_in_node::node_world_size]
@@ -198,7 +201,7 @@ class Autotuner():
                         return state.avg
             del g
             return state.avg
-        except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
+        except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception) as e:
             return float("inf")
 
     def __call__(self, *args, **kwargs):
@@ -215,13 +218,15 @@ class Autotuner():
         
         def _benchmark(_run_key):
             from lightllm.utils.dist_utils import get_global_rank
+
             
             rank0 = (not dist.is_initialized()) or (get_global_rank() == 0)
-
+            rank_id = get_global_rank()
             _best_config = self.default_config
             best_time = float("inf")
             self.early_stop_cnt = 0
-            enum_configs = enumerate(tqdm(self.configs, desc=f"Autotuning {self.name} for {_run_key}")) if rank0 else enumerate(self.configs)
+            bar = tqdm(self.configs, desc=f"Autotuning {self.name} for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}", position=get_global_rank(), dynamic_ncols=True)
+            enum_configs = enumerate(bar)
             for i, config in enum_configs:
                 kwargs_with_config = kwargs.copy()
                 kwargs_with_config["run_config"] = config
@@ -230,8 +235,8 @@ class Autotuner():
                     if rank0 and best_time != float("inf"):
                         logger.info(f"Best config for {self.name} is {_best_config} with time {best_time:.5f} -> {run_time:.5f}")
                     best_time = run_time
-                    _best_config = config
-            logger.info(f"Early stop ratio : {self.early_stop_cnt / len(self.configs):.2%}")        
+                    _best_config = config   
+                bar.set_description(f"Autotuning {self.name} [rank:{rank_id}] for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}, best_time: {best_time:.5f}")
             world_size = dist.get_world_size() if dist.is_initialized() else 1
             if world_size > 1:
                 local_best = torch.tensor([best_time], device="cuda")
