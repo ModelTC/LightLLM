@@ -5,6 +5,7 @@ from typing import Union, Optional
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.embed_cache.impl.naive_memory_cache import InMemoryCache
 from rpyc.utils.classic import obtain
+import pickle
 
 
 class CacheServer(rpyc.Service):
@@ -47,6 +48,47 @@ class CacheServer(rpyc.Service):
     def exposed_get_items_embed(self, ids: list[int]) -> list[bool]:
         ids = obtain(ids)
         return self._impl.get_items_embed(ids)
+
+    def exposed_alloc_v2(self, batch_md5_token_nums: bytes) -> bytes:
+        """
+        batch_md5_token_nums: pickle.dumps([(md5sum, token_num), ...])
+        返回: pickle.dumps(records)
+        """
+        batch_requests = pickle.loads(batch_md5_token_nums)
+        md5sum_list = [obtain(md5) for md5, num in batch_requests]
+        token_num_list = [obtain(num) for md5, num in batch_requests]
+        record = self._impl.alloc(md5sum_list, token_num_list)
+        return pickle.dumps(record)
+
+    def exposed_release_v2(self, ids_blob: bytes) -> None:
+        ids = pickle.loads(ids_blob)
+        ids = [obtain(id) for id in ids]
+        return self._impl.release(ids)
+
+    def exposed_set_items_data_v2(self, ids_blob: bytes) -> bytes:
+        ids = pickle.loads(ids_blob)
+        ids = [obtain(id) for id in ids]
+        status_list = self._impl.set_items_data(ids)
+        return pickle.dumps(status_list)
+
+    def exposed_get_items_data_v2(self, ids_blob: bytes) -> bytes:
+        ids = pickle.loads(ids_blob)
+        ids = [obtain(id) for id in ids]
+        status_list = self._impl.get_items_data(ids)
+        return pickle.dumps(status_list)
+
+    def exposed_set_items_embed_v2(self, ids_blob: bytes) -> None:
+
+        ids = pickle.loads(ids_blob)
+        ids = [obtain(id) for id in ids]
+        status_list = self._impl.set_items_embed(ids)
+        return pickle.dumps(status_list)
+
+    def exposed_get_items_embed_v2(self, ids_blob: bytes) -> bytes:
+        ids = pickle.loads(ids_blob)
+        ids = [obtain(id) for id in ids]
+        status_list = self._impl.get_items_embed(ids)
+        return pickle.dumps(status_list)
 
 
 def start_cache_manager(port: int, args, pipe_writer):
