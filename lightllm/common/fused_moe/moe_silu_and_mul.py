@@ -72,7 +72,7 @@ def _silu_and_mul_kernel_fast(
         for bm in [32, 64, 128, 256]
         for bn in [32, 64, 128, 256]
     ],
-    default_config={"BLOCK_M": 128, "BLOCK_N": 128, "num_warps": 4, "num_stages": 1},
+    default_config={"BLOCK_M": 128, "BLOCK_N": 128, "num_warps": 4, "NUM_STAGES": 1},
     static_key_func=lambda input, output: f"N={input.shape[-1] // 2},out_dtype={output.dtype}",
     run_key_func=lambda input: str(nearest_power_of_2(input.shape[0])),
 )
