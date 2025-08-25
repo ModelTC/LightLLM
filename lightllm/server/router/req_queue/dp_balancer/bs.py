@@ -37,7 +37,7 @@ class DpBsBalancer(DpBalancer):
             # assign the request to the dp rank and update the load count
             for req in req_group:
                 req.sample_params.suggested_dp_index = suggested_dp_index
-                self.inner_queues[suggested_dp_index].append(req)
+            self.inner_queues[suggested_dp_index].extend(req_group)
             # update the load count for this dp rank
             total_load_per_dp[suggested_dp_index] += len(req_group)
 

@@ -46,6 +46,6 @@ class RoundRobinDpBalancer(DpBalancer):
             suggested_dp_index = self.get_suggest_dp_index()
             for req in req_group:
                 req.sample_params.suggested_dp_index = suggested_dp_index
-                self.inner_queues[suggested_dp_index].append(req)
+            self.inner_queues[suggested_dp_index].extend(req_group)
         reqs_waiting_for_dp_index.clear()
         return
