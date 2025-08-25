@@ -19,6 +19,10 @@ class DpQueue:
         self.inner_queues: List[BaseQueue] = [
             base_queue_class(args, router, dp_index, dp_size_in_node) for dp_index in range(self.dp_size_in_node)
         ]
+        # 在调度这放松，在推理时约束。
+        # 避免prefill 模式下的情况下，推理完成了，调度没及时获取信息，导致调度bs 过小
+        for queue in self.inner_queues:
+            queue.batch_max_tokens = int(args.batch_max_tokens * 2)
         self.dp_balancer = get_dp_balancer(args, dp_size_in_node, self.inner_queues)
         self.reqs_waiting_for_dp_index: List[List[Req]] = []
         return
