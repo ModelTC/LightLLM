@@ -258,7 +258,9 @@ def run_forward_once(
         b_seq_len[i] = input_len
 
     total_token_num = batch_size * input_len
-    mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0]).cuda()
+    mem_indexes = model_part.req_manager.mem_manager.alloc(
+        test_data.shape[0], b_req_idx, b_seq_len, b_ready_cache_len, True
+    ).cuda()
 
     rank_id = model_kvargs["rank_id"]
 
@@ -322,7 +324,7 @@ def run_forward_once(
         total_token_num += batch_size
         b_mtp_index += 1
         b_seq_len += 1
-        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0]).cuda()
+        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0], b_req_idx, b_seq_len).cuda()
         max_len_in_batch = input_len + i + 1
         logits = decode_fn(
             model_part,

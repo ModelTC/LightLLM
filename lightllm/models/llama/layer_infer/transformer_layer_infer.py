@@ -87,6 +87,14 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 self._copy_kv_to_mem_cache = partial(
                     LlamaTransformerLayerInfer._copy_kv_to_mem_cache_with_calibration, self
                 )
+            elif "page_size_variable" in self.mode:
+                self._context_attention_kernel = partial(
+                    LlamaTransformerLayerInfer._paged_context_attention_flashattention, self
+                )
+                self._token_attention_kernel = partial(
+                    LlamaTransformerLayerInfer._paged_token_decode_attention_flashattention, self
+                )
+                self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
             elif not self.mode:
                 self._context_attention_kernel = partial(
                     LlamaTransformerLayerInfer._context_attention_flashattention, self
@@ -99,9 +107,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 raise Exception(f"Unsupported mode for fa3 backend: {self.mode}")
             return
         elif get_env_start_args().enable_flashinfer_prefill:
-            self._context_attention_kernel = partial(
-                LlamaTransformerLayerInfer._context_attention_flashinfer_kernel, self
-            )
+            if "page_size_variable" in self.mode:
+                self._context_attention_kernel = partial(
+                    LlamaTransformerLayerInfer._paged_context_attention_flashinfer_kernel, self
+                )
+            elif not self.mode:
+                self._context_attention_kernel = partial(
+                    LlamaTransformerLayerInfer._context_attention_flashinfer_kernel, self
+                )
+            else:
+                raise Exception(f"Unsupported mode for flashinfer backend: {self.mode}")
         else:
             self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
         if "ppl_int8kv" in self.mode:
@@ -166,6 +181,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             self._copy_kv_to_mem_cache = partial(
                 LlamaTransformerLayerInfer._copy_kv_to_mem_cache_with_calibration, self
             )
+        elif "page_size_variable" in self.mode:
+            assert get_env_start_args().enable_flashinfer_prefill and get_env_start_args().enable_flashinfer_decode
+            self._token_attention_kernel = partial(
+                LlamaTransformerLayerInfer._paged_token_decode_attention_flashinfer, self
+            )
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         elif not self.mode:
             if get_env_start_args().enable_flashinfer_decode:
                 self._token_attention_kernel = partial(
@@ -266,6 +287,20 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         )
         return o_tensor
 
+    def _paged_context_attention_flashinfer_kernel(
+        self, q, kv, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
+    ) -> torch.Tensor:
+        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].view(
+            -1, infer_state.page_size, 2 * self.tp_k_head_num_, self.head_dim_
+        )
+        infer_state.prefill_wrapper.run(
+            q.view(q.shape[0], -1, self.head_dim_),
+            (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
+            out=o_tensor.view(q.shape[0], -1, self.head_dim_),
+        )
+        return o_tensor
+
     def _context_attention_kernel(
         self, q, kv, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
@@ -316,6 +351,38 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.b_ready_cache_len,
         )
         return o_tensor
+
+    def _paged_context_attention_flashattention(
+        self, q, kv, infer_state: FlashAttentionStateInfo, layer_weight, out=None
+    ):
+        cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :].reshape(
+            -1, infer_state.page_size, self.tp_k_head_num_, self.head_dim_
+        )
+        cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
+            :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+        ].reshape(-1, infer_state.page_size, self.tp_v_head_num_, self.head_dim_)
+        q = q.reshape(-1, self.tp_q_head_num_, self.head_dim_)
+        k_descale, v_descale = None, None  # disable quantization
+        Lq = q.shape[-1]
+        sm_scale = 1.0 / (Lq ** 0.5)
+        o = flash_attn_with_kvcache(
+            q=q,
+            k_cache=cache_k,
+            v_cache=cache_v,
+            page_table=infer_state.page_table,
+            cache_seqlens=infer_state.b_seq_len,
+            cu_seqlens_q=infer_state.cu_seqlens_q,
+            cu_seqlens_k_new=infer_state.cu_seqlens_k,
+            max_seqlen_q=infer_state.q_max_seq_len,
+            softmax_scale=sm_scale,
+            causal=True,
+            window_size=(-1, -1),
+            softcap=0.0,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            return_softmax_lse=False,
+        )
+        return o
 
     def _context_attention_flashattention(self, q, kv, infer_state: FlashAttentionStateInfo, layer_weight, out=None):
         cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :].reshape(
@@ -539,6 +606,23 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
         kv = infer_state.mem_manager.kv_buffer[self.layer_num_].unsqueeze(1)
+        infer_state.decode_wrapper.run(
+            q.view(calcu_shape1),
+            (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
+            out=o_tensor.view(calcu_shape1),
+        )
+        return o_tensor
+
+    def _paged_token_decode_attention_flashinfer(
+        self, q, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
+    ):
+        batch_size = infer_state.batch_size
+        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
+
+        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].view(
+            -1, infer_state.page_size, 2 * self.tp_k_head_num_, self.head_dim_
+        )
         infer_state.decode_wrapper.run(
             q.view(calcu_shape1),
             (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
@@ -823,6 +907,38 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             out=out,
             alloc_tensor_func=self.alloc_tensor,
         )
+
+    def _paged_token_decode_attention_flashattention(
+        self, q, infer_state: FlashAttentionStateInfo, layer_weight, out=None
+    ):
+        cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :].reshape(
+            -1, infer_state.page_size, self.tp_k_head_num_, self.head_dim_
+        )
+        cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
+            :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+        ].reshape(-1, infer_state.page_size, self.tp_v_head_num_, self.head_dim_)
+        q = q.reshape(-1, self.tp_q_head_num_, self.head_dim_)
+        k_descale, v_descale = None, None  # disable quantization
+        Lq = q.shape[-1]
+        sm_scale = 1.0 / (Lq ** 0.5)
+        o = flash_attn_with_kvcache(
+            q=q,
+            k_cache=cache_k,
+            v_cache=cache_v,
+            page_table=infer_state.page_table,
+            cache_seqlens=infer_state.b_seq_len,
+            cu_seqlens_q=infer_state.cu_seqlens_q,
+            cu_seqlens_k_new=infer_state.cu_seqlens_k,
+            max_seqlen_q=1,
+            softmax_scale=sm_scale,
+            causal=False,
+            window_size=(-1, -1),
+            softcap=0.0,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            return_softmax_lse=False,
+        )
+        return o
 
     def _token_decode_attention_flashattention(self, q, infer_state: FlashAttentionStateInfo, layer_weight, out=None):
         cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :].reshape(
