@@ -118,7 +118,7 @@ def moe_align1_kernel(
     experts_topk_weight_stride0,
     experts_topk_weight_stride1,
     TOKEN_BLOCK_SIZE: tl.constexpr,
-    num_stages: tl.constexpr,
+    range_num_stages: tl.constexpr,
 ):
 
     expert_id = tl.program_id(axis=0)
@@ -127,7 +127,7 @@ def moe_align1_kernel(
 
     pre_sum = 0
 
-    for start_loc in tl.range(0, experts_info_n, TOKEN_BLOCK_SIZE, num_stages=num_stages):
+    for start_loc in tl.range(0, experts_info_n, TOKEN_BLOCK_SIZE, num_stages=range_num_stages):
         n_range = start_loc + off_n
         topk_weights_data = tl.load(topk_weights + n_range, mask=n_range < experts_info_n, other=0)
         expert_data = tl.load(
@@ -213,7 +213,7 @@ def moe_align1(
         experts_weight_info.stride(0),
         experts_weight_info.stride(1),
         TOKEN_BLOCK_SIZE=TOKEN_BLOCK_SIZE,
-        num_stages=4,
+        range_num_stages=4,
         num_warps=8,
         num_stages=1,
     )
