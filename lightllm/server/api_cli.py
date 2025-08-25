@@ -119,7 +119,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="tool call parser type",
     )
     parser.add_argument(
-        "--running_max_req_size", type=int, default=2048, help="the max size for forward requests in the same time"
+        "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
     )
     parser.add_argument("--nnodes", type=int, default=1, help="the number of nodes")
     parser.add_argument("--node_rank", type=int, default=0, help="the rank of the current node")
