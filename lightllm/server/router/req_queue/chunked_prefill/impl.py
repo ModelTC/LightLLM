@@ -69,7 +69,6 @@ class ChunkedPrefillQueue(BaseQueue):
         new_batch_first_router_need_tokens = (
             0 if current_batch is None else current_batch.get_batch_decode_need_tokens()[self.dp_index]
         )
-        print(f"new_batch_first_router_need_tokens: {new_batch_first_router_need_tokens}")
 
         self._init_cache_list(current_batch, is_busy)
         can_run_list = []
