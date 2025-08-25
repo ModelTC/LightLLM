@@ -56,7 +56,7 @@ class DpQueue:
         suggested_dp_index = req.sample_params.suggested_dp_index
         if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
             # 在调度时，统一分配请求id
-            self.reqs_waiting_for_dp_index.append(req)
+            self.reqs_waiting_for_dp_index.append([req])
         else:
             self.inner_queues[suggested_dp_index].append(req)
         return
