@@ -496,7 +496,7 @@ class RouterManager:
         if self.is_multinode_tp:
             self._multinode_tp_generate_new_batch()
         else:
-            if self._get_paused_req_num() == 0 and self.shm_reqs_io_buffer.is_empty():
+            if self._get_paused_req_num() == 0:
                 self._generate_new_batch()
         return
 
