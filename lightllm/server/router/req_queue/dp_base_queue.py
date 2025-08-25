@@ -32,16 +32,11 @@ class DpQueue:
 
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch):
-        try:
-            self.dp_balancer.assign_reqs_to_dp(current_batch, self.reqs_waiting_for_dp_index)
-            batches = [
-                self.inner_queues[dp_index].generate_new_batch(current_batch)
-                for dp_index in range(self.dp_size_in_node)
-            ]
-            return self._merge_batch(batches)
-        except Exception as e:
-            logger.error(f"generate new batch failed: {e}")
-            raise e
+        self.dp_balancer.assign_reqs_to_dp(current_batch, self.reqs_waiting_for_dp_index)
+        batches = [
+            self.inner_queues[dp_index].generate_new_batch(current_batch) for dp_index in range(self.dp_size_in_node)
+        ]
+        return self._merge_batch(batches)
 
     def _merge_batch(self, dp_batches: List[Batch]):
         merged_batch: Batch = None
@@ -51,15 +46,6 @@ class DpQueue:
             else:
                 merged_batch = iter_batch
         return merged_batch
-
-    def append(self, req: Req):
-        suggested_dp_index = req.sample_params.suggested_dp_index
-        if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
-            # 在调度时，统一分配请求id
-            self.reqs_waiting_for_dp_index.append([req])
-        else:
-            self.inner_queues[suggested_dp_index].append(req)
-        return
 
     def extend(self, req_group: List[Req]):
         suggested_dp_index = req_group[0].sample_params.suggested_dp_index
