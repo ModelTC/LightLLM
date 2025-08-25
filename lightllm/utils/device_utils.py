@@ -82,7 +82,7 @@ def get_current_device_name():
 
     if torch.cuda.is_available():
         device = torch.cuda.current_device()
-        gpu_name = torch.cuda.get_device_name(device)
+        gpu_name = torch.cuda.get_device_name(device).replace(" ", "_")
         return gpu_name
     else:
         return None

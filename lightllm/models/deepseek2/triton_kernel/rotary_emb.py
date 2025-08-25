@@ -2,6 +2,8 @@ import torch
 
 import triton
 import triton.language as tl
+import itertools
+from lightllm.common.triton_utils.autotuner import autotune, nearest_power_of_2
 
 
 @triton.jit
@@ -92,25 +94,44 @@ def _rotary_kernel(
     return
 
 
-@torch.no_grad()
-def rotary_emb_fwd(q, k, cos, sin, **run_config):
+def get_test_configs():
+    configs = []
+    result = itertools.product([1, 2, 4, 8, 16, 32], [1, 2, 4, 8], [1, 2, 3, 4, 5], [1, 2, 4, 8, 16])
+    for BLOCK_SEQ, num_warps, num_stages, HEAD_PARALLEL_NUM in result:
+        t_config = {
+            "BLOCK_SEQ": BLOCK_SEQ,
+            "HEAD_PARALLEL_NUM": HEAD_PARALLEL_NUM,
+            "num_warps": num_warps,
+            "num_stages": num_stages,
+        }
+        configs.append(t_config)
+    return configs
+
+
+def get_static_key(q, k):
+    head_num_q, head_num_k, head_dim = q.shape[1], k.shape[1], q.shape[2]
+    return {
+        "Q_HEAD_NUM": head_num_q,
+        "K_HEAD_NUM": head_num_k,
+        "HEAD_DIM": head_dim,
+        "dtype": str(q.dtype),
+    }
+
+
+@autotune(
+    name="rotary_emb_fwd:v1",
+    configs=get_test_configs(),
+    default_config={"BLOCK_SEQ": 16, "NUM_STAGE": 1, "num_warps": 1, "num_stages": 1, "HEAD_PARALLEL_NUM": 1},
+    static_key_func=get_static_key,
+    run_key_func=lambda q: str(nearest_power_of_2(q.shape[0])),
+)
+def rotary_emb_fwd(q, k, cos, sin, run_config=None):
     total_len = q.shape[0]
     head_num_q, head_num_k = q.shape[1], k.shape[1]
     head_dim = q.shape[2]
     assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], f"q shape {q.shape} cos shape {cos.shape}"
     assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
     assert triton.next_power_of_2(head_dim) == head_dim
-
-    from .rotary_emb_config import DeepseekV3RotaryKernelConfig
-
-    if not run_config:
-        run_config = DeepseekV3RotaryKernelConfig.try_to_get_best_config(
-            M=total_len,
-            Q_HEAD_NUM=head_num_q,
-            K_HEAD_NUM=head_num_k,
-            HEAD_DIM=head_dim,
-            dtype=str(q.dtype),
-        )
 
     BLOCK_SEQ = run_config["BLOCK_SEQ"]
     HEAD_PARALLEL_NUM = run_config["HEAD_PARALLEL_NUM"]
