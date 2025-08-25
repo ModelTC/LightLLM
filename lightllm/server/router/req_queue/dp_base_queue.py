@@ -20,7 +20,7 @@ class DpQueue:
             base_queue_class(args, router, dp_index, dp_size_in_node) for dp_index in range(self.dp_size_in_node)
         ]
         self.dp_balancer = get_dp_balancer(args, dp_size_in_node, self.inner_queues)
-        self.reqs_waiting_for_dp_index = []
+        self.reqs_waiting_for_dp_index: List[List[Req]] = []
         return
 
     def get_dp_queue(self, dp_index: int):

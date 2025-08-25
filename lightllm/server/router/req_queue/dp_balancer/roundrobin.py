@@ -41,11 +41,9 @@ class RoundRobinDpBalancer(DpBalancer):
         self.pre_select_dp_index = random.choice(select_dp_indexes)
         return self.pre_select_dp_index
 
-    def assign_reqs_to_dp(self, current_batch: Batch, reqs_waiting_for_dp_index: List[Union[Req, List[Req]]]) -> None:
+    def assign_reqs_to_dp(self, current_batch: Batch, reqs_waiting_for_dp_index: List[List[Req]]) -> None:
         for req_group in reqs_waiting_for_dp_index:
             suggested_dp_index = self.get_suggest_dp_index()
-            if not isinstance(req_group, list):
-                req_group = [req_group]
             for req in req_group:
                 req.sample_params.suggested_dp_index = suggested_dp_index
                 self.inner_queues[suggested_dp_index].append(req)

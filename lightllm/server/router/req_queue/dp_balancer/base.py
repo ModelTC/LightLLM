@@ -19,5 +19,5 @@ class DpBalancer(ABC):
         self.inner_queues = inner_queues
 
     @abstractmethod
-    def assign_reqs_to_dp(self, current_batch: Batch, reqs_waiting_for_dp_index: List[Union[Req, List[Req]]]) -> None:
+    def assign_reqs_to_dp(self, current_batch: Batch, reqs_waiting_for_dp_index: List[List[Req]]) -> None:
         pass

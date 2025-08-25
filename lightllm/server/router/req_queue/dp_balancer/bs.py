@@ -18,7 +18,7 @@ class DpBsBalancer(DpBalancer):
     def __init__(self, dp_size_in_node: int, inner_queues: List[BaseQueue]):
         super().__init__(dp_size_in_node, inner_queues)
 
-    def assign_reqs_to_dp(self, current_batch: Batch, reqs_waiting_for_dp_index: List[Union[Req, List[Req]]]) -> None:
+    def assign_reqs_to_dp(self, current_batch: Batch, reqs_waiting_for_dp_index: List[List[Req]]) -> None:
         if len(reqs_waiting_for_dp_index) == 0:
             return
         # calculate the total load of each dp rank
