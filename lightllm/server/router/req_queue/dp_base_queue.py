@@ -53,8 +53,7 @@ class DpQueue:
             # 同一个组的，要分配在同一个 dp 上
             self.reqs_waiting_for_dp_index.append(req_group)
         else:
-            for req in req_group:
-                self.inner_queues[suggested_dp_index].append(req)
+            self.inner_queues[suggested_dp_index].extend(req_group)
         return
 
     def is_busy(self):
