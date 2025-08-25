@@ -446,9 +446,7 @@ class ModeBackend:
             else:
                 token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
-                    # 跳过等下次prefill，避免oom
-                    prefill_tokens = 0
-                    break
+                    continue
                 prefill_tokens += token_num
                 if token_num <= can_alloc_token_num:
                     prefill_reqs.append(req_obj)
