@@ -26,11 +26,6 @@ class BaseQueue:
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
         self.router_max_new_token_len = args.router_max_new_token_len
 
-    def append(self, req: Req):
-        req.sample_params.suggested_dp_index = self.dp_index
-        self.waiting_req_list.append(req)
-        return
-
     def extend(self, req_group: List[Req]):
         for req in req_group:
             req.sample_params.suggested_dp_index = self.dp_index

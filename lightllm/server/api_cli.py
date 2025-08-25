@@ -145,6 +145,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
                         do not set it and keep the default value as 1.""",
     )
     parser.add_argument(
+        "--dp_balancer",
+        type=str,
+        default="bs_balancer",
+        choices=["round_robin", "bs_balancer"],
+        help="the dp balancer type, default is bs_balancer",
+    )
+    parser.add_argument(
         "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
     )
     parser.add_argument(
