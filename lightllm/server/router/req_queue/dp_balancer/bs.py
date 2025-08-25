@@ -2,7 +2,7 @@ from typing import List, Union
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 from lightllm.server.router.batch import Batch, Req
 from lightllm.utils.log_utils import init_logger
-from .dp_base_balancer import DpBalancer
+from .base import DpBalancer
 
 logger = init_logger(__name__)
 
