@@ -17,7 +17,6 @@ class DpBalancer(ABC):
     def __init__(self, dp_size_in_node: int, inner_queues: List[BaseQueue]):
         self.dp_size_in_node = dp_size_in_node
         self.inner_queues = inner_queues
-        self.pre_select_dp_index = self.dp_size_in_node - 1
 
     @abstractmethod
     def assign_reqs_to_dp(self, current_batch: Batch, reqs_waiting_for_dp_index: List[Union[Req, List[Req]]]) -> None:
@@ -29,6 +28,10 @@ class RoundRobinDpBalancer(DpBalancer):
     轮询负载均衡器
     在队列长度最小的DP中进行轮询选择
     """
+
+    def __init__(self, dp_size_in_node: int, inner_queues: List[BaseQueue]):
+        super().__init__(dp_size_in_node, inner_queues)
+        self.pre_select_dp_index = self.dp_size_in_node - 1
 
     def get_suggest_dp_index(
         self,
