@@ -16,49 +16,34 @@ import traceback
 logger = init_logger(__name__)
 
 
-@lru_cache(maxsize=1)
-def get_triton_version():
-    return f"triton_{triton.__version__}"
+def autotune(
+    name,
+    configs,
+    default_config,
+    static_key_func=None,
+    run_key_func=None,
+    reset_to_zero=None,
+    restore_value=None,
+    pre_hook=None,
+    post_hook=None,
+):
+    def decorator(fn):
+        arg_names = [param.name for param in inspect.signature(fn).parameters.values()]
+        return Autotuner(
+            fn,
+            arg_names,
+            name,
+            configs,
+            default_config,
+            static_key_func,
+            run_key_func,
+            reset_to_zero,
+            restore_value,
+            pre_hook=pre_hook,
+            post_hook=post_hook,
+        )
 
-
-def split_configs(configs):
-    from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
-    import random
-
-    random.shuffle(configs)
-    rank_in_node = get_current_rank_in_node()
-    node_world_size = get_node_world_size()
-    return configs[rank_in_node::node_world_size]
-
-
-def dict_to_filename(data):
-    parts = []
-    for k, v in sorted(data.items(), key=lambda x: str(x[0])):
-        safe_k = str(k).replace(" ", "_").replace(":", "_")
-        safe_v = str(v).replace(" ", "_").replace(":", "_")
-        parts.append(f"{safe_k}={safe_v}")
-    return ",".join(parts)
-
-
-def nearest_power_of_2(x):
-    # 返回最接近 x 的 2 的幂次方
-    if x <= 1:
-        return 1
-    return triton.next_power_of_2(x - triton.next_power_of_2(x) // 4)
-
-
-class BenchmarkState:
-    def __init__(self):
-        self.sum = 0
-        self.min = float("inf")
-        self.avg = 0
-        self.count = 0
-
-    def update(self, measurement):
-        self.sum += measurement
-        self.min = min(self.min, measurement)
-        self.count += 1
-        self.avg = self.sum / self.count
+    return decorator
 
 
 class Autotuner:
@@ -97,7 +82,7 @@ class Autotuner:
         warmup=None,
         rep=None,
     ):
-
+        # 是否打印autotune信息
         self.print_autotune = os.environ.get("LIGHTLLM_TRITON_PRINT_AUTOTUNE", "0") == "1"
         self.all_configs = configs
         self.configs = None
@@ -109,6 +94,11 @@ class Autotuner:
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
+
+        # 是否使用之前配置
+        self.can_be_none = os.environ.get("DISABLE_MANUAL_TUNE_CONFIG", "0") == "0"
+        # 是否使用autotune注解
+        self.disable_autotune = os.environ.get("DISABLE_AUTOTUNE_ANNOTATION", "0") == "1"
 
         self.cached_configs = {}
         self.arg_names = arg_names
@@ -233,6 +223,9 @@ class Autotuner:
 
     @torch.no_grad()
     def __call__(self, *args, **kwargs):
+        if self.disable_autotune:
+            return self.fn(*args, **kwargs)
+
         static_key = self._static_key(*args, **kwargs)
         run_key = self._run_key(*args, **kwargs)
 
@@ -307,28 +300,28 @@ class Autotuner:
             full_nargs = {**self.nargs, **kwargs}
             self.pre_hook(full_nargs, reset_only=True)
 
-        if static_key in self.cached_configs:
-            if run_key in self.cached_configs[static_key]:
-                best_config = self.cached_configs[static_key][run_key]
+        best_config = self.cached_configs.get(static_key, {}).get(run_key)
 
         if best_config is None:
             if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
                 _benchmark(run_key)
-            else:
-                if static_key in self.sorted_cached_configs:
+            elif not self.can_be_none:
+                cached_for_static = self.cached_configs.setdefault(static_key, {})
+                if static_key in self.sorted_cached_configs and self.sorted_cached_configs[static_key]:
                     sorted_configs = self.sorted_cached_configs[static_key]
-                    self.cached_configs[static_key][run_key] = min(
-                        sorted_configs, key=lambda x: abs(x[0] - int(run_key))
-                    )[1]
+                    try:
+                        target = int(run_key)
+                        cached_for_static[run_key] = min(sorted_configs, key=lambda x: abs(x[0] - target))[1]
+                    except Exception:
+                        cached_for_static[run_key] = self.default_config
                 else:
-                    if static_key not in self.cached_configs:
+                    if static_key not in self.sorted_cached_configs:
                         logger.warning(
                             f"No kernel config for {self.name} in {self.cache_dir}/{static_key}, using default config"
                         )
-                        self.cached_configs[static_key] = {}
-                    self.cached_configs[static_key][run_key] = self.default_config
+                    cached_for_static[run_key] = self.default_config
 
-            best_config = self.cached_configs[static_key][run_key]
+                best_config = self.cached_configs[static_key][run_key]
 
         kwargs["run_config"] = best_config
         return self.fn(*args, **kwargs)
@@ -381,31 +374,45 @@ class Autotuner:
         return "default"
 
 
-def autotune(
-    name,
-    configs,
-    default_config,
-    static_key_func=None,
-    run_key_func=None,
-    reset_to_zero=None,
-    restore_value=None,
-    pre_hook=None,
-    post_hook=None,
-):
-    def decorator(fn):
-        arg_names = [param.name for param in inspect.signature(fn).parameters.values()]
-        return Autotuner(
-            fn,
-            arg_names,
-            name,
-            configs,
-            default_config,
-            static_key_func,
-            run_key_func,
-            reset_to_zero,
-            restore_value,
-            pre_hook=pre_hook,
-            post_hook=post_hook,
-        )
+class BenchmarkState:
+    def __init__(self):
+        self.sum = 0
+        self.min = float("inf")
+        self.avg = 0
+        self.count = 0
 
-    return decorator
+    def update(self, measurement):
+        self.sum += measurement
+        self.min = min(self.min, measurement)
+        self.count += 1
+        self.avg = self.sum / self.count
+
+
+def get_triton_version():
+    return f"triton_{triton.__version__}"
+
+
+def split_configs(configs):
+    from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
+    import random
+
+    random.shuffle(configs)
+    rank_in_node = get_current_rank_in_node()
+    node_world_size = get_node_world_size()
+    return configs[rank_in_node::node_world_size]
+
+
+def dict_to_filename(data):
+    parts = []
+    for k, v in sorted(data.items(), key=lambda x: str(x[0])):
+        safe_k = str(k).replace(" ", "_").replace(":", "_")
+        safe_v = str(v).replace(" ", "_").replace(":", "_")
+        parts.append(f"{safe_k}={safe_v}")
+    return ",".join(parts)
+
+
+def nearest_power_of_2(x):
+    # 返回最接近 x 的 2 的幂次方
+    if x <= 1:
+        return 1
+    return triton.next_power_of_2(x - triton.next_power_of_2(x) // 4)

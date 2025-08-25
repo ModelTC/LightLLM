@@ -723,6 +723,7 @@ class TpPartBaseModel:
         return
 
     def autotune_layers(self):
+        # 控制autotune的层数，用于适配不同模型
         return self.config.get("first_k_dense_replace", 0) + 1
 
     @final
@@ -749,7 +750,7 @@ class TpPartBaseModel:
         for input_len in warmup_lengths:
             try:
                 logger.info(f"autotune warmup for length {input_len}")
-                dummy_input_ids = torch.ones(input_len, dtype=torch.int32, device="cuda")
+                dummy_input_ids = torch.randint(0, 10000, (input_len,), dtype=torch.int32, device="cuda")
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
                 mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
@@ -777,11 +778,13 @@ class TpPartBaseModel:
                 del model_output
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
+                torch.cuda.empty_cache()
                 logger.info(f"autotune warmup for length {input_len} ok")
             except Exception as e:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
+                torch.cuda.empty_cache()
         self.layers_num = layer_num_bak
         torch.distributed.barrier()
         os.environ["LIGHTLLM_TRITON_AUTOTUNE"] = "0"

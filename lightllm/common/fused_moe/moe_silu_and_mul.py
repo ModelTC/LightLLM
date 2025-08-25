@@ -79,7 +79,7 @@ def _silu_and_mul_kernel_fast(
 def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None):
     assert input.is_contiguous()
     assert output.is_contiguous()
-    assert run_config is not None
+
     stride_input_m = input.stride(0)
     stride_input_n = input.stride(1)
     stride_output_m = output.stride(0)
@@ -87,10 +87,16 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None)
     size_m = input.shape[0]
     size_n = input.shape[-1] // 2
 
+    if not run_config:
+        run_config = MoeSiluAndMulKernelConfig.try_to_get_best_config(M=size_m, N=size_n, out_dtype=str(output.dtype))
+
     BLOCK_M = run_config["BLOCK_M"]
     BLOCK_N = run_config["BLOCK_N"]
     num_warps = run_config["num_warps"]
     NUM_STAGES = run_config["NUM_STAGES"]
+    # limit the grid size to avoid the invalid argument error of triton
+    while triton.cdiv(size_m, BLOCK_M) > 8192:
+        BLOCK_M *= 2
 
     grid = (
         triton.cdiv(size_n, BLOCK_N),

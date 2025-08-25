@@ -72,6 +72,11 @@ def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict =
     token_num, topk_num, hidden_dim = input.shape
     assert output.shape[0] == token_num and output.shape[1] == hidden_dim
 
+    if not run_config:
+        run_config = MoeSumReduceKernelConfig.try_to_get_best_config(
+            M=token_num, topk_num=topk_num, hidden_dim=hidden_dim, out_dtype=str(output.dtype)
+        )
+
     BLOCK_M = run_config["BLOCK_M"]
     BLOCK_DIM = run_config["BLOCK_DIM"]
     NUM_STAGE = run_config["NUM_STAGE"]
