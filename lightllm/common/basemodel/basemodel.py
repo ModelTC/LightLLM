@@ -81,10 +81,6 @@ class TpPartBaseModel:
 
         self._init_datatype()
         self._init_config()
-
-        if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
-            self.layers_num = self.autotune_layers()
-
         self._verify_must()
         self._verify_params()
         self._init_quant()
@@ -748,6 +744,8 @@ class TpPartBaseModel:
 
         warmup_lengths.sort(reverse=True)
 
+        layer_num_bak = self.layers_num
+        self.layers_num = self.autotune_layers()
         for input_len in warmup_lengths:
             try:
                 logger.info(f"autotune warmup for length {input_len}")
@@ -779,16 +777,14 @@ class TpPartBaseModel:
                 del model_output
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
-                torch.cuda.empty_cache()
                 logger.info(f"autotune warmup for length {input_len} ok")
             except Exception as e:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
-                torch.cuda.empty_cache()
+        self.layers_num = layer_num_bak
         torch.distributed.barrier()
-        logger.info("autotune warmup done, exit!")
-        exit(0)
+        os.environ["LIGHTLLM_TRITON_AUTOTUNE"] = "0"
 
     @final
     @torch.no_grad()

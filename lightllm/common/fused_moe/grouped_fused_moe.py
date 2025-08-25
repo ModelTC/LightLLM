@@ -478,7 +478,7 @@ def get_grouped_matmul_static_key(
             "BLOCK_SIZE_N": bn,
             "BLOCK_SIZE_K": bk,
             "GROUP_SIZE_M": gm,
-            "num_warps": nw,
+            "NUM_WARPS": nw,
             "NUM_STAGE": ns,
         }
         for ns in [1, 2, 3, 4, 5]
@@ -493,7 +493,7 @@ def get_grouped_matmul_static_key(
         "BLOCK_SIZE_N": 64,
         "BLOCK_SIZE_K": 32,
         "GROUP_SIZE_M": 8,
-        "num_warps": 4,
+        "NUM_WARPS": 4,
         "NUM_STAGE": 1,
     },
     static_key_func=get_grouped_matmul_static_key,
@@ -550,7 +550,7 @@ def grouped_matmul(
     BLOCK_SIZE_N = run_config["BLOCK_SIZE_N"]
     BLOCK_SIZE_K = run_config["BLOCK_SIZE_K"]
     GROUP_SIZE_M = run_config["GROUP_SIZE_M"]
-    num_warps = run_config["num_warps"]
+    num_warps = run_config["NUM_WARPS"]
     num_stages = run_config["NUM_STAGE"]
 
     if block_size_k != 0:

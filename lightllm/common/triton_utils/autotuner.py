@@ -99,7 +99,8 @@ class Autotuner:
     ):
 
         self.print_autotune = os.environ.get("LIGHTLLM_TRITON_PRINT_AUTOTUNE", "0") == "1"
-        self.configs = configs
+        self.all_configs = configs
+        self.configs = None
         self.default_config = default_config
         self.name = name
         self.cache_dir = os.path.join(
@@ -178,7 +179,7 @@ class Autotuner:
                 self.cached_configs[static_key] = {}
         self._loaded_static_keys.add(static_key)
 
-    def _bench(self, *args, n_repeat=5, **kwargs):
+    def _bench(self, *args, n_repeat=5, n_retries=10, current_best_ms=None, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
@@ -199,6 +200,7 @@ class Autotuner:
         try:
             # warmup
             kernel_call()
+
             torch.cuda.synchronize()
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
@@ -206,14 +208,26 @@ class Autotuner:
                     kernel_call()
             torch.cuda.synchronize()
 
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-            g.replay()
-            end_event.record()
-            torch.cuda.synchronize()
-            return start_event.elapsed_time(end_event) / n_repeat
+            state = BenchmarkState()
+            for i in range(n_retries):
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
+                g.replay()
+                end_event.record()
+                torch.cuda.synchronize()
+                state.update(start_event.elapsed_time(end_event) / n_repeat)
 
+                # early stop
+                if current_best_ms is not None and i >= 3:
+                    remaining_retries = n_retries - (i + 1)
+                    estimated_rem_time = remaining_retries * state.min
+                    if state.sum + estimated_rem_time > current_best_ms * n_retries:
+                        self.early_stop_cnt += 1
+                        del g
+                        return state.avg
+            del g
+            return state.avg
         except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
             return float("inf")
 
@@ -230,43 +244,42 @@ class Autotuner:
         def _benchmark(_run_key):
             from lightllm.utils.dist_utils import get_global_rank
 
+            if self.configs is None:
+                self.configs = split_configs(self.all_configs)
+
             rank_id = get_global_rank()
+            _best_config = self.default_config
+            best_time = float("inf")
+            self.early_stop_cnt = 0
             bar = tqdm(
                 self.configs,
-                desc=f"Autotuning {self.name} [rank:{rank_id}] for {_run_key}",
+                desc=f"Autotuning {self.name} for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}",
                 position=get_global_rank(),
                 dynamic_ncols=True,
             )
-            _best_time = float("inf")
-            run_time_list = []
-            for i, config in enumerate(bar):
+            enum_configs = enumerate(bar)
+            for i, config in enum_configs:
                 kwargs_with_config = kwargs.copy()
                 kwargs_with_config["run_config"] = config
-                run_time = self._bench(*args, **kwargs_with_config)
-                if run_time < _best_time:
-                    _best_time = run_time
-                run_time_list.append(run_time)
+                run_time = self._bench(*args, current_best_ms=best_time, **kwargs_with_config)
+                if run_time < best_time:
+                    best_time = run_time
+                    _best_config = config
                 bar.set_description(
                     f"Autotuning {self.name} [rank:{rank_id}] \
-                        for {_run_key}, best_time: {_best_time:.5f}"
+                        for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}, \
+                        best_time: {best_time:.5f}"
                 )
-            # 在所有设备上聚合每个配置的运行时间之和，并基于该总和选择最佳配置
-            aggregated_time_list = run_time_list
-
-            if dist.is_initialized():
-                time_tensor = torch.tensor(
-                    run_time_list,
-                    dtype=torch.float32,
-                    device=torch.cuda.current_device(),
-                )
-                dist.all_reduce(time_tensor, op=dist.ReduceOp.SUM)
-                aggregated_time_list = time_tensor.detach().cpu().tolist()
-
-            if len(aggregated_time_list) > 0:
-                best_idx = min(range(len(aggregated_time_list)), key=lambda i: aggregated_time_list[i])
-                _best_config = self.configs[best_idx]
-            else:
-                _best_config = self.default_config
+            world_size = dist.get_world_size() if dist.is_initialized() else 1
+            if world_size > 1:
+                local_best = torch.tensor([best_time], device="cuda")
+                all_best_times = [torch.zeros_like(local_best) for _ in range(world_size)]
+                dist.all_gather(all_best_times, local_best)
+                all_times = [t.item() for t in all_best_times]
+                min_idx = int(torch.tensor(all_times).argmin().item())
+                obj_list = [_best_config]
+                dist.broadcast_object_list(obj_list, src=min_idx)
+                _best_config = obj_list[0]
 
             if static_key not in self.cached_configs:
                 self.cached_configs[static_key] = {}
