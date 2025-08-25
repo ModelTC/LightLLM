@@ -29,9 +29,6 @@ class DpBsBalancer(DpBalancer):
             all_dp_req_num[i] + len(self.inner_queues[i].waiting_req_list) for i in range(self.dp_size_in_node)
         ]
         for req_group in reqs_waiting_for_dp_index:
-            # calculate the length of this request group
-            req_length = len(req_group)
-
             # find the dp rank with minimum load
             min_load = min(total_load_per_dp)
             select_dp_indexes = [i for i in range(self.dp_size_in_node) if total_load_per_dp[i] == min_load]
@@ -41,9 +38,8 @@ class DpBsBalancer(DpBalancer):
             for req in req_group:
                 req.sample_params.suggested_dp_index = suggested_dp_index
                 self.inner_queues[suggested_dp_index].append(req)
-
             # update the load count for this dp rank
-            total_load_per_dp[suggested_dp_index] += req_length
+            total_load_per_dp[suggested_dp_index] += len(req_group)
 
         reqs_waiting_for_dp_index.clear()
         return
