@@ -12,19 +12,20 @@ import math
 import fcntl
 from lightllm.utils.log_utils import init_logger
 import traceback
+from typing import Callable, Optional, Union, List
 
 logger = init_logger(__name__)
 
 
 def autotune(
-    name,
-    configs,
-    static_key_func=None,
-    run_key_func=None,
+    name: str,
+    configs: "Optional[Union[List, Callable[[], List]]]",
+    static_key_func: "Optional[Callable]" = None,
+    run_key_func: "Optional[Callable]" = None,
     reset_to_zero=None,
     restore_value=None,
-    pre_hook=None,
-    post_hook=None,
+    pre_hook: "Optional[Callable]" = None,
+    post_hook: "Optional[Callable]" = None,
 ):
     def decorator(fn):
         arg_names = [param.name for param in inspect.signature(fn).parameters.values()]
@@ -79,21 +80,18 @@ class Autotuner:
         fn,
         arg_names,
         name,
-        configs,
-        static_key_func,
-        run_key_func,
-        reset_to_zero,
-        restore_value,
-        pre_hook=None,
-        post_hook=None,
-        warmup=None,
-        rep=None,
+        configs: "Optional[Union[List, Callable[[], List]]]",
+        static_key_func: "Optional[Callable]" = None,
+        run_key_func: "Optional[Callable]" = None,
+        reset_to_zero: "Optional[List]" = None,
+        restore_value: "Optional[List]" = None,
+        pre_hook: "Optional[Callable]" = None,
+        post_hook: "Optional[Callable]" = None,
     ):
         # Whether to use this autotune decorator
         self.disable_autotune = os.environ.get("DISABLE_AUTOTUNE_DECORATOR", "0") == "1"
 
-        self.all_configs = configs
-        self.configs = None
+        self.configs: "Optional[Union[List, Callable[[], List]]]" = configs
         self.name = name
         self.cache_dir = os.path.join(
             Path(__file__).parent, "all_kernel_configs", get_triton_version(), get_current_device_name(), self.name
@@ -228,8 +226,10 @@ class Autotuner:
         def _benchmark(_run_key):
             from lightllm.utils.dist_utils import get_global_rank
 
-            if self.configs is None:
-                self.configs = split_configs(self.all_configs)
+            if callable(self.configs):
+                self.configs = self.configs()
+
+            self.configs = split_configs(self.configs)
 
             rank_id = get_global_rank()
             _best_config = self.default_config
