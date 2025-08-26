@@ -170,7 +170,7 @@ class Autotuner:
                 self.cached_configs[static_key] = {}
         self._loaded_static_keys.add(static_key)
 
-    def _bench(self, *args, n_repeat=5, n_retries=10, current_best_ms=None, **kwargs):
+    def _bench(self, *args, n_repeat=5, n_retries=1, current_best_ms=None, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
@@ -208,15 +208,6 @@ class Autotuner:
                 end_event.record()
                 torch.cuda.synchronize()
                 state.update(start_event.elapsed_time(end_event) / n_repeat)
-
-                # early stop
-                if current_best_ms is not None and i >= 3:
-                    remaining_retries = n_retries - (i + 1)
-                    estimated_rem_time = remaining_retries * state.min
-                    if state.sum + estimated_rem_time > current_best_ms * n_retries:
-                        self.early_stop_cnt += 1
-                        del g
-                        return state.avg
             del g
             return state.avg
         except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
