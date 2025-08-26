@@ -11,7 +11,7 @@ from typing import List
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
-from lightllm.server.core.objs.shm_req_manager import ShmReqManager
+from lightllm.server.core.objs.shm_req_manager import ShmReqManager, StartArgs
 from lightllm.server.multimodal_params import AudioItem
 from .model_infer.model_rpc import start_model_process, AudioModelRpcClient
 from lightllm.utils.graceful_utils import graceful_registry
@@ -24,20 +24,22 @@ logger = init_logger(__name__)
 class AudioManager:
     def __init__(
         self,
-        args,
-        router_port,
-        audio_port,
-        cache_port,
+        args: StartArgs,
         infer_batch_size=4,
     ):
         context = zmq.asyncio.Context(2)
-        self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
 
-        self.recv_from_visualserver = context.socket(zmq.PULL)
-        self.recv_from_visualserver.bind(f"{args.zmq_mode}127.0.0.1:{audio_port}")
-        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
-        self.cache_port = cache_port
+        if args.enable_cpu_cache:
+            self.send_to_next_module = context.socket(zmq.PUSH)
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+        else:
+            self.send_to_next_module = context.socket(zmq.PUSH)
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+
+        self.zmq_recv_socket = context.socket(zmq.PULL)
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+        self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+        self.cache_port = args.cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
@@ -92,7 +94,7 @@ class AudioManager:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
                         # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
                         # 需要一些一致的流程来保证不出现异步问题。
-                        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                         continue
 
                     multimodal_params = group_req_indexes.multimodal_params
@@ -108,24 +110,26 @@ class AudioManager:
                             await self.infer_audios(audios_need_infer)
                             audios_need_infer = []
                             for _group_req_indexes in processing_group_reqs:
-                                self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                                self.send_to_next_module.send_pyobj(
+                                    _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
+                                )
                             processing_group_reqs = []
 
                     if len(audios_need_infer) == 0:
-                        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
                 if len(audios_need_infer) > 0:
                     await self.infer_audios(audios_need_infer)
                     for _group_req_indexes in processing_group_reqs:
-                        self.send_to_router.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     processing_group_reqs = []
                     audios_need_infer = []
 
     async def loop_for_netio_req(self):
         while True:
-            recv_req: GroupReqIndexes = await self.recv_from_visualserver.recv_pyobj()
+            recv_req: GroupReqIndexes = await self.zmq_recv_socket.recv_pyobj()
             if isinstance(recv_req, GroupReqIndexes):
                 self.waiting_reqs.append(recv_req)
             else:
@@ -139,13 +143,13 @@ class AudioManager:
         return
 
 
-def start_audio_process(args, router_port, audio_port, cache_port, pipe_writer):
+def start_audio_process(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::audio_server")
 
     try:
-        audioserver = AudioManager(args, router_port, audio_port, cache_port)
+        audioserver = AudioManager(args=args)
         asyncio.run(audioserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))

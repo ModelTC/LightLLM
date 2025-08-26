@@ -2,6 +2,7 @@ import uuid
 from typing import List
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class ChunkedBeamContinuesBatchQueue(BaseQueue):
@@ -90,8 +91,13 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
         new_batch_first_router_need_tokens = 0  # 主要是对 prefill 大块计算时候的token数量限制
         aborted_count = 0
         cur_group_reqs = []
+        # 在开启 cpu cache 功能的情况下，由于multi_level_kv_cache 模块会对请求申请一些cpu kv cache
+        # 页面，这些页面的释放是在推理进程中完成的，所以如果直接在调度的时候就退出，会导致这些页面无法回收
+        # ，所以在使能 cpu cache 的情况下，不在调度的过程中进行 cpu cache页面的释放，而是延迟到推理的
+        # 过程中进行回收
+        disable_queue_aborted = get_env_start_args().enable_cpu_cache
         for req in self.waiting_req_list:
-            if req.is_aborted:
+            if req.is_aborted and not disable_queue_aborted:
                 aborted_count += 1
                 abort_req_list.append(req)
                 continue

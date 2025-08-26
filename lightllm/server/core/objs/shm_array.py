@@ -10,7 +10,7 @@ class ShmArray:
         self.shm = None
         self.arr = None
         self.name = name
-        self.dtype_byte_num = np.array([1], dtype=dtype).dtype.itemsize
+        self.dtype_byte_num = np.dtype(dtype=dtype).itemsize
         self.dest_size = np.prod(shape) * self.dtype_byte_num
         self.shape = shape
         self.dtype = dtype
