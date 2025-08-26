@@ -13,6 +13,7 @@ import fcntl
 from lightllm.utils.log_utils import init_logger
 import traceback
 from typing import Callable, Optional, Union, List
+from lightllm.utils.envs_utils import is_triton_autotune_enabled, disable_triton_autotune
 
 logger = init_logger(__name__)
 
@@ -43,16 +44,6 @@ def autotune(
         )
 
     return decorator
-
-
-def is_triton_autotune_enabled():
-    # Whether Triton autotune is enabled (read-only check)
-    return os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1"
-
-
-def disable_triton_autotune():
-    # Disable Triton autotune (setter)
-    os.environ["LIGHTLLM_TRITON_AUTOTUNE"] = "0"
 
 
 class Autotuner:
@@ -148,8 +139,6 @@ class Autotuner:
                 os.makedirs(self.cache_dir, exist_ok=True)
 
         self._loaded_static_keys = set()
-        self.sorted_cached_configs = {}
-        self.early_stop_cnt = 0
 
     @lru_cache(maxsize=None)
     def _ensure_cache_loaded(self, static_key: str):
@@ -160,15 +149,11 @@ class Autotuner:
             try:
                 with open(cache_file, "rb") as f:
                     self.cached_configs[static_key] = orjson.loads(f.read())
-                    self.sorted_cached_configs[static_key] = [
-                        (int(k), v) for k, v in self.cached_configs[static_key].items()
-                    ]
-                    self.sorted_cached_configs[static_key].sort(key=lambda x: x[0])
             except Exception:
                 self.cached_configs[static_key] = {}
         self._loaded_static_keys.add(static_key)
 
-    def _bench(self, *args, n_repeat=5, n_retries=1, current_best_ms=None, **kwargs):
+    def _bench(self, *args, n_repeat=5, n_retries=1, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
@@ -234,10 +219,10 @@ class Autotuner:
             rank_id = get_global_rank()
             _best_config = self.default_config
             best_time = float("inf")
-            self.early_stop_cnt = 0
+
             bar = tqdm(
                 self.configs,
-                desc=f"Autotuning {self.name} for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}",
+                desc=f"Autotuning {self.name} for {_run_key}",
                 position=get_global_rank(),
                 dynamic_ncols=True,
             )
@@ -245,15 +230,14 @@ class Autotuner:
             for i, config in enum_configs:
                 kwargs_with_config = kwargs.copy()
                 kwargs_with_config["run_config"] = config
-                run_time = self._bench(*args, current_best_ms=best_time, **kwargs_with_config)
+                run_time = self._bench(*args, **kwargs_with_config)
                 if run_time < best_time:
                     best_time = run_time
                     _best_config = config
                 bar.set_description(
-                    f"Autotuning {self.name} [rank:{rank_id}] \
-                        for {_run_key}, es:{self.early_stop_cnt / len(self.configs):.2%}, \
-                        best_time: {best_time:.5f}"
+                    f"Autotuning {self.name} [rank:{rank_id}] for {_run_key}, best_time: {best_time:.5f}"
                 )
+
             world_size = dist.get_world_size() if dist.is_initialized() else 1
             if world_size > 1:
                 local_best = torch.tensor([best_time], device="cuda")
@@ -268,24 +252,21 @@ class Autotuner:
             if static_key not in self.cached_configs:
                 self.cached_configs[static_key] = {}
             self.cached_configs[static_key][run_key] = _best_config
-            self.sorted_cached_configs[static_key] = [(int(k), v) for k, v in self.cached_configs[static_key].items()]
-            self.sorted_cached_configs[static_key].sort(key=lambda x: x[0])
 
+            # save configs to file
             if not dist.is_initialized() or get_global_rank() == 0:
-                if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
-                    cache_file = os.path.join(self.cache_dir, f"{static_key}.json")
-                    with open(cache_file, "wb") as f:
-                        fcntl.flock(f, fcntl.LOCK_EX)
-                        try:
-                            f.write(
-                                orjson.dumps(
-                                    self.cached_configs[static_key], option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
-                                )
+                cache_file = os.path.join(self.cache_dir, f"{static_key}.json")
+                with open(cache_file, "wb") as f:
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    try:
+                        f.write(
+                            orjson.dumps(
+                                self.cached_configs[static_key], option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
                             )
-                        finally:
-                            fcntl.flock(f, fcntl.LOCK_UN)
-                    if self.print_autotune:
-                        logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
+                        )
+                    finally:
+                        fcntl.flock(f, fcntl.LOCK_UN)
+                logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
 
             kwargs["run_config"] = self.cached_configs[static_key][run_key]
             full_nargs = {**self.nargs, **kwargs}
@@ -294,7 +275,8 @@ class Autotuner:
         if static_key not in self.cached_configs:
             if not is_triton_autotune_enabled():
                 logger.warning(
-                    f"No kernel config for {self.name} in {self.cache_dir}/{static_key}, using default config",
+                    f"No kernel config for {self.name} - {static_key}, \
+                    using default config. Use `LIGHTLLM_TRITON_AUTOTUNE=1` to enable autotune.",
                 )
             self.cached_configs[static_key] = {}
 

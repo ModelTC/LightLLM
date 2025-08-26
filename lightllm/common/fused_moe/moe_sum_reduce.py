@@ -52,15 +52,19 @@ def _get_static_key(input, output):
     return f"topk_num={input.shape[1]},hidden_dim={input.shape[2]},out_dtype={output.dtype}"
 
 
-@autotune(
-    name="moe_sum_reduce:v1",
-    configs=[
+def _get_moe_sum_reduce_configs():
+    return [
         {"BLOCK_M": bm, "BLOCK_DIM": bd, "NUM_STAGE": ns, "num_warps": nw}
         for ns in [1, 2, 4]
         for nw in [1, 2, 4, 8, 16]
         for bm in [1, 2, 4, 8, 16, 32]
         for bd in [64, 128, 256, 512, 1024]
-    ],
+    ]
+
+
+@autotune(
+    name="moe_sum_reduce:v1",
+    configs=_get_moe_sum_reduce_configs,
     static_key_func=_get_static_key,
     run_key_func=lambda input: str(nearest_power_of_2(input.shape[0])),
 )

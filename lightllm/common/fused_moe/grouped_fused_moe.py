@@ -471,9 +471,8 @@ def _get_grouped_matmul_static_key(
     )
 
 
-@autotune(
-    name="grouped_matmul:v1",
-    configs=[
+def _get_grouped_matmul_configs():
+    return [
         {
             "BLOCK_SIZE_M": bm,
             "BLOCK_SIZE_N": bn,
@@ -488,7 +487,12 @@ def _get_grouped_matmul_static_key(
         for bm in [16, 32, 64, 128]
         for bn in [16, 32, 64, 128]
         for bk in [16, 32, 64, 128]
-    ],
+    ]
+
+
+@autotune(
+    name="grouped_matmul:v1",
+    configs=_get_grouped_matmul_configs,
     static_key_func=_get_grouped_matmul_static_key,
     run_key_func=lambda token_num_mul_topk_num: str(nearest_power_of_2(token_num_mul_topk_num)),
 )

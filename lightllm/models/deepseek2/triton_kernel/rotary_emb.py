@@ -120,10 +120,11 @@ def get_static_key(q, k):
 
 @autotune(
     name="rotary_emb_fwd:v1",
-    configs=get_test_configs(),
+    configs=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=lambda q: str(nearest_power_of_2(q.shape[0])),
 )
+@torch.no_grad()
 def rotary_emb_fwd(q, k, cos, sin, run_config=None):
     total_len = q.shape[0]
     head_num_q, head_num_k = q.shape[1], k.shape[1]
