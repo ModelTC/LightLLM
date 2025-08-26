@@ -41,11 +41,6 @@ def autotune(
 
 
 class Autotuner:
-    @staticmethod
-    def _get_param_names(func: Callable) -> List[str]:
-        sig = inspect.signature(func)
-        return [name for name, p in sig.parameters.items()]
-
     def __init__(
         self,
         fn,
@@ -73,26 +68,27 @@ class Autotuner:
         self.run_key_func = run_key_func
         self.run_key_distance_func = run_key_distance_func
         self.cached_configs = {}
-        self.arg_names = [param.name for param in inspect.signature(fn).parameters.values()]
+        self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
         self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
 
-        self._static_key_func_param_names = self._get_param_names(self.static_key_func)
-        self._run_key_func_param_names = self._get_param_names(self.run_key_func)
-
+        self._static_key_func_param_names = [
+            name for name, _ in inspect.signature(self.static_key_func).parameters.items()
+        ]
+        self._run_key_func_param_names = [name for name, _ in inspect.signature(self.run_key_func).parameters.items()]
         self.mutates_args = mutates_args
-
-        if not os.path.exists(self.cache_dir):
-            if is_triton_autotune_enabled():
-                os.makedirs(self.cache_dir, exist_ok=True)
+        return
 
     def _try_load_cache(self, static_key):
         if static_key in self.cached_configs:
             return
+
+        os.makedirs(self.cache_dir, exist_ok=True)
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
+        return
 
     def _bench(self, *args, n_repeat=5, n_retries=1, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
