@@ -87,7 +87,7 @@ class Autotuner:
         if self.disable_autotune:
             return self.fn(*args, **kwargs)
 
-        static_key = self._static_key(*args, **kwargs)
+        static_key = frozendict(self._static_key(*args, **kwargs))
         run_key = self._run_key(*args, **kwargs)
 
         # Lazy load
