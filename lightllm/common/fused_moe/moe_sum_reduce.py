@@ -67,6 +67,7 @@ def _get_moe_sum_reduce_configs():
     configs_gen_func=_get_moe_sum_reduce_configs,
     static_key_func=_get_moe_sum_reduce_static_key,
     run_key_func=lambda input: input.shape[0],
+    mutates_args=["output"],
 )
 def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict = None):
     assert input.is_contiguous()

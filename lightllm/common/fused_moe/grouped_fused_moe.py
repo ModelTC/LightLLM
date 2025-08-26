@@ -493,6 +493,7 @@ def _get_grouped_matmul_configs():
     configs_gen_func=_get_grouped_matmul_configs,
     static_key_func=_get_grouped_matmul_static_key,
     run_key_func=lambda token_inputs: token_inputs.shape[0],
+    mutates_args=["out"],
 )
 def grouped_matmul(
     token_num_mul_topk_num: int,
