@@ -80,13 +80,6 @@ def get_shm_name_embed(uid):
     return str(uid) + "-embed"
 
 
-def afs_embed_exists(md5sum: str):
-    uid_int = int(md5sum, 16)
-    filename = f"{uid_int}-embed"
-    fullpath = os.path.join(get_env_start_args().visual_embed_path, filename)
-    return True if os.path.isfile(fullpath) else False
-
-
 """
 Importable Redis-backed MD5 refcount with LRU eviction.
 

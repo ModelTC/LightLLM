@@ -16,7 +16,7 @@ from typing import Union, List, Tuple, Dict, Optional
 from fastapi import Request
 from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole
-from ..embed_cache.utils import get_shm_name_data, create_shm, afs_embed_exists
+from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
@@ -116,10 +116,6 @@ class HttpServerManager:
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
-
-    async def _check_and_set_new_id_range(self, token_num):
-        assert self.token_id_range_start + token_num < self.token_id_range_end
-        self.token_id_range_start += token_num
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
 
@@ -253,7 +249,7 @@ class HttpServerManager:
         # health 请求 request_id 为负数，直接返回
         if is_health_req:
             return sampling_params.group_request_id
-        if self.pd_mode == NodeRole.NORMAL or self.pd_mode == NodeRole.LLM_ONLY:
+        if self.pd_mode.is_normal():
             if not self.is_multinode_tp:
                 group_request_id = self.id_gen.generate_id()
             else:
