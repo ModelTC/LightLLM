@@ -3,8 +3,6 @@ import orjson
 import os
 import inspect
 import torch
-import fcntl
-import random
 import torch.distributed as dist
 from pathlib import Path
 from tqdm import tqdm
@@ -14,7 +12,7 @@ from lightllm.utils.log_utils import init_logger
 from typing import Callable, Optional, Union, List
 from lightllm.utils.envs_utils import is_triton_autotune_enabled
 from lightllm.common.kernel_config import KernelConfigs
-from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size, get_global_rank
+from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 
 logger = init_logger(__name__)
 
@@ -143,7 +141,7 @@ class Autotuner:
                     kernel_call()
             torch.cuda.synchronize()
 
-            state = BenchmarkState()
+            state = _BenchmarkState()
             for i in range(n_retries):
                 start_event = torch.cuda.Event(enable_timing=True)
                 end_event = torch.cuda.Event(enable_timing=True)
@@ -158,15 +156,14 @@ class Autotuner:
             return float("inf")
 
     def _autotune(self, args, kwargs, static_key, run_key):
-        if self.configs is None:
-            self.configs = split_configs(self.configs_gen_func())
+        rank_tuning_configs = split_configs(self.configs_gen_func())
 
         rank_id = get_global_rank()
         _best_config = None
         best_time = float("inf")
 
         bar = tqdm(
-            self.configs,
+            rank_tuning_configs,
             desc=f"Autotuning {self.kernel_name} for {run_key}",
             position=get_global_rank(),
             dynamic_ncols=True,
@@ -202,19 +199,13 @@ class Autotuner:
         if not dist.is_initialized() or get_global_rank() == 0:
             cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
             with open(cache_file, "wb") as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                try:
-                    f.write(
-                        orjson.dumps(
-                            self.cached_configs[static_key],
-                            option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS,
-                        )
+                f.write(
+                    orjson.dumps(
+                        self.cached_configs[static_key],
+                        option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS,
                     )
-                finally:
-                    fcntl.flock(f, fcntl.LOCK_UN)
-            logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
-
-        kwargs["run_config"] = self.cached_configs[static_key][run_key]
+                )
+            logger.info(f"Saved configs for {self.kernel_name} - {static_key} - {run_key}")
 
     def _mutate_args_clone(self, args, kwargs):
         new_kwargs = kwargs.copy()
@@ -222,11 +213,11 @@ class Autotuner:
 
         for name in self.mutates_args:
             if name in kwargs:
-                new_kwargs[name] = kwargs[name].clone()
+                new_kwargs[name] = None if kwargs[name] is None else kwargs[name].clone()
             else:
                 pos = self._argname_to_pos.get(name, None)
                 if pos is not None and pos < len(args):
-                    new_args[pos] = args[pos].clone()
+                    new_args[pos] = None if args[pos] is None else args[pos].clone()
                 else:
                     raise KeyError(f"Missing argument '{name}' required to be mutated")
         return tuple(new_args), new_kwargs
@@ -256,7 +247,7 @@ class Autotuner:
         return self.run_key_func(*params)
 
 
-class BenchmarkState:
+class _BenchmarkState:
     def __init__(self):
         self.sum = 0
         self.min = float("inf")
@@ -275,8 +266,6 @@ def get_triton_version():
 
 
 def split_configs(configs):
-
-    random.shuffle(configs)
-    rank_in_node = get_current_rank_in_node()
-    node_world_size = get_node_world_size()
-    return configs[rank_in_node::node_world_size]
+    global_rank = get_global_rank()
+    global_world_size = get_global_world_size()
+    return configs[global_rank::global_world_size]
