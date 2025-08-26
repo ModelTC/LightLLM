@@ -26,14 +26,12 @@ def autotune(
     configs_gen_func: Callable[[], List],
     static_key_func: Callable,
     run_key_func: Callable,
-    run_key_distance_func: Callable = lambda run_key, run_key_cached: abs(run_key - run_key_cached),
+    run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
     mutates_args: List[str] = [],
 ):
     def decorator(fn):
-        arg_names = [param.name for param in inspect.signature(fn).parameters.values()]
         return Autotuner(
             fn=fn,
-            arg_names=arg_names,
             kernel_name=kernel_name,
             configs_gen_func=configs_gen_func,
             static_key_func=static_key_func,
@@ -54,12 +52,11 @@ class Autotuner:
     def __init__(
         self,
         fn,
-        arg_names: List[str],
         kernel_name: str,
         configs_gen_func: Callable[[], List],
         static_key_func: Callable,
         run_key_func: Callable,
-        run_key_distance_func: Callable = lambda run_key, run_key_cached: abs(run_key - run_key_cached),
+        run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
         mutates_args: List[str] = [],
     ):
         # Whether to use this autotune decorator
@@ -79,11 +76,12 @@ class Autotuner:
         self.run_key_func = run_key_func
         self.run_key_distance_func = run_key_distance_func
         self.cached_configs = {}
-        self.arg_names = arg_names
+        self.arg_names = [param.name for param in inspect.signature(fn).parameters.values()]
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
+        self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
 
-        self._static_param_names = self._get_param_names(self.static_key_func)
-        self._run_param_names = self._get_param_names(self.run_key_func)
+        self._static_key_func_param_names = self._get_param_names(self.static_key_func)
+        self._run_key_func_param_names = self._get_param_names(self.run_key_func)
 
         self.mutates_args = mutates_args
 
@@ -91,8 +89,7 @@ class Autotuner:
             if is_triton_autotune_enabled():
                 os.makedirs(self.cache_dir, exist_ok=True)
 
-    @lru_cache(maxsize=None)
-    def _ensure_cache_loaded(self, static_key):
+    def _try_load_cache(self, static_key):
         if static_key in self.cached_configs:
             return
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
@@ -104,19 +101,12 @@ class Autotuner:
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
-        full_nargs = {**self.nargs, **kwargs}
-
         def kernel_call():
-            self.pre_hook(full_nargs)
+            new_args, new_kwargs = self._mutate_args_clone(args, kwargs)
             try:
-                self.fn(*args, **kwargs)
+                self.fn(*new_args, **new_kwargs)
             except Exception as e:
-                try:
-                    self.post_hook(full_nargs, exception=e)
-                finally:
-                    raise
-
-            self.post_hook(full_nargs, exception=None)
+                raise e
 
         try:
             # warmup
@@ -211,35 +201,41 @@ class Autotuner:
         run_key = self._run_key(*args, **kwargs)
 
         # Lazy load
-        self._ensure_cache_loaded(static_key)
-        self.nargs = dict(zip(self.arg_names, args))
+        self._try_load_cache(static_key)
+
+        if is_triton_autotune_enabled():
+            if run_key not in self.cached_configs.get(static_key, {}):
+                self._autotune(args, kwargs, static_key, run_key)
 
         if static_key not in self.cached_configs:
-            if not is_triton_autotune_enabled():
-                logger.warning(
-                    f"No kernel config for {self.name} - {static_key}, \
-                    using default config. Use `LIGHTLLM_TRITON_AUTOTUNE=1` to enable autotune.",
-                )
+            logger.warning(
+                f"No kernel config for {self.kernel_name} - {static_key}, \
+                using default config. Use `LIGHTLLM_TRITON_AUTOTUNE=1` to enable autotune.",
+            )
             self.cached_configs[static_key] = {}
 
         all_configs = self.cached_configs.get(static_key)
-        best_config = all_configs.get(run_key)
 
-        if best_config is not None:
-            kwargs["run_config"] = best_config
-            return self.fn(*args, **kwargs)
-
-        if is_triton_autotune_enabled():
-            self._autotune(args, kwargs, static_key, run_key)
-            kwargs["run_config"] = self.cached_configs.get(static_key, {}).get(run_key)
-            return self.fn(*args, **kwargs)
-
-        if all_configs != {}:
-            closest_config = min(all_configs, key=lambda x: self.run_key_distance_func(int(x[0]), int(run_key)))[1]
-            self.cached_configs[static_key][run_key] = closest_config
+        if len(all_configs) != 0:
+            closest_config = min(all_configs, key=lambda c_key: self.run_key_distance_func(run_key, c_key))
             kwargs["run_config"] = closest_config
 
         return self.fn(*args, **kwargs)
+
+    def _mutate_args_clone(self, args, kwargs):
+        new_kwargs = kwargs.copy()
+        new_args = list(args).copy()
+
+        for name in self.mutates_args:
+            if name in kwargs:
+                new_kwargs[name] = kwargs[name].clone()
+            else:
+                pos = self._argname_to_pos.get(name, None)
+                if pos is not None and pos < len(args):
+                    new_args[pos] = args[pos].clone()
+                else:
+                    raise KeyError(f"Missing argument '{name}' required to be mutated")
+        return tuple(new_args), new_kwargs
 
     def _select_args(self, param_names, args, kwargs):
         if not param_names:
@@ -257,16 +253,12 @@ class Autotuner:
         return tuple(values)
 
     def _static_key(self, *args, **kwargs):
-        if self.static_key_func is None:
-            return "default"
-        params = self._select_args(self._static_param_names, args, kwargs)
+        params = self._select_args(self._static_key_func_param_names, args, kwargs)
         key = self.static_key_func(*params)
         return frozendict(key)
 
     def _run_key(self, *args, **kwargs):
-        if self.run_key_func is None:
-            return "default"
-        params = self._select_args(self._run_param_names, args, kwargs)
+        params = self._select_args(self._run_key_func_param_names, args, kwargs)
         return self.run_key_func(*params)
 
 
@@ -296,10 +288,3 @@ def split_configs(configs):
     rank_in_node = get_current_rank_in_node()
     node_world_size = get_node_world_size()
     return configs[rank_in_node::node_world_size]
-
-
-def nearest_power_of_2(x):
-    # Return the power of two closest to x
-    if x <= 1:
-        return 1
-    return triton.next_power_of_2(x - triton.next_power_of_2(x) // 4)
