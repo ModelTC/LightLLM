@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 from .moe_silu_and_mul_config import MoeSiluAndMulKernelConfig
-from lightllm.common.triton_utils.autotuner import autotune, nearest_power_of_2
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.jit

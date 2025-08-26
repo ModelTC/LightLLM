@@ -225,9 +225,7 @@ class Autotuner:
 
         # save configs to file
         if not dist.is_initialized() or get_global_rank() == 0:
-            cache_file = os.path.join(
-                self.cache_dir, f"{KernelConfigs.get_config_file_name_wo_device(static_key)}.json"
-            )
+            cache_file = os.path.join(self.cache_dir, f"{KernelConfigs.get_config_file_name(static_key)}.json")
             with open(cache_file, "wb") as f:
                 fcntl.flock(f, fcntl.LOCK_EX)
                 try:

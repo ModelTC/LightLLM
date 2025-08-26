@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 from .moe_sum_recude_config import MoeSumReduceKernelConfig
 from typing import Any, Callable, Dict, Optional, Tuple
-from lightllm.common.triton_utils.autotuner import autotune, nearest_power_of_2
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.jit
