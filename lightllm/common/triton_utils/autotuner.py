@@ -4,6 +4,7 @@ import os
 import inspect
 import torch
 import fcntl
+import random
 import torch.distributed as dist
 from pathlib import Path
 from tqdm import tqdm
@@ -13,7 +14,7 @@ from lightllm.utils.log_utils import init_logger
 from typing import Callable, Optional, Union, List
 from lightllm.utils.envs_utils import is_triton_autotune_enabled
 from lightllm.common.kernel_config import KernelConfigs
-
+from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size, get_global_rank
 
 logger = init_logger(__name__)
 
@@ -157,8 +158,6 @@ class Autotuner:
             return float("inf")
 
     def _autotune(self, args, kwargs, static_key, run_key):
-        from lightllm.utils.dist_utils import get_global_rank
-
         if self.configs is None:
             self.configs = split_configs(self.configs_gen_func())
 
@@ -274,8 +273,6 @@ def get_triton_version():
 
 
 def split_configs(configs):
-    from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
-    import random
 
     random.shuffle(configs)
     rank_in_node = get_current_rank_in_node()
