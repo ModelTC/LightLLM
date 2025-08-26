@@ -426,7 +426,9 @@ async def _process_prompts_completion(
             prompt, individual_sampling_params, multimodal_params, request=raw_request
         )
 
-        return await _collect_generation_results(generator, request, prompt_str, prompt_index)
+        return await _collect_generation_results(
+            generator, request, prompt_str, prompt_index, individual_sampling_params
+        )
 
     tasks = [asyncio.create_task(process_single_prompt(prompt, i)) for i, prompt in enumerate(prompts)]
 
@@ -485,7 +487,9 @@ async def _handle_streaming_completion(
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
-async def _collect_generation_results(generator, request: CompletionRequest, prompt: str, prompt_index: int):
+async def _collect_generation_results(
+    generator, request: CompletionRequest, prompt: str, prompt_index: int, sampling_params: SamplingParams
+):
     final_output = []
     count_output_tokens = 0
     finish_reason = None
@@ -516,9 +520,20 @@ async def _collect_generation_results(generator, request: CompletionRequest, pro
             finish_reason = finish_status.get_finish_reason()
             prompt_tokens = metadata["prompt_tokens"]
 
+    # 处理停止序列剔除
+    final_text = "".join(final_output)
+    if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
+        valid_stop_strings = sampling_params.stop_sequences.to_strings()
+        for stop_str in valid_stop_strings:
+            stop_index = final_text.rfind(stop_str, max(0, len(final_text) - len(stop_str) - 20), len(final_text))
+            if stop_index != -1:
+                logger.debug(f"removed stop sequence in tail: '{final_text[stop_index:]}'")
+                final_text = final_text[:stop_index]
+                break
+
     return {
         "index": prompt_index,
-        "text": "".join(final_output),
+        "text": final_text,
         "finish_reason": finish_reason,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": count_output_tokens,

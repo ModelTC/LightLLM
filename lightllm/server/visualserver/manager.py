@@ -164,6 +164,25 @@ class VisualManager:
                     processing_group_reqs = []
                     images_need_infer = []
 
+    async def loop_for_netio_req(self):
+        if not hasattr(self, "visual_recv_max_count"):
+            self.visual_recv_max_count = 64
+
+        while True:
+            try:
+                for _ in range(self.visual_recv_max_count):
+                    recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+                    if isinstance(recv_req, GroupReqIndexes):
+                        self.waiting_reqs_from_httpserver.append(recv_req)
+                    else:
+                        assert False, f"Error Req Inf {recv_req}"
+                self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
+            except zmq.ZMQError:
+                # 当队列已经开始清空的时候，将一次接受数量下调
+                self.visual_recv_max_count = 64
+            await asyncio.sleep(0.01)
+
+    # code for visual only mode
     async def loop_for_fwd_visual_only(self):
         while True:
             if len(self.waiting_reqs_visual_only) == 0:
@@ -265,24 +284,6 @@ class VisualManager:
         for img in multimodal_params.images:
             img.is_abort = True
         return
-
-    async def loop_for_netio_req(self):
-        if not hasattr(self, "visual_recv_max_count"):
-            self.visual_recv_max_count = 64
-
-        while True:
-            try:
-                for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
-                    if isinstance(recv_req, GroupReqIndexes):
-                        self.waiting_reqs_from_httpserver.append(recv_req)
-                    else:
-                        assert False, f"Error Req Inf {recv_req}"
-                self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
-            except zmq.ZMQError:
-                # 当队列已经开始清空的时候，将一次接受数量下调
-                self.visual_recv_max_count = 64
-            await asyncio.sleep(0.01)
 
     def clean_up(self):
         for model_rpc in self.model_rpcs:

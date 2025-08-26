@@ -392,9 +392,6 @@ class InferReq:
             self.finish_status.set_status(FinishStatus.FINISHED_LENGTH)
         return
 
-    def is_finished_or_aborted(self):
-        return self.finish_status.is_finished() or self.shm_req.router_aborted
-
     def _stop_sequences_matched(self, output_len: int):
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)
