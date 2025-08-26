@@ -225,12 +225,15 @@ class Autotuner:
 
         # save configs to file
         if not dist.is_initialized() or get_global_rank() == 0:
-            cache_file = os.path.join(self.cache_dir, f"{KernelConfigs.get_config_file_name(static_key)}.json")
+            cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
             with open(cache_file, "wb") as f:
                 fcntl.flock(f, fcntl.LOCK_EX)
                 try:
                     f.write(
-                        orjson.dumps(self.cached_configs[static_key], option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS)
+                        orjson.dumps(
+                            self.cached_configs[static_key],
+                            option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS,
+                        )
                     )
                 finally:
                     fcntl.flock(f, fcntl.LOCK_UN)
