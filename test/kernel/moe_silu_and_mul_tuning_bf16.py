@@ -44,14 +44,14 @@ def test_kernel(
         input_tuples.append((input.clone(), output.clone()))
 
     # warm_up
-    silu_and_mul_fwd(input, output, **config)
+    silu_and_mul_fwd(input, output, run_config=config)
 
     graph = torch.cuda.CUDAGraph()
 
     with torch.cuda.graph(graph):
         for index in range(test_count):
             input, output = input_tuples[index]
-            silu_and_mul_fwd(input, output, **config)
+            silu_and_mul_fwd(input, output, run_config=config)
 
     graph.replay()
 
