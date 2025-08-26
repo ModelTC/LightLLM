@@ -63,6 +63,7 @@ class Autotuner:
             get_current_device_name(),
             self.kernel_name,
         )
+        os.makedirs(self.cache_dir, exist_ok=True)
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -83,7 +84,6 @@ class Autotuner:
         if static_key in self.cached_configs:
             return
 
-        os.makedirs(self.cache_dir, exist_ok=True)
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
             with open(cache_file, "rb") as f:
