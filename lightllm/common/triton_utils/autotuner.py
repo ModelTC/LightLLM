@@ -167,7 +167,7 @@ class Autotuner:
 
         bar = tqdm(
             self.configs,
-            desc=f"Autotuning {self.name} for {run_key}",
+            desc=f"Autotuning {self.kernel_name} for {run_key}",
             position=get_global_rank(),
             dynamic_ncols=True,
         )
@@ -179,7 +179,9 @@ class Autotuner:
             if run_time < best_time:
                 best_time = run_time
                 _best_config = config
-            bar.set_description(f"Autotuning {self.name} [rank:{rank_id}] for {run_key}, best_time: {best_time:.5f}")
+            bar.set_description(
+                f"Autotuning {self.kernel_name} [rank:{rank_id}] for {run_key}, best_time: {best_time:.5f}"
+            )
 
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         if world_size > 1:
