@@ -89,8 +89,6 @@ class Autotuner:
         warmup=None,
         rep=None,
     ):
-        # Whether to print autotune logs
-        self.print_autotune = os.environ.get("LIGHTLLM_TRITON_PRINT_AUTOTUNE", "0") == "1"
         # Whether to use this autotune decorator
         self.disable_autotune = os.environ.get("DISABLE_AUTOTUNE_DECORATOR", "0") == "1"
 

@@ -48,7 +48,7 @@ def _moe_sum_reduce_kernel(
         tl.store(store_t_ptr, accumulator.to(input_ptr.dtype.element_ty), mask=offs_dim < dim_end)
 
 
-def get_static_key(input, output):
+def _get_static_key(input, output):
     return f"topk_num={input.shape[1]},hidden_dim={input.shape[2]},out_dtype={output.dtype}"
 
 
@@ -61,7 +61,7 @@ def get_static_key(input, output):
         for bm in [1, 2, 4, 8, 16, 32]
         for bd in [64, 128, 256, 512, 1024]
     ],
-    static_key_func=get_static_key,
+    static_key_func=_get_static_key,
     run_key_func=lambda input: str(nearest_power_of_2(input.shape[0])),
 )
 def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict = None):

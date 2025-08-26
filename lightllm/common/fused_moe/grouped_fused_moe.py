@@ -450,7 +450,7 @@ def grouped_matmul_kernel(
     return
 
 
-def get_grouped_matmul_static_key(
+def _get_grouped_matmul_static_key(
     expert_weights: torch.Tensor,
     topk_num: int,
     out: torch.Tensor,
@@ -489,7 +489,7 @@ def get_grouped_matmul_static_key(
         for bn in [16, 32, 64, 128]
         for bk in [16, 32, 64, 128]
     ],
-    static_key_func=get_grouped_matmul_static_key,
+    static_key_func=_get_grouped_matmul_static_key,
     run_key_func=lambda token_num_mul_topk_num: str(nearest_power_of_2(token_num_mul_topk_num)),
 )
 def grouped_matmul(
