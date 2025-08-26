@@ -1,20 +1,17 @@
 import triton
 import orjson
 import os
+import inspect
+import torch
+import fcntl
+import torch.distributed as dist
 from pathlib import Path
 from tqdm import tqdm
 from frozendict import frozendict
-import inspect
-import torch
-import torch.distributed as dist
-from functools import lru_cache
 from lightllm.utils.device_utils import get_current_device_name
-import math
-import fcntl
 from lightllm.utils.log_utils import init_logger
-import traceback
 from typing import Callable, Optional, Union, List
-from lightllm.utils.envs_utils import is_triton_autotune_enabled, disable_triton_autotune
+from lightllm.utils.envs_utils import is_triton_autotune_enabled
 from lightllm.common.kernel_config import KernelConfigs
 
 
