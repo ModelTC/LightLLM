@@ -213,6 +213,8 @@ def w8a8_block_fp8_matmul(
     _, N = B.shape
     assert triton.cdiv(K, block_k) == Ascale.shape[-1] and Ascale.shape[-1] == Bscale.shape[0]
     assert triton.cdiv(N, block_n) == Bscale.shape[1]
+    if not run_config:
+        run_config = Fp8BlockMMKernelConfig.try_to_get_best_config(M, N, K, block_size, dtype)
     grid = (triton.cdiv(M, run_config["BLOCK_M"]) * triton.cdiv(N, run_config["BLOCK_N"]),)
     _block_scaled_block_gemm[grid](
         A,
