@@ -26,7 +26,7 @@ from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status, is_triton_autotune_enabled, disable_triton_autotune
-
+from lightllm.utils.infer_utils import clear_cuda_cache_after
 
 logger = init_logger(__name__)
 
@@ -729,6 +729,7 @@ class TpPartBaseModel:
 
     @final
     @torch.no_grad()
+    @clear_cuda_cache_after
     def _autotune_warmup(self):
         if not is_triton_autotune_enabled():
             return

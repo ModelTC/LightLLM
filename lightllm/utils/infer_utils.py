@@ -91,3 +91,12 @@ def set_random_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def clear_cuda_cache_after(func):
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        torch.cuda.empty_cache()
+        return result
+
+    return wrapper
