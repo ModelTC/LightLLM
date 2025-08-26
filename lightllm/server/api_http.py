@@ -42,7 +42,6 @@ from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .visualserver.manager import VisualManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
-from .httpserver_for_visual_only.manager import HttpServerManagerForVisualOnly
 from .api_lightllm import lightllm_get_score, lightllm_get_image_embedding
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
 from lightllm.utils.log_utils import init_logger
@@ -70,7 +69,7 @@ class G_Objs:
     args: object = None
     g_generate_func: Callable = None
     g_generate_stream_func: Callable = None
-    httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster, HttpServerManagerForVisualOnly] = None
+    httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster, VisualManager] = None
     visual_manager: VisualManager = None
     shared_token_load: TokenLoad = None
 
@@ -94,11 +93,12 @@ class G_Objs:
             )
         elif args.run_mode == "visual_only":
             self.metric_client = MetricClient(args.metric_port)
-            self.httpserver_manager = HttpServerManagerForVisualOnly(
+            self.httpserver_manager = VisualManager(
                 args,
-                cache_port=args.cache_port,
+                next_module_port=None,
                 visual_port=args.visual_port,
-                metric_port=args.metric_port,
+                cache_port=None,
+                visual_model_rpc_ports=args.visual_model_rpc_ports,
             )
         elif args.run_mode == "llm_only":
             init_tokenizer(args)  # for openai api
@@ -372,6 +372,10 @@ async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
-    loop.create_task(g_objs.httpserver_manager.handle_loop())
+    if g_objs.args.run_mode == "visual_only":
+        await g_objs.httpserver_manager.wait_to_model_ready()
+        loop.create_task(g_objs.httpserver_manager.loop_for_fwd_visual_only())
+    else:
+        loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return

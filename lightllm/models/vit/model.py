@@ -178,7 +178,7 @@ class VisionTransformer:
         for i, img in enumerate(images):
             if isinstance(img, ImageItem):
                 uuids.append(img.uuid)
-                image_data = read_shm(get_shm_name_data(img.uuid))
+                image_data = img._preload_data
                 image_data = Image.open(BytesIO(image_data))
                 t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
                 img_tensors.append(t)

@@ -548,17 +548,16 @@ def visual_only_start(args):
         return
     already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
     can_use_ports = alloc_can_use_network_port(
-        num=5 + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=4 + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
         router_port,
         visual_port,
         audio_port,
-        cache_port,
         metric_port,
-    ) = can_use_ports[0:5]
-    can_use_ports = can_use_ports[5:]
+    ) = can_use_ports[0:4]
+    can_use_ports = can_use_ports[4:]
 
     visual_model_tp_ports = []
     for _ in range(args.visual_dp):
@@ -570,7 +569,6 @@ def visual_only_start(args):
     args.router_port = router_port
     args.visual_port = visual_port
     args.audio_port = audio_port
-    args.cache_port = cache_port
     args.metric_port = metric_port
     args.visual_model_rpc_ports = visual_model_tp_ports
 
@@ -585,33 +583,17 @@ def visual_only_start(args):
         start_args=[(metric_port, args)],
     )
 
-    from .visualserver.manager import start_visual_process
+    # if args.enable_multimodal_audio:
+    #     from .audioserver.manager import start_audio_process
 
-    process_manager.start_submodule_processes(
-        start_funcs=[
-            start_cache_manager,
-        ],
-        start_args=[(cache_port, args)],
-    )
-    process_manager.start_submodule_processes(
-        start_funcs=[
-            start_visual_process,
-        ],
-        start_args=[
-            (args, audio_port, visual_port, cache_port, visual_model_tp_ports),
-        ],
-    )
-    if args.enable_multimodal_audio:
-        from .audioserver.manager import start_audio_process
-
-        process_manager.start_submodule_processes(
-            start_funcs=[
-                start_audio_process,
-            ],
-            start_args=[
-                (args, router_port, audio_port, cache_port),
-            ],
-        )
+    #     process_manager.start_submodule_processes(
+    #         start_funcs=[
+    #             start_audio_process,
+    #         ],
+    #         start_args=[
+    #             (args, router_port, audio_port, cache_port),
+    #         ],
+    #     )
 
     # 启动 gunicorn
     command = [

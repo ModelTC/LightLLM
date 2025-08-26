@@ -1,13 +1,22 @@
 import zmq
+import time
 import zmq.asyncio
 import asyncio
 import uvloop
 import rpyc
 import pickle
+import hashlib
+import datetime
 import inspect
-from typing import List
-from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
+from fastapi import Request
+from ..tokenizer import get_tokenizer
+from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes, VisualOnlyReqIndexes
 from lightllm.server.core.objs import ShmReqManager
+from lightllm.server.core.objs import SamplingParams
+from lightllm.server.core.objs import Req, FinishStatus
+from typing import Union, List, Tuple, Dict, Optional
+from ..req_id_generator import ReqIDGenerator
+from lightllm.server.core.objs.io_objs import GroupReqObjs
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
@@ -30,29 +39,33 @@ class VisualManager:
         cache_port,
         visual_model_rpc_ports,
     ):
-        self.visual_only = True if args.run_mode == "visual_only" else False
+        self.args = args
+        self.visual_only = True if self.args.run_mode == "visual_only" else False
         context = zmq.Context(2)
+        self.id_gen = ReqIDGenerator()
         if not self.visual_only:
             self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
             self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
+            self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
 
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
-        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
+
         self.cache_port = cache_port
-        self.waiting_reqs: List[GroupReqIndexes] = []
+        self.waiting_reqs_from_httpserver: List[GroupReqIndexes] = []
+        self.waiting_reqs_visual_only: List[VisualOnlyReqIndexes] = []
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
         self.vit_dp = args.visual_dp
         self.vit_tp = args.visual_tp
         self.infer_batch_size = args.visual_infer_batch_size
         self.trust_remote_code = args.trust_remote_code
-        self.args = args
         self.visual_model_rpc_ports = visual_model_rpc_ports
         self.shm_req_manager = ShmReqManager()
+        self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
     async def wait_to_model_ready(self):
-
+        # 待完成，需要读取config_server来起多个vit
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
 
         for dp_rank_id in range(self.vit_dp):
@@ -102,26 +115,15 @@ class VisualManager:
         await asyncio.gather(*tasks)
         return
 
-    async def _send_to_next_module_or_release(self, group_req_indexes: GroupReqIndexes):
-        if self.visual_only:
-            for idx in group_req_indexes.shm_req_indexes:
-                shm_req = self.shm_req_manager.get_req_obj_by_index(idx)
-                shm_req.can_released_mark = True
-                shm_req.finish_status.set_status(1)
-                self.shm_req_manager.put_back_req_obj(shm_req)
-                logger.info(f"router release req id {shm_req.request_id}")
-        else:
-            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-
     async def loop_for_fwd(self):
         while True:
-            if len(self.waiting_reqs) == 0:
+            if len(self.waiting_reqs_from_httpserver) == 0:
                 await asyncio.sleep(0.01)  # 10ms
             else:
                 processing_group_reqs = []
                 images_need_infer = []
-                while len(self.waiting_reqs) > 0:
-                    group_req_indexes = self.waiting_reqs.pop(0)
+                while len(self.waiting_reqs_from_httpserver) > 0:
+                    group_req_indexes = self.waiting_reqs_from_httpserver.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
                     is_aborted = shm_req.is_aborted
                     self.shm_req_manager.put_back_req_obj(shm_req)
@@ -129,7 +131,7 @@ class VisualManager:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
                         # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
                         # 需要一些一致的流程来保证不出现异步问题。
-                        await self._send_to_next_module_or_release(group_req_indexes)
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                         continue
 
                     multimodal_params = group_req_indexes.multimodal_params
@@ -145,20 +147,124 @@ class VisualManager:
                             await self.infer_imgs(images_need_infer)
                             images_need_infer = []
                             for _group_req_indexes in processing_group_reqs:
-                                await self._send_to_next_module_or_release(group_req_indexes)
+                                self.send_to_next_module.send_pyobj(
+                                    _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
+                                )
                             processing_group_reqs = []
 
                     if len(images_need_infer) == 0:
-                        await self._send_to_next_module_or_release(group_req_indexes)
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
                 if len(images_need_infer) > 0:
                     await self.infer_imgs(images_need_infer)
                     for _group_req_indexes in processing_group_reqs:
-                        await self._send_to_next_module_or_release(group_req_indexes)
+                        self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                     processing_group_reqs = []
                     images_need_infer = []
+
+    async def loop_for_fwd_visual_only(self):
+        while True:
+            if len(self.waiting_reqs_visual_only) == 0:
+                await asyncio.sleep(0.01)  # 10ms
+            else:
+                images_need_infer = []
+
+                while len(self.waiting_reqs_visual_only) > 0:
+                    visual_req = self.waiting_reqs_visual_only.pop(0)
+
+                    for img in visual_req.multimodal_params.images:
+                        if img.is_abort:
+                            continue
+                        images_need_infer.append(img)
+
+                        if len(images_need_infer) == self.infer_batch_size:
+                            await self.infer_imgs(images_need_infer)
+                            images_need_infer = []
+
+                    if len(images_need_infer) > 0:
+                        await self.infer_imgs(images_need_infer)
+                        images_need_infer = []
+                    # 在这里release这个image，ref-1
+                    logger.info(f"req-id {visual_req.group_req_id} has been release ok")
+
+    async def _initialize_multimodal_metadata(
+        self, multimodal_params: MultimodalParams, sampling_params: SamplingParams
+    ):
+        for img in multimodal_params.images:
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
+            data = img.read()
+            # must after init_imageitem_extral_params
+            token_num = self.tokenizer.get_image_token_length(img)
+            md5sum = "{}_{}".format(
+                hashlib.md5(data).hexdigest(),
+                hashlib.md5(pickle.dumps(img.extra_params, protocol=4)).hexdigest(),
+            )
+            img.uuid = int(md5sum, 16)
+            img.token_num = token_num
+
+    async def _log_req_header(self, request_headers, group_request_id: int, image_count: int):
+
+        x_request_id = request_headers.get("X-Request-Id", "")
+        x_session_id = request_headers.get("X-Session-Id", "")
+
+        format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(
+            f"recieved req X-Request-Id:{x_request_id} "
+            f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
+            f"lightllm_req_id:{group_request_id} "
+            f"image_count:{image_count}"
+        )
+        return
+
+    def alloc_req_id(self, sampling_params, is_health_req: bool = False):
+        # 请求的 id 可以由外部传入，也可以由内部生成，但是由外部传入的时候，要自己保证全局唯一性
+        # 否则会造成异常问题。目前限制 NORMAL 模式都使用内部id替换， P 和 D 模式按需设置
+        # health 请求 request_id 为负数，直接返回
+        if is_health_req:
+            return sampling_params.group_request_id
+        group_request_id = self.id_gen.generate_id()
+
+        sampling_params.group_request_id = group_request_id
+        return group_request_id
+
+    async def generate(
+        self,
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        is_health_req: bool = False,
+    ) -> Tuple[int, str, dict, FinishStatus]:
+
+        request_headers = request.headers if request is not None else {}
+        group_request_id = self.alloc_req_id(sampling_params, is_health_req)
+
+        try:
+            await multimodal_params.verify_and_preload(request)
+            image_count = len(multimodal_params.images)
+            # 记录请求到达的相关信息
+            await self._log_req_header(request_headers, group_request_id, image_count)
+            assert (
+                len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
+            ), "too many multimodal items!"
+
+            await self._initialize_multimodal_metadata(multimodal_params, sampling_params)
+
+            visual_req_status = VisualOnlyReqIndexes(group_req_id=group_request_id, multimodal_params=multimodal_params)
+            self.waiting_reqs_visual_only.append(visual_req_status)
+
+        except Exception as e:
+            logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+            await self.abort(group_request_id, multimodal_params)
+            raise e
+        return
+
+    async def abort(self, group_req_id: int, multimodal_params: MultimodalParams):
+        logger.warning(f"aborted group_request_id {group_req_id}")
+        for img in multimodal_params.images:
+            img.is_abort = True
+        return
 
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):
@@ -169,7 +275,7 @@ class VisualManager:
                 for _ in range(self.visual_recv_max_count):
                     recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
-                        self.waiting_reqs.append(recv_req)
+                        self.waiting_reqs_from_httpserver.append(recv_req)
                     else:
                         assert False, f"Error Req Inf {recv_req}"
                 self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)

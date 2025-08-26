@@ -44,7 +44,7 @@ def create_shm(name, data):
 def create_afs(name, data):
     try:
         data_size = len(data)
-        path = os.path.join(get_env_start_args().visual_embed_path, name)
+        path = os.path.join("/mtc/sangchengmeng/afs", name)
         with open(path, "xb") as f:
             mem_view = memoryview(data)
             f.write(mem_view[:data_size])
@@ -78,7 +78,6 @@ def get_shm_name_data(uid):
 
 def get_shm_name_embed(uid):
     return str(uid) + "-embed"
-
 
 """
 Importable Redis-backed MD5 refcount with LRU eviction.

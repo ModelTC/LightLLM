@@ -46,8 +46,10 @@ class VisualModelRpcServer(rpyc.Service):
         self.cache_port = kvargs["cache_port"]
         weight_dir = kvargs["weight_dir"]
         self.vit_rank_id = kvargs["vit_rank_id"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
+        if self.args.run_mode != "visual_only":
+            self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         self.data_type = kvargs["data_type"]
+        self.visual_only = True if self.args.run_mode == "visual_only" else False
 
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
@@ -107,21 +109,28 @@ class VisualModelRpcServer(rpyc.Service):
         all_img_embeds = all_img_embeds.to(torch.device("cpu"))
 
         if self.tp_rank_id == 0:
-            ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
-            ids_to_set = []
-            for i, ready in enumerate(ready_flags):
-                if ready:
-                    continue
-                uid = uuids[i]
-                start, end = valid_ids[i]
-                cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                if self.args.run_mode == "visual_only":
-                    create_afs(get_shm_name_embed(uid), cur_embed_bytes)
-                else:
-                    create_shm(get_shm_name_embed(uid), cur_embed_bytes)
-                ids_to_set.append(uid)
-            if ids_to_set:
-                self.cache_client.root.set_items_embed(ids_to_set)
+            if self.visual_only:
+                for i, img in enumerate(images):
+                    uid = img.uuid
+                    start, end = valid_ids[i]
+                    cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
+                    create_afs(get_shm_name_embed(uid), cur_embed_bytes)  # 后面替换成redis存
+            else:
+                ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
+                ids_to_set = []
+                for i, ready in enumerate(ready_flags):
+                    if ready:
+                        continue
+                    uid = uuids[i]
+                    start, end = valid_ids[i]
+                    cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
+                    if self.args.run_mode == "visual_only":
+                        create_afs(get_shm_name_embed(uid), cur_embed_bytes)
+                    else:
+                        create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                    ids_to_set.append(uid)
+                if ids_to_set:
+                    self.cache_client.root.set_items_embed(ids_to_set)
         return
 
 
@@ -179,7 +188,7 @@ def _init_env(port, device_id):
 async def start_model_process(port, vit_tp, device_id):
     import multiprocessing
 
-    proc = multiprocessing.Process(
+    proc = multiprocessing.get_context("spawn").Process(
         target=_init_env,
         args=(
             port,
