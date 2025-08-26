@@ -119,7 +119,7 @@ def get_static_key(q, k):
 
 
 @autotune(
-    name="rotary_emb_fwd:v1",
+    kernel_name="rotary_emb_fwd:v1",
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=lambda q: q.shape[0],
