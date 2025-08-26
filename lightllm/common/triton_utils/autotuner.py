@@ -91,20 +91,14 @@ class Autotuner:
             if is_triton_autotune_enabled():
                 os.makedirs(self.cache_dir, exist_ok=True)
 
-        self._loaded_static_keys = set()
-
     @lru_cache(maxsize=None)
     def _ensure_cache_loaded(self, static_key):
-        if static_key in self._loaded_static_keys:
+        if static_key in self.cached_configs:
             return
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
-            try:
-                with open(cache_file, "rb") as f:
-                    self.cached_configs[static_key] = orjson.loads(f.read())
-            except Exception:
-                self.cached_configs[static_key] = {}
-        self._loaded_static_keys.add(static_key)
+            with open(cache_file, "rb") as f:
+                self.cached_configs[static_key] = orjson.loads(f.read())
 
     def _bench(self, *args, n_repeat=5, n_retries=1, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
