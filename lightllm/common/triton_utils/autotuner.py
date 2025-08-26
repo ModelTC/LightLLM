@@ -91,16 +91,16 @@ class Autotuner:
         # Lazy load
         self._try_load_cache(static_key)
 
-        if is_triton_autotune_enabled():
-            if run_key not in self.cached_configs.get(static_key, {}):
-                self._autotune(args, kwargs, static_key, run_key)
-
         if static_key not in self.cached_configs:
             logger.warning(
                 f"No kernel config for {self.kernel_name} - {static_key}, \
                 using default config. Use `LIGHTLLM_TRITON_AUTOTUNE=1` to enable autotune.",
             )
             self.cached_configs[static_key] = {}
+
+        if is_triton_autotune_enabled():
+            if run_key not in self.cached_configs.get(static_key, {}):
+                self._autotune(args, kwargs, static_key, run_key)
 
         all_configs = self.cached_configs.get(static_key)
 
