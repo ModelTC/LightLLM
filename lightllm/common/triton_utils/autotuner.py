@@ -81,6 +81,9 @@ class Autotuner:
 
     @torch.no_grad()
     def __call__(self, *args, **kwargs):
+        if kwargs.get("run_config", None) is not None:
+            return self.fn(*args, **kwargs)
+
         if self.disable_autotune:
             return self.fn(*args, **kwargs)
 
