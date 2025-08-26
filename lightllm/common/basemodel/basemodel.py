@@ -392,71 +392,6 @@ class TpPartBaseModel:
 
         return model_output
 
-    def _build_prefill_model_input(
-        self, input_len: int, random_token: bool = False, include_special: bool = False
-    ) -> ModelInput:
-        dummy_input_ids = (
-            torch.randint(0, 10000, (input_len,), dtype=torch.int32, device="cuda")
-            if random_token
-            else torch.ones(input_len, dtype=torch.int32, device="cuda")
-        )
-        b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-        mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
-        b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
-        b_seq_len[:] = input_len
-        b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-        total_token_num = input_len
-        b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
-
-        special_kwargs = {}
-        if include_special:
-            special_kwargs.update(self._gen_special_model_input(total_token_num))
-
-        model_input = ModelInput(
-            batch_size=1,
-            total_token_num=total_token_num,
-            max_len_in_batch=input_len,
-            input_ids=dummy_input_ids,
-            mem_indexes=mem_indexes,
-            b_req_idx=b_req_idx,
-            b_seq_len=b_seq_len,
-            b_mtp_index=b_mtp_index,
-            is_prefill=True,
-            b_ready_cache_len=b_ready_cache_len,
-            multimodal_params=[],
-            **special_kwargs,
-        )
-        return model_input
-
-    def _build_padded_prefill_hold_model_input(self, prefill_input_len: int, batch_size: int) -> ModelInput:
-        dummy_input_ids = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
-        b_req_idx = torch.tensor(
-            [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
-        )
-        mem_indexes = torch.tensor(
-            [self.mem_manager.HOLD_TOKEN_MEMINDEX for _ in range(batch_size)], dtype=torch.int32, device="cuda"
-        )
-        b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
-        b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-        total_token_num = prefill_input_len * batch_size
-        b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-
-        model_input = ModelInput(
-            batch_size=batch_size,
-            total_token_num=total_token_num,
-            max_len_in_batch=prefill_input_len,
-            input_ids=dummy_input_ids,
-            mem_indexes=mem_indexes,
-            b_req_idx=b_req_idx,
-            b_mtp_index=b_mtp_index,
-            b_seq_len=b_seq_len,
-            b_ready_cache_len=b_ready_cache_len,
-            is_prefill=True,
-            multimodal_params=[],
-            **self._gen_special_model_input(total_token_num),
-        )
-        return model_input
-
     @final
     def _context_forward(self, input_ids, infer_state: InferStateInfo):
         run_mode_index = 1 if self.enable_tpsp_mix_mode else 0
@@ -746,8 +681,25 @@ class TpPartBaseModel:
         # 模拟最大长度进行 prefill，观察是否出现 OOM
         try:
             logger.info("begin check max_len infer")
-            model_input = self._build_prefill_model_input(
-                self.batch_max_tokens, random_token=False, include_special=False
+            dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int32, device="cuda")
+            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+            mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+            b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+            b_seq_len[:] = self.batch_max_tokens
+            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+            total_token_num = self.batch_max_tokens
+            b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+            model_input = ModelInput(
+                batch_size=1,
+                total_token_num=total_token_num,
+                max_len_in_batch=self.batch_max_tokens,
+                input_ids=dummy_input_ids,
+                mem_indexes=mem_indexes,
+                b_req_idx=b_req_idx,
+                b_seq_len=b_seq_len,
+                b_mtp_index=b_mtp_index,
+                is_prefill=True,
+                b_ready_cache_len=b_ready_cache_len,
             )
             model_output = self.forward(
                 model_input,
@@ -801,7 +753,28 @@ class TpPartBaseModel:
         for input_len in warmup_lengths:
             try:
                 logger.info(f"autotune warmup for length {input_len}")
-                model_input = self._build_prefill_model_input(input_len, random_token=True, include_special=True)
+                dummy_input_ids = torch.randint(0, 10000, (input_len,), dtype=torch.int32, device="cuda")
+                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+                mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+                b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+                b_seq_len[:] = input_len
+                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+                total_token_num = input_len
+                b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+                model_input = ModelInput(
+                    batch_size=1,
+                    total_token_num=total_token_num,
+                    max_len_in_batch=input_len,
+                    input_ids=dummy_input_ids,
+                    mem_indexes=mem_indexes,
+                    b_req_idx=b_req_idx,
+                    b_seq_len=b_seq_len,
+                    b_mtp_index=b_mtp_index,
+                    is_prefill=True,
+                    b_ready_cache_len=b_ready_cache_len,
+                    multimodal_params=[],
+                    **self._gen_special_model_input(total_token_num),
+                )
                 model_output = self.forward(
                     model_input,
                 )
@@ -833,8 +806,30 @@ class TpPartBaseModel:
         # prefill init padding req.
         prefill_input_len = 1
         batch_size = 1
-        model_input = self._build_padded_prefill_hold_model_input(
-            prefill_input_len=prefill_input_len, batch_size=batch_size
+        dummy_input_ids = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
+        b_req_idx = torch.tensor(
+            [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+        )
+        mem_indexes = torch.tensor(
+            [self.mem_manager.HOLD_TOKEN_MEMINDEX for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+        )
+        b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
+        b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+        total_token_num = prefill_input_len * batch_size
+        b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+        model_input = ModelInput(
+            batch_size=batch_size,
+            total_token_num=total_token_num,
+            max_len_in_batch=prefill_input_len,
+            input_ids=dummy_input_ids,
+            mem_indexes=mem_indexes,
+            b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
+            b_seq_len=b_seq_len,
+            b_ready_cache_len=b_ready_cache_len,
+            is_prefill=True,
+            multimodal_params=[],
+            **self._gen_special_model_input(total_token_num),
         )
 
         model_output: ModelOutput = self.forward(model_input)
