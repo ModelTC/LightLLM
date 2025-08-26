@@ -2,6 +2,7 @@ import rpyc
 import uuid
 import inspect
 from typing import Union, Optional
+from lightllm.server.core.objs import StartArgs
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.embed_cache.impl.naive_memory_cache import InMemoryCache
 from rpyc.utils.classic import obtain
@@ -49,7 +50,7 @@ class CacheServer(rpyc.Service):
         return self._impl.get_items_embed(ids)
 
 
-def start_cache_manager(port: int, args, pipe_writer):
+def start_cache_manager(args: StartArgs, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
@@ -57,7 +58,7 @@ def start_cache_manager(port: int, args, pipe_writer):
     service = CacheServer(manager)
     from rpyc.utils.server import ThreadedServer
 
-    t = ThreadedServer(service, port=port, protocol_config={"allow_pickle": True})
+    t = ThreadedServer(service, port=args.cache_port, protocol_config={"allow_pickle": True})
     pipe_writer.send("init ok")
     t.start()
 

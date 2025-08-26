@@ -505,4 +505,25 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=0.03,
         help="""The interval of the schedule time, default is 30ms.""",
     )
+    parser.add_argument(
+        "--enable_cpu_cache",
+        action="store_true",
+        help="""enable cpu cache to store kv cache.""",
+    )
+    parser.add_argument(
+        "--cpu_cache_storage_size",
+        type=float,
+        default=2,
+        help="""The capacity of cpu cache. GB used.""",
+    )
+    parser.add_argument(
+        "--cpu_cache_token_page_size",
+        type=int,
+        default=256,
+        help="""The token page size of cpu cache""",
+    )
+    parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
+    parser.add_argument(
+        "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
+    )
     return parser

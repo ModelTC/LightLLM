@@ -1,6 +1,4 @@
-import os
-import copy
-import time
+import enum
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -33,10 +31,15 @@ class InferenceContext:
     vocab_size = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
+    cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
 
     def register(
-        self, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int
+        self, backend, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int
     ):
+        self.args = get_env_start_args()
+        from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+
+        self.backend: ModeBackend = backend
         self.req_manager = req_manager
         self.req_sampling_manager = self.req_manager.req_sampling_params_manager
         self.radix_cache = radix_cache
@@ -53,6 +56,11 @@ class InferenceContext:
         if self.overlap_stream is None:
             self.overlap_stream = torch.cuda.Stream()
         return self.overlap_stream
+
+    def get_cpu_kv_cache_stream(self) -> torch.cuda.Stream:
+        if self.cpu_kv_cache_stream is None:
+            self.cpu_kv_cache_stream = torch.cuda.Stream()
+        return self.cpu_kv_cache_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
@@ -100,7 +108,7 @@ class InferenceContext:
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
 
             if is_group_finished:
-                prefix_len = self.radix_cache.insert(key, value)
+                prefix_len, _ = self.radix_cache.insert(key, value)
                 old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
                 free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
                 if req.shared_kv_node is not None:
@@ -274,6 +282,20 @@ class InferSamplingParams:
 
 
 class InferReq:
+    class _CpuCacheTaskStatus(enum.Enum):
+        NOT_STARTED = 0
+        RUNNING = 1
+        FINISHED = 2
+
+        def is_not_started(self):
+            return self == self.NOT_STARTED
+
+        def is_running(self):
+            return self == self.RUNNING
+
+        def is_finished(self):
+            return self == self.FINISHED
+
     def __init__(
         self,
         req_id: int,
@@ -298,6 +320,10 @@ class InferReq:
         self.filter_mark = False
         self.need_out_token_id_statistics = True
         self.out_token_id_count: Dict[int, int] = None
+
+        # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
+        # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
+        self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
