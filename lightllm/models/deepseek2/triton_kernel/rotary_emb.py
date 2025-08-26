@@ -121,7 +121,6 @@ def get_static_key(q, k):
 @autotune(
     name="rotary_emb_fwd:v1",
     configs=get_test_configs(),
-    default_config={"BLOCK_SEQ": 16, "NUM_STAGE": 1, "num_warps": 1, "num_stages": 1, "HEAD_PARALLEL_NUM": 1},
     static_key_func=get_static_key,
     run_key_func=lambda q: str(nearest_power_of_2(q.shape[0])),
 )

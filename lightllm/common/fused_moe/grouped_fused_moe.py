@@ -489,14 +489,6 @@ def get_grouped_matmul_static_key(
         for bn in [16, 32, 64, 128]
         for bk in [16, 32, 64, 128]
     ],
-    default_config={
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 64,
-        "BLOCK_SIZE_K": 32,
-        "GROUP_SIZE_M": 8,
-        "num_warps": 4,
-        "num_stages": 1,
-    },
     static_key_func=get_grouped_matmul_static_key,
     run_key_func=lambda token_num_mul_topk_num: str(nearest_power_of_2(token_num_mul_topk_num)),
 )

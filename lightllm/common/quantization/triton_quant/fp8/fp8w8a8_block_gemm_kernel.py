@@ -179,7 +179,6 @@ def get_static_key(A, B, block_size, dtype):
 @autotune(
     name="w8a8_block_fp8_matmul:v1",
     configs=get_test_configs(),
-    default_config={"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_M": 32, "num_stages": 3, "num_warps": 4},
     static_key_func=get_static_key,
     run_key_func=lambda M: str(nearest_power_of_2(M)),
 )

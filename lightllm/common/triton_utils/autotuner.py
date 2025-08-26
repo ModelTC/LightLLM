@@ -19,7 +19,6 @@ logger = init_logger(__name__)
 def autotune(
     name,
     configs,
-    default_config,
     static_key_func=None,
     run_key_func=None,
     reset_to_zero=None,
@@ -34,7 +33,6 @@ def autotune(
             arg_names,
             name,
             configs,
-            default_config,
             static_key_func,
             run_key_func,
             reset_to_zero,
@@ -44,6 +42,16 @@ def autotune(
         )
 
     return decorator
+
+
+def is_triton_autotune_enabled():
+    # Whether Triton autotune is enabled (read-only check)
+    return os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1"
+
+
+def disable_triton_autotune():
+    # Disable Triton autotune (setter)
+    os.environ["LIGHTLLM_TRITON_AUTOTUNE"] = "0"
 
 
 class Autotuner:
@@ -72,7 +80,6 @@ class Autotuner:
         arg_names,
         name,
         configs,
-        default_config,
         static_key_func,
         run_key_func,
         reset_to_zero,
@@ -82,11 +89,13 @@ class Autotuner:
         warmup=None,
         rep=None,
     ):
-        # 是否打印autotune信息
+        # Whether to print autotune logs
         self.print_autotune = os.environ.get("LIGHTLLM_TRITON_PRINT_AUTOTUNE", "0") == "1"
+        # Whether to use this autotune decorator
+        self.disable_autotune = os.environ.get("DISABLE_AUTOTUNE_DECORATOR", "0") == "1"
+
         self.all_configs = configs
         self.configs = None
-        self.default_config = default_config
         self.name = name
         self.cache_dir = os.path.join(
             Path(__file__).parent, "all_kernel_configs", get_triton_version(), get_current_device_name(), self.name
@@ -94,11 +103,6 @@ class Autotuner:
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
-
-        # 是否使用之前配置
-        self.can_be_none = os.environ.get("DISABLE_MANUAL_TUNE_CONFIG", "0") == "0"
-        # 是否使用autotune注解
-        self.disable_autotune = os.environ.get("DISABLE_AUTOTUNE_ANNOTATION", "0") == "1"
 
         self.cached_configs = {}
         self.arg_names = arg_names
@@ -165,7 +169,6 @@ class Autotuner:
                     ]
                     self.sorted_cached_configs[static_key].sort(key=lambda x: x[0])
             except Exception:
-                # 若缓存损坏，忽略并在之后覆盖
                 self.cached_configs[static_key] = {}
         self._loaded_static_keys.add(static_key)
 
@@ -229,9 +232,8 @@ class Autotuner:
         static_key = self._static_key(*args, **kwargs)
         run_key = self._run_key(*args, **kwargs)
 
-        # 懒加载
+        # Lazy load
         self._ensure_cache_loaded(static_key)
-        best_config = None
         self.nargs = dict(zip(self.arg_names, args))
 
         def _benchmark(_run_key):
@@ -300,30 +302,30 @@ class Autotuner:
             full_nargs = {**self.nargs, **kwargs}
             self.pre_hook(full_nargs, reset_only=True)
 
-        best_config = self.cached_configs.get(static_key, {}).get(run_key)
+        if static_key not in self.cached_configs:
+            if not is_triton_autotune_enabled():
+                logger.warning(
+                    f"No kernel config for {self.name} in {self.cache_dir}/{static_key}, using default config",
+                )
+            self.cached_configs[static_key] = {}
 
-        if best_config is None:
-            if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
-                _benchmark(run_key)
-            elif not self.can_be_none:
-                cached_for_static = self.cached_configs.setdefault(static_key, {})
-                if static_key in self.sorted_cached_configs and self.sorted_cached_configs[static_key]:
-                    sorted_configs = self.sorted_cached_configs[static_key]
-                    try:
-                        target = int(run_key)
-                        cached_for_static[run_key] = min(sorted_configs, key=lambda x: abs(x[0] - target))[1]
-                    except Exception:
-                        cached_for_static[run_key] = self.default_config
-                else:
-                    if static_key not in self.sorted_cached_configs:
-                        logger.warning(
-                            f"No kernel config for {self.name} in {self.cache_dir}/{static_key}, using default config"
-                        )
-                    cached_for_static[run_key] = self.default_config
+        all_configs = self.cached_configs.get(static_key)
+        best_config = all_configs.get(run_key)
 
-                best_config = self.cached_configs[static_key][run_key]
+        if best_config is not None:
+            kwargs["run_config"] = best_config
+            return self.fn(*args, **kwargs)
 
-        kwargs["run_config"] = best_config
+        if is_triton_autotune_enabled():
+            _benchmark(run_key)
+            kwargs["run_config"] = self.cached_configs.get(static_key, {}).get(run_key)
+            return self.fn(*args, **kwargs)
+
+        if all_configs != {}:
+            closest_config = min(all_configs, key=lambda x: abs(int(x[0]) - int(run_key)))[1]
+            self.cached_configs[static_key][run_key] = closest_config
+            kwargs["run_config"] = closest_config
+
         return self.fn(*args, **kwargs)
 
     def _select_args(self, param_names, args, kwargs):
@@ -412,7 +414,7 @@ def dict_to_filename(data):
 
 
 def nearest_power_of_2(x):
-    # 返回最接近 x 的 2 的幂次方
+    # Return the power of two closest to x
     if x <= 1:
         return 1
     return triton.next_power_of_2(x - triton.next_power_of_2(x) // 4)

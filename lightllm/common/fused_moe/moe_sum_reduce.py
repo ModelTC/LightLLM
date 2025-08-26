@@ -61,7 +61,6 @@ def get_static_key(input, output):
         for bm in [1, 2, 4, 8, 16, 32]
         for bd in [64, 128, 256, 512, 1024]
     ],
-    default_config={"BLOCK_M": 1, "BLOCK_DIM": 128, "NUM_STAGE": 1, "num_warps": 2},
     static_key_func=get_static_key,
     run_key_func=lambda input: str(nearest_power_of_2(input.shape[0])),
 )
