@@ -729,7 +729,9 @@ class TpPartBaseModel:
     @final
     @torch.no_grad()
     def _autotune_warmup(self):
-        if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") != "1":
+        from lightllm.common.triton_utils.autotuner import is_triton_autotune_enabled, disable_triton_autotune
+
+        if not is_triton_autotune_enabled():
             return
 
         torch.distributed.barrier()
@@ -787,7 +789,7 @@ class TpPartBaseModel:
                 torch.cuda.empty_cache()
         self.layers_num = layer_num_bak
         torch.distributed.barrier()
-        os.environ["LIGHTLLM_TRITON_AUTOTUNE"] = "0"
+        disable_triton_autotune()
 
     @final
     @torch.no_grad()
