@@ -94,10 +94,10 @@ class Autotuner:
         self._loaded_static_keys = set()
 
     @lru_cache(maxsize=None)
-    def _ensure_cache_loaded(self, static_key: str):
+    def _ensure_cache_loaded(self, static_key):
         if static_key in self._loaded_static_keys:
             return
-        cache_file = os.path.join(self.cache_dir, f"{static_key}.json")
+        cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
             try:
                 with open(cache_file, "rb") as f:
