@@ -94,10 +94,10 @@ class Autotuner:
         self._try_load_cache(static_key)
 
         if static_key not in self.cached_configs:
-            logger.warning(
-                f"No kernel config for {self.kernel_name} - {static_key}, \
-                using default config. Use `LIGHTLLM_TRITON_AUTOTUNE=1` to enable autotune.",
-            )
+            if get_global_rank() == 0:
+                logger.warning(
+                    f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)}",
+                )
             self.cached_configs[static_key] = {}
 
         if is_triton_autotune_enabled():
@@ -107,7 +107,9 @@ class Autotuner:
         all_configs = self.cached_configs.get(static_key)
 
         if len(all_configs) != 0:
-            closest_config = min(all_configs, key=lambda c_key: self.run_key_distance_func(run_key, c_key))
+            closest_config = min(
+                list(all_configs.items()), key=lambda item: self.run_key_distance_func(run_key, item[0])
+            )[1]
             kwargs["run_config"] = closest_config
 
         return self.fn(*args, **kwargs)
