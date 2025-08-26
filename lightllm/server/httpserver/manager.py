@@ -137,6 +137,10 @@ class HttpServerManager:
                 item.token_num = rec["token_num"]
                 uid_list.append(rec["id"])
 
+            # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
+            if self.args.run_mode == "llm_only":
+                return
+
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
             update_data_ids = []
 
@@ -184,47 +188,6 @@ class HttpServerManager:
                     items.append(audio)
 
                 await self._alloc_resource(items, md5sums, tokens_nums, datas)
-        return
-
-    async def _wait_for_afs_embed(self, md5sum_hex: str, interval_sec: float = 0.01) -> None:
-        while not afs_embed_exists(md5sum_hex):
-            await asyncio.sleep(interval_sec)
-
-    async def _get_image_embedding_from_afs(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
-        for img in multimodal_params.images:
-            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
-            data = img.read()
-            # must after init_imageitem_extral_params
-            token_num = self.tokenizer.get_image_token_length(img)
-            md5sum = "{}_{}".format(
-                hashlib.md5(data).hexdigest(),
-                hashlib.md5(pickle.dumps(img.extra_params, protocol=4)).hexdigest(),
-            )
-            uid_int = int(md5sum, 16)
-            if not afs_embed_exists(md5sum):
-                await self._wait_for_afs_embed(md5sum)
-            img.uuid = uid_int
-            img.afs_embed = True
-            token_id_range_start = self.token_id_range_start
-            img.token_id = token_id_range_start
-            img.token_num = token_num
-
-        for audio in multimodal_params.audios:
-            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
-            data = audio.read()
-            token_num = self.tokenizer.get_audio_token_length(audio)
-            md5sum = "{}_{}".format(
-                hashlib.md5(data).hexdigest(),
-                hashlib.md5(pickle.dumps(audio.extra_params, protocol=4)).hexdigest(),
-            )
-            if not afs_embed_exists(md5sum):
-                await self._wait_for_afs_embed(md5sum)
-            uid_int = int(md5sum, 16)
-            audio.uuid = uid_int
-            audio.afs_embed = True
-            token_id_range_start = self.token_id_range_start
-            audio.token_id = token_id_range_start
-            audio.token_num = token_num
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):

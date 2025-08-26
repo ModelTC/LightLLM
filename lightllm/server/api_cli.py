@@ -478,4 +478,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=0.03,
         help="""The interval of the schedule time, default is 30ms.""",
     )
+    # redis for vit llm disaggregation
+    parser.add_argument(
+        "--redis_port",
+        type=int,
+        default=6379,
+        help="The port number for the redis service in config_server mode.",
+    )
+    parser.add_argument(
+        "--start_redis",
+        action="store_true",
+        help="Whether to start the redis service in config_server mode.",
+    )
     return parser

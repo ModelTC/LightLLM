@@ -77,10 +77,7 @@ class InMemoryCache:
                 if record.data:
                     free_shm(get_shm_name_data(id))
                 if record.embed:
-                    if self.args.run_mode == "visual_only":
-                        free_afs(get_shm_name_embed(id))
-                    else:
-                        free_shm(get_shm_name_embed(id))
+                    free_shm(get_shm_name_embed(id))
                 del self._md5_to_record[record.md5sum]
                 del self._records[id]
                 self.occupied -= 1

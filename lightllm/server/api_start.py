@@ -15,16 +15,19 @@ from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
+from lightllm.utils.redis_utils import start_redis_service
 
 logger = init_logger(__name__)
 
 
-def setup_signal_handlers(http_server_process, process_manager):
+def setup_signal_handlers(http_server_process, process_manager, redis_process=None):
     def signal_handler(sig, frame):
         if sig == signal.SIGINT:
             logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
             if http_server_process:
                 kill_recursive(http_server_process)
+            if redis_process and redis_process.poll() is None:
+                redis_process.terminate()
 
             process_manager.terminate_all_processes()
             logger.info("All processes have been forcefully terminated.")
@@ -47,6 +50,19 @@ def setup_signal_handlers(http_server_process, process_manager):
                     logger.warning("HTTP server did not exit in time, killing it...")
                     kill_recursive(http_server_process)
 
+            # 优雅关闭Redis
+            if redis_process and redis_process.poll() is None:
+                redis_process.send_signal(signal.SIGTERM)
+                start_time = time.time()
+                while (time.time() - start_time) < 10:
+                    if redis_process.poll() is not None:
+                        logger.info("Redis service has exited gracefully")
+                        break
+                    time.sleep(0.5)
+                else:
+                    logger.warning("Redis service did not exit in time, killing it...")
+                    redis_process.terminate()
+
             process_manager.terminate_all_processes()
             logger.info("All processes have been terminated gracefully.")
             sys.exit(0)
@@ -56,6 +72,8 @@ def setup_signal_handlers(http_server_process, process_manager):
 
     logger.info(f"start process pid {os.getpid()}")
     logger.info(f"http server pid {http_server_process.pid}")
+    if redis_process:
+        logger.info(f"redis service pid {redis_process.pid}")
     return
 
 
@@ -639,6 +657,9 @@ def config_server_start(args):
     if args.run_mode != "config_server":
         return
 
+    # 启动Redis服务（如果指定）
+    redis_process = start_redis_service(args)
+
     logger.info(f"all start args:{args}")
 
     set_env_start_args(args)
@@ -666,5 +687,5 @@ def config_server_start(args):
     ]
 
     http_server_process = subprocess.Popen(command)
-    setup_signal_handlers(http_server_process, process_manager)
+    setup_signal_handlers(http_server_process, process_manager, redis_process)
     http_server_process.wait()
