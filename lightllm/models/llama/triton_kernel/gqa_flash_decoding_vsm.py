@@ -6,6 +6,7 @@ from lightllm.utils.device_utils import calcu_kernel_best_vsm_count
 from frozendict import frozendict
 from functools import lru_cache
 from typing import Dict
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 class GQAVSMDecodeAttentionKernelConfig(KernelConfigs):
@@ -411,8 +412,72 @@ def emstimate_stage1_vsm(
     return num_vsm
 
 
+def _get_gqa_flash_decoding_vsm_configs():
+    configs = []
+    for block_n in [16]:
+        # for block_n in [16, 32, 64, 128]:
+        for block_q_head in [
+            16,
+        ]:
+            for stage1_num_warps in [
+                2,
+            ]:
+                # for stage1_num_warps in [2, 4, 8, 16]:
+                for stage1_num_stages in [
+                    1,
+                    # 2,
+                    # 3,
+                ]:
+                    for stage2_num_warps in [
+                        2,
+                    ]:
+                        # for stage2_num_warps in [1, 2, 4]:
+                        for stage2_num_stages in [
+                            1,
+                            # 2,
+                            # 3,
+                        ]:
+                            configs.append(
+                                {
+                                    "BLOCK_N": block_n,
+                                    "BLOCK_Q_HEAD": block_q_head,
+                                    "stage1_num_warps": stage1_num_warps,
+                                    "stage1_num_stages": stage1_num_stages,
+                                    "stage2_num_warps": stage2_num_warps,
+                                    "stage2_num_stages": stage2_num_stages,
+                                }
+                            )
+    return configs
+
+
+def _get_gqa_flash_decoding_vsm_static_key(
+    q_head_num: int,
+    q_head_dim: int,
+    kv_head_num: int,
+    out_dtype: str,
+):
+    return {
+        "q_head_num": q_head_num,
+        "q_head_dim": q_head_dim,
+        "kv_head_num": kv_head_num,
+        "out_dtype": str(out_dtype),
+    }
+
+
+@autotune(
+    name="gqa_flash_decoding_vsm:v1",
+    configs=_get_gqa_flash_decoding_vsm_configs,
+    static_key_func=_get_gqa_flash_decoding_vsm_static_key,
+    run_key_func=lambda q: q.shape[0],
+)
 def gqa_token_decode_attention_flash_decoding_vsm(
-    q, k, v, infer_state, out=None, alloc_tensor_func=torch.empty, **run_config
+    q,
+    k,
+    v,
+    infer_state,
+    out=None,
+    alloc_tensor_func=torch.empty,
+    run_config=None,
 ):
     batch_size, q_head_num, q_head_dim = q.shape
     kv_head_num = k.shape[1]
