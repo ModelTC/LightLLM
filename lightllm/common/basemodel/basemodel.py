@@ -832,6 +832,11 @@ class TpPartBaseModel:
 
         model_output: ModelOutput = self.forward(model_input)
         del model_input
+        del dummy_input_ids
+        del b_req_idx
+        del mem_indexes
+        del b_seq_len
+        del b_ready_cache_len
         del model_output
         torch.cuda.empty_cache()
         return
