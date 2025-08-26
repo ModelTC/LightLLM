@@ -180,7 +180,7 @@ def _get_static_key(A, B, block_size, dtype):
     name="w8a8_block_fp8_matmul:v1",
     configs=get_test_configs,
     static_key_func=_get_static_key,
-    run_key_func=lambda M: str(nearest_power_of_2(M)),
+    run_key_func=lambda M: M,
 )
 def w8a8_block_fp8_matmul(
     A: torch.Tensor,

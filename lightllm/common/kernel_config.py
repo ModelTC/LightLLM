@@ -15,11 +15,15 @@ class KernelConfigs(ABC):
 
     @classmethod
     def get_config_file_name(cls, params: Dict[str, Any]) -> str:
+        device_name = get_current_device_name().replace(" ", "_")
+        filename_wo_device = cls.get_config_file_name_wo_device(params)
+        return f"{filename_wo_device}_{device_name}.json"
+
+    @classmethod
+    def get_config_file_name_wo_device(cls, params: Dict[str, Any]) -> str:
         json_str = json.dumps(params, sort_keys=True)
         json_str = json_str.replace(" ", "").replace("\n", "").replace('"', "").replace(":", "=")
-        filename = json_str
-        device_name = get_current_device_name().replace(" ", "_")
-        return f"{filename}_{device_name}.json"
+        return json_str
 
     @classmethod
     @lru_cache(maxsize=None)

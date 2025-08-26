@@ -73,11 +73,15 @@ def _get_silu_and_mul_configs():
     ]
 
 
+def _get_silu_and_mul_static_key(input: torch.Tensor, output: torch.Tensor):
+    return {"N": input.shape[-1] // 2, "out_dtype": str(output.dtype)}
+
+
 @autotune(
     name="silu_and_mul_fwd:v1",
     configs=_get_silu_and_mul_configs,
-    static_key_func=lambda input, output: f"N={input.shape[-1] // 2},out_dtype={output.dtype}",
-    run_key_func=lambda input: str(nearest_power_of_2(input.shape[0])),
+    static_key_func=_get_silu_and_mul_static_key,
+    run_key_func=lambda input: input.shape[0],
 )
 def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None):
     assert input.is_contiguous()

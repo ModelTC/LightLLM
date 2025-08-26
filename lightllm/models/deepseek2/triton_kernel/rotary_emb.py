@@ -122,7 +122,7 @@ def get_static_key(q, k):
     name="rotary_emb_fwd:v1",
     configs=get_test_configs,
     static_key_func=get_static_key,
-    run_key_func=lambda q: str(nearest_power_of_2(q.shape[0])),
+    run_key_func=lambda q: q.shape[0],
 )
 @torch.no_grad()
 def rotary_emb_fwd(q, k, cos, sin, run_config=None):

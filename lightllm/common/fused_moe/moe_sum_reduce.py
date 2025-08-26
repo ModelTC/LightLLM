@@ -48,8 +48,8 @@ def _moe_sum_reduce_kernel(
         tl.store(store_t_ptr, accumulator.to(input_ptr.dtype.element_ty), mask=offs_dim < dim_end)
 
 
-def _get_static_key(input, output):
-    return f"topk_num={input.shape[1]},hidden_dim={input.shape[2]},out_dtype={output.dtype}"
+def _get_moe_sum_reduce_static_key(input: torch.Tensor, output: torch.Tensor):
+    return {"topk_num": input.shape[1], "hidden_dim": input.shape[2], "out_dtype": str(output.dtype)}
 
 
 def _get_moe_sum_reduce_configs():
@@ -65,8 +65,8 @@ def _get_moe_sum_reduce_configs():
 @autotune(
     name="moe_sum_reduce:v1",
     configs=_get_moe_sum_reduce_configs,
-    static_key_func=_get_static_key,
-    run_key_func=lambda input: str(nearest_power_of_2(input.shape[0])),
+    static_key_func=_get_moe_sum_reduce_static_key,
+    run_key_func=lambda input: input.shape[0],
 )
 def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict = None):
     assert input.is_contiguous()

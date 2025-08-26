@@ -3,6 +3,7 @@ import orjson
 import os
 from pathlib import Path
 from tqdm import tqdm
+from frozendict import frozendict
 import inspect
 import torch
 import torch.distributed as dist
@@ -14,6 +15,8 @@ from lightllm.utils.log_utils import init_logger
 import traceback
 from typing import Callable, Optional, Union, List
 from lightllm.utils.envs_utils import is_triton_autotune_enabled, disable_triton_autotune
+from lightllm.common.kernel_config import KernelConfigs
+
 
 logger = init_logger(__name__)
 
@@ -23,6 +26,7 @@ def autotune(
     configs: "Optional[Union[List, Callable[[], List]]]",
     static_key_func: "Optional[Callable]" = None,
     run_key_func: "Optional[Callable]" = None,
+    run_key_distance_func: "Optional[Callable]" = None,
     reset_to_zero=None,
     restore_value=None,
     pre_hook: "Optional[Callable]" = None,
@@ -37,6 +41,7 @@ def autotune(
             configs,
             static_key_func,
             run_key_func,
+            run_key_distance_func,
             reset_to_zero,
             restore_value,
             pre_hook=pre_hook,
@@ -72,8 +77,9 @@ class Autotuner:
         arg_names,
         name,
         configs: "Optional[Union[List, Callable[[], List]]]",
-        static_key_func: "Optional[Callable]" = None,
+        static_key_func: "Optional[Callable[[], dict]]" = None,
         run_key_func: "Optional[Callable]" = None,
+        run_key_distance_func: "Optional[Callable]" = lambda a, b: abs(a - b),
         reset_to_zero: "Optional[List]" = None,
         restore_value: "Optional[List]" = None,
         pre_hook: "Optional[Callable]" = None,
@@ -83,6 +89,8 @@ class Autotuner:
         self.disable_autotune = os.environ.get("DISABLE_AUTOTUNE_DECORATOR", "0") == "1"
 
         self.configs: "Optional[Union[List, Callable[[], List]]]" = configs
+        if not callable(self.configs):
+            self.configs = split_configs(self.configs)
         self.name = name
         self.cache_dir = os.path.join(
             Path(__file__).parent, "all_kernel_configs", get_triton_version(), get_current_device_name(), self.name
@@ -90,7 +98,7 @@ class Autotuner:
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
-
+        self.run_key_distance_func = run_key_distance_func
         self.cached_configs = {}
         self.arg_names = arg_names
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
@@ -196,6 +204,66 @@ class Autotuner:
         except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
             return float("inf")
 
+    def _autotune(self, args, kwargs, static_key, run_key):
+        from lightllm.utils.dist_utils import get_global_rank
+
+        if callable(self.configs):
+            self.configs = split_configs(self.configs())
+
+        rank_id = get_global_rank()
+        _best_config = self.default_config
+        best_time = float("inf")
+
+        bar = tqdm(
+            self.configs,
+            desc=f"Autotuning {self.name} for {run_key}",
+            position=get_global_rank(),
+            dynamic_ncols=True,
+        )
+        enum_configs = enumerate(bar)
+        for i, config in enum_configs:
+            kwargs_with_config = kwargs.copy()
+            kwargs_with_config["run_config"] = config
+            run_time = self._bench(*args, **kwargs_with_config)
+            if run_time < best_time:
+                best_time = run_time
+                _best_config = config
+            bar.set_description(f"Autotuning {self.name} [rank:{rank_id}] for {run_key}, best_time: {best_time:.5f}")
+
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        if world_size > 1:
+            local_best = torch.tensor([best_time], device="cuda")
+            all_best_times = [torch.zeros_like(local_best) for _ in range(world_size)]
+            dist.all_gather(all_best_times, local_best)
+            all_times = [t.item() for t in all_best_times]
+            min_idx = int(torch.tensor(all_times).argmin().item())
+            obj_list = [_best_config]
+            dist.broadcast_object_list(obj_list, src=min_idx)
+            _best_config = obj_list[0]
+
+        if static_key not in self.cached_configs:
+            self.cached_configs[static_key] = {}
+        self.cached_configs[static_key][run_key] = _best_config
+
+        # save configs to file
+        if not dist.is_initialized() or get_global_rank() == 0:
+            cache_file = os.path.join(
+                self.cache_dir, f"{KernelConfigs.get_config_file_name_wo_device(static_key)}.json"
+            )
+            with open(cache_file, "wb") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    f.write(
+                        orjson.dumps(self.cached_configs[static_key], option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS)
+                    )
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+            logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
+
+        kwargs["run_config"] = self.cached_configs[static_key][run_key]
+        full_nargs = {**self.nargs, **kwargs}
+        self.pre_hook(full_nargs, reset_only=True)
+
     @torch.no_grad()
     def __call__(self, *args, **kwargs):
         if self.disable_autotune:
@@ -207,70 +275,6 @@ class Autotuner:
         # Lazy load
         self._ensure_cache_loaded(static_key)
         self.nargs = dict(zip(self.arg_names, args))
-
-        def _benchmark(_run_key):
-            from lightllm.utils.dist_utils import get_global_rank
-
-            if callable(self.configs):
-                self.configs = self.configs()
-
-            self.configs = split_configs(self.configs)
-
-            rank_id = get_global_rank()
-            _best_config = self.default_config
-            best_time = float("inf")
-
-            bar = tqdm(
-                self.configs,
-                desc=f"Autotuning {self.name} for {_run_key}",
-                position=get_global_rank(),
-                dynamic_ncols=True,
-            )
-            enum_configs = enumerate(bar)
-            for i, config in enum_configs:
-                kwargs_with_config = kwargs.copy()
-                kwargs_with_config["run_config"] = config
-                run_time = self._bench(*args, **kwargs_with_config)
-                if run_time < best_time:
-                    best_time = run_time
-                    _best_config = config
-                bar.set_description(
-                    f"Autotuning {self.name} [rank:{rank_id}] for {_run_key}, best_time: {best_time:.5f}"
-                )
-
-            world_size = dist.get_world_size() if dist.is_initialized() else 1
-            if world_size > 1:
-                local_best = torch.tensor([best_time], device="cuda")
-                all_best_times = [torch.zeros_like(local_best) for _ in range(world_size)]
-                dist.all_gather(all_best_times, local_best)
-                all_times = [t.item() for t in all_best_times]
-                min_idx = int(torch.tensor(all_times).argmin().item())
-                obj_list = [_best_config]
-                dist.broadcast_object_list(obj_list, src=min_idx)
-                _best_config = obj_list[0]
-
-            if static_key not in self.cached_configs:
-                self.cached_configs[static_key] = {}
-            self.cached_configs[static_key][run_key] = _best_config
-
-            # save configs to file
-            if not dist.is_initialized() or get_global_rank() == 0:
-                cache_file = os.path.join(self.cache_dir, f"{static_key}.json")
-                with open(cache_file, "wb") as f:
-                    fcntl.flock(f, fcntl.LOCK_EX)
-                    try:
-                        f.write(
-                            orjson.dumps(
-                                self.cached_configs[static_key], option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
-                            )
-                        )
-                    finally:
-                        fcntl.flock(f, fcntl.LOCK_UN)
-                logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
-
-            kwargs["run_config"] = self.cached_configs[static_key][run_key]
-            full_nargs = {**self.nargs, **kwargs}
-            self.pre_hook(full_nargs, reset_only=True)
 
         if static_key not in self.cached_configs:
             if not is_triton_autotune_enabled():
@@ -288,12 +292,12 @@ class Autotuner:
             return self.fn(*args, **kwargs)
 
         if is_triton_autotune_enabled():
-            _benchmark(run_key)
+            self._autotune(args, kwargs, static_key, run_key)
             kwargs["run_config"] = self.cached_configs.get(static_key, {}).get(run_key)
             return self.fn(*args, **kwargs)
 
         if all_configs != {}:
-            closest_config = min(all_configs, key=lambda x: abs(int(x[0]) - int(run_key)))[1]
+            closest_config = min(all_configs, key=lambda x: self.run_key_distance_func(int(x[0]), int(run_key)))[1]
             self.cached_configs[static_key][run_key] = closest_config
             kwargs["run_config"] = closest_config
 
@@ -315,36 +319,17 @@ class Autotuner:
         return tuple(values)
 
     def _static_key(self, *args, **kwargs):
-        if callable(self.static_key_func):
-            try:
-                params = self._select_args(self._static_param_names, args, kwargs)
-                key = (
-                    self.static_key_func(*params)
-                    if self._static_param_names is not None
-                    else self.static_key_func(*args, **kwargs)
-                )
-            except Exception:
-                key = self.static_key_func(*args, **kwargs)
-            if isinstance(key, dict):
-                return dict_to_filename(key)
-            return str(key)
-        return "default"
+        if self.static_key_func is None:
+            return "default"
+        params = self._select_args(self._static_param_names, args, kwargs)
+        key = self.static_key_func(*params)
+        return frozendict(key)
 
     def _run_key(self, *args, **kwargs):
-        if callable(self.run_key_func):
-            try:
-                params = self._select_args(self._run_param_names, args, kwargs)
-                key = (
-                    self.run_key_func(*params)
-                    if self._run_param_names is not None
-                    else self.run_key_func(*args, **kwargs)
-                )
-            except Exception:
-                key = self.run_key_func(*args, **kwargs)
-            if isinstance(key, dict):
-                return dict_to_filename(key)
-            return str(key)
-        return "default"
+        if self.run_key_func is None:
+            return "default"
+        params = self._select_args(self._run_param_names, args, kwargs)
+        return self.run_key_func(*params)
 
 
 class BenchmarkState:
@@ -373,15 +358,6 @@ def split_configs(configs):
     rank_in_node = get_current_rank_in_node()
     node_world_size = get_node_world_size()
     return configs[rank_in_node::node_world_size]
-
-
-def dict_to_filename(data):
-    parts = []
-    for k, v in sorted(data.items(), key=lambda x: str(x[0])):
-        safe_k = str(k).replace(" ", "_").replace(":", "_")
-        safe_v = str(v).replace(" ", "_").replace(":", "_")
-        parts.append(f"{safe_k}={safe_v}")
-    return ",".join(parts)
 
 
 def nearest_power_of_2(x):

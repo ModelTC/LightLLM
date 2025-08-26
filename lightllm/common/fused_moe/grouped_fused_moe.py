@@ -456,19 +456,17 @@ def _get_grouped_matmul_static_key(
     out: torch.Tensor,
     mul_routed_weight: bool,
     use_fp8_w8a8: bool,
-):
+) -> dict:
     expert_num, n, k = expert_weights.shape
-    return dict_to_filename(
-        {
-            "N": n,
-            "K": k,
-            "topk_num": topk_num,
-            "expert_num": expert_num,
-            "mul_routed_weight": mul_routed_weight,
-            "use_fp8_w8a8": use_fp8_w8a8,
-            "out_dtype": str(out.dtype),
-        }
-    )
+    return {
+        "N": n,
+        "K": k,
+        "topk_num": topk_num,
+        "expert_num": expert_num,
+        "mul_routed_weight": mul_routed_weight,
+        "use_fp8_w8a8": use_fp8_w8a8,
+        "out_dtype": str(out.dtype),
+    }
 
 
 def _get_grouped_matmul_configs():
@@ -494,7 +492,7 @@ def _get_grouped_matmul_configs():
     name="grouped_matmul:v1",
     configs=_get_grouped_matmul_configs,
     static_key_func=_get_grouped_matmul_static_key,
-    run_key_func=lambda token_num_mul_topk_num: str(nearest_power_of_2(token_num_mul_topk_num)),
+    run_key_func=lambda token_num_mul_topk_num: token_num_mul_topk_num,
 )
 def grouped_matmul(
     token_num_mul_topk_num: int,
