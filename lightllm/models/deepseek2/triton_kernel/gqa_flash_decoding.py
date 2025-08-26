@@ -7,65 +7,10 @@ from typing import List
 from lightllm.utils.log_utils import init_logger
 from .gqa_flash_decoding_config import MlaDecodeAttentionKernelConfig
 from lightllm.utils.device_utils import get_device_sm_count
-from lightllm.common.triton_utils.autotuner import autotune
 
 logger = init_logger(__name__)
 
 
-def _get_gqa_flash_decoding_configs():
-    configs = []
-    for block_n in [16, 32, 64, 128]:
-        # for block_n in [16, 32, 64, 128]:
-        for block_q_head in [16, 32]:
-            for stage1_num_warps in [2, 4]:
-                # for stage1_num_warps in [2, 4, 8, 16]:
-                for stage1_num_stages in [
-                    1,
-                    2,
-                    3,
-                ]:
-                    for stage2_num_warps in [
-                        2,
-                    ]:
-                        # for stage2_num_warps in [1, 2, 4]:
-                        for stage2_num_stages in [
-                            1,
-                            2,
-                            3,
-                        ]:
-                            configs.append(
-                                {
-                                    "BLOCK_N": block_n,
-                                    "BLOCK_Q_HEAD": block_q_head,
-                                    "stage1_num_warps": stage1_num_warps,
-                                    "stage1_num_stages": stage1_num_stages,
-                                    "stage2_num_warps": stage2_num_warps,
-                                    "stage2_num_stages": stage2_num_stages,
-                                }
-                            )
-    return configs
-
-
-def _get_gqa_flash_decoding_static_key(
-    q_head_num: int,
-    kv_lora_rank: int,
-    q_rope_dim: int,
-    out_dtype: str,
-):
-    return {
-        "q_head_num": q_head_num,
-        "q_head_dim": kv_lora_rank,
-        "q_rope_dim": q_rope_dim,
-        "out_dtype": str(out_dtype),
-    }
-
-
-@autotune(
-    name="gqa_flash_decoding:v1",
-    configs=_get_gqa_flash_decoding_configs,
-    static_key_func=_get_gqa_flash_decoding_static_key,
-    run_key_func=lambda infer_state: infer_state.batch_size,
-)
 def gqa_token_decode_attention_flash_decoding(
     q_nope,
     q_rope,
@@ -79,7 +24,7 @@ def gqa_token_decode_attention_flash_decoding(
     softmax_scale,
     out=None,
     alloc_tensor_func=torch.empty,
-    run_config=None,
+    **run_config
 ):
     batch_size = infer_state.batch_size
     max_len_in_batch = infer_state.max_len_in_batch
