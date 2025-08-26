@@ -7,6 +7,7 @@ from lightllm.common.kernel_config import KernelConfigs
 from frozendict import frozendict
 from functools import lru_cache
 from typing import Dict
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 class BmmScaledFp8KernelConfig(KernelConfigs):
@@ -62,6 +63,37 @@ class BmmScaledFp8KernelConfig(KernelConfigs):
         }
         key_params = frozendict(key_params)
         return cls.store_config(key_params, config_json)
+
+
+def _get_bmm_scaled_fp8_configs():
+    configs = []
+    for block_size_m in [64, 128, 256]:
+        for block_size_n in [64, 128, 256]:
+            for block_size_k in [64, 128]:
+                for group_size_m in [4, 8, 16]:
+                    for num_warps in [4, 8]:
+                        for num_stages in [2, 3, 4]:
+                            configs.append(
+                                {
+                                    "BLOCK_SIZE_M": block_size_m,
+                                    "BLOCK_SIZE_N": block_size_n,
+                                    "BLOCK_SIZE_K": block_size_k,
+                                    "GROUP_SIZE_M": group_size_m,
+                                    "num_stages": num_stages,
+                                    "num_warps": num_warps,
+                                }
+                            )
+    return configs
+
+
+def _get_bmm_scaled_fp8_static_key(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor):
+    return {
+        "B": int(a.shape[0]),
+        "M": int(a.shape[1]),
+        "N": int(b.shape[2]),
+        "K": int(a.shape[2]),
+        "out_dtype": str(c.dtype),
+    }
 
 
 @triton.jit
@@ -142,7 +174,13 @@ def bmm_scaled_fp8_kernel(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
-def bmm_scaled_fp8(a, a_scale, b, b_scale, c, **run_config):
+@autotune(
+    name="bmm_scaled_fp8:v1",
+    configs=_get_bmm_scaled_fp8_configs,
+    static_key_func=_get_bmm_scaled_fp8_static_key,
+    run_key_func=lambda b: b.shape[2],
+)
+def bmm_scaled_fp8(a, a_scale, b, b_scale, c, run_config=None):
     assert a.shape[0] == b.shape[0], "Incompatible dimensions"
     assert c.shape[0] == b.shape[0], "Incompatible dimensions"
     assert a.shape[2] == b.shape[1], "Incompatible dimensions"
