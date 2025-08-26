@@ -64,7 +64,7 @@ def _get_moe_sum_reduce_configs():
 
 @autotune(
     name="moe_sum_reduce:v1",
-    configs=_get_moe_sum_reduce_configs,
+    configs_gen_func=_get_moe_sum_reduce_configs,
     static_key_func=_get_moe_sum_reduce_static_key,
     run_key_func=lambda input: input.shape[0],
 )

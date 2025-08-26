@@ -490,7 +490,7 @@ def _get_grouped_matmul_configs():
 
 @autotune(
     name="grouped_matmul:v1",
-    configs=_get_grouped_matmul_configs,
+    configs_gen_func=_get_grouped_matmul_configs,
     static_key_func=_get_grouped_matmul_static_key,
     run_key_func=lambda token_num_mul_topk_num: token_num_mul_topk_num,
 )

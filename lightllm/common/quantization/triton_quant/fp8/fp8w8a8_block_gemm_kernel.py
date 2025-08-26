@@ -178,7 +178,7 @@ def _get_static_key(A, B, block_size, dtype):
 
 @autotune(
     name="w8a8_block_fp8_matmul:v1",
-    configs=get_test_configs,
+    configs_gen_func=get_test_configs,
     static_key_func=_get_static_key,
     run_key_func=lambda M: M,
 )

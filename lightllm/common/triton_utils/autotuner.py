@@ -23,14 +23,11 @@ logger = init_logger(__name__)
 
 def autotune(
     name: str,
-    configs: "Optional[Union[List, Callable[[], List]]]",
+    configs_gen_func: Callable[[], List],
     static_key_func: "Optional[Callable]" = None,
     run_key_func: "Optional[Callable]" = None,
     run_key_distance_func: "Optional[Callable]" = None,
-    reset_to_zero=None,
-    restore_value=None,
-    pre_hook: "Optional[Callable]" = None,
-    post_hook: "Optional[Callable]" = None,
+    mutates_args: List[str] = None,
 ):
     def decorator(fn):
         arg_names = [param.name for param in inspect.signature(fn).parameters.values()]
@@ -38,14 +35,11 @@ def autotune(
             fn,
             arg_names,
             name,
-            configs,
+            configs_gen_func,
             static_key_func,
             run_key_func,
             run_key_distance_func,
-            reset_to_zero,
-            restore_value,
-            pre_hook=pre_hook,
-            post_hook=post_hook,
+            mutates_args,
         )
 
     return decorator
@@ -76,21 +70,18 @@ class Autotuner:
         fn,
         arg_names,
         name,
-        configs: "Optional[Union[List, Callable[[], List]]]",
-        static_key_func: "Optional[Callable[[], dict]]" = None,
-        run_key_func: "Optional[Callable]" = None,
-        run_key_distance_func: "Optional[Callable]" = lambda a, b: abs(a - b),
-        reset_to_zero: "Optional[List]" = None,
-        restore_value: "Optional[List]" = None,
-        pre_hook: "Optional[Callable]" = None,
-        post_hook: "Optional[Callable]" = None,
+        configs_gen_func: Callable[[], List],
+        static_key_func: Optional[Callable[[], dict]] = None,
+        run_key_func: Optional[Callable] = None,
+        run_key_distance_func: Optional[Callable] = lambda run_key, run_key_cached: abs(run_key - run_key_cached),
+        mutates_args: List[str] = None,
     ):
         # Whether to use this autotune decorator
         self.disable_autotune = os.environ.get("DISABLE_AUTOTUNE_DECORATOR", "0") == "1"
 
-        self.configs: "Optional[Union[List, Callable[[], List]]]" = configs
-        if not callable(self.configs):
-            self.configs = split_configs(self.configs)
+        self.configs = None
+        self.configs_gen_func = configs_gen_func
+
         self.name = name
         self.cache_dir = os.path.join(
             Path(__file__).parent, "all_kernel_configs", get_triton_version(), get_current_device_name(), self.name
@@ -106,34 +97,21 @@ class Autotuner:
         self._static_param_names = self._get_param_names(self.static_key_func)
         self._run_param_names = self._get_param_names(self.run_key_func)
 
-        self.reset_to_zero = []
-        if reset_to_zero is not None:
-            self.reset_to_zero = list(reset_to_zero)
-        self.restore_value = []
-        if restore_value is not None:
-            self.restore_value = list(restore_value)
+        self.mutates_args = []
+        if mutates_args is not None:
+            self.mutates_args = list(mutates_args)
 
         self.pre_hook = lambda kwargs, reset_only=False: 0
         self.post_hook = lambda kwargs, exception: 0
         self.user_defined_pre_hook = False
         self.user_defined_post_hook = False
-        if pre_hook:
-            self.pre_hook = pre_hook
-            self.user_defined_pre_hook = True
-        elif len(self.reset_to_zero) > 0 or len(self.restore_value) > 0:
 
-            def _pre_hook(kwargs, reset_only=False):
-                for name in self.reset_to_zero:
-                    kwargs[name].zero_()
-                if not reset_only:
-                    self.restore_copies = {name: kwargs[name].clone() for name in self.restore_value}
+        if len(self.mutates_args) > 0:
+
+            def _pre_hook(kwargs):
+                self.restore_copies = {name: kwargs[name].clone() for name in self.mutates_args}
 
             self.pre_hook = _pre_hook
-
-        if post_hook:
-            self.post_hook = post_hook
-            self.user_defined_post_hook = True
-        elif len(self.restore_value) > 0:
 
             def _post_hook(kwargs, exception):
                 for name in self.restore_value:
@@ -143,7 +121,7 @@ class Autotuner:
             self.post_hook = _post_hook
 
         if not os.path.exists(self.cache_dir):
-            if os.environ.get("LIGHTLLM_TRITON_AUTOTUNE", "0") == "1":
+            if is_triton_autotune_enabled():
                 os.makedirs(self.cache_dir, exist_ok=True)
 
         self._loaded_static_keys = set()
@@ -207,11 +185,11 @@ class Autotuner:
     def _autotune(self, args, kwargs, static_key, run_key):
         from lightllm.utils.dist_utils import get_global_rank
 
-        if callable(self.configs):
-            self.configs = split_configs(self.configs())
+        if self.configs is None:
+            self.configs = split_configs(self.configs_gen_func())
 
         rank_id = get_global_rank()
-        _best_config = self.default_config
+        _best_config = None
         best_time = float("inf")
 
         bar = tqdm(
@@ -261,8 +239,6 @@ class Autotuner:
             logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
 
         kwargs["run_config"] = self.cached_configs[static_key][run_key]
-        full_nargs = {**self.nargs, **kwargs}
-        self.pre_hook(full_nargs, reset_only=True)
 
     @torch.no_grad()
     def __call__(self, *args, **kwargs):
