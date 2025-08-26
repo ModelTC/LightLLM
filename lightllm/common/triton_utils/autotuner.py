@@ -80,6 +80,36 @@ class Autotuner:
         self.mutates_args = mutates_args
         return
 
+    @torch.no_grad()
+    def __call__(self, *args, **kwargs):
+        if self.disable_autotune:
+            return self.fn(*args, **kwargs)
+
+        static_key = self._static_key(*args, **kwargs)
+        run_key = self._run_key(*args, **kwargs)
+
+        # Lazy load
+        self._try_load_cache(static_key)
+
+        if is_triton_autotune_enabled():
+            if run_key not in self.cached_configs.get(static_key, {}):
+                self._autotune(args, kwargs, static_key, run_key)
+
+        if static_key not in self.cached_configs:
+            logger.warning(
+                f"No kernel config for {self.kernel_name} - {static_key}, \
+                using default config. Use `LIGHTLLM_TRITON_AUTOTUNE=1` to enable autotune.",
+            )
+            self.cached_configs[static_key] = {}
+
+        all_configs = self.cached_configs.get(static_key)
+
+        if len(all_configs) != 0:
+            closest_config = min(all_configs, key=lambda c_key: self.run_key_distance_func(run_key, c_key))
+            kwargs["run_config"] = closest_config
+
+        return self.fn(*args, **kwargs)
+
     def _try_load_cache(self, static_key):
         if static_key in self.cached_configs:
             return
@@ -184,36 +214,6 @@ class Autotuner:
             logger.info(f"Saved configs for {self.name} - {static_key} - {run_key}")
 
         kwargs["run_config"] = self.cached_configs[static_key][run_key]
-
-    @torch.no_grad()
-    def __call__(self, *args, **kwargs):
-        if self.disable_autotune:
-            return self.fn(*args, **kwargs)
-
-        static_key = self._static_key(*args, **kwargs)
-        run_key = self._run_key(*args, **kwargs)
-
-        # Lazy load
-        self._try_load_cache(static_key)
-
-        if is_triton_autotune_enabled():
-            if run_key not in self.cached_configs.get(static_key, {}):
-                self._autotune(args, kwargs, static_key, run_key)
-
-        if static_key not in self.cached_configs:
-            logger.warning(
-                f"No kernel config for {self.kernel_name} - {static_key}, \
-                using default config. Use `LIGHTLLM_TRITON_AUTOTUNE=1` to enable autotune.",
-            )
-            self.cached_configs[static_key] = {}
-
-        all_configs = self.cached_configs.get(static_key)
-
-        if len(all_configs) != 0:
-            closest_config = min(all_configs, key=lambda c_key: self.run_key_distance_func(run_key, c_key))
-            kwargs["run_config"] = closest_config
-
-        return self.fn(*args, **kwargs)
 
     def _mutate_args_clone(self, args, kwargs):
         new_kwargs = kwargs.copy()
