@@ -22,24 +22,24 @@ logger = init_logger(__name__)
 
 
 def autotune(
-    name: str,
+    kernel_name: str,
     configs_gen_func: Callable[[], List],
-    static_key_func: "Optional[Callable]" = None,
-    run_key_func: "Optional[Callable]" = None,
-    run_key_distance_func: "Optional[Callable]" = None,
-    mutates_args: List[str] = None,
+    static_key_func: Callable,
+    run_key_func: Callable,
+    run_key_distance_func: Callable = lambda run_key, run_key_cached: abs(run_key - run_key_cached),
+    mutates_args: List[str] = [],
 ):
     def decorator(fn):
         arg_names = [param.name for param in inspect.signature(fn).parameters.values()]
         return Autotuner(
-            fn,
-            arg_names,
-            name,
-            configs_gen_func,
-            static_key_func,
-            run_key_func,
-            run_key_distance_func,
-            mutates_args,
+            fn=fn,
+            arg_names=arg_names,
+            kernel_name=kernel_name,
+            configs_gen_func=configs_gen_func,
+            static_key_func=static_key_func,
+            run_key_func=run_key_func,
+            run_key_distance_func=run_key_distance_func,
+            mutates_args=mutates_args,
         )
 
     return decorator
@@ -47,44 +47,32 @@ def autotune(
 
 class Autotuner:
     @staticmethod
-    def _get_param_names(func):
-        if not callable(func):
-            return None
-        try:
-            sig = inspect.signature(func)
-            return [
-                name
-                for name, p in sig.parameters.items()
-                if p.kind
-                in (
-                    inspect.Parameter.POSITIONAL_ONLY,
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    inspect.Parameter.KEYWORD_ONLY,
-                )
-            ]
-        except (ValueError, TypeError):
-            return None
+    def _get_param_names(func: Callable) -> List[str]:
+        sig = inspect.signature(func)
+        return [name for name, p in sig.parameters.items()]
 
     def __init__(
         self,
         fn,
-        arg_names,
-        name,
+        arg_names: List[str],
+        kernel_name: str,
         configs_gen_func: Callable[[], List],
-        static_key_func: Optional[Callable[[], dict]] = None,
-        run_key_func: Optional[Callable] = None,
-        run_key_distance_func: Optional[Callable] = lambda run_key, run_key_cached: abs(run_key - run_key_cached),
-        mutates_args: List[str] = None,
+        static_key_func: Callable,
+        run_key_func: Callable,
+        run_key_distance_func: Callable = lambda run_key, run_key_cached: abs(run_key - run_key_cached),
+        mutates_args: List[str] = [],
     ):
         # Whether to use this autotune decorator
-        self.disable_autotune = os.environ.get("DISABLE_AUTOTUNE_DECORATOR", "0") == "1"
+        self.disable_autotune = not is_triton_autotune_enabled()
 
-        self.configs = None
         self.configs_gen_func = configs_gen_func
-
-        self.name = name
+        self.kernel_name = kernel_name
         self.cache_dir = os.path.join(
-            Path(__file__).parent, "all_kernel_configs", get_triton_version(), get_current_device_name(), self.name
+            Path(__file__).parent,
+            "all_kernel_configs",
+            get_triton_version(),
+            get_current_device_name(),
+            self.kernel_name,
         )
         self.fn = fn
         self.static_key_func = static_key_func
@@ -97,28 +85,7 @@ class Autotuner:
         self._static_param_names = self._get_param_names(self.static_key_func)
         self._run_param_names = self._get_param_names(self.run_key_func)
 
-        self.mutates_args = []
-        if mutates_args is not None:
-            self.mutates_args = list(mutates_args)
-
-        self.pre_hook = lambda kwargs, reset_only=False: 0
-        self.post_hook = lambda kwargs, exception: 0
-        self.user_defined_pre_hook = False
-        self.user_defined_post_hook = False
-
-        if len(self.mutates_args) > 0:
-
-            def _pre_hook(kwargs):
-                self.restore_copies = {name: kwargs[name].clone() for name in self.mutates_args}
-
-            self.pre_hook = _pre_hook
-
-            def _post_hook(kwargs, exception):
-                for name in self.restore_value:
-                    kwargs[name].copy_(self.restore_copies[name])
-                self.restore_copies = {}
-
-            self.post_hook = _post_hook
+        self.mutates_args = mutates_args
 
         if not os.path.exists(self.cache_dir):
             if is_triton_autotune_enabled():
