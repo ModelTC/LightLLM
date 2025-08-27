@@ -15,6 +15,7 @@ from typing import Callable, Optional, Union, List
 from lightllm.utils.envs_utils import is_triton_autotune_enabled
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
+from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
 
@@ -70,6 +71,7 @@ class Autotuner:
         self.run_key_func = run_key_func
         self.run_key_distance_func = run_key_distance_func
         self.cached_configs = {}
+        self.fast_match_configs = collections.defaultdict(dict)
         self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
         self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
@@ -89,6 +91,9 @@ class Autotuner:
         if self.disable_autotune:
             return self.fn(*args, **kwargs)
 
+        rank_id = 0 if not dist.is_initialized() else get_global_rank()
+        world_size = 1 if not dist.is_initialized() else get_global_world_size()
+
         static_key = self._static_key(*args, **kwargs)
         run_key = str(self._run_key(*args, **kwargs))
 
@@ -103,16 +108,35 @@ class Autotuner:
             self.cached_configs[static_key] = {}
 
         if is_triton_autotune_enabled():
-            if run_key not in self.cached_configs.get(static_key, {}):
-                self._autotune(args, kwargs, static_key, run_key)
+            need_tunning = run_key not in self.cached_configs.get(static_key, {})
+            if world_size > 1:
+                _need_tunnings = [None for _ in range(world_size)]
+                dist.all_gather_object(
+                    _need_tunnings, obj=need_tunning, group=dist_group_manager.get_default_group().autotune_group
+                )
+                need_tunning = any(_need_tunnings)
+            if need_tunning:
+                self._autotune(
+                    args=args,
+                    kwargs=kwargs,
+                    static_key=static_key,
+                    run_key=run_key,
+                    rank_id=rank_id,
+                    world_size=world_size,
+                )
+
+        if static_key in self.fast_match_configs and run_key in self.fast_match_configs[static_key]:
+            closest_config = self.fast_match_configs[static_key][run_key]
+            kwargs["run_config"] = closest_config
+            return self.fn(*args, **kwargs)
 
         all_configs = self.cached_configs.get(static_key)
-
         if len(all_configs) != 0:
             closest_config = min(
                 list(all_configs.items()), key=lambda item: self.run_key_distance_func(run_key, item[0])
             )[1]
             kwargs["run_config"] = closest_config
+            self.fast_match_configs[static_key][run_key] = closest_config
 
         return self.fn(*args, **kwargs)
 
@@ -144,12 +168,12 @@ class Autotuner:
             # warmup
             kernel_call()
 
-            torch.cuda.synchronize()
+            torch.cuda.current_stream().synchronize()
             g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
+            with torch.cuda.graph(g, stream=torch.cuda.Stream()):
                 for _ in range(n_repeat):
                     kernel_call()
-            torch.cuda.synchronize()
+            torch.cuda.current_stream().synchronize()
 
             state = _BenchmarkState()
             for i in range(n_retries):
@@ -158,21 +182,21 @@ class Autotuner:
                 start_event.record()
                 g.replay()
                 end_event.record()
-                torch.cuda.synchronize()
+                end_event.synchronize()
                 state.update(start_event.elapsed_time(end_event) / n_repeat)
             del g
             return state.avg
         except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
             return float("inf")
 
-    def _autotune(self, args, kwargs, static_key, run_key):
-        rank_id = 0 if not dist.is_initialized() else get_global_rank()
-        world_size = 1 if not dist.is_initialized() else get_global_world_size()
+    def _autotune(self, args, kwargs, static_key, run_key, rank_id, world_size):
         is_key_all_same = True
         if world_size > 1:
             all_keys = [None for _ in range(world_size)]
             all_key_str = f"{run_key}_{static_key}"
-            dist.all_gather_object(all_keys, obj=all_key_str)
+            dist.all_gather_object(
+                all_keys, obj=all_key_str, group=dist_group_manager.get_default_group().autotune_group
+            )
             is_key_all_same = all(all_keys[0] == k for k in all_keys)
             if not is_key_all_same:
                 logger.warning(
@@ -210,7 +234,11 @@ class Autotuner:
         update_static_key_list = []
         if world_size > 1:
             all_gather_configs = [None for _ in range(world_size)]
-            dist.all_gather_object(all_gather_configs, obj=(best_time, run_key, dict(static_key), best_config))
+            dist.all_gather_object(
+                all_gather_configs,
+                obj=(best_time, run_key, dict(static_key), best_config),
+                group=dist_group_manager.get_default_group().autotune_group,
+            )
             all_gather_configs = sorted(all_gather_configs, key=lambda x: x[0])
             key_set = set()
             unique_configs = collections.defaultdict(dict)
@@ -243,6 +271,8 @@ class Autotuner:
                         )
                     )
                 logger.info(f"Saved configs for {self.kernel_name} - {_static_key}")
+
+        logger.info(f"rank {rank_id} tuning {self.kernel_name} _static_key {static_key} finished")
 
     def _mutate_args_clone(self, args, kwargs):
         origin_list = []

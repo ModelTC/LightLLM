@@ -101,8 +101,8 @@ class TpPartBaseModel:
         self._init_some_value()
         self._init_custom()
         self._init_inferstate_cls()
-        self._init_padded_req()
         self._autotune_warmup()
+        self._init_padded_req()
         self._init_cudagraph()
         self._check_max_len_infer()
         torch.cuda.empty_cache()
@@ -736,14 +736,12 @@ class TpPartBaseModel:
 
         torch.distributed.barrier()
 
-        warmup_lengths = []
-        cur_len = 1
-        while cur_len <= self.batch_max_tokens:
-            warmup_lengths.append(cur_len)
-            cur_len *= 2
+        warmup_lengths = [1, 8, 16, 64, 128, 256, 1024, 2048, 4096]
 
         if self.batch_max_tokens not in warmup_lengths:
             warmup_lengths.append(self.batch_max_tokens)
+
+        warmup_lengths = [e for e in warmup_lengths if e <= self.batch_max_tokens]
 
         warmup_lengths.sort(reverse=True)
 
@@ -785,6 +783,7 @@ class TpPartBaseModel:
                 logger.info(f"autotune warmup for length {input_len} ok")
             except Exception as e:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
+                logger.exception(str(e))
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
                 gc.collect()
