@@ -751,7 +751,7 @@ class TpPartBaseModel:
             try:
                 logger.info(f"autotune warmup for length {input_len}")
                 rand_gen = torch.Generator(device="cuda")
-                rand_gen.manual_seed(seed=input_len)
+                rand_gen.manual_seed(input_len)
                 dummy_input_ids = torch.randint(
                     0, 10000, (input_len,), dtype=torch.int32, device="cuda", generator=rand_gen
                 )
