@@ -192,8 +192,8 @@ def fused_experts_impl(
             # here is used to match autotune feature, make moe model run same triton kernel in different rank.
             # in some special case, one rank will recv 0 token, so add a token to make it run triton kernel.
             if is_triton_autotune_enabled():
-                _gemm_out_a = torch.empty((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
-                _silu_out = torch.empty((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
+                _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
+                _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
                 silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
                 _gemm_out_a, _silu_out = None, None
 
