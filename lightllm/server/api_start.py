@@ -5,7 +5,7 @@ import uuid
 import subprocess
 import signal
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
-from lightllm.utils.start_utils import process_manager, kill_recursive
+from lightllm.utils.start_utils import process_manager, kill_recursive, is_multimodal_mode
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
@@ -157,11 +157,13 @@ def check_and_set_args(args):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
+    args.enable_multimodal = is_multimodal_mode(args)
     # visual_only模式下才需要设置visual_embed_path
     if args.visual_embed_path is not None:
         assert (
             args.run_mode == "visual_only" or args.run_mode == "llm_only"
         ), "only visual_only or llm_only mode need visual_embed_path"
+
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -174,13 +176,11 @@ def check_and_set_args(args):
         args.visual_gpu_ids = args.visual_gpu_ids[:total_required_gpus]
 
     # 检查visual_nccl_port数量是否足够
-    if len(args.visual_nccl_ports) < args.visual_dp:
+    if args.visual_nccl_ports is not None and len(args.visual_nccl_ports) < args.visual_dp:
         raise ValueError(
             f"Not enough visual_nccl_ports specified. You need at least {args.visual_dp}, "
             f"but got ({len(args.visual_nccl_ports)})."
         )
-    else:
-        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
     if args.visual_dp <= 0:
         raise ValueError("visual_dp must be a positive integer.")
@@ -287,7 +287,6 @@ def normal_or_p_d_start(args):
     logger.info(f"all start args:{args}")
 
     ports_locker.release_port()
-
     if args.enable_multimodal:
         from .visualserver.manager import start_visual_process
 
@@ -326,105 +325,6 @@ def normal_or_p_d_start(args):
                     (args, router_port, visual_port, cache_port, visual_model_tp_ports),
                 ],
             )
-
-    process_manager.start_submodule_processes(
-        start_funcs=[
-            start_metric_manager,
-        ],
-        start_args=[(metric_port, args)],
-    )
-
-    process_manager.start_submodule_processes(
-        start_funcs=[start_router_process, start_detokenization_process],
-        start_args=[
-            (args, router_port, detokenization_port, metric_port),
-            (args, detokenization_port, detokenization_pub_port),
-        ],
-    )
-
-    # 启动 gunicorn
-    command = [
-        "gunicorn",
-        "--workers",
-        f"{args.httpserver_workers}",
-        "--worker-class",
-        "uvicorn.workers.UvicornWorker",
-        "--bind",
-        f"{args.host}:{args.port}",
-        "--log-level",
-        "info",
-        "--access-logfile",
-        "-",
-        "--error-logfile",
-        "-",
-        "lightllm.server.api_http:app",
-        "--timeout",
-        f"{get_lightllm_gunicorn_time_out_seconds()}",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
-    ]
-
-    # 启动子进程
-    http_server_process = subprocess.Popen(command)
-
-    if "s3://" in args.model_dir:
-        from lightllm.utils.petrel_helper import s3_model_clear
-
-        s3_model_clear(args.model_dir)
-
-    if args.health_monitor:
-        from lightllm.server.health_monitor.manager import start_health_check_process
-
-        process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
-    return
-
-
-def llm_only_start(args):
-
-    check_and_set_args(args)
-    already_uesd_ports = [args.nccl_port, args.port]
-
-    # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
-    # 捕获到端口设置冲突的问题
-    ports_locker = PortLocker(already_uesd_ports)
-    ports_locker.lock_port()
-
-    node_world_size = args.tp // args.nnodes
-    can_use_ports = alloc_can_use_network_port(num=4 + node_world_size, used_nccl_ports=already_uesd_ports)
-    logger.info(f"alloced ports: {can_use_ports}")
-    (
-        router_port,
-        detokenization_port,
-        detokenization_pub_port,
-        metric_port,
-    ) = can_use_ports[0:4]
-    can_use_ports = can_use_ports[4:]
-
-    # 将申请好的端口放入args参数中
-    args.router_port = router_port
-    args.detokenization_port = detokenization_port
-    args.detokenization_pub_port = detokenization_pub_port
-    args.metric_port = metric_port
-
-    # 申请在 p d 分离模式下，会用的端口
-    args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
-    # p d 分离模式下用于标识节点的id
-    args.pd_node_id = uuid.uuid4().int
-    # p 节点用来建立torch kv 传输分布组的可用端口范围
-    args.pd_p_allowed_port_min = 20000
-    args.pd_p_allowed_port_max = 30000
-
-    # p d 分离模式下，decode节点的调度间隙是0
-    if args.run_mode == "decode":
-        args.router_max_wait_tokens = 0
-
-    send_and_receive_node_ip(args)  # 多机用于收发node ip
-    set_env_start_args(args)
-    logger.info(f"all start args:{args}")
-
-    ports_locker.release_port()
 
     process_manager.start_submodule_processes(
         start_funcs=[

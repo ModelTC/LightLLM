@@ -13,7 +13,5 @@ if __name__ == "__main__":
         config_server_start(args)
     elif args.run_mode == "visual_only":
         visual_only_start(args)
-    elif args.run_mode == "llm_only":
-        llm_only_start(args)
     else:
         normal_or_p_d_start(args)

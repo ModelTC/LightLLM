@@ -81,10 +81,12 @@ class HttpServerManager:
                 )
 
         self.enable_multimodal = enable_multimodal
-        if self.enable_multimodal and self.args.run_mode != "llm_only":
+        if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
-            self.send_to_visual = context.socket(zmq.PUSH)
-            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
+            # 初始化VIT连接管理器
+            from .vit_loop import VITConnectionManager
+
+            self.vit_manager = VITConnectionManager(args, context, visual_port)
 
         self.token_id_range_start = 100000000
         self.token_id_range_end = 2 ** 63 - 1
@@ -406,10 +408,7 @@ class HttpServerManager:
                 ), "too many multimodal items!"
                 if multimodal_params.audios:
                     assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
-                if self.args.run_mode == "llm_only":
-                    await self._get_image_embedding_from_afs(multimodal_params, sampling_params)
-                else:
-                    await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
                 )
@@ -483,9 +482,9 @@ class HttpServerManager:
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
 
-        if self.pd_mode == NodeRole.P:
-            if self.enable_multimodal and self.args.run_mode != "llm_only":
-                self.send_to_visual.send_pyobj(
+        if self.pd_mode.is_P_or_NORMAL():
+            if self.enable_multimodal:
+                await self.vit_manager.send_to_vit(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
@@ -502,19 +501,6 @@ class HttpServerManager:
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
-            return
-
-        if self.pd_mode == NodeRole.NORMAL or self.pd_mode == NodeRole.LLM_ONLY:
-            if self.enable_multimodal and self.args.run_mode != "llm_only":
-                self.send_to_visual.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
-            else:
-                self.send_to_router.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
             return
 
         assert False, "dead code path"

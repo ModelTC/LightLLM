@@ -506,6 +506,17 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=0.03,
         help="""The interval of the schedule time, default is 30ms.""",
     )
+    parser.add_argument(
+        "--enable_remote_vit",
+        action="store_true",
+        help="Whether to enable remote vit for multimodal service.",
+    )
+    parser.add_argument(
+        "--remote_vit_port",
+        type=int,
+        default=12346,
+        help="The port number for the remote vit service.",
+    )
     # redis for vit llm disaggregation
     parser.add_argument(
         "--redis_port",

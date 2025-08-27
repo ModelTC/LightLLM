@@ -5,12 +5,6 @@ from ..req import Req
 
 
 @dataclass
-class VisualOnlyReqIndexes:
-    group_req_id: int
-    multimodal_params: MultimodalParams
-
-
-@dataclass
 class GroupReqIndexes:
     group_req_id: int
     multimodal_params: MultimodalParams
