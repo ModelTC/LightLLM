@@ -750,7 +750,11 @@ class TpPartBaseModel:
         for input_len in warmup_lengths:
             try:
                 logger.info(f"autotune warmup for length {input_len}")
-                dummy_input_ids = torch.randint(0, 10000, (input_len,), dtype=torch.int32, device="cuda")
+                rand_gen = torch.Generator(device="cuda")
+                rand_gen.manual_seed(seed=input_len)
+                dummy_input_ids = torch.randint(
+                    0, 10000, (input_len,), dtype=torch.int32, device="cuda", generator=rand_gen
+                )
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
                 mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
