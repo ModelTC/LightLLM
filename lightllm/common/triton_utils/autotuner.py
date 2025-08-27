@@ -4,6 +4,7 @@ import os
 import inspect
 import torch
 import torch.distributed as dist
+import random
 from pathlib import Path
 from tqdm import tqdm
 from frozendict import frozendict
@@ -12,7 +13,7 @@ from lightllm.utils.log_utils import init_logger
 from typing import Callable, Optional, Union, List
 from lightllm.utils.envs_utils import is_triton_autotune_enabled
 from lightllm.common.kernel_config import KernelConfigs
-from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
+from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
 
 logger = init_logger(__name__)
 
@@ -94,7 +95,7 @@ class Autotuner:
         self._try_load_cache(static_key)
 
         if static_key not in self.cached_configs:
-            if get_global_rank() == 0:
+            if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
                 logger.warning(
                     f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)}",
                 )
@@ -163,14 +164,14 @@ class Autotuner:
     def _autotune(self, args, kwargs, static_key, run_key):
         rank_tuning_configs = split_configs(self.configs_gen_func())
 
-        rank_id = get_global_rank()
+        rank_id = 0 if not dist.is_initialized() else get_global_rank()
         _best_config = None
         best_time = float("inf")
 
         bar = tqdm(
             rank_tuning_configs,
             desc=f"Autotuning {self.kernel_name} for {run_key}",
-            position=get_global_rank(),
+            position=rank_id,
             dynamic_ncols=True,
         )
         enum_configs = enumerate(bar)
@@ -185,7 +186,7 @@ class Autotuner:
                 f"Autotuning {self.kernel_name} [rank:{rank_id}] for {run_key}, best_time: {best_time:.5f}"
             )
 
-        world_size = get_global_world_size()
+        world_size = 1 if not dist.is_initialized() else get_global_world_size()
         if world_size > 1:
             local_best = torch.tensor([best_time], device="cuda")
             all_best_times = [torch.zeros_like(local_best) for _ in range(world_size)]
@@ -201,7 +202,7 @@ class Autotuner:
         self.cached_configs[static_key][run_key] = _best_config
 
         # save configs to file
-        if get_global_rank() == 0:
+        if rank_id == 0:
             cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
             with open(cache_file, "wb") as f:
                 f.write(
@@ -271,6 +272,8 @@ def get_triton_version():
 
 
 def split_configs(configs):
-    global_rank = get_global_rank()
-    global_world_size = get_global_world_size()
+    global_rank = 0 if not dist.is_initialized() else get_global_rank()
+    global_world_size = 1 if not dist.is_initialized() else get_global_world_size()
+    random.seed(0)
+    configs = random.shuffle(configs)
     return configs[global_rank::global_world_size]
