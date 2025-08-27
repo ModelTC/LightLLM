@@ -185,7 +185,7 @@ class Autotuner:
                 f"Autotuning {self.kernel_name} [rank:{rank_id}] for {run_key}, best_time: {best_time:.5f}"
             )
 
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        world_size = get_global_world_size()
         if world_size > 1:
             local_best = torch.tensor([best_time], device="cuda")
             all_best_times = [torch.zeros_like(local_best) for _ in range(world_size)]
@@ -201,7 +201,7 @@ class Autotuner:
         self.cached_configs[static_key][run_key] = _best_config
 
         # save configs to file
-        if not dist.is_initialized() or get_global_rank() == 0:
+        if get_global_rank() == 0:
             cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
             with open(cache_file, "wb") as f:
                 f.write(
