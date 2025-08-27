@@ -5,6 +5,7 @@ import inspect
 import torch
 import torch.distributed as dist
 import random
+import collections
 from pathlib import Path
 from tqdm import tqdm
 from frozendict import frozendict
@@ -89,7 +90,7 @@ class Autotuner:
             return self.fn(*args, **kwargs)
 
         static_key = self._static_key(*args, **kwargs)
-        run_key = self._run_key(*args, **kwargs)
+        run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load
         self._try_load_cache(static_key)
@@ -165,10 +166,25 @@ class Autotuner:
             return float("inf")
 
     def _autotune(self, args, kwargs, static_key, run_key):
-        rank_tuning_configs = split_configs(self.configs_gen_func())
-
         rank_id = 0 if not dist.is_initialized() else get_global_rank()
-        _best_config = None
+        world_size = 1 if not dist.is_initialized() else get_global_world_size()
+        is_key_all_same = True
+        if world_size > 1:
+            all_keys = [None for _ in range(world_size)]
+            all_key_str = f"{run_key}_{static_key}"
+            dist.all_gather_object(all_keys, obj=all_key_str)
+            is_key_all_same = all(all_keys[0] == k for k in all_keys)
+            if not is_key_all_same:
+                logger.warning(
+                    f"{self.kernel_name} not all key is same, get keys {all_keys}, tuning is not parral split configs"
+                )
+                rank_tuning_configs = self.configs_gen_func()
+            else:
+                rank_tuning_configs = split_configs(self.configs_gen_func())
+        else:
+            rank_tuning_configs = self.configs_gen_func()
+
+        best_config = None
         best_time = float("inf")
 
         bar = tqdm(
@@ -184,37 +200,47 @@ class Autotuner:
             run_time = self._bench(*args, **kwargs_with_config)
             if run_time < best_time:
                 best_time = run_time
-                _best_config = config
+                best_config = config
             bar.set_description(
                 f"Autotuning {self.kernel_name} [rank:{rank_id}] for {run_key}, best_time: {best_time:.5f}"
             )
 
-        world_size = 1 if not dist.is_initialized() else get_global_world_size()
+        update_static_key_list = []
         if world_size > 1:
-            local_best = torch.tensor([best_time], device="cuda")
-            all_best_times = [torch.zeros_like(local_best) for _ in range(world_size)]
-            dist.all_gather(all_best_times, local_best)
-            all_times = [t.item() for t in all_best_times]
-            min_idx = int(torch.tensor(all_times).argmin().item())
-            obj_list = [_best_config]
-            dist.broadcast_object_list(obj_list, src=min_idx)
-            _best_config = obj_list[0]
+            all_gather_configs = [None for _ in range(world_size)]
+            dist.all_gather_object(all_gather_configs, obj=(best_time, run_key, dict(static_key), best_config))
+            all_gather_configs = sorted(all_gather_configs, key=lambda x: x[0])
+            key_set = set()
+            unique_configs = collections.defaultdict(dict)
+            for _best_time, _run_key, _static_key, _config in all_gather_configs:
+                _all_key = f"{_run_key}_{frozendict(_static_key)}"
+                update_static_key_list.append(frozendict(_static_key))
+                if _all_key not in key_set:
+                    unique_configs[frozendict(_static_key)][_run_key] = _config
+                    key_set.add(_all_key)
+        else:
+            unique_configs = collections.defaultdict(dict)
+            unique_configs[static_key][run_key] = best_config
+            update_static_key_list.append(static_key)
 
-        if static_key not in self.cached_configs:
-            self.cached_configs[static_key] = {}
-        self.cached_configs[static_key][run_key] = _best_config
+        for _static_key, _t_dict in unique_configs.items():
+            if _static_key not in self.cached_configs:
+                self.cached_configs[_static_key] = {}
+            for _run_key, _config in _t_dict.items():
+                self.cached_configs[_static_key][_run_key] = _config
 
         # save configs to file
         if rank_id == 0:
-            cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
-            with open(cache_file, "wb") as f:
-                f.write(
-                    orjson.dumps(
-                        self.cached_configs[static_key],
-                        option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS,
+            for _static_key in update_static_key_list:
+                cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(_static_key))
+                with open(cache_file, "wb") as f:
+                    f.write(
+                        orjson.dumps(
+                            self.cached_configs[_static_key],
+                            option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS,
+                        )
                     )
-                )
-            logger.info(f"Saved configs for {self.kernel_name} - {static_key} - {run_key}")
+                logger.info(f"Saved configs for {self.kernel_name} - {_static_key}")
 
     def _mutate_args_clone(self, args, kwargs):
         origin_list = []
