@@ -150,7 +150,7 @@ class Autotuner:
                 self.cached_configs[static_key] = orjson.loads(f.read())
         return
 
-    def _bench(self, *args, n_repeat=5, n_retries=1, **kwargs):
+    def _bench(self, *args, n_repeat=3, n_retries=1, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
