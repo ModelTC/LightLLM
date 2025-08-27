@@ -57,7 +57,7 @@ class Autotuner:
         self.kernel_name = kernel_name
         self.cache_dir = os.path.join(
             Path(__file__).parent,
-            "all_kernel_configs",
+            "autotune_kernel_configs",
             get_triton_version(),
             get_current_device_name(),
             self.kernel_name,
