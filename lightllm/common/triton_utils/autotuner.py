@@ -129,12 +129,15 @@ class Autotuner:
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
+        new_args, new_kwargs, origin_list, new_list = self._mutate_args_clone(args, kwargs)
+
         def kernel_call():
-            new_args, new_kwargs = self._mutate_args_clone(args, kwargs)
             try:
                 self.fn(*new_args, **new_kwargs)
             except Exception as e:
                 raise e
+            finally:
+                self._recover_mutated_args(origin_list=origin_list, new_list=new_list)
 
         try:
             # warmup
@@ -214,19 +217,31 @@ class Autotuner:
             logger.info(f"Saved configs for {self.kernel_name} - {static_key} - {run_key}")
 
     def _mutate_args_clone(self, args, kwargs):
+        origin_list = []
+        new_list = []
         new_kwargs = kwargs.copy()
         new_args = list(args).copy()
 
         for name in self.mutates_args:
             if name in kwargs:
                 new_kwargs[name] = None if kwargs[name] is None else kwargs[name].clone()
+                origin_list.append(kwargs[name])
+                new_list.append(new_kwargs[name])
             else:
                 pos = self._argname_to_pos.get(name, None)
                 if pos is not None and pos < len(args):
                     new_args[pos] = None if args[pos] is None else args[pos].clone()
+                    origin_list.append(args[name])
+                    new_list.append(new_args[name])
                 else:
                     raise KeyError(f"Missing argument '{name}' required to be mutated")
-        return tuple(new_args), new_kwargs
+        return tuple(new_args), new_kwargs, origin_list, new_list
+
+    def _recover_mutated_args(self, origin_list, new_list):
+        for a, b in zip(origin_list, new_list):
+            if b is not None:
+                b.copy_(a)
+        return
 
     def _select_args(self, param_names, args, kwargs):
         if not param_names:
