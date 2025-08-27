@@ -180,7 +180,9 @@ class Autotuner:
                 )
                 rank_tuning_configs = self.configs_gen_func()
             else:
-                rank_tuning_configs = split_configs(self.configs_gen_func())
+                rank_tuning_configs = split_configs(
+                    self.configs_gen_func(), global_rank=rank_id, global_world_size=world_size
+                )
         else:
             rank_tuning_configs = self.configs_gen_func()
 
@@ -257,8 +259,8 @@ class Autotuner:
                 pos = self._argname_to_pos.get(name, None)
                 if pos is not None and pos < len(args):
                     new_args[pos] = None if args[pos] is None else args[pos].clone()
-                    origin_list.append(args[name])
-                    new_list.append(new_args[name])
+                    origin_list.append(args[pos])
+                    new_list.append(new_args[pos])
                 else:
                     raise KeyError(f"Missing argument '{name}' required to be mutated")
         return tuple(new_args), new_kwargs, origin_list, new_list
@@ -312,9 +314,6 @@ def get_triton_version():
     return f"triton_{triton.__version__}"
 
 
-def split_configs(configs):
-    global_rank = 0 if not dist.is_initialized() else get_global_rank()
-    global_world_size = 1 if not dist.is_initialized() else get_global_world_size()
-    random.seed(0)
-    configs = random.shuffle(configs)
+def split_configs(configs, global_rank, global_world_size):
+    random.Random(0).shuffle(configs)
     return configs[global_rank::global_world_size]
