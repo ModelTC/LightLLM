@@ -93,7 +93,7 @@ class G_Objs:
                 args,
                 metric_port=args.metric_port,
             )
-        elif args.run_mode == "visual_only":
+        elif args.run_mode == "visual":
             self.metric_client = MetricClient(args.metric_port)
         elif args.run_mode == "llm_only":
             init_tokenizer(args)  # for openai api
@@ -160,7 +160,7 @@ def get_model_name():
 @app.get("/health", summary="Check server health")
 @app.head("/health", summary="Check server health")
 async def healthcheck(request: Request):
-    if g_objs.args.run_mode in ["pd_master", "visual_only"]:
+    if g_objs.args.run_mode in ["pd_master", "visual"]:
         return JSONResponse({"message": "Ok"}, status_code=200)
 
     if os.environ.get("DEBUG_HEALTHCHECK_RETURN_FAIL") == "true":
@@ -367,7 +367,7 @@ async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
-    if g_objs.args.run_mode != "visual_only":
+    if g_objs.args.run_mode != "visual":
         loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return

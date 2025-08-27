@@ -10,7 +10,7 @@ import datetime
 import inspect
 from fastapi import Request
 from ..tokenizer import get_tokenizer
-from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes, VisualOnlyReqIndexes
+from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs import Req, FinishStatus
@@ -41,9 +41,8 @@ class VisualManager:
         visual_model_rpc_ports,
     ):
         self.args = args
-        self.remote_vit = args.enable_remote_vit
+        self.remote_vit = args.enable_remote_vit or args.run_mode == "visual"
         self.cache_port = cache_port
-        self.memory_cache = MemoryCacheWithRedis(args)
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.infer_batch_size = args.visual_infer_batch_size
         self.trust_remote_code = args.trust_remote_code
@@ -53,8 +52,10 @@ class VisualManager:
     def _setup_connections(self):
         context = zmq.Context(2)
         if self.remote_vit:
-            self.recv_from_httpserver.bind(f"tcp://*:{self.args.remote_vit_port}")
+            self.recv_from_remote_llm = context.socket(zmq.PULL)
+            self.recv_from_remote_llm.bind(f"tcp://*:{self.args.remote_vit_port}")
         else:
+            self.recv_from_httpserver = context.socket(zmq.PULL)
             self.recv_from_httpserver.bind(f"{self.args.zmq_mode}127.0.0.1:{self.visual_port}")
             self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
             self.send_to_next_module.connect(f"{self.args.zmq_mode}127.0.0.1:{self.next_module_port}")
@@ -62,20 +63,22 @@ class VisualManager:
 
     async def wait_to_model_ready(self):
         # 待完成，需要读取config_server来起多个vit
-        self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
+        visual_dp = self.args.visual_dp
+        visual_tp = self.args.visual_tp
+        self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(visual_dp)]
 
-        for dp_rank_id in range(self.args.visual_dp):
+        for dp_rank_id in range(visual_dp):
             tp_ports_each_dp = self.visual_model_rpc_ports[dp_rank_id]
-            for tp_rank_id in range(self.args.visual_tp):
-                device_id = self.args.visual_gpu_ids[dp_rank_id * self.args.visual_tp + tp_rank_id]
+            for tp_rank_id in range(visual_tp):
+                device_id = self.args.visual_gpu_ids[dp_rank_id * visual_tp + tp_rank_id]
                 rpc_model = await start_model_process(
-                    port=tp_ports_each_dp[tp_rank_id], vit_tp=self.args.visual_tp, device_id=device_id
+                    port=tp_ports_each_dp[tp_rank_id], vit_tp=visual_tp, device_id=device_id
                 )
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
-        for dp_rank_id in range(self.args.visual_dp):  # async init model process
-            for tp_rank_id in range(self.args.visual_tp):
+        for dp_rank_id in range(visual_dp):  # async init model process
+            for tp_rank_id in range(visual_tp):
                 kvargs = {
                     "tp_rank_id": tp_rank_id,
                     "dp_rank_id": dp_rank_id,

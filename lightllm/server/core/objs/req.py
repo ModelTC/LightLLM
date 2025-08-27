@@ -161,30 +161,6 @@ class Req(ctypes.Structure):
 
         self.post_init()
 
-    def init_visual_only(
-        self,
-        request_id: int,
-    ):
-        # 只是为了有更好的编码辅助类型提示
-        self.index_in_shm_mem: int = self.index_in_shm_mem
-        self.ref_count: int = self.ref_count
-
-        self.request_id = request_id
-        self.group_req_id = convert_sub_id_to_group_id(request_id)
-        self.is_paused = False
-        self.finish_status = FinishStatus()
-        self.is_aborted = False
-        self.router_aborted = False
-        self.shm_infer_released = False
-        self.shm_cur_kv_len = 0
-        self.shm_cur_output_len = 0
-        self.candetoken_out_len = 0
-        self.prompt_cache_len = 0
-        self.finish_token_index = -1
-        self.can_released_mark = False
-
-        self.post_init()
-
     def post_init(self):
         # 子类继承进行一些额外的初始化操作
         pass

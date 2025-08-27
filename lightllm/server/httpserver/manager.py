@@ -13,7 +13,7 @@ from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
-from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes, VisualOnlyReqIndexes
+from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from fastapi import Request
 from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole
@@ -143,7 +143,7 @@ class HttpServerManager:
                 uid_list.append(rec["id"])
 
             # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
-            if self.args.run_mode == "llm_only":
+            if self.enable_remote_vit:
                 return
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
@@ -303,41 +303,6 @@ class HttpServerManager:
             )
             img.uuid = int(md5sum, 16)
             img.token_num = token_num
-
-    # async def get_image_embeding(
-    #     self,
-    #     sampling_params: SamplingParams,
-    #     multimodal_params: MultimodalParams,
-    #     request: Request,
-    #     is_health_req: bool = False,
-    # ) -> Tuple[int, str, dict, FinishStatus]:
-
-    #     request_headers = request.headers if request is not None else {}
-    #     group_request_id = self.alloc_req_id(sampling_params, is_health_req)
-
-    #     try:
-    #         await multimodal_params.verify_and_preload(request)
-    #         image_count = len(multimodal_params.images)
-    #         # 记录请求到达的相关信息
-    #         await self._log_req_header_for_visual_only(request_headers, group_request_id, image_count)
-    #         assert (
-    #             len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
-    #         ), "too many multimodal items!"
-
-    #         await self._initialize_multimodal_metadata(multimodal_params, sampling_params)
-
-    #         visual_req_status = VisualOnlyReqIndexes(group_req_id=group_request_id, multimodal_params=multimodal_params)
-
-    #         self.send_to_visual.send_pyobj(
-    #             visual_req_status,
-    #             protocol=pickle.HIGHEST_PROTOCOL,
-    #         )
-
-    #     except Exception as e:
-    #         logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
-    #         await self.abort(group_request_id, multimodal_params)
-    #         raise e
-    #     return
 
     async def generate(
         self,

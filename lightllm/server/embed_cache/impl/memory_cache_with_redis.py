@@ -21,7 +21,7 @@ class MemoryCacheWithRedis(InMemoryCache):
         self.redis_cache = EmbedRefCountRedis(
             redis_url=redis_url,
             capacity=args.cache_capacity,
-            evict_fraction=args.evict_fraction,
+            evict_fraction=args.redis_evict_fraction,
             image_embed_dir=args.image_embed_dir,
         )
         # 这里之所以把cache * 2是因为，在分离模式下，cache 服务只是为了更新redis状态，以及维护图片cache的 token_id

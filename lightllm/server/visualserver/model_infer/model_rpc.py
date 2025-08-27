@@ -40,20 +40,18 @@ class VisualModelRpcServer(rpyc.Service):
 
         self.args = get_env_start_args()
 
-        weight_dir = (self.args.model_dir,)
-        cache_port = (self.args.cache_port,)
-        data_type = (self.args.data_type,)
-        quant_type = (self.args.vit_quant_type,)
-        quant_cfg = (self.args.vit_quant_cfg,)
-        max_batch_size = (min(self.args.visual_infer_batch_size // self.args.visual_dp, 1),)
+        weight_dir = self.args.model_dir
+        cache_port = self.args.cache_port
+        data_type = self.args.data_type
+        quant_type = self.args.vit_quant_type
+        quant_cfg = self.args.vit_quant_cfg
+        max_batch_size = min(self.args.visual_infer_batch_size // self.args.visual_dp, 1)
 
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
         kvargs["vit_rank_id"] = self.dp_rank_id * self.args.visual_tp + self.tp_rank_id
-
-        if self.args.run_mode != "visual_only":
-            self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
-        self.visual_only = True if self.args.run_mode == "visual_only" else False
+        print(cache_port)
+        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
 
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)

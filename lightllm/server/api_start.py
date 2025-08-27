@@ -57,7 +57,8 @@ def setup_signal_handlers(http_server_process, process_manager):
     signal.signal(signal.SIGINT, signal_handler)
 
     logger.info(f"start process pid {os.getpid()}")
-    logger.info(f"http server pid {http_server_process.pid}")
+    if http_server_process:
+        logger.info(f"http server pid {http_server_process.pid}")
     return
 
 
@@ -72,7 +73,7 @@ def check_and_set_args(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "llm_only", "visual_only"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "llm_only", "visual"]:
         return
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
@@ -420,11 +421,9 @@ def pd_master_start(args):
     http_server_process.wait()
 
 
-def visual_only_start(args):
+def visual_start(args):
     check_and_set_args(args)
-    if args.run_mode != "visual_only":
-        return
-    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
+    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.remote_vit_port]
     can_use_ports = alloc_can_use_network_port(
         num=5 + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
@@ -437,6 +436,7 @@ def visual_only_start(args):
         metric_port,
     ) = can_use_ports[0:5]
     can_use_ports = can_use_ports[5:]
+    print(cache_port)
 
     visual_model_tp_ports = []
     for _ in range(args.visual_dp):
@@ -456,13 +456,6 @@ def visual_only_start(args):
 
     set_env_start_args(args)
 
-    process_manager.start_submodule_processes(
-        start_funcs=[
-            start_metric_manager,
-        ],
-        start_args=[(metric_port, args)],
-    )
-
     from .visualserver.manager import start_visual_process
 
     process_manager.start_submodule_processes(
@@ -476,58 +469,18 @@ def visual_only_start(args):
             start_visual_process,
         ],
         start_args=[
-            (args, audio_port, visual_port, cache_port, visual_model_tp_ports),
+            (args, router_port, visual_port, cache_port, visual_model_tp_ports),
         ],
     )
-    if args.enable_multimodal_audio:
-        from .audioserver.manager import start_audio_process
-
-        process_manager.start_submodule_processes(
-            start_funcs=[
-                start_audio_process,
-            ],
-            start_args=[
-                (args, router_port, audio_port, cache_port),
-            ],
-        )
-
-    # 启动 gunicorn
-    command = [
-        "gunicorn",
-        "--workers",
-        f"{args.httpserver_workers}",
-        "--worker-class",
-        "uvicorn.workers.UvicornWorker",
-        "--bind",
-        f"{args.host}:{args.port}",
-        "--log-level",
-        "info",
-        "--access-logfile",
-        "-",
-        "--error-logfile",
-        "-",
-        "lightllm.server.api_http:app",
-        "--timeout",
-        f"{get_lightllm_gunicorn_time_out_seconds()}",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
-    ]
-
-    # 启动子进程
-    http_server_process = subprocess.Popen(command)
-
-    if "s3://" in args.model_dir:
-        from lightllm.utils.petrel_helper import s3_model_clear
-
-        s3_model_clear(args.model_dir)
-
-    if args.health_monitor:
-        from lightllm.server.health_monitor.manager import start_health_check_process
-
-        process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
-    return
+    setup_signal_handlers(None, process_manager)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt, shutting down...")
+        process_manager.terminate_all_processes()
+        logger.info("All processes have been terminated gracefully.")
+        sys.exit(0)
 
 
 def config_server_start(args):

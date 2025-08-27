@@ -7,7 +7,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run_mode",
         type=str,
-        choices=["normal", "prefill", "decode", "pd_master", "config_server", "visual_only"],
+        choices=["normal", "prefill", "decode", "pd_master", "config_server", "visual"],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
@@ -528,6 +528,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=6379,
         help="The port number for the redis service in config_server mode.",
+    )
+    parser.add_argument(
+        "--redis_evict_fraction",
+        type=float,
+        default=0.3,
+        help="The evict fraction for the redis service in config_server mode.",
     )
     parser.add_argument(
         "--start_redis",
