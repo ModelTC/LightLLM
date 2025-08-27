@@ -42,6 +42,8 @@ from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .visualserver.manager import VisualManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
+
+# from .visualserver.manager import VisualManager
 from .api_lightllm import lightllm_get_score, lightllm_get_image_embedding
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
 from lightllm.utils.log_utils import init_logger
@@ -69,7 +71,7 @@ class G_Objs:
     args: object = None
     g_generate_func: Callable = None
     g_generate_stream_func: Callable = None
-    httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster, VisualManager] = None
+    httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster] = None
     visual_manager: VisualManager = None
     shared_token_load: TokenLoad = None
 
@@ -93,13 +95,6 @@ class G_Objs:
             )
         elif args.run_mode == "visual_only":
             self.metric_client = MetricClient(args.metric_port)
-            self.httpserver_manager = VisualManager(
-                args,
-                next_module_port=None,
-                visual_port=args.visual_port,
-                cache_port=None,
-                visual_model_rpc_ports=args.visual_model_rpc_ports,
-            )
         elif args.run_mode == "llm_only":
             init_tokenizer(args)  # for openai api
             SamplingParams.load_generation_cfg(args.model_dir)
@@ -372,10 +367,7 @@ async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
-    if g_objs.args.run_mode == "visual_only":
-        await g_objs.httpserver_manager.wait_to_model_ready()
-        loop.create_task(g_objs.httpserver_manager.loop_for_fwd_visual_only())
-    else:
+    if g_objs.args.run_mode != "visual_only":
         loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return

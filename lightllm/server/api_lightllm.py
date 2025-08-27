@@ -154,7 +154,7 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
-async def lightllm_get_image_embedding(request: Request, httpserver_manager: VisualManager) -> Response:
+async def lightllm_get_image_embedding(request: Request, httpserver_manager: HttpServerManager) -> Response:
     request_dict = await request.json()
     # request_dict: {'parameters': {'max_new_tokens': 128},
     # 'multimodal_params': {'images': [{'type': 'base64', 'data': 'base64'}]}}
@@ -165,6 +165,6 @@ async def lightllm_get_image_embedding(request: Request, httpserver_manager: Vis
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
 
-    await httpserver_manager.generate(sampling_params, multimodal_params, request=request)
+    await httpserver_manager.get_image_embeding(sampling_params, multimodal_params, request=request)
 
     return JSONResponse({"message": "OK"}, status_code=200)

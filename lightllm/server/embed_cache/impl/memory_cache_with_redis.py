@@ -7,7 +7,7 @@ import torch
 import time
 from collections import deque
 import multiprocessing.shared_memory as shm
-from ..utils import get_shm_name_data, get_shm_name_embed, free_shm, free_afs, EmbedRefCountRedis
+from ..utils import get_shm_name_data, get_shm_name_embed, free_shm, EmbedRefCountRedis
 from .naive_memory_cache import Record, InMemoryCache
 from lightllm.utils.log_utils import init_logger
 

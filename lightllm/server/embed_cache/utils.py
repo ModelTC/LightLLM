@@ -79,6 +79,7 @@ def get_shm_name_data(uid):
 def get_shm_name_embed(uid):
     return str(uid) + "-embed"
 
+
 """
 Importable Redis-backed MD5 refcount with LRU eviction.
 
@@ -108,7 +109,7 @@ class EmbedRefCountRedis:
     def __init__(
         self,
         redis_url: str = "redis://localhost:6379/0",
-        capacity: int = 50_000,
+        capacity: int = 50000,
         evict_fraction: float = 0.2,
         key_prefix: str = "md5:",
         image_embed_dir: str = None,

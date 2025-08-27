@@ -21,14 +21,12 @@ from lightllm.utils.shm_size_check import check_recommended_shm_size
 logger = init_logger(__name__)
 
 
-def setup_signal_handlers(http_server_process, process_manager, redis_process=None):
+def setup_signal_handlers(http_server_process, process_manager):
     def signal_handler(sig, frame):
         if sig == signal.SIGINT:
             logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
             if http_server_process:
                 kill_recursive(http_server_process)
-            if redis_process and redis_process.poll() is None:
-                redis_process.terminate()
 
             process_manager.terminate_all_processes()
             logger.info("All processes have been forcefully terminated.")
@@ -51,19 +49,6 @@ def setup_signal_handlers(http_server_process, process_manager, redis_process=No
                     logger.warning("HTTP server did not exit in time, killing it...")
                     kill_recursive(http_server_process)
 
-            # 优雅关闭Redis
-            if redis_process and redis_process.poll() is None:
-                redis_process.send_signal(signal.SIGTERM)
-                start_time = time.time()
-                while (time.time() - start_time) < 10:
-                    if redis_process.poll() is not None:
-                        logger.info("Redis service has exited gracefully")
-                        break
-                    time.sleep(0.5)
-                else:
-                    logger.warning("Redis service did not exit in time, killing it...")
-                    redis_process.terminate()
-
             process_manager.terminate_all_processes()
             logger.info("All processes have been terminated gracefully.")
             sys.exit(0)
@@ -73,8 +58,6 @@ def setup_signal_handlers(http_server_process, process_manager, redis_process=No
 
     logger.info(f"start process pid {os.getpid()}")
     logger.info(f"http server pid {http_server_process.pid}")
-    if redis_process:
-        logger.info(f"redis service pid {redis_process.pid}")
     return
 
 
@@ -159,10 +142,10 @@ def check_and_set_args(args):
 
     args.enable_multimodal = is_multimodal_mode(args)
     # visual_only模式下才需要设置visual_embed_path
-    if args.visual_embed_path is not None:
+    if args.visual_only_port is not None:
         assert (
             args.run_mode == "visual_only" or args.run_mode == "llm_only"
-        ), "only visual_only or llm_only mode need visual_embed_path"
+        ), "only visual_only or llm_only mode need visual_only_port"
 
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
@@ -449,16 +432,17 @@ def visual_only_start(args):
         return
     already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
     can_use_ports = alloc_can_use_network_port(
-        num=4 + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=5 + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
         router_port,
         visual_port,
         audio_port,
+        cache_port,
         metric_port,
-    ) = can_use_ports[0:4]
-    can_use_ports = can_use_ports[4:]
+    ) = can_use_ports[0:5]
+    can_use_ports = can_use_ports[5:]
 
     visual_model_tp_ports = []
     for _ in range(args.visual_dp):
@@ -470,6 +454,7 @@ def visual_only_start(args):
     args.router_port = router_port
     args.visual_port = visual_port
     args.audio_port = audio_port
+    args.cache_port = cache_port
     args.metric_port = metric_port
     args.visual_model_rpc_ports = visual_model_tp_ports
 
@@ -484,17 +469,33 @@ def visual_only_start(args):
         start_args=[(metric_port, args)],
     )
 
-    # if args.enable_multimodal_audio:
-    #     from .audioserver.manager import start_audio_process
+    from .visualserver.manager import start_visual_process
 
-    #     process_manager.start_submodule_processes(
-    #         start_funcs=[
-    #             start_audio_process,
-    #         ],
-    #         start_args=[
-    #             (args, router_port, audio_port, cache_port),
-    #         ],
-    #     )
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_cache_manager,
+        ],
+        start_args=[(cache_port, args)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_visual_process,
+        ],
+        start_args=[
+            (args, audio_port, visual_port, cache_port, visual_model_tp_ports),
+        ],
+    )
+    if args.enable_multimodal_audio:
+        from .audioserver.manager import start_audio_process
+
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_audio_process,
+            ],
+            start_args=[
+                (args, router_port, audio_port, cache_port),
+            ],
+        )
 
     # 启动 gunicorn
     command = [
@@ -540,9 +541,6 @@ def config_server_start(args):
     if args.run_mode != "config_server":
         return
 
-    # 启动Redis服务（如果指定）
-    redis_process = start_redis_service(args)
-
     logger.info(f"all start args:{args}")
 
     set_env_start_args(args)
@@ -570,5 +568,5 @@ def config_server_start(args):
     ]
 
     http_server_process = subprocess.Popen(command)
-    setup_signal_handlers(http_server_process, process_manager, redis_process)
+    setup_signal_handlers(http_server_process, process_manager)
     http_server_process.wait()

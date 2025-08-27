@@ -17,6 +17,7 @@ from lightllm.server.core.objs import Req, FinishStatus
 from typing import Union, List, Tuple, Dict, Optional
 from ..req_id_generator import ReqIDGenerator
 from lightllm.server.core.objs.io_objs import GroupReqObjs
+from lightllm.server.embed_cache.impl.memory_cache_with_redis import MemoryCacheWithRedis
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
@@ -43,15 +44,17 @@ class VisualManager:
         self.visual_only = True if self.args.run_mode == "visual_only" else False
         context = zmq.Context(2)
         self.id_gen = ReqIDGenerator()
-        if not self.visual_only:
+        self.recv_from_httpserver = context.socket(zmq.PULL)
+        if self.visual_only:
+            self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{self.args.visual_only_port}")
+        else:
+            self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
             self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
             self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
             self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
 
-        self.recv_from_httpserver = context.socket(zmq.PULL)
-        self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
-
         self.cache_port = cache_port
+        self.memory_cache = MemoryCacheWithRedis(args)
         self.waiting_reqs_from_httpserver: List[GroupReqIndexes] = []
         self.waiting_reqs_visual_only: List[VisualOnlyReqIndexes] = []
         self.model_weightdir = args.model_dir
@@ -248,42 +251,62 @@ class VisualManager:
         sampling_params.group_request_id = group_request_id
         return group_request_id
 
-    async def generate(
-        self,
-        sampling_params: SamplingParams,
-        multimodal_params: MultimodalParams,
-        request: Request,
-        is_health_req: bool = False,
-    ) -> Tuple[int, str, dict, FinishStatus]:
+    # async def generate(
+    #     self,
+    #     sampling_params: SamplingParams,
+    #     multimodal_params: MultimodalParams,
+    #     request: Request,
+    #     is_health_req: bool = False,
+    # ) -> Tuple[int, str, dict, FinishStatus]:
 
-        request_headers = request.headers if request is not None else {}
-        group_request_id = self.alloc_req_id(sampling_params, is_health_req)
+    #     request_headers = request.headers if request is not None else {}
+    #     group_request_id = self.alloc_req_id(sampling_params, is_health_req)
 
-        try:
-            await multimodal_params.verify_and_preload(request)
-            image_count = len(multimodal_params.images)
-            # 记录请求到达的相关信息
-            await self._log_req_header(request_headers, group_request_id, image_count)
-            assert (
-                len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
-            ), "too many multimodal items!"
+    #     try:
+    #         await multimodal_params.verify_and_preload(request)
+    #         image_count = len(multimodal_params.images)
+    #         # 记录请求到达的相关信息
+    #         await self._log_req_header(request_headers, group_request_id, image_count)
+    #         assert (
+    #             len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
+    #         ), "too many multimodal items!"
 
-            await self._initialize_multimodal_metadata(multimodal_params, sampling_params)
+    #         await self._initialize_multimodal_metadata(multimodal_params, sampling_params)
 
-            visual_req_status = VisualOnlyReqIndexes(group_req_id=group_request_id, multimodal_params=multimodal_params)
-            self.waiting_reqs_visual_only.append(visual_req_status)
+    #         visual_req_status = VisualOnlyReqIndexes(group_req_id=group_request_id,
+    # multimodal_params=multimodal_params)
+    #         self.waiting_reqs_visual_only.append(visual_req_status)
 
-        except Exception as e:
-            logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
-            await self.abort(group_request_id, multimodal_params)
-            raise e
-        return
+    #     except Exception as e:
+    #         logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+    #         await self.abort(group_request_id, multimodal_params)
+    #         raise e
+    #     return
 
     async def abort(self, group_req_id: int, multimodal_params: MultimodalParams):
         logger.warning(f"aborted group_request_id {group_req_id}")
         for img in multimodal_params.images:
             img.is_abort = True
         return
+
+    async def loop_for_netio_req(self):
+        if not hasattr(self, "visual_recv_max_count"):
+            self.visual_recv_max_count = 64
+
+        while True:
+            try:
+                for _ in range(self.visual_recv_max_count):
+                    recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+                    print(f"recv_req is {recv_req}")
+                    if isinstance(recv_req, GroupReqIndexes):
+                        self.waiting_reqs_from_httpserver.append(recv_req)
+                    else:
+                        assert False, f"Error Req Inf {recv_req}"
+                self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
+            except zmq.ZMQError:
+                # 当队列已经开始清空的时候，将一次接受数量下调
+                self.visual_recv_max_count = 64
+            await asyncio.sleep(0.01)
 
     def clean_up(self):
         for model_rpc in self.model_rpcs:
@@ -313,6 +336,9 @@ def start_visual_process(args, next_module_port, visual_port, cache_port, model_
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
-    loop.create_task(visualserver.loop_for_fwd())
+    if args.run_mode == "visual_only":
+        loop.create_task(visualserver.loop_for_fwd_visual_only())
+    else:
+        loop.create_task(visualserver.loop_for_fwd())
     loop.run_until_complete(visualserver.loop_for_netio_req())
     return

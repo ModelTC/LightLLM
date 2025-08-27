@@ -338,6 +338,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metric_gateway", type=str, default=None, help="address for collecting monitoring metrics")
     parser.add_argument("--job_name", type=str, default="lightllm", help="job name for monitor")
     parser.add_argument("--visual_embed_path", type=str, default=None, help="path for vit embed")
+    parser.add_argument("--visual_only_port", type=int, default=18097, help="port for visual only server")
     parser.add_argument(
         "--grouping_key", action="append", default=[], help="grouping_key for the monitor in the form key=value"
     )

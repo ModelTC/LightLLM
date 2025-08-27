@@ -85,7 +85,9 @@ class VisualModelRpcServer(rpyc.Service):
             else:
                 raise Exception(f"can not support {self.model_type} now")
             self.model.load_model(weight_dir)
+            print("begin load model")
             self.model = self.model.cuda()
+            print("load model OK")
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -188,7 +190,7 @@ def _init_env(port, device_id):
 async def start_model_process(port, vit_tp, device_id):
     import multiprocessing
 
-    proc = multiprocessing.get_context("spawn").Process(
+    proc = multiprocessing.Process(
         target=_init_env,
         args=(
             port,

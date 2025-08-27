@@ -7,7 +7,7 @@ import torch
 import time
 from collections import deque
 import multiprocessing.shared_memory as shm
-from ..utils import get_shm_name_data, get_shm_name_embed, free_shm, free_afs
+from ..utils import get_shm_name_data, get_shm_name_embed, free_shm
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
