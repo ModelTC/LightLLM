@@ -7,7 +7,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run_mode",
         type=str,
-        choices=["normal", "prefill", "decode", "pd_master", "config_server", "visual_only", "llm_only"],
+        choices=["normal", "prefill", "decode", "pd_master", "config_server", "visual_only"],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
@@ -337,8 +337,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--metric_gateway", type=str, default=None, help="address for collecting monitoring metrics")
     parser.add_argument("--job_name", type=str, default="lightllm", help="job name for monitor")
-    parser.add_argument("--visual_embed_path", type=str, default=None, help="path for vit embed")
-    parser.add_argument("--visual_only_port", type=int, default=18097, help="port for visual only server")
     parser.add_argument(
         "--grouping_key", action="append", default=[], help="grouping_key for the monitor in the form key=value"
     )
@@ -506,6 +504,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.03,
         help="""The interval of the schedule time, default is 30ms.""",
+    )
+    parser.add_argument(
+        "--image_embed_dir",
+        type=str,
+        default=None,
+        help="path for vit embed",
     )
     parser.add_argument(
         "--enable_remote_vit",

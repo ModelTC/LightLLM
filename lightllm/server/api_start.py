@@ -141,12 +141,6 @@ def check_and_set_args(args):
         assert args.mtp_step == 0
 
     args.enable_multimodal = is_multimodal_mode(args)
-    # visual_only模式下才需要设置visual_embed_path
-    if args.visual_only_port is not None:
-        assert (
-            args.run_mode == "visual_only" or args.run_mode == "llm_only"
-        ), "only visual_only or llm_only mode need visual_only_port"
-
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -279,7 +273,7 @@ def normal_or_p_d_start(args):
             ],
             start_args=[(cache_port, args)],
         )
-        if args.enable_multimodal_audio and args.run_mode != "llm_only":
+        if args.enable_multimodal_audio and not args.enable_remote_vit:
             from .audioserver.manager import start_audio_process
 
             process_manager.start_submodule_processes(
@@ -299,7 +293,7 @@ def normal_or_p_d_start(args):
                 ],
             )
 
-        elif args.run_mode != "llm_only":
+        elif not args.enable_remote_vit:
             process_manager.start_submodule_processes(
                 start_funcs=[
                     start_visual_process,

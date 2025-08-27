@@ -55,19 +55,23 @@ def get_environ(environ_name):
 
 
 def init_vision_distributed_env(kvargs):
-    tp_world_size = kvargs["vit_tp"]
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    args = get_env_start_args()
+    tp_world_size = args.visual_tp
     dp_size = 1
     tp_rank_id = kvargs["tp_rank_id"]
     set_dp_size(dp_size)
     set_dp_world_size(tp_world_size)
     set_current_rank_in_dp(tp_rank_id)
-    visual_gpu_ids = kvargs["visual_gpu_ids"]
+    visual_gpu_ids = args.visual_gpu_ids
     device_id = visual_gpu_ids[kvargs["vit_rank_id"]]
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
+    visual_nccl_port = args.visual_nccl_ports[kvargs["dp_rank_id"]]
     dist.init_process_group(
         "nccl",
-        init_method=f'tcp://127.0.0.1:{kvargs["visual_nccl_port"]}',
+        init_method=f"tcp://127.0.0.1:{visual_nccl_port}",
         rank=kvargs["tp_rank_id"],
         world_size=tp_world_size,
     )

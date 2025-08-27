@@ -39,16 +39,20 @@ class VisualModelRpcServer(rpyc.Service):
         import torch.distributed as dist
 
         self.args = get_env_start_args()
-        self.vit_dp = kvargs["vit_dp"]
-        self.vit_tp = kvargs["vit_tp"]
+
+        weight_dir = (self.args.model_dir,)
+        cache_port = (self.args.cache_port,)
+        data_type = (self.args.data_type,)
+        quant_type = (self.args.vit_quant_type,)
+        quant_cfg = (self.args.vit_quant_cfg,)
+        max_batch_size = (min(self.args.visual_infer_batch_size // self.args.visual_dp, 1),)
+
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
-        self.cache_port = kvargs["cache_port"]
-        weight_dir = kvargs["weight_dir"]
-        self.vit_rank_id = kvargs["vit_rank_id"]
+        kvargs["vit_rank_id"] = self.dp_rank_id * self.args.visual_tp + self.tp_rank_id
+
         if self.args.run_mode != "visual_only":
-            self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
-        self.data_type = kvargs["data_type"]
+            self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
         self.visual_only = True if self.args.run_mode == "visual_only" else False
 
         init_vision_distributed_env(kvargs)
@@ -57,10 +61,10 @@ class VisualModelRpcServer(rpyc.Service):
         try:
             kvargs = {
                 "weight_dir": weight_dir,
-                "data_type": self.data_type,
-                "quant_type": kvargs["quant_type"],
-                "quant_cfg": kvargs["quant_cfg"],
-                "max_batch_size": kvargs["max_batch_size"],
+                "data_type": data_type,
+                "quant_type": quant_type,
+                "quant_cfg": quant_cfg,
+                "max_batch_size": max_batch_size,
             }
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":
@@ -111,28 +115,21 @@ class VisualModelRpcServer(rpyc.Service):
         all_img_embeds = all_img_embeds.to(torch.device("cpu"))
 
         if self.tp_rank_id == 0:
-            if self.visual_only:
-                for i, img in enumerate(images):
-                    uid = img.uuid
-                    start, end = valid_ids[i]
-                    cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                    create_afs(get_shm_name_embed(uid), cur_embed_bytes)  # 后面替换成redis存
-            else:
-                ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
-                ids_to_set = []
-                for i, ready in enumerate(ready_flags):
-                    if ready:
-                        continue
-                    uid = uuids[i]
-                    start, end = valid_ids[i]
-                    cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                    if self.args.run_mode == "visual_only":
-                        create_afs(get_shm_name_embed(uid), cur_embed_bytes)
-                    else:
-                        create_shm(get_shm_name_embed(uid), cur_embed_bytes)
-                    ids_to_set.append(uid)
-                if ids_to_set:
-                    self.cache_client.root.set_items_embed(ids_to_set)
+            ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
+            ids_to_set = []
+            for i, ready in enumerate(ready_flags):
+                if ready:
+                    continue
+                uid = uuids[i]
+                start, end = valid_ids[i]
+                cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
+                if self.args.enable_remote_vit:
+                    create_afs(get_shm_name_embed(uid), cur_embed_bytes)
+                else:
+                    create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                ids_to_set.append(uid)
+            if ids_to_set:
+                self.cache_client.root.set_items_embed(ids_to_set)
         return
 
 
