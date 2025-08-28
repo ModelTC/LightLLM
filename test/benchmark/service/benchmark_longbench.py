@@ -26,6 +26,7 @@ from typing import AsyncGenerator, List, Tuple, Union
 import aiohttp
 import numpy as np
 from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
+from tqdm.asyncio import tqdm
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -142,22 +143,32 @@ def sample_requests(
 async def get_request(
     input_requests: List[Tuple[List[dict], str, int, int]],
     request_rate: float,
+    concurrency: int = None,
 ) -> AsyncGenerator[Tuple[List[dict], str, int, int], None]:
     input_requests = iter(input_requests)
-    for request in input_requests:
-        yield request
 
-        if request_rate == float("inf"):
-            # If the request rate is infinity, then we don't need to wait.
-            continue
-        # Sample the request interval from the exponential distribution.
-        interval = np.random.exponential(1.0 / request_rate)
-        # The next request will be sent after the interval.
-        await asyncio.sleep(interval)
+    if concurrency is not None:
+        # Concurrency-based request generation
+        # This generator will be consumed by the benchmark function
+        # which will manage the concurrency
+        for request in input_requests:
+            yield request
+    else:
+        # Rate-based request generation (original logic)
+        for request in input_requests:
+            yield request
+
+            if request_rate == float("inf"):
+                # If the request rate is infinity, then we don't need to wait.
+                continue
+            # Sample the request interval from the exponential distribution.
+            interval = np.random.exponential(1.0 / request_rate)
+            # The next request will be sent after the interval.
+            await asyncio.sleep(interval)
 
 
 async def send_request(
-    messages: List[dict], rendered_prompt: str, prompt_len: int, output_len: int, use_openai_api: bool
+    messages: List[dict], rendered_prompt: str, prompt_len: int, output_len: int, use_openai_api: bool, pbar=None
 ) -> None:
     if use_openai_api:
         # Use OpenAI API to send the request.
@@ -191,7 +202,7 @@ async def send_request(
                     if is_first:
                         is_first = False
                         ttft = delta_time
-                    text += json.loads(chunk.decode("utf-8")[6:])["choices"][0]["delta"].get("content", "")
+                    # text += json.loads(chunk.decode("utf-8")[6:])["choices"][0]["delta"].get("content", "")
                     if delta_time < 0.005:
                         receive_n += 1
                     chunks.append(delta_time)
@@ -236,18 +247,50 @@ async def send_request(
     request_latency = request_end_time - request_start_time
     REQUEST_LATENCY.append((prompt_len, output_len, request_latency, ttft))
 
+    # Update progress bar if provided
+    if pbar:
+        pbar.update(1)
+
 
 async def benchmark(
     input_requests: List[Tuple[List[dict], str, int, int]],
     request_rate: float,
     use_openai_api: bool = False,
+    concurrency: int = None,
 ) -> None:
-    tasks: List[asyncio.Task] = []
-    async for request in get_request(input_requests, request_rate):
-        messages, rendered_prompt, prompt_len, output_len = request
-        task = asyncio.create_task(send_request(messages, rendered_prompt, prompt_len, output_len, use_openai_api))
-        tasks.append(task)
-    await asyncio.gather(*tasks)
+    total_requests = len(input_requests)
+
+    # Create progress bar
+    pbar = tqdm(total=total_requests, desc="Processing requests", unit="req")
+
+    if concurrency is not None:
+        # Concurrency-based processing
+        semaphore = asyncio.Semaphore(concurrency)
+        tasks: List[asyncio.Task] = []
+
+        async def send_with_semaphore(messages, rendered_prompt, prompt_len, output_len):
+            async with semaphore:
+                await send_request(messages, rendered_prompt, prompt_len, output_len, use_openai_api, pbar)
+
+        async for request in get_request(input_requests, request_rate, concurrency):
+            messages, rendered_prompt, prompt_len, output_len = request
+            task = asyncio.create_task(send_with_semaphore(messages, rendered_prompt, prompt_len, output_len))
+            tasks.append(task)
+
+        await asyncio.gather(*tasks)
+    else:
+        # Rate-based processing (original logic)
+        tasks: List[asyncio.Task] = []
+        async for request in get_request(input_requests, request_rate, concurrency):
+            messages, rendered_prompt, prompt_len, output_len = request
+            task = asyncio.create_task(
+                send_request(messages, rendered_prompt, prompt_len, output_len, use_openai_api, pbar)
+            )
+            tasks.append(task)
+        await asyncio.gather(*tasks)
+
+    # Close progress bar
+    pbar.close()
 
 
 def main(args: argparse.Namespace):
@@ -258,7 +301,7 @@ def main(args: argparse.Namespace):
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer, args.max_total_tokens)
 
     benchmark_start_time = time.time()
-    asyncio.run(benchmark(input_requests, args.request_rate, args.use_openai_api))
+    asyncio.run(benchmark(input_requests, args.request_rate, args.use_openai_api, args.concurrency))
     benchmark_end_time = time.time()
     benchmark_time = benchmark_end_time - benchmark_start_time
     print(f"Total time: {benchmark_time:.2f} s")
@@ -298,8 +341,19 @@ if __name__ == "__main__":
         "Otherwise, we use Poisson process to synthesize "
         "the request arrival times.",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="Number of concurrent requests to maintain. " "Cannot be used together with --request-rate.",
+    )
     parser.add_argument("--num-prompts", type=int, default=1, help="Number of prompts to process.")
     parser.add_argument("--max-total-tokens", type=int, default=16384, help="Max total tokens (input + output).")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+
+    # Validate that only one of request_rate or concurrency is set
+    if args.concurrency is not None and args.request_rate != float("inf"):
+        raise ValueError("Cannot set both --request-rate and --concurrency. Please use only one.")
+
     main(args)
