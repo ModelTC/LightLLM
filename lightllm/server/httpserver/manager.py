@@ -133,9 +133,9 @@ class HttpServerManager:
                 item.token_num = rec["token_num"]
                 uid_list.append(rec["id"])
 
-            # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
-            if self.enable_remote_vit:
-                return
+            # # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
+            # if self.enable_remote_vit:
+            #     return
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
             update_data_ids = []
@@ -159,11 +159,10 @@ class HttpServerManager:
                 items, md5sums, tokens_nums, datas = [], [], [], []
                 for img in multimodal_params.images:
                     self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
-                    patch_num = self.tokenizer.get_image_patch(img)
                     data = img.read()
                     # must after init_imageitem_extral_params
                     token_num = self.tokenizer.get_image_token_length(img)
-                    md5sum = "{}_{}".format(hashlib.md5(data).hexdigest(), patch_num)
+                    md5sum = "{}_{}".format(hashlib.md5(data).hexdigest(), img.patch_num)
                     md5sums.append(md5sum)
                     tokens_nums.append(token_num)
                     datas.append(data)

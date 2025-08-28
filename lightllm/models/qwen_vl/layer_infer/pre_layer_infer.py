@@ -53,11 +53,11 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
                 if img["token_id"] in img_start_token_ids or img["_prefill_"] is False:
                     continue
                 # pull the img_embeds by uid from shm or afs
-                if self.args.run_mode == "llm_only":
-                    data = read_afs(get_shm_name_embed(img["uuid"]))
+                if self.args.enable_remote_vit:
+                    embed = read_afs(get_shm_name_embed(img["uuid"]))
                 else:
-                    data = read_shm(get_shm_name_embed(img["uuid"]))
-                img_weight.append(bytes2tensor(data).cuda().reshape(img["token_num"], -1))
+                    embed = read_shm(get_shm_name_embed(img["uuid"]))
+                img_weight.append(bytes2tensor(embed).cuda().reshape(img["token_num"], -1))
                 img_start_token_ids.append(img["token_id"])
                 img_token_lens.append(img["token_num"])
                 img_start_locs.append(img_start_loc)

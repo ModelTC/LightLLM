@@ -43,6 +43,8 @@ class VisualManager:
         self.args = args
         self.remote_vit = args.enable_remote_vit or args.run_mode == "visual"
         self.cache_port = cache_port
+        self.visual_port = visual_port
+        self.next_module_port = next_module_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.infer_batch_size = args.visual_infer_batch_size
         self.trust_remote_code = args.trust_remote_code
@@ -151,20 +153,16 @@ class VisualManager:
                     processing_group_reqs = []
                     images_need_infer = []
 
-    def _recv_reqs(self):
-        if self.remote_vit:
-            recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
-            for img in recv_req.multimodal_params.images:
-                image_patch = self.tokenizer.get_image_patch_func(img)
-                data = img._preload_data
-                # img._preload_data = None
-                md5sum = "{}_{}".format(hashlib.md5(data).hexdigest(), image_patch)
-                md5 = int(md5sum, 16)
-                # create_shm(get_shm_name_data(uid), data)
-                self.cache_client.root.set_items_data([md5])
-            return recv_req
-        else:
-            return self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+    # def _recv_reqs(self):
+    #     if self.remote_vit:
+    #         recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+    #         recv_req.multimodal_params.images[:]= [
+    #             img for img in recv_req.multimodal_params.images
+    #             if not self.cache_client.root.get_item_embed(img.uuid)  # embed已存在的被丢弃 , ref +1
+    #         ]
+    #         return recv_req
+    #     else:
+    #         return self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
 
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):
@@ -173,7 +171,7 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self._recv_reqs()
+                    recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
                         self.waiting_reqs.append(recv_req)
                     else:
@@ -196,8 +194,6 @@ class VisualManager:
                     visual_req = self.waiting_reqs.pop(0)
 
                     for img in visual_req.multimodal_params.images:
-                        if img.is_abort:
-                            continue
                         images_need_infer.append(img)
 
                         if len(images_need_infer) == self.infer_batch_size:
@@ -249,9 +245,6 @@ def start_visual_process(args, next_module_port, visual_port, cache_port, model_
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
-    if args.run_mode == "visual":
-        loop.create_task(visualserver.loop_for_fwd_visual_only())
-    else:
-        loop.create_task(visualserver.loop_for_fwd())
+    create_forward_loop(visualserver, loop)
     loop.run_until_complete(visualserver.loop_for_netio_req())
     return
