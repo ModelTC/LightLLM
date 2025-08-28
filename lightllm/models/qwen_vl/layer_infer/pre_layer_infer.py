@@ -54,7 +54,7 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
                     continue
                 # pull the img_embeds by uid from shm or afs
                 if self.args.enable_remote_vit:
-                    embed = read_afs(get_shm_name_embed(img["uuid"]))
+                    embed = read_afs(get_shm_name_embed(img["uuid"], self.args.image_embed_dir))
                 else:
                     embed = read_shm(get_shm_name_embed(img["uuid"]))
                 img_weight.append(bytes2tensor(embed).cuda().reshape(img["token_num"], -1))
