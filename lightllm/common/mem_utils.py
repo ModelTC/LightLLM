@@ -4,6 +4,7 @@ from lightllm.common.calibration_fp8kv_mem_manager import CalibrationFP8KVMemory
 from lightllm.common.export_calibration_mem_manager import ExportCalibrationMemoryManager
 from lightllm.common.ppl_int8kv_mem_manager import PPLINT8KVMemoryManager
 from lightllm.common.ppl_int4kv_mem_manager import PPLINT4KVMemoryManager
+from lightllm.common.page_size_variable_mem_manager import PageSizeVariableMemoryManager
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -28,6 +29,9 @@ def select_mem_manager_class(mode):
     elif "export_fp8kv_calibration" in mode:
         memory_manager_class = ExportCalibrationMemoryManager
         logger.info("Using mode export fp8kv calibration")
+    elif "page_size_variable" in mode:
+        memory_manager_class = PageSizeVariableMemoryManager
+        logger.info("Page size will be variable")
     else:
         memory_manager_class = MemoryManager
         logger.info("Model kv cache using mode normal")

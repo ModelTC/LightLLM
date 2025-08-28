@@ -94,7 +94,7 @@ def normal_or_p_d_start(args):
 
     if args.graph_max_len_in_batch == 0:
         args.graph_max_len_in_batch = args.max_req_total_len
-    
+
     # mode setting check.
     if args.output_constraint_mode != "none":
         assert args.disable_dynamic_prompt_cache is False
@@ -126,6 +126,13 @@ def normal_or_p_d_start(args):
             "--enable_flashinfer_prefill and --enable_flashinfer_decode"
         )
         assert args.disable_cudagraph is True, "export_fp8kv_calibration mode need disable cudagraph"
+    if "page_size_variable" in args.mode:
+        assert args.enable_fa3 is True or (
+            args.enable_flashinfer_prefill is True and args.enable_flashinfer_decode is True
+        ), (
+            "page_size_variable mode need enable fa3 or flashinfer, add --enable_fa3 or "
+            "--enable_flashinfer_prefill and --enable_flashinfer_decode"
+        )
 
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
