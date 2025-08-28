@@ -697,6 +697,9 @@ class HttpServerManager:
 
             asyncio.create_task(pd_handle_loop(self))
 
+        if self.enable_multimodal:
+            asyncio.create_task(self.vit_manager.vit_handle_loop())
+
         while True:
             try:
                 await asyncio.wait_for(self.recv_from_detokenization.recv_pyobj(), timeout=0.05)

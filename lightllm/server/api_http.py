@@ -95,21 +95,6 @@ class G_Objs:
             )
         elif args.run_mode == "visual":
             self.metric_client = MetricClient(args.metric_port)
-        elif args.run_mode == "llm_only":
-            init_tokenizer(args)  # for openai api
-            SamplingParams.load_generation_cfg(args.model_dir)
-            self.metric_client = MetricClient(args.metric_port)
-            self.httpserver_manager = HttpServerManager(
-                args,
-                router_port=args.router_port,
-                cache_port=None,
-                detokenization_pub_port=args.detokenization_pub_port,
-                visual_port=None,
-                enable_multimodal=args.enable_multimodal,
-                metric_port=args.metric_port,
-            )
-            dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
-            self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", dp_size_in_node)
         else:
             init_tokenizer(args)  # for openai api
             SamplingParams.load_generation_cfg(args.model_dir)
@@ -365,9 +350,10 @@ async def shutdown():
 @app.on_event("startup")
 async def startup_event():
     logger.info("server start up")
+    if g_objs.httpserver_manager is None:
+        return
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
-    if g_objs.args.run_mode != "visual":
-        loop.create_task(g_objs.httpserver_manager.handle_loop())
+    loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return

@@ -57,6 +57,7 @@ class VITConnectionManager:
         logger.info(f"Connected to local VIT instance at {self.args.zmq_mode}127.0.0.1:{self.local_visual_port}")
 
     def _setup_remote_vit_connections(self):
+        print("_setup_remote_vit_connections", "fdakpgdakgjadpgkjadk")
         asyncio.create_task(self.vit_handle_loop())
 
         # wait for remote vit instances
@@ -89,6 +90,7 @@ class VITConnectionManager:
             raise Exception(f"Failed to send to VIT instance {instance.host_ip_port}: {e}")
 
     async def vit_handle_loop(self):
+        print("vit_handle_loop", "fdakpgdakgjadpgkjadk")
         while True:
             try:
                 id_to_vit_obj = await self._get_vit_objs()
@@ -118,8 +120,8 @@ class VITConnectionManager:
         get_vit_objs 主要负责从 config_server 获取所有的vit远程服务。
         """
         # 使用 config_server 服务来发现所有的 pd_master 节点。
-        uri = f"ws://{self.args.config_server_host}:{self.args.config_server_port}/registered_vit"
-
+        uri = f"ws://{self.args.config_server_host}:{self.args.config_server_port}/registered_visual_objects"
+        print("uri", uri)
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(uri)

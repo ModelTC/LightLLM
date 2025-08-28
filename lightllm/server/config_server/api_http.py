@@ -8,7 +8,8 @@ from threading import Lock
 from typing import Dict, List
 from fastapi.responses import JSONResponse
 from lightllm.utils.log_utils import init_logger
-from ..pd_io_struct import PD_Master_Obj, Visual_Server_Obj
+from lightllm.server.visualserver.vit_connect import VIT_Obj
+from ..pd_io_struct import PD_Master_Obj
 from .nccl_tcp_store import start_tcp_store_server
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.process_check import start_parent_check_thread
@@ -18,7 +19,7 @@ logger = init_logger(__name__)
 app = FastAPI()
 
 registered_pd_master_objs: Dict[str, PD_Master_Obj] = {}
-registered_visual_server_obj: Dict[str, Visual_Server_Obj] = {}
+registered_visual_server_objs: Dict[str, VIT_Obj] = {}
 registered_pd_master_obj_lock = Lock()
 registered_visual_server_obj_lock = Lock()
 
@@ -73,15 +74,15 @@ async def websocket_endpoint(websocket: WebSocket):
     return
 
 
-@app.websocket("/visual_server_register")
+@app.websocket("/visual_register")
 async def visual_websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_ip, client_port = websocket.client
     logger.info(f"ws connected from IP: {client_ip}, Port: {client_port}")
-    registered_visual_server_obj: Visual_Server_Obj = pickle.loads(await websocket.receive_bytes())
+    registered_visual_server_obj: VIT_Obj = pickle.loads(await websocket.receive_bytes())
     logger.info(f"recieved registered_visual_server_obj {registered_visual_server_obj}")
     with registered_visual_server_obj_lock:
-        registered_visual_server_obj_lock[registered_visual_server_obj.node_id] = registered_visual_server_obj
+        registered_visual_server_objs[registered_visual_server_obj.node_id] = registered_visual_server_obj
 
     try:
         while True:
@@ -93,7 +94,7 @@ async def visual_websocket_endpoint(websocket: WebSocket):
     finally:
         logger.error(f"registered_visual_server_obj {registered_visual_server_obj} removed")
         with registered_visual_server_obj_lock:
-            registered_visual_server_obj.pop(registered_visual_server_obj.node_id, None)
+            registered_visual_server_objs.pop(registered_visual_server_obj.node_id, None)
     return
 
 
@@ -105,10 +106,10 @@ async def get_registered_objects():
         return {"data": base64_encoded}
 
 
-@app.get("/registered_visual_server_objects")
+@app.get("/registered_visual_objects")
 async def get_vit_registered_objects():
     with registered_visual_server_obj_lock:
-        serialized_data = pickle.dumps(registered_visual_server_obj)
+        serialized_data = pickle.dumps(registered_visual_server_objs)
         base64_encoded = base64.b64encode(serialized_data).decode("utf-8")
         return {"data": base64_encoded}
 

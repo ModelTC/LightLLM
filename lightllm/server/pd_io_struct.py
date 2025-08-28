@@ -74,15 +74,6 @@ class PD_Master_Obj:
 
 
 @dataclass
-class Visual_Server_Obj:
-    node_id: int
-    host_ip_port: str
-
-    def to_log_str(self):
-        return f"Visual_Server host_ip_port: {self.host_ip_port} node_id: {self.node_id}"
-
-
-@dataclass
 class UpKVStatus:
     type: str = "kv_move_status"
     group_request_id: int = None

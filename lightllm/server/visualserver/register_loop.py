@@ -20,7 +20,7 @@ async def register_loop(args):
     while True:
 
         try:
-            uri = f"ws://{args.config_server_host}:{args.config_server_port}/visual_server_register"
+            uri = f"ws://{args.config_server_host}:{args.config_server_port}/visual_register"
             async with websockets.connect(uri, max_queue=(2048 * 1024, 2048 * 1023)) as websocket:
 
                 sock = websocket.transport.get_extra_info("socket")
@@ -33,7 +33,7 @@ async def register_loop(args):
 
                 while True:
                     await websocket.send("heartbeat")
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(40)
 
         except Exception as e:
             logger.error("connetion to config_server has error")

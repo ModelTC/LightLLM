@@ -53,11 +53,11 @@ class VisualManager:
     def _setup_connections(self):
         context = zmq.Context(2)
         if self.remote_vit:
-            self.recv_from_remote_llm = context.socket(zmq.PULL)
-            self.recv_from_remote_llm.bind(f"tcp://*:{self.args.remote_vit_port}")
+            self.vit_receiver = context.socket(zmq.PULL)
+            self.vit_receiver.bind(f"tcp://*:{self.args.remote_vit_port}")
         else:
-            self.recv_from_httpserver = context.socket(zmq.PULL)
-            self.recv_from_httpserver.bind(f"{self.args.zmq_mode}127.0.0.1:{self.visual_port}")
+            self.vit_receiver = context.socket(zmq.PULL)
+            self.vit_receiver.bind(f"{self.args.zmq_mode}127.0.0.1:{self.visual_port}")
             self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
             self.send_to_next_module.connect(f"{self.args.zmq_mode}127.0.0.1:{self.next_module_port}")
         self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
@@ -153,7 +153,7 @@ class VisualManager:
 
     def _recv_reqs(self):
         if self.remote_vit:
-            recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+            recv_req: GroupReqIndexes = self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
             for img in recv_req.multimodal_params.images:
                 image_patch = self.tokenizer.get_image_patch_func(img)
                 data = img._preload_data
@@ -164,7 +164,7 @@ class VisualManager:
                 self.cache_client.root.set_items_data([md5])
             return recv_req
         else:
-            return self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+            return self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
 
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):
@@ -173,7 +173,7 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self._recv_reqs()
+                    recv_req: GroupReqIndexes = self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
                         self.waiting_reqs.append(recv_req)
                     else:
@@ -182,6 +182,9 @@ class VisualManager:
             except zmq.ZMQError:
                 # 当队列已经开始清空的时候，将一次接受数量下调
                 self.visual_recv_max_count = 64
+            except Exception as e:
+                logger.exception(f"Error in loop_for_netio_req: {e}")
+                raise e
             await asyncio.sleep(0.01)
 
     # code for visual only mode
@@ -249,9 +252,6 @@ def start_visual_process(args, next_module_port, visual_port, cache_port, model_
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
-    if args.run_mode == "visual":
-        loop.create_task(visualserver.loop_for_fwd_visual_only())
-    else:
-        loop.create_task(visualserver.loop_for_fwd())
+    create_forward_loop(args, visualserver, loop)
     loop.run_until_complete(visualserver.loop_for_netio_req())
     return

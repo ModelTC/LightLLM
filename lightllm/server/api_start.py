@@ -208,9 +208,9 @@ def check_and_set_args(args):
 def normal_or_p_d_start(args):
 
     check_and_set_args(args)
-    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
+    already_uesd_ports = [args.nccl_port, args.port]
     if args.run_mode == "decode":
-        already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port, args.pd_decode_rpyc_port]
+        already_uesd_ports = [args.nccl_port, args.port, args.pd_decode_rpyc_port]
 
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
@@ -219,7 +219,7 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=7 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=7 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -238,6 +238,9 @@ def normal_or_p_d_start(args):
         tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
         can_use_ports = can_use_ports[args.visual_tp :]
         visual_model_tp_ports.append(tp_ports_for_dp)
+
+    args.visual_nccl_ports = can_use_ports[0 : args.visual_dp]
+    can_use_ports = can_use_ports[args.visual_dp :]
 
     # 将申请好的端口放入args参数中
     args.router_port = router_port
@@ -436,7 +439,6 @@ def visual_start(args):
         metric_port,
     ) = can_use_ports[0:5]
     can_use_ports = can_use_ports[5:]
-    print(cache_port)
 
     visual_model_tp_ports = []
     for _ in range(args.visual_dp):
