@@ -260,7 +260,7 @@ def run_forward_once(
     total_token_num = batch_size * input_len
     mem_indexes = model_part.req_manager.mem_manager.alloc(
         test_data.shape[0], b_req_idx, b_seq_len, b_ready_cache_len, True
-    ).cuda()
+    )
     b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
     rank_id = model_kvargs["rank_id"]
 
@@ -323,7 +323,7 @@ def run_forward_once(
         step_start = time.time()
         total_token_num += batch_size
         b_seq_len += 1
-        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0], b_req_idx, b_seq_len).cuda()
+        mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0], b_req_idx, b_seq_len)
         max_len_in_batch = input_len + i + 1
         logits = decode_fn(
             model_part,

@@ -179,7 +179,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_fp16 | triton_flashdecoding
                         | triton_gqa_attention | triton_gqa_flashdecoding | triton_fp8kv | offline_calibration_fp8kv
-                        | export_fp8kv_calibration
+                        | export_fp8kv_calibration | page_size_variable
                         triton_flashdecoding mode is for long context, current support llama llama2 qwen;
                         triton_gqa_attention and triton_gqa_flashdecoding is fast kernel for model which use GQA;
                         triton_int8kv mode use int8 to store kv cache, can increase token capacity, use triton kernel;
@@ -191,6 +191,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
                         Calibration need to disable cudagraph and use fa3 or flashinfer backend.
                         ppl_int8kv mode use int8 to store kv cache, and use ppl fast kernel;
                         ppl_fp16 mode use ppl fast fp16 decode attention kernel;
+                        page_size_variable allow to use page size > 1, use PAGE_SIZE env to set page size,
+                        page_size_variable only support fa3 and flashinfer backend for now
                         you need to read source code to make sure the supported detail mode for all models""",
     )
     parser.add_argument(
