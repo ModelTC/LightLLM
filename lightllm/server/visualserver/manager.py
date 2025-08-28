@@ -47,6 +47,7 @@ class VisualManager:
         self.infer_batch_size = args.visual_infer_batch_size
         self.trust_remote_code = args.trust_remote_code
         self.visual_model_rpc_ports = visual_model_rpc_ports
+        self.shm_req_manager = ShmReqManager()
         self._setup_connections()
 
     def _setup_connections(self):
@@ -62,7 +63,6 @@ class VisualManager:
         self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
 
     async def wait_to_model_ready(self):
-        # 待完成，需要读取config_server来起多个vit
         visual_dp = self.args.visual_dp
         visual_tp = self.args.visual_tp
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(visual_dp)]
@@ -155,13 +155,13 @@ class VisualManager:
         if self.remote_vit:
             recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
             for img in recv_req.multimodal_params.images:
+                image_patch = self.tokenizer.get_image_patch_func(img)
                 data = img._preload_data
-                img._preload_data = None
-                md5sum = hashlib.md5(data).hexdigest()
-                uid = int(md5sum, 16)
+                # img._preload_data = None
+                md5sum = "{}_{}".format(hashlib.md5(data).hexdigest(), image_patch)
+                md5 = int(md5sum, 16)
                 # create_shm(get_shm_name_data(uid), data)
-                self.cache_client.root.set_items_data([uid])
-
+                self.cache_client.root.set_items_data([md5])
             return recv_req
         else:
             return self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
@@ -187,13 +187,13 @@ class VisualManager:
     # code for visual only mode
     async def loop_for_fwd_visual_only(self):
         while True:
-            if len(self.waiting_reqs_visual_only) == 0:
+            if len(self.waiting_reqs) == 0:
                 await asyncio.sleep(0.01)  # 10ms
             else:
                 images_need_infer = []
 
-                while len(self.waiting_reqs_visual_only) > 0:
-                    visual_req = self.waiting_reqs_visual_only.pop(0)
+                while len(self.waiting_reqs) > 0:
+                    visual_req = self.waiting_reqs.pop(0)
 
                     for img in visual_req.multimodal_params.images:
                         if img.is_abort:

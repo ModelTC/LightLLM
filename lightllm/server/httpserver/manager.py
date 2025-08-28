@@ -159,13 +159,11 @@ class HttpServerManager:
                 items, md5sums, tokens_nums, datas = [], [], [], []
                 for img in multimodal_params.images:
                     self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
+                    patch_num = self.tokenizer.get_image_patch(img)
                     data = img.read()
                     # must after init_imageitem_extral_params
                     token_num = self.tokenizer.get_image_token_length(img)
-                    md5sum = "{}_{}".format(
-                        hashlib.md5(data).hexdigest(),
-                        hashlib.md5(pickle.dumps(img.extra_params, protocol=4)).hexdigest(),
-                    )
+                    md5sum = "{}_{}".format(hashlib.md5(data).hexdigest(), patch_num)
                     md5sums.append(md5sum)
                     tokens_nums.append(token_num)
                     datas.append(data)
