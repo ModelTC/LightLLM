@@ -45,14 +45,14 @@ def test_kernel(
         input_tuples.append((input.clone(), output.clone()))
 
     # warm_up
-    moe_sum_reduce(input, output, **config)
+    moe_sum_reduce(input, output, run_config=config)
 
     graph = torch.cuda.CUDAGraph()
 
     with torch.cuda.graph(graph):
         for index in range(test_count):
             input, output = input_tuples[index]
-            moe_sum_reduce(input, output, **config)
+            moe_sum_reduce(input, output, run_config=config)
 
     graph.replay()
 

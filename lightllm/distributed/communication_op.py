@@ -67,6 +67,7 @@ class CustomProcessGroup:
         self.custom_gather = None
         self.dp_world_size = get_dp_world_size()
         self.device_group = create_new_group_for_current_dp("nccl")
+        self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
     def init_custom_reduce(self) -> None:
         if not HAS_SGL_KERNEL or not has_nvlink() or self.dp_world_size not in [2, 4, 6, 8]:

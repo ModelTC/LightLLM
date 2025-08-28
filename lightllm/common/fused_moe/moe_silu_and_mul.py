@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 from .moe_silu_and_mul_config import MoeSiluAndMulKernelConfig
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.jit
@@ -62,7 +63,28 @@ def _silu_and_mul_kernel_fast(
         )
 
 
-def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, **run_config):
+def _get_silu_and_mul_configs():
+    return [
+        {"BLOCK_M": bm, "BLOCK_N": bn, "num_warps": nw, "NUM_STAGES": ns}
+        for ns in [1, 2, 4]
+        for nw in [1, 4, 8]
+        for bm in [32, 64, 128, 256]
+        for bn in [32, 64, 128, 256]
+    ]
+
+
+def _get_silu_and_mul_static_key(input: torch.Tensor, output: torch.Tensor):
+    return {"N": input.shape[-1] // 2, "out_dtype": str(output.dtype)}
+
+
+@autotune(
+    kernel_name="silu_and_mul_fwd:v1",
+    configs_gen_func=_get_silu_and_mul_configs,
+    static_key_func=_get_silu_and_mul_static_key,
+    run_key_func=lambda input: input.shape[0],
+    mutates_args=["output"],
+)
+def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None):
     assert input.is_contiguous()
     assert output.is_contiguous()
 

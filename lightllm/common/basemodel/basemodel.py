@@ -1,6 +1,7 @@
 import os
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+import gc
 import copy
 import json
 import torch
@@ -24,8 +25,8 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status
-
+from lightllm.utils.envs_utils import set_model_init_status, is_triton_autotune_enabled, disable_triton_autotune
+from lightllm.utils.infer_utils import post_empty_cache
 
 logger = init_logger(__name__)
 
@@ -100,6 +101,7 @@ class TpPartBaseModel:
         self._init_some_value()
         self._init_custom()
         self._init_inferstate_cls()
+        self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
         self._check_max_len_infer()
@@ -720,6 +722,79 @@ class TpPartBaseModel:
             logger.error(exception_str)
             raise Exception(exception_str)
         return
+
+    def autotune_layers(self):
+        # 控制autotune的层数，用于适配不同模型
+        return self.config.get("first_k_dense_replace", 0) + 1
+
+    @final
+    @torch.no_grad()
+    @post_empty_cache
+    def _autotune_warmup(self):
+        if not is_triton_autotune_enabled():
+            return
+
+        torch.distributed.barrier()
+
+        warmup_lengths = [1, 8, 16, 64, 128, 256, 1024, 2048, 4096]
+
+        if self.batch_max_tokens not in warmup_lengths:
+            warmup_lengths.append(self.batch_max_tokens)
+
+        warmup_lengths = [e for e in warmup_lengths if e <= self.batch_max_tokens]
+
+        warmup_lengths.sort(reverse=True)
+
+        layer_num_bak = self.layers_num
+        self.layers_num = self.autotune_layers()
+        for input_len in warmup_lengths:
+            try:
+                logger.info(f"autotune warmup for length {input_len}")
+                rand_gen = torch.Generator(device="cuda")
+                rand_gen.manual_seed(input_len)
+                dummy_input_ids = torch.randint(
+                    0, 10000, (input_len,), dtype=torch.int32, device="cuda", generator=rand_gen
+                )
+                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+                mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+                b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+                b_seq_len[:] = input_len
+                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+                total_token_num = input_len
+                b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+                model_input = ModelInput(
+                    batch_size=1,
+                    total_token_num=total_token_num,
+                    max_len_in_batch=input_len,
+                    input_ids=dummy_input_ids,
+                    mem_indexes=mem_indexes,
+                    b_req_idx=b_req_idx,
+                    b_seq_len=b_seq_len,
+                    b_mtp_index=b_mtp_index,
+                    is_prefill=True,
+                    b_ready_cache_len=b_ready_cache_len,
+                    multimodal_params=[],
+                    **self._gen_special_model_input(total_token_num),
+                )
+                model_output = self.forward(
+                    model_input,
+                )
+                del model_output
+                self.req_manager.free_all()
+                self.mem_manager.free_all()
+                gc.collect()
+                torch.cuda.empty_cache()
+                logger.info(f"autotune warmup for length {input_len} ok")
+            except Exception as e:
+                logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
+                logger.exception(str(e))
+                self.req_manager.free_all()
+                self.mem_manager.free_all()
+                gc.collect()
+                torch.cuda.empty_cache()
+        self.layers_num = layer_num_bak
+        torch.distributed.barrier()
+        disable_triton_autotune()
 
     @final
     @torch.no_grad()
