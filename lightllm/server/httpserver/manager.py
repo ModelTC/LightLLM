@@ -512,7 +512,7 @@ class HttpServerManager:
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
-            else:
+            if not self.enable_multimodal or self.args.enable_remote_vit:
                 self.send_to_router.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,

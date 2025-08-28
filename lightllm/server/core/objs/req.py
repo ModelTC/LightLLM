@@ -214,9 +214,6 @@ class Req(ctypes.Structure):
         # 只有管理节点有一个引用
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
-        print(f"self.is_aborted is {self.is_aborted}")
-        print(f"self.finish_status.is_finished() is {self.finish_status.is_finished()}")
-        print(f"self.ref_count is {self.ref_count}")
         if self.is_aborted and can_released_mark and ref_count_ok:
             return True
 

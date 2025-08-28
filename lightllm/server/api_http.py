@@ -350,10 +350,10 @@ async def shutdown():
 @app.on_event("startup")
 async def startup_event():
     logger.info("server start up")
-    if g_objs.httpserver_manager is None:
-        return
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
+    if g_objs.httpserver_manager is None:
+        return
     loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return
