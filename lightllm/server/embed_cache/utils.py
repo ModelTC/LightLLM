@@ -113,7 +113,7 @@ class EmbedRefCountRedis:
         evict_fraction: float = 0.2,
         key_prefix: str = "md5:",
         image_embed_dir: str = None,
-        path_ext: str = ".embed",
+        path_ext: str = "-embed",
         **redis_kwargs,
     ) -> None:
         """

@@ -121,7 +121,7 @@ class VisualModelRpcServer(rpyc.Service):
                 uid = uuids[i]
                 start, end = valid_ids[i]
                 cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                if self.args.enable_remote_vit:
+                if self.args.run_mode == "visual":
                     create_afs(get_shm_name_embed(uid), cur_embed_bytes, self.args.image_embed_dir)
                 else:
                     create_shm(get_shm_name_embed(uid), cur_embed_bytes)

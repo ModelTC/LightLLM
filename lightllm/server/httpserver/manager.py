@@ -134,7 +134,7 @@ class HttpServerManager:
                 uid_list.append(rec["id"])
 
             # # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
-            if self.enable_remote_vit:
+            if self.args.enable_remote_vit:
                 return
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
@@ -262,35 +262,6 @@ class HttpServerManager:
         else:
             assert False, "dead code path"
         return group_request_id
-
-    async def _log_req_header_for_visual_only(self, request_headers, group_request_id: int, image_count: int):
-
-        x_request_id = request_headers.get("X-Request-Id", "")
-        x_session_id = request_headers.get("X-Session-Id", "")
-
-        format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
-            f"recieved req X-Request-Id:{x_request_id} "
-            f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
-            f"lightllm_req_id:{group_request_id} "
-            f"image_count:{image_count}"
-        )
-        return
-
-    async def _initialize_multimodal_metadata(
-        self, multimodal_params: MultimodalParams, sampling_params: SamplingParams
-    ):
-        for img in multimodal_params.images:
-            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
-            data = img.read()
-            # must after init_imageitem_extral_params
-            token_num = self.tokenizer.get_image_token_length(img)
-            md5sum = "{}_{}".format(
-                hashlib.md5(data).hexdigest(),
-                hashlib.md5(pickle.dumps(img.extra_params, protocol=4)).hexdigest(),
-            )
-            img.uuid = int(md5sum, 16)
-            img.token_num = token_num
 
     async def generate(
         self,

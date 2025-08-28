@@ -495,6 +495,9 @@ def config_server_start(args):
 
     logger.info(f"all start args:{args}")
 
+    if args.start_redis:
+        start_redis_service(args)
+
     set_env_start_args(args)
 
     command = [
