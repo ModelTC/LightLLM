@@ -41,10 +41,10 @@ def create_shm(name, data):
         print("Warning create shm {} failed because of FileExistsError!".format(name))
 
 
-def create_afs(name, data):
+def create_afs(name, data, path):
     try:
         data_size = len(data)
-        path = os.path.join("/mtc/sangchengmeng/afs", name)
+        path = os.path.join(path, name)
         with open(path, "xb") as f:
             mem_view = memoryview(data)
             f.write(mem_view[:data_size])
@@ -60,7 +60,7 @@ def read_shm(name):
     return data
 
 
-def read_afs(name: str, base_dir: str = "/mtc/sangchengmeng/afs") -> bytes:
+def read_afs(name: str, base_dir) -> bytes:
 
     path = Path(base_dir) / name
     return path.read_bytes()
