@@ -148,6 +148,9 @@ class MultimodalParams:
         for audio in self.audios:
             audio.free()
 
+    def get_all_uuids(self):
+        return [image.uuid for image in self.images] + [audio.uuid for audio in self.audios]
+
     async def verify_and_preload(self, request: Request):
         for image in self.images:
             await image.preload(request)

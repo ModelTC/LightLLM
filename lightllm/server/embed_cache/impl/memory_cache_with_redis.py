@@ -18,7 +18,6 @@ class MemoryCacheWithRedis(InMemoryCache):
     def __init__(self, args) -> None:
         super().__init__(args)
         redis_url = f"redis://{args.config_server_host}:{args.redis_port}/0"
-        print(redis_url, flush=True)
         self.redis_cache = EmbedRefCountRedis(
             redis_url=redis_url,
             capacity=args.cache_capacity,
@@ -29,24 +28,25 @@ class MemoryCacheWithRedis(InMemoryCache):
         # 便于 dynamic prompt cache 的使用。所以要把cache_capacity * 2，保障其保留的图片cache > redis 服务维护的
         # 硬盘里的图片image embed 数量。
         self.cache_capacity = args.cache_capacity * 2
-        print(self.redis_cache.stats(), flush=True)
 
     def release(self, ids: list[int]) -> None:
         with self.lock:
             for id_ in ids:
                 self._records[id_].ref -= 1
                 self.redis_cache.decr(id_)
-
-    def set_items_data(self, ids: list[int]) -> None:
-        for id_ in ids:
-            self._records[id_].data = True
-
-    def get_items_data(self, ids: list[int]) -> list[Optional[bool]]:
-        return [self._records.get(id_).data if id_ in self._records else False for id_ in ids]
+                print(self.redis_cache.stats(), flush=True)
 
     def set_items_embed(self, ids: list[int]) -> None:
         for id in ids:
             self.redis_cache.insert(str(id))
 
     def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
-        return [self.redis_cache.query_and_incre(str(id)) for id in ids]
+        ret = []
+        for id in ids:
+            # 避免重复的引用计数增加
+            if self._records[id].embed:
+                ret.append(True)
+                continue
+            self._records[id].embed = self.redis_cache.query_and_incre(str(id))
+            ret.append(self._records[id].embed)
+        return ret

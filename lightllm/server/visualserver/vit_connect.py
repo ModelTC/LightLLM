@@ -8,6 +8,7 @@ from lightllm.utils.log_utils import init_logger
 import httpx
 import base64
 from dataclasses import dataclass
+import rpyc
 
 logger = init_logger(__name__)
 
@@ -24,7 +25,7 @@ class VIT_Obj:
 class VITConnectionManager:
     """VIT连接管理器"""
 
-    def __init__(self, args, context, local_visual_port: int):
+    def __init__(self, args, context, local_visual_port: int, cache_client: rpyc.Connection):
         self.args = args
         self.context = context
         self.local_visual_port = local_visual_port
@@ -34,6 +35,7 @@ class VITConnectionManager:
         self.current_vit_index = 0
         self.remote_vit = args.enable_remote_vit
         self.remote_vit_port = args.remote_vit_port
+        self.cache_client = cache_client
 
         self._setup_vit_connections()
 
@@ -159,16 +161,21 @@ class VITConnectionManager:
         发送数据到VIT实例，支持本地和远程模式
         """
         instance = self._get_vit_instance()
+        # 本地模式下，提前释放图片资源，降低传输开销
+        if not self.remote_vit:
+            data.multimodal_params.free()
+
         try:
             print(instance, flush=True)
             instance.send_pyobj(data, protocol=protocol)
         except Exception as e:
             logger.error(f"Failed to send to VIT instance: {e}")
             raise Exception(f"Failed to send to VIT instance: {e}")
-        finally:
-            # 释放图片资源
+
+        # 远程模式下，发送完以后，在释放图片资源
+        await self._wait_visual_embed_ready(data)
+        if self.remote_vit:
             data.multimodal_params.free()
-        await self._wait_visual_embed_ready()
 
     async def vit_handle_loop(self):
         """
@@ -179,7 +186,6 @@ class VITConnectionManager:
             try:
                 id_to_vit_obj = await self._async_get_vit_objs()
                 if id_to_vit_obj:
-                    logger.debug(f"Retrieved {len(id_to_vit_obj)} VIT instances")
                     self._update_vit_connections(id_to_vit_obj)
                 await asyncio.sleep(30)
             except Exception as e:
@@ -205,8 +211,20 @@ class VITConnectionManager:
             logger.exception(f"Error getting VIT instances: {e}")
             return None
 
-    async def _wait_visual_embed_ready(self):
-        """
-        等待VIT实例的embed准备好
-        """
-        await asyncio.sleep(10)
+    async def _wait_visual_embed_ready(self, data, timeout_seconds: int = 20):
+        # 本地模式不需要等待
+        if not self.remote_vit:
+            return
+
+        uuids = data.multimodal_params.get_all_uuids()
+
+        async def wait_for_embeds():
+            while not all(self.cache_client.root.get_items_embed(uuids)):
+                await asyncio.sleep(0.05)
+
+        try:
+            await asyncio.wait_for(wait_for_embeds(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Req {data.group_req_id}: timeout waiting for visual embed ready after {timeout_seconds} seconds"
+            )

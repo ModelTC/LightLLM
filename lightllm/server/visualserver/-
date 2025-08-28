@@ -15,3 +15,13 @@
 533706:M 28 Aug 2025 13:13:21.724 # Server initialized
 533706:M 28 Aug 2025 13:13:21.724 # WARNING overcommit_memory is set to 0! Background save may fail under low memory condition. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
 533706:M 28 Aug 2025 13:13:21.727 * Ready to accept connections
+533706:signal-handler (1756390331) Received SIGINT scheduling shutdown...
+533706:M 28 Aug 2025 14:12:11.921 # User requested shutdown...
+533706:M 28 Aug 2025 14:12:11.922 # Redis is now ready to exit, bye bye...
+546119:C 28 Aug 2025 14:12:19.084 # oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+546119:C 28 Aug 2025 14:12:19.086 # Redis version=6.0.16, bits=64, commit=00000000, modified=0, pid=546119, just started
+546119:C 28 Aug 2025 14:12:19.087 # Configuration loaded
+546119:M 28 Aug 2025 14:12:19.089 * Running mode=standalone, port=6379.
+546119:M 28 Aug 2025 14:12:19.090 # Server initialized
+546119:M 28 Aug 2025 14:12:19.091 # WARNING overcommit_memory is set to 0! Background save may fail under low memory condition. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+546119:M 28 Aug 2025 14:12:19.093 * Ready to accept connections

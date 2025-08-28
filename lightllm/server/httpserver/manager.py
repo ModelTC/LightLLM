@@ -87,7 +87,7 @@ class HttpServerManager:
             # 初始化VIT连接管理器
             from lightllm.server.visualserver.vit_connect import VITConnectionManager
 
-            self.vit_manager = VITConnectionManager(args, context, visual_port)
+            self.vit_manager = VITConnectionManager(args, context, visual_port, self.cache_client)
 
         self.shm_req_manager = ShmReqManager()
 
