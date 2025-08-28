@@ -173,6 +173,7 @@ class VisualManager:
                 for _ in range(self.visual_recv_max_count):
                     recv_req: GroupReqIndexes = self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
+                        print(recv_req, flush=True)
                         self.waiting_reqs.append(recv_req)
                     else:
                         assert False, f"Error Req Inf {recv_req}"

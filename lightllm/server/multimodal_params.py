@@ -53,10 +53,7 @@ class AudioItem:
 
     def read(self):
         assert self._preload_data is not None
-        ans = self._preload_data
-        # self._preload_data = None
-        # self._data = None
-        return ans
+        return self._preload_data
 
     def to_dict(self):
         ret = {}
@@ -112,10 +109,11 @@ class ImageItem:
 
     def read(self):
         assert self._preload_data is not None
-        ans = self._preload_data
+        return self._preload_data
+
+    def free(self):
         self._preload_data = None
         self._data = None
-        return ans
 
     def to_dict(self):
         ret = {}
@@ -143,6 +141,12 @@ class MultimodalParams:
         self.images = [ImageItem(**i) for i in images]
         self.audios = [AudioItem(**a) for a in audios]
         return
+
+    def free(self):
+        for image in self.images:
+            image.free()
+        for audio in self.audios:
+            audio.free()
 
     async def verify_and_preload(self, request: Request):
         for image in self.images:

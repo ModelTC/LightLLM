@@ -134,8 +134,8 @@ class HttpServerManager:
                 uid_list.append(rec["id"])
 
             # # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
-            # if self.enable_remote_vit:
-            #     return
+            if self.enable_remote_vit:
+                return
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
             update_data_ids = []
@@ -512,6 +512,7 @@ class HttpServerManager:
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
+
             if not self.enable_multimodal or self.args.enable_remote_vit:
                 self.send_to_router.send_pyobj(
                     group_req_objs.to_group_req_index(),

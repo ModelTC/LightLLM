@@ -131,7 +131,9 @@ class VITConnectionManager:
             if id not in self.remote_vit_instances:
                 try:
                     socket = self.context.socket(zmq.PUSH)
-                    socket.connect(f"tcp://{vit_obj.host_ip_port}:{self.args.remote_vit_port}")
+                    print(vit_obj.host_ip_port, self.args.remote_vit_port, flush=True)
+                    ip, port = vit_obj.host_ip_port.split(":")
+                    socket.connect(f"tcp://{ip}:{port}")
                     self.remote_vit_instances[id] = socket
                     logger.info(f"Connected to VIT instance {id} at {vit_obj.host_ip_port}")
                 except Exception as e:
@@ -158,11 +160,14 @@ class VITConnectionManager:
         """
         instance = self._get_vit_instance()
         try:
+            print(instance, flush=True)
             instance.send_pyobj(data, protocol=protocol)
         except Exception as e:
             logger.error(f"Failed to send to VIT instance: {e}")
             raise Exception(f"Failed to send to VIT instance: {e}")
-
+        finally:
+            # 释放图片资源
+            data.multimodal_params.free()
         await self._wait_visual_embed_ready()
 
     async def vit_handle_loop(self):
