@@ -14,6 +14,7 @@ from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
 )
 from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
+from lightllm.utils.envs_utils import is_triton_autotune_enabled
 import numpy as np
 
 logger = init_logger(__name__)
@@ -24,17 +25,6 @@ try:
 
 except:
     logger.warning("no deepep or deep_gemm")
-
-
-def tma_aligned_quantize(
-    input_tensor: torch.Tensor, block_size: int = 128, dtype: torch.dtype = torch.float8_e4m3fn
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    m, k = input_tensor.shape
-    input_scale = torch.empty((m, k // block_size), dtype=torch.float32, device=input_tensor.device)
-    qinput_tensor = torch.empty((m, k), dtype=dtype, device=input_tensor.device)
-    per_token_group_quant_fp8(input_tensor, block_size, qinput_tensor, input_scale)
-    input_scale = tma_align_input_scale(input_scale)
-    return qinput_tensor, input_scale
 
 
 def masked_group_gemm(
@@ -106,9 +96,7 @@ def fused_experts_impl(
 
     combined_x = None
     if is_prefill:
-        input_scale = torch.empty((M, K // block_size_k), dtype=torch.float32, device=hidden_states.device)
-        qinput_tensor = torch.empty((M, K), dtype=w1.dtype, device=hidden_states.device)
-        per_token_group_quant_fp8(hidden_states, block_size_k, qinput_tensor, input_scale)
+        qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
 
         # get_dispatch_layout
         (
@@ -186,7 +174,9 @@ def fused_experts_impl(
             silu_out = torch.empty((all_tokens, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
 
             silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
-            qsilu_out, qsilu_out_scale = tma_aligned_quantize(silu_out)
+            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
+                silu_out, block_size_k, dtype=w1.dtype, column_major_scales=True, scale_tma_aligned=True
+            )
 
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=hidden_states.device, dtype=hidden_states.dtype)
@@ -197,6 +187,16 @@ def fused_experts_impl(
 
             # gather and local reduce
             ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
+        else:
+            ######################################## warning ##################################################
+            # here is used to match autotune feature, make moe model run same triton kernel in different rank.
+            # in some special case, one rank will recv 0 token, so add a token to make it run triton kernel.
+            if is_triton_autotune_enabled():
+                _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
+                _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                _gemm_out_a, _silu_out = None, None
+
         # normal combine
         combined_x, _, event = buffer.combine(
             gather_out,

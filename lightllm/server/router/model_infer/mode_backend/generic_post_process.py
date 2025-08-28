@@ -14,6 +14,7 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         b_top_ks,
         b_length_penalty_param,
         b_mask_eos_reqs,
+        is_all_greedy,
     ) = _get_post_sample_tensors(reqs)
     eos_ids = torch.tensor(eos_id, dtype=torch.int32, device="cpu", pin_memory=True).cuda(non_blocking=True)
 
@@ -61,7 +62,12 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
     logits.div_(b_temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
 
-    if get_env_start_args().sampling_backend == "triton":
+    if is_all_greedy:
+        batch_next_token_ids = torch.argmax(logits, -1)
+        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
+        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+
+    elif get_env_start_args().sampling_backend == "triton":
         probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
         sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
         next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
@@ -104,6 +110,8 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     top_ks: List[int] = []
     length_penalty_param: List[int] = []
     mask_eos_reqs: List[bool] = []
+    is_all_greedy = True
+
     for i, req_obj in enumerate(reqs):
         sample_param = req_obj.sampling_param
         shm_param = sample_param.shm_param
@@ -114,7 +122,10 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
 
         temperatures.append(shm_param.temperature)
         top_ps.append(shm_param.top_p)
-        top_ks.append(shm_param.top_k)
+        top_k_val = shm_param.top_k
+        top_ks.append(top_k_val)
+        if top_k_val > 1:
+            is_all_greedy = False
         req_idxes.append(req_obj.req_idx)
 
     req_idxes_cpu = torch.tensor(req_idxes, dtype=torch.int32, device="cpu", pin_memory=True)
@@ -131,4 +142,5 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         top_ks_cpu.cuda(non_blocking=True),
         length_penalty_param_cpu.cuda(non_blocking=True),
         mask_eos_reqs_cpu.cuda(non_blocking=True),
+        is_all_greedy,
     )

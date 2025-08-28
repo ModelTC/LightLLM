@@ -85,3 +85,4 @@ sgl-kernel==0.2.6
 httpx==0.28.1
 librosa==0.11.0
 cuda_bindings==12.9.0
+orjson==3.11.2

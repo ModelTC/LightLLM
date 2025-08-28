@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
-from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd
+from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd, StopStrMatchedReqCmd
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .shm_reqs_io_buffer import ShmReqsIOBuffer
@@ -197,10 +197,6 @@ class RouterManager:
         return
 
     def _get_schedule_time_interval(self):
-        if self.running_batch is None:
-            # 没有运行中的 batch 时，每 10ms 触发一次请求调度
-            return 0.01
-
         # dp 模式，为了更好的配平，需要更长的调度间隔，以便于能收到更多的请求
         return self.schedule_time_interval
 
@@ -279,6 +275,9 @@ class RouterManager:
         aborted_reqs = self._get_aborted_reqs_from_running_batch()
         if aborted_reqs:
             await self._aborted_reqs(aborted_reqs=aborted_reqs)
+        stop_str_matched_reqs = self._get_stop_str_reqs_from_running_batch()
+        if stop_str_matched_reqs:
+            await self._stop_str_matched_reqs(stop_str_matched_reqs=stop_str_matched_reqs)
         return
 
     async def _add_batch(self, batch: Batch):
@@ -294,6 +293,15 @@ class RouterManager:
 
     async def _aborted_reqs(self, aborted_reqs: List[Req]):
         cmds = [AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs]
+        while not self.shm_reqs_io_buffer.is_empty():
+            await asyncio.sleep(0.02)
+
+        self.shm_reqs_io_buffer.write_obj(cmds)
+        self.shm_reqs_io_buffer.set_ready()
+        return
+
+    async def _stop_str_matched_reqs(self, stop_str_matched_reqs: List[Req]):
+        cmds = [StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs]
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.02)
 
@@ -320,8 +328,22 @@ class RouterManager:
         if self.running_batch is None:
             return ans
         for req in self.running_batch.reqs:
-            if req.is_aborted and req.router_aborted is False:
-                req.router_aborted = True
+            if req.is_aborted and req._router_aborted is False:
+                req._router_aborted = True
+                ans.append(req)
+        return ans
+
+    def _get_stop_str_reqs_from_running_batch(self) -> List[Req]:
+        # to do, 多节点tp模式，暂时不能支持 stop str 匹配退出
+        if self.is_multinode_tp:
+            return []
+
+        ans = []
+        if self.running_batch is None:
+            return ans
+        for req in self.running_batch.reqs:
+            if req.stop_str_matched and req._router_stop_str_matched is False:
+                req._router_stop_str_matched = True
                 ans.append(req)
         return ans
 
@@ -361,6 +383,11 @@ class RouterManager:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
             req.multimodal_params = group_req_indexes.multimodal_params
             req.start_time = group_req_indexes.time_mark
+            # 附加一个私有标记变量，标记请求是否已经被router发送过abort命令给推理进程，
+            # 防止反复发送abort命令给推理进程
+            req._router_aborted = False
+            # 作用同 _router_aborted 类似
+            req._router_stop_str_matched = False
             req_group.append(req)
 
             logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")

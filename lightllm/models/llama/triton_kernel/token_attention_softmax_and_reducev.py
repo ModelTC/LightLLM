@@ -53,7 +53,7 @@ def _fwd_kernel(
             Req_to_tokens + cur_batch_req_idx * stride_req_to_token_b + (start_n + offs_n) * stride_req_to_token_s,
             mask=(start_n + offs_n) < cur_batch_seq_len,
             other=other_kv_index,
-        )
+        ).to(tl.int64)
 
         qk = tl.load(
             Logics + cur_head * stride_logic_h + (cur_batch_start_loc + start_n + offs_n) * stride_logic_bs,

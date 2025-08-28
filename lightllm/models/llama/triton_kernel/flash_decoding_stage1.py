@@ -44,6 +44,7 @@ def _fwd_kernel_flash_decode_stage1(
     for start_n in range(0, block_n_size, 1):
         offs_n_new = start_n * BLOCK_N + offs_n
         k_loc = tl.load(Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx +  offs_n_new, mask=offs_n_new < cur_batch_end_index, other=0)
+        k_loc = k_loc.to(tl.int64)
         off_k = k_loc[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :]
         k = tl.load(K + off_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
         att_value = tl.sum(q[None, :] * k, 1)
