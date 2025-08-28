@@ -64,6 +64,7 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
                 img.extra_params["image_patch_max_num"] = 6
             elif num_images > 6:
                 img.extra_params["image_patch_max_num"] = 0
+        img.patch_num = self.get_image_patch(img)
         return
 
     def init_audioitem_extral_params(

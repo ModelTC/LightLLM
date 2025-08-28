@@ -78,8 +78,7 @@ class ImageItem:
         self.token_num = None
         self.image_w = 0
         self.image_h = 0
-        self.afs_embed = False
-        self.is_abort = False
+        self.patch_num = 0
 
         self._preload_data = None
         self.extra_params = {}
@@ -114,8 +113,8 @@ class ImageItem:
     def read(self):
         assert self._preload_data is not None
         ans = self._preload_data
-        # self._preload_data = None
-        # self._data = None
+        self._preload_data = None
+        self._data = None
         return ans
 
     def to_dict(self):

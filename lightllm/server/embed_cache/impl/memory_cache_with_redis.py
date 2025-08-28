@@ -36,13 +36,15 @@ class MemoryCacheWithRedis(InMemoryCache):
                 self.redis_cache.decr(id_)
 
     def set_items_data(self, ids: list[int]) -> None:
-        pass
+        for id_ in ids:
+            self._records[id_].data = True
 
     def get_items_data(self, ids: list[int]) -> list[Optional[bool]]:
         return [self._records.get(id_).data if id_ in self._records else False for id_ in ids]
 
     def set_items_embed(self, ids: list[int]) -> None:
-        pass
+        for id in ids:
+            self.redis_cache.insert(id)
 
     def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
-        pass
+        return [self.redis_cache.query_and_incre(id) for id in ids]
