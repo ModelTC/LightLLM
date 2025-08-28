@@ -85,7 +85,7 @@ class HttpServerManager:
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
             # 初始化VIT连接管理器
-            from .vit_connect import VITConnectionManager
+            from lightllm.server.visualserver.vit_connect import VITConnectionManager
 
             self.vit_manager = VITConnectionManager(args, context, visual_port)
 

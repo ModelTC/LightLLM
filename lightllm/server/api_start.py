@@ -452,6 +452,9 @@ def visual_start(args):
     args.metric_port = metric_port
     args.visual_model_rpc_ports = visual_model_tp_ports
 
+    # 远程vit server 需要一个唯一的id
+    args.visual_node_id = uuid.uuid4().int
+
     logger.info(f"all start args:{args}")
 
     set_env_start_args(args)

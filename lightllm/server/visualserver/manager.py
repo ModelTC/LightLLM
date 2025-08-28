@@ -218,6 +218,17 @@ class VisualManager:
         return
 
 
+def create_forward_loop(args, visualserver: VisualManager, loop: asyncio.AbstractEventLoop):
+    if args.run_mode == "visual":
+        from .register_loop import register_loop
+
+        loop.create_task(visualserver.loop_for_fwd_visual_only())
+        loop.create_task(register_loop(args))
+    else:
+        loop.create_task(visualserver.loop_for_fwd())
+    return
+
+
 def start_visual_process(args, next_module_port, visual_port, cache_port, model_rpc_ports, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
@@ -238,7 +249,7 @@ def start_visual_process(args, next_module_port, visual_port, cache_port, model_
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
-    if args.run_mode == "visual_only":
+    if args.run_mode == "visual":
         loop.create_task(visualserver.loop_for_fwd_visual_only())
     else:
         loop.create_task(visualserver.loop_for_fwd())
