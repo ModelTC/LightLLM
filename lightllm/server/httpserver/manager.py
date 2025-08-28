@@ -85,18 +85,9 @@ class HttpServerManager:
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
             # 初始化VIT连接管理器
-            from .vit_loop import VITConnectionManager
+            from .vit_connect import VITConnectionManager
 
             self.vit_manager = VITConnectionManager(args, context, visual_port)
-            # self.send_to_visual = context.socket(zmq.PUSH)
-            # if self.args.run_mode == "llm_only":
-            #     self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{self.args.visual_only_port}")
-            # else:
-            #     self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
-            #     self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
-
-        self.token_id_range_start = 100000000
-        self.token_id_range_end = 2 ** 63 - 1
 
         self.shm_req_manager = ShmReqManager()
 
