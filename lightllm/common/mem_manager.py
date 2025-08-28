@@ -52,6 +52,7 @@ class MemoryManager:
             layer_num,
         )
         self.HOLD_TOKEN_MEMINDEX = self.size
+        # MemoryManager也需要个引用备份，供内部使用
         self.req_to_token_indexs = None
 
     def get_cell_size(self):
@@ -341,8 +342,17 @@ class ReadOnlyStaticsMemoryManager:
             SharedInt(f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}")
             for rank_in_node in range(0, self.node_world_size, self.dp_world_size)
         ]
+        self.shared_tp_info_pages = [
+            SharedInt(f"{get_unique_server_name()}_mem_manger_can_use_page_num_{rank_in_node}")
+            for rank_in_node in range(0, self.node_world_size, self.dp_world_size)
+        ]
 
     def get_unrefed_token_num(self, dp_rank_in_node: int):
         if self.is_multinode_tp:
             return self.shared_tp_infos[0].get_value()
         return self.shared_tp_infos[dp_rank_in_node].get_value()
+
+    def get_unrefed_page_num(self, dp_rank_in_node: int):
+        if self.is_multinode_tp:
+            return self.shared_tp_info_pages[0].get_value()
+        return self.shared_tp_info_pages[dp_rank_in_node].get_value()

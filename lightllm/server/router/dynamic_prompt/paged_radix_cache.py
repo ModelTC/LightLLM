@@ -159,7 +159,7 @@ class PagedRadixCache:
         )
         self.tree_total_tokens_num.arr[0] = 0
 
-    def _get_page_aligned_key(self, key, value=None):
+    def _get_page_aligned_key(self, key, value=None, free_truncated=False):
         aligned_len = len(key)
         if aligned_len == 0:
             return None, None
@@ -171,6 +171,13 @@ class PagedRadixCache:
                     aligned_len = aligned_len & ~self._page_size_mask
                 else:
                     aligned_len = (aligned_len // self.page_size) * self.page_size
+
+                # 释放被截断的部分
+                if free_truncated and aligned_len < len(key) and self.mem_manager is not None:
+                    truncated_value = value[aligned_len:] if value is not None else key[aligned_len:]
+                    if len(truncated_value) > 0:
+                        self.mem_manager.free(truncated_value)
+
                 return (
                     key[:aligned_len] if aligned_len > 0 else None,
                     value[:aligned_len] if value is not None and aligned_len > 0 else None,
@@ -182,7 +189,7 @@ class PagedRadixCache:
             value = key
 
         assert len(key) == len(value)  # and len(key) >= 1
-        key, value = self._get_page_aligned_key(key, value)
+        key, value = self._get_page_aligned_key(key, value, free_truncated=True)
         if key is None:
             return 0
         return self._insert_helper(self.root_node, key, value)
@@ -422,41 +429,3 @@ class PagedRadixCache:
                 mem_index = torch.concat(release_mems)
                 self.mem_manager.free(mem_index)
         return
-
-
-class _RadixCacheReadOnlyClient:
-    """
-    router 端只读用的客户端，用于从共享内存中读取树结构中的信息，用于进行prompt cache 的调度估计。
-    """
-
-    def __init__(self, unique_name, total_token_num, rank_in_node):
-        self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
-        self.tree_total_tokens_num = SharedArray(
-            f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
-        )
-
-    def get_refed_tokens_num(self):
-        return self.refed_tokens_num.arr[0]
-
-    def get_tree_total_tokens_num(self):
-        return self.tree_total_tokens_num.arr[0]
-
-    def get_unrefed_tokens_num(self):
-        return self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0]
-
-
-class RadixCacheReadOnlyClient:
-    def __init__(self, unique_name, total_token_num, node_world_size, dp_world_size):
-        self.dp_rank_clients: List[_RadixCacheReadOnlyClient] = [
-            _RadixCacheReadOnlyClient(unique_name, total_token_num, rank_in_node)
-            for rank_in_node in range(0, node_world_size, dp_world_size)
-        ]
-
-    def get_refed_tokens_num(self, dp_rank_in_node):
-        return self.dp_rank_clients[dp_rank_in_node].get_refed_tokens_num()
-
-    def get_tree_total_tokens_num(self, dp_rank_in_node):
-        return self.dp_rank_clients[dp_rank_in_node].get_tree_total_tokens_num()
-
-    def get_unrefed_tokens_num(self, dp_rank_in_node):
-        return self.dp_rank_clients[dp_rank_in_node].get_unrefed_tokens_num()
