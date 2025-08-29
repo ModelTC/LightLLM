@@ -88,9 +88,6 @@ class Autotuner:
         if kwargs.get("run_config", None) is not None:
             return self.fn(*args, **kwargs)
 
-        if self.disable_autotune:
-            return self.fn(*args, **kwargs)
-
         rank_id = 0 if not dist.is_initialized() else get_global_rank()
         world_size = 1 if not dist.is_initialized() else get_global_world_size()
 
@@ -146,11 +143,12 @@ class Autotuner:
 
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
+            logger.info(f"Loading cached configs for {self.kernel_name} - {static_key}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
         return
 
-    def _bench(self, *args, n_repeat=3, n_retries=1, **kwargs):
+    def _bench(self, *args, n_repeat=3, n_retries=5, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
