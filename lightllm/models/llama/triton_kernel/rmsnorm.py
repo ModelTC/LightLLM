@@ -2,7 +2,9 @@ import torch
 
 import triton
 import triton.language as tl
+import os
 
+use_5o_num_warps = os.getenv("IS_OMNI5", "False").upper() in ["ON", "TRUE", "1"]
 
 @triton.jit
 def _rms_norm_fwd_fused(
@@ -56,8 +58,11 @@ def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None):
     if N > BLOCK_SIZE:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    num_warps = min(max(BLOCK_SIZE // 256, 1), 4)
-    num_warps = triton.next_power_of_2(num_warps)
+    if use_5o_num_warps:
+        num_warps = min(max(BLOCK_SIZE // 256, 1), 4)
+        num_warps = triton.next_power_of_2(num_warps)
+    else:
+        num_warps = 8
     if BLOCK_SIZE > 16384:
         BLOCK_SIZE = 16384
     # enqueue kernel
