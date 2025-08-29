@@ -29,16 +29,21 @@ class MemoryCacheWithRedis(InMemoryCache):
         # 硬盘里的图片image embed 数量。
         self.cache_capacity = args.cache_capacity * 2
 
+    # llm 负责release
     def release(self, ids: list[int]) -> None:
         with self.lock:
             for id_ in ids:
                 self._records[id_].ref -= 1
-                self.redis_cache.decr(id_)
-                print(self.redis_cache.stats(), flush=True)
+                if self.redis_cache.query(str(id_)):
+                    self.redis_cache.decr(str(id_))
+                    print(self.redis_cache.stats(), flush=True)
 
+    # vit 负责set
     def set_items_embed(self, ids: list[int]) -> None:
-        for id in ids:
-            self.redis_cache.insert(str(id))
+        with self.lock:
+            for id in ids:
+                self.redis_cache.insert(str(id))
+                self._records[id].embed = True
 
     def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
         ret = []

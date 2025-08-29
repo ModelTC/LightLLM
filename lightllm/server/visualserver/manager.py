@@ -165,7 +165,8 @@ class VisualManager:
             for img in recv_req.multimodal_params.images:
                 uuids.append(img.uuid)
                 token_nums.append(img.token_num)
-            self.cache_client.root.alloc(uuids, token_nums)
+                record = self.cache_client.root.alloc(uuids, token_nums)
+            print(f"record is {record}")
             return recv_req
         else:
             return self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
@@ -179,7 +180,7 @@ class VisualManager:
                 for _ in range(self.visual_recv_max_count):
                     recv_req: GroupReqIndexes = self._recv_reqs()
                     if isinstance(recv_req, GroupReqIndexes):
-                        print(recv_req, flush=True)
+                        # print(recv_req, flush=True)
                         self.waiting_reqs.append(recv_req)
                     else:
                         assert False, f"Error Req Inf {recv_req}"

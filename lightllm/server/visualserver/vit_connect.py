@@ -211,7 +211,7 @@ class VITConnectionManager:
             logger.exception(f"Error getting VIT instances: {e}")
             return None
 
-    async def _wait_visual_embed_ready(self, data, timeout_seconds: int = 20):
+    async def _wait_visual_embed_ready(self, data, timeout_seconds: int = 100):
         # 本地模式不需要等待
         if not self.remote_vit:
             return

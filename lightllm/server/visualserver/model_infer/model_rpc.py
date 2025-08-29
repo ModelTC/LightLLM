@@ -114,6 +114,7 @@ class VisualModelRpcServer(rpyc.Service):
 
         if self.tp_rank_id == 0:
             ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
+            print(f"ready_flags is {ready_flags}")
             ids_to_set = []
             for i, ready in enumerate(ready_flags):
                 if ready:
