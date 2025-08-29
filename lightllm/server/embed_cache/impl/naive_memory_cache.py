@@ -7,7 +7,7 @@ import torch
 import time
 from collections import deque
 import multiprocessing.shared_memory as shm
-from ..utils import get_shm_name_data, get_shm_name_embed, free_shm
+from ..utils import get_shm_name_data, get_shm_name_embed, free_shm, free_afs
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -77,7 +77,11 @@ class InMemoryCache:
                 if record.data:
                     free_shm(get_shm_name_data(id))
                 if record.embed:
-                    free_shm(get_shm_name_embed(id))
+                    # 仅vit释放掉afs里的, llm端不做释放
+                    if self.args.run_mode == "visual":
+                        free_afs(get_shm_name_embed(id), self.args.image_embed_dir)
+                    elif not self.args.enable_remote_vit:
+                        free_shm(get_shm_name_embed(id))
                 del self._md5_to_record[record.md5sum]
                 del self._records[id]
                 self.occupied -= 1

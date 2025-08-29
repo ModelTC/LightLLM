@@ -72,6 +72,11 @@ def free_shm(name):
     shared_memory.unlink()
 
 
+def free_afs(name: str, base_dir) -> None:
+    path = Path(base_dir) / name
+    path.unlink()
+
+
 def get_shm_name_data(uid):
     return str(uid) + "-data"
 
