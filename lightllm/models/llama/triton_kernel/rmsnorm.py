@@ -6,6 +6,7 @@ import os
 
 use_5o_num_warps = os.getenv("IS_OMNI5", "False").upper() in ["ON", "TRUE", "1"]
 
+
 @triton.jit
 def _rms_norm_fwd_fused(
     X,  # pointer to the input
