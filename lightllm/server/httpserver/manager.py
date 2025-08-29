@@ -13,6 +13,7 @@ from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
+from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from fastapi import Request
 from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole
@@ -83,8 +84,10 @@ class HttpServerManager:
         self.enable_multimodal = enable_multimodal
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
-            self.send_to_visual = context.socket(zmq.PUSH)
-            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
+            # 初始化VIT连接管理器
+            from lightllm.server.visualserver.vit_connect import VITConnectionManager
+
+            self.vit_manager = VITConnectionManager(args, context, visual_port, self.cache_client)
 
         self.shm_req_manager = ShmReqManager()
 
@@ -101,7 +104,7 @@ class HttpServerManager:
         self.metric_client = MetricClient(metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
-        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL]
+        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL, NodeRole.LLM_ONLY]
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -114,10 +117,16 @@ class HttpServerManager:
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
 
-    async def _alloc_resource(self, items, md5sums, token_nums, datas):
+    async def _alloc_resource(self, items, uuids, token_nums, datas):
 
         while True:
-            records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
+            # 检查这个图片在redis总是否已经存在
+            # embed_exists = obtain(self.cache_client.root.get_items_embed(uuids))
+            # for exist in embed_exists:
+            #     if exist:
+            #         continue
+            # else:
+            records = obtain(self.cache_client.root.alloc(uuids, token_nums))
 
             if records is None:
                 await asyncio.sleep(0.1)
@@ -129,6 +138,10 @@ class HttpServerManager:
                 item.token_id = rec["token_id"]
                 item.token_num = rec["token_num"]
                 uid_list.append(rec["id"])
+
+            # # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
+            if self.args.enable_remote_vit:
+                return
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
             update_data_ids = []
@@ -149,14 +162,15 @@ class HttpServerManager:
             # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
             # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
             async with self._resource_lock:
-                items, md5sums, tokens_nums, datas = [], [], [], []
+                items, uuids, tokens_nums, datas = [], [], [], []
                 for img in multimodal_params.images:
                     self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
                     data = img.read()
                     # must after init_imageitem_extral_params
                     token_num = self.tokenizer.get_image_token_length(img)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
-                    md5sums.append(md5sum)
+                    md5sum = "{}_{}".format(hashlib.md5(data).hexdigest(), img.patch_num)
+                    uuid = int(md5sum, 16)
+                    uuids.append(uuid)
                     tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(img)
@@ -164,13 +178,17 @@ class HttpServerManager:
                     self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
                     data = audio.read()
                     token_num = self.tokenizer.get_audio_token_length(audio)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
-                    md5sums.append(md5sum)
+                    md5sum = "{}_{}".format(
+                        hashlib.md5(data).hexdigest(),
+                        hashlib.md5(pickle.dumps(audio.extra_params, protocol=4)).hexdigest(),
+                    )
+                    uuid = int(md5sum, 16)
+                    uuids.append(uuid)
                     tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(audio)
 
-                await self._alloc_resource(items, md5sums, tokens_nums, datas)
+                await self._alloc_resource(items, uuids, tokens_nums, datas)
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
@@ -236,7 +254,7 @@ class HttpServerManager:
         # health 请求 request_id 为负数，直接返回
         if is_health_req:
             return sampling_params.group_request_id
-        if self.pd_mode == NodeRole.NORMAL:
+        if self.pd_mode.is_normal():
             if not self.is_multinode_tp:
                 group_request_id = self.id_gen.generate_id()
             else:
@@ -350,7 +368,7 @@ class HttpServerManager:
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
             # 进行回收。
-            if group_request_id not in self.req_id_to_out_inf:
+            if group_request_id not in self.req_id_to_out_inf and self.args.run_mode != "llm_only":
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
@@ -467,13 +485,14 @@ class HttpServerManager:
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
 
-        if self.pd_mode == NodeRole.P:
+        if self.pd_mode.is_P_or_NORMAL():
             if self.enable_multimodal:
-                self.send_to_visual.send_pyobj(
+                await self.vit_manager.send_to_vit(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
-            else:
+
+            if not self.enable_multimodal or self.args.enable_remote_vit:
                 self.send_to_router.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
@@ -486,19 +505,6 @@ class HttpServerManager:
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
-            return
-
-        if self.pd_mode == NodeRole.NORMAL:
-            if self.enable_multimodal:
-                self.send_to_visual.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
-            else:
-                self.send_to_router.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
             return
 
         assert False, "dead code path"
@@ -638,7 +644,8 @@ class HttpServerManager:
                 for req in req_status.group_req_objs.shm_req_objs:
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
-                await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
+                if self.args.run_mode != "llm_only":
+                    await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
 
             # 先保留这个关键得日志，用于方便定位重构中的问题。
             if time.time() - pre_time_mark > 120:
@@ -668,6 +675,9 @@ class HttpServerManager:
             from lightllm.server.httpserver.pd_loop import pd_handle_loop
 
             asyncio.create_task(pd_handle_loop(self))
+
+        if self.enable_multimodal:
+            asyncio.create_task(self.vit_manager.vit_handle_loop())
 
         while True:
             try:
