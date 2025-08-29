@@ -103,7 +103,7 @@ class InMemoryCache:
                     rec.visittime = now
                     rec.ref += 1
                 else:
-                    uid_int = int(md5sum, 16)
+                    uid_int = md5sum
                     self._check_and_set_new_id_range(token_num)
                     rec = Record(
                         id=uid_int,

@@ -117,10 +117,16 @@ class HttpServerManager:
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
 
-    async def _alloc_resource(self, items, md5sums, token_nums, datas):
+    async def _alloc_resource(self, items, uuids, token_nums, datas):
 
         while True:
-            records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
+            # 检查这个图片在redis总是否已经存在
+            # embed_exists = obtain(self.cache_client.root.get_items_embed(uuids))
+            # for exist in embed_exists:
+            #     if exist:
+            #         continue
+            # else:
+            records = obtain(self.cache_client.root.alloc(uuids, token_nums))
 
             if records is None:
                 await asyncio.sleep(0.1)
@@ -156,14 +162,15 @@ class HttpServerManager:
             # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
             # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
             async with self._resource_lock:
-                items, md5sums, tokens_nums, datas = [], [], [], []
+                items, uuids, tokens_nums, datas = [], [], [], []
                 for img in multimodal_params.images:
                     self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
                     data = img.read()
                     # must after init_imageitem_extral_params
                     token_num = self.tokenizer.get_image_token_length(img)
                     md5sum = "{}_{}".format(hashlib.md5(data).hexdigest(), img.patch_num)
-                    md5sums.append(md5sum)
+                    uuid = int(md5sum, 16)
+                    uuids.append(uuid)
                     tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(img)
@@ -175,12 +182,13 @@ class HttpServerManager:
                         hashlib.md5(data).hexdigest(),
                         hashlib.md5(pickle.dumps(audio.extra_params, protocol=4)).hexdigest(),
                     )
-                    md5sums.append(md5sum)
+                    uuid = int(md5sum, 16)
+                    uuids.append(uuid)
                     tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(audio)
 
-                await self._alloc_resource(items, md5sums, tokens_nums, datas)
+                await self._alloc_resource(items, uuids, tokens_nums, datas)
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):

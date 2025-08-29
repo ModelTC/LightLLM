@@ -153,16 +153,22 @@ class VisualManager:
                     processing_group_reqs = []
                     images_need_infer = []
 
-    # def _recv_reqs(self):
-    #     if self.remote_vit:
-    #         recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
-    #         recv_req.multimodal_params.images[:]= [
-    #             img for img in recv_req.multimodal_params.images
-    #             if not self.cache_client.root.get_item_embed(img.uuid)  # embed已存在的被丢弃 , ref +1
-    #         ]
-    #         return recv_req
-    #     else:
-    #         return self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+    def _recv_reqs(self):
+        if self.remote_vit:
+            recv_req: GroupReqIndexes = self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
+            # recv_req.multimodal_params.images[:]= [
+            #     img for img in recv_req.multimodal_params.images
+            #     if not self.cache_client.root.get_item_embed(img.uuid)  # embed已存在的被丢弃 , ref +1
+            # ]
+            uuids = []
+            token_nums = []
+            for img in recv_req.multimodal_params.images:
+                uuids.append(img.uuid)
+                token_nums.append(img.token_num)
+            self.cache_client.root.alloc(uuids, token_nums)
+            return recv_req
+        else:
+            return self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
 
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):
@@ -171,7 +177,7 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
+                    recv_req: GroupReqIndexes = self._recv_reqs()
                     if isinstance(recv_req, GroupReqIndexes):
                         print(recv_req, flush=True)
                         self.waiting_reqs.append(recv_req)

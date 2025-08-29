@@ -183,6 +183,11 @@ class EmbedRefCountRedis:
             self._release_lock()
             raise e
 
+    def query(self, md5: str) -> bool:
+        """Quert if md5 exists."""
+        self._wait_if_eviction()
+        return bool(self.r.exists(self.ref_prefix + md5))
+
     def query_and_incre(self, md5: str) -> bool:
         """Query if md5 exists and increment ref_count if found."""
         self._wait_if_eviction()
