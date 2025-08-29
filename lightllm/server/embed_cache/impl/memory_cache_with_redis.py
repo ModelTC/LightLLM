@@ -44,6 +44,7 @@ class MemoryCacheWithRedis(InMemoryCache):
             for id in ids:
                 self.redis_cache.insert(str(id))
                 self._records[id].embed = True
+                self._records[id].ref -= 1
 
     def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
         ret = []
