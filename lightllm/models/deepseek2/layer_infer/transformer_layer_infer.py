@@ -563,21 +563,20 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         k_descale, v_descale = None, None
         o_tensor = flash_attn_with_kvcache_mtp(
             q=q_rope.reshape(-1, self.tp_q_head_num_ * self.mtp_size, self.qk_rope_head_dim),
-            k_cache=k_rope,
-            v_cache=kv_nope,
-            qv=q_nope.reshape(-1, self.tp_q_head_num_ * self.mtp_size, self.kv_lora_rank),
+            k=k_rope,
+            v=kv_nope,
+            q_v=q_nope.reshape(-1, self.tp_q_head_num_ * self.mtp_size, self.kv_lora_rank),
             page_table=infer_state.page_table[self.mtp_size - 1 :: self.mtp_size],
-            cache_seqlens=infer_state.b_seq_len[self.mtp_size - 1 :: self.mtp_size].contiguous(),
+            seqused_k=infer_state.b_seq_len[self.mtp_size - 1 :: self.mtp_size].contiguous(),
             cu_seqlens_q=infer_state.cu_seqlens_q,
             cu_seqlens_k_new=infer_state.cu_seqlens_k,
             max_seqlen_q=1,
             softmax_scale=self.softmax_scale,
-            causal=True,
+            is_causal=True,
             window_size=(-1, -1),
             softcap=0.0,
             k_descale=k_descale,
             v_descale=v_descale,
-            return_softmax_lse=False,
             mtp_step=self.mtp_step,
         )
         return o_tensor.view(-1, self.tp_q_head_num_, self.kv_lora_rank)

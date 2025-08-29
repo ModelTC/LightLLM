@@ -113,21 +113,20 @@ def run_fa3_mla_mtp(
     def flash_mla_fa3():
         out = flash_attn_with_kvcache_mtp(
             q=q_pe.view(-1, BLOCK_H, dpe),
-            k_cache=blocked_k_pe,
-            v_cache=blocked_k_nope,
-            qv=q_nope.view(-1, BLOCK_H, dv),
+            k=blocked_k_pe,
+            v=blocked_k_nope,
+            q_v=q_nope.view(-1, BLOCK_H, dv),
             page_table=block_table,
-            cache_seqlens=cache_seqlens,
+            seqused_k=cache_seqlens,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k_new=cu_seqlens_k,
             max_seqlen_q=1,
             softmax_scale=scale,
-            causal=True,
+            is_causal=True,
             window_size=(-1, -1),
             softcap=0.0,
             k_descale=k_descale,
             v_descale=v_descale,
-            return_softmax_lse=False,
             mtp_step=1,
         )
         return out.view([b, s_q, h_q, dv])
