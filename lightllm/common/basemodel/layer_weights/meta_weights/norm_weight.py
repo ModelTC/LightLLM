@@ -2,6 +2,23 @@ import torch
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id
 
+# For special weight
+class DummyWeight(BaseWeightTpl):
+    def __init__(self, weight_name, data_type):
+        super().__init__()
+        self.weight_name = weight_name
+        self.data_type_ = data_type
+        self.weight = None
+
+    def load_hf_weights(self, weights):
+        if self.weight_name in weights:
+            self.weight = weights[self.weight_name].to(self.data_type_).cuda(get_current_device_id())
+
+    def verify_load(self):
+        load_ok = True
+        load_ok = load_ok and self.weight is not None
+        return load_ok
+
 
 class NormWeight(BaseWeightTpl):
     def __init__(self, weight_name, data_type, bias_name=None):
