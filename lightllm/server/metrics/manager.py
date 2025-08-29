@@ -5,6 +5,7 @@ import threading
 import inspect
 import functools
 import queue
+import setproctitle
 from .metrics import Monitor
 from prometheus_client import generate_latest
 from rpyc import SocketStream
@@ -136,6 +137,7 @@ class MetricClient(threading.Thread):
 def start_metric_manager(port: int, args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::metric_manager:{port}")
 
     service = MetricServer(args)
     if args.metric_gateway is not None:

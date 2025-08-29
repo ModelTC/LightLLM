@@ -1,6 +1,7 @@
 import sys
 import uvloop
 import asyncio
+import setproctitle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import os
@@ -88,6 +89,7 @@ def get_all_cared_pids():
 def start_health_check_process(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::health_monitor:{args.port}")
     pipe_writer.send("init ok")
 
     all_process_ids = get_all_cared_pids()

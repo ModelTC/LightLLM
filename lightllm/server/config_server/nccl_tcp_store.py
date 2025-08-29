@@ -1,5 +1,6 @@
 import psutil
 import time
+import setproctitle
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from lightllm.utils.log_utils import init_logger
@@ -26,6 +27,7 @@ def _start_tcp_store_server(nccl_store_host, nccl_store_port):
     start a TCPStore server.
     """
     start_parent_check_thread()
+    setproctitle.setproctitle(f"lightllm::nccl_tcp_store:{nccl_store_port}")
 
     try:
         from torch._C._distributed_c10d import _DEFAULT_PG_NCCL_TIMEOUT

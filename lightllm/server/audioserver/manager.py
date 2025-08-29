@@ -5,6 +5,7 @@ import asyncio
 import uvloop
 import rpyc
 import inspect
+import setproctitle
 from typing import List
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -140,6 +141,7 @@ class AudioManager:
 def start_audio_process(args, router_port, audio_port, cache_port, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::audio_server:{audio_port}")
 
     try:
         audioserver = AudioManager(args, router_port, audio_port, cache_port)

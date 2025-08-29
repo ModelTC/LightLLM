@@ -3,6 +3,7 @@ import time
 import sys
 import inspect
 import threading
+import setproctitle
 import torch.multiprocessing as mp
 from torch.distributed import TCPStore
 from datetime import timedelta
@@ -99,6 +100,8 @@ def _init_env(args, device_id: int, task_in_queue: mp.Queue, task_out_queue: mp.
     torch.backends.cudnn.enabled = False
 
     dp_size_in_node = max(1, args.dp // args.nnodes)
+
+    setproctitle.setproctitle(f"lightllm::decode_trans:Device{device_id}_DpSizeInNode{dp_size_in_node}")
 
     try:
         torch.cuda.set_device(device_id)

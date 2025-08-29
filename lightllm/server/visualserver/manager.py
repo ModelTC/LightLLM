@@ -5,6 +5,7 @@ import uvloop
 import rpyc
 import pickle
 import inspect
+import setproctitle
 from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager
@@ -178,6 +179,7 @@ class VisualManager:
 def start_visual_process(args, next_module_port, visual_port, cache_port, model_rpc_ports, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::visual_server:{visual_port}")
     start_parent_check_thread()
     try:
         visualserver = VisualManager(args, next_module_port, visual_port, cache_port, model_rpc_ports)

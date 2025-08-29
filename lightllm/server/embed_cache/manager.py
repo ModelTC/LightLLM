@@ -1,6 +1,7 @@
 import rpyc
 import uuid
 import inspect
+import setproctitle
 from typing import Union, Optional
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.embed_cache.impl.naive_memory_cache import InMemoryCache
@@ -53,6 +54,7 @@ def start_cache_manager(port: int, args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
+    setproctitle.setproctitle(f"lightllm::cache_manager:{port}")
     manager = InMemoryCache(args)
     service = CacheServer(manager)
     from rpyc.utils.server import ThreadedServer

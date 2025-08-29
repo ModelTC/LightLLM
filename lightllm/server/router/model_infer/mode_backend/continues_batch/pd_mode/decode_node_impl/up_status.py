@@ -4,6 +4,7 @@ import asyncio
 import threading
 import websockets
 import inspect
+import setproctitle
 
 from typing import Dict
 from dataclasses import asdict
@@ -108,6 +109,7 @@ class UpStatusManager:
 
 def _init_env(args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle("lightllm::up_kv_status")
     up_kv_manager = UpStatusManager(args, task_in_queue, task_out_queue)
     logger.info(f"up kv manager {str(up_kv_manager)} start ok")
     while True:
