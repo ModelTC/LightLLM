@@ -32,12 +32,8 @@ class AutotuneLevel:
     AUTOTUNE = 1
     # Autotune anyway to overwrite the config of cached files.
     AUTOTUNE_OVERWRITE = 2
-    # Auotune in runtime to search for more better config.
-    AUTOTUNE_RUNTIME = 3
-    # Autotune in runtime to search for more better config and overwrite the config of cached files.
-    AUTOTUNE_RUNTIME_OVERWRITE = 4
     # Close autotune and not use the config of cached files.
-    CLOSE_AUTOTUNE = 5
+    CLOSE_AUTOTUNE = 3
 
 
 def autotune(
@@ -128,8 +124,6 @@ class Autotuner:
             AutotuneLevel.NO_AUTOTUNE,
             AutotuneLevel.AUTOTUNE,
             AutotuneLevel.AUTOTUNE_OVERWRITE,
-            AutotuneLevel.AUTOTUNE_RUNTIME,
-            AutotuneLevel.AUTOTUNE_RUNTIME_OVERWRITE,
             AutotuneLevel.CLOSE_AUTOTUNE,
         ]
         return
@@ -150,10 +144,7 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        if get_triton_autotune_level() not in [
-            AutotuneLevel.AUTOTUNE_OVERWRITE,
-            AutotuneLevel.AUTOTUNE_RUNTIME_OVERWRITE,
-        ]:
+        if get_triton_autotune_level() != AutotuneLevel.AUTOTUNE_OVERWRITE:
             self._try_load_cache(static_key)
 
         if static_key not in self.cached_configs and get_triton_autotune_level() == AutotuneLevel.NO_AUTOTUNE:

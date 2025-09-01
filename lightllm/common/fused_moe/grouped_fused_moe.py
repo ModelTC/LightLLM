@@ -35,7 +35,7 @@ from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.torch_ops_utils import direct_register_custom_op
-from lightllm.common.triton_utils.autotuner import autotune, closest_pow_of_2
+from lightllm.common.triton_utils.autotuner import autotune
 
 FFN_MOE_CHUNK_SIZE = 32 * 1024
 
@@ -492,7 +492,7 @@ def _get_grouped_matmul_configs():
     kernel_name="grouped_matmul:v1",
     configs_gen_func=_get_grouped_matmul_configs,
     static_key_func=_get_grouped_matmul_static_key,
-    run_key_func=lambda token_inputs: closest_pow_of_2(token_inputs.shape[0]),
+    run_key_func=lambda token_inputs: token_inputs.shape[0],
     mutates_args=["out"],
 )
 def grouped_matmul(
