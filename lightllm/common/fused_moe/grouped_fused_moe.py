@@ -486,7 +486,7 @@ def _get_grouped_matmul_configs():
             "GROUP_SIZE_M": gm,
             "num_warps": nw,
             "num_stages": ns,
-            "need_trans": need_trans,
+            "NEED_TRANS": need_trans,
         }
         for ns in [1, 2, 3, 4, 5]
         for gm in [1, 2, 4, 8]
@@ -570,6 +570,8 @@ def grouped_matmul(
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
     NEED_TRANS = run_config.get("NEED_TRANS", False)
+    if not use_fp8_w8a8:
+        assert NEED_TRANS is False, "only use_fp8_w8a8 mode can use NEED_TRANS to accelerate"
 
     if block_size_k != 0:
         # 如果使用了 block wise 量化，分块大小不能超过 block size
