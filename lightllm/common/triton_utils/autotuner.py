@@ -134,7 +134,8 @@ class Autotuner:
             return self.fn(*args, **kwargs)
 
         # if the autotune_level is AutotuneLevel.CLOSE_AUTOTUNE, ignore the autotune
-        if get_triton_autotune_level() == AutotuneLevel.CLOSE_AUTOTUNE:
+        autotune_level = get_triton_autotune_level()
+        if autotune_level == AutotuneLevel.CLOSE_AUTOTUNE:
             return self.fn(*args, **kwargs)
 
         rank_id = 0 if not dist.is_initialized() else get_global_rank()
@@ -144,23 +145,27 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        if get_triton_autotune_level() != AutotuneLevel.AUTOTUNE_OVERWRITE:
-            self._try_load_cache(static_key)
+        self._try_load_cache(static_key)
 
-        if static_key not in self.cached_configs and get_triton_autotune_level() == AutotuneLevel.NO_AUTOTUNE:
+        if static_key not in self.cached_configs and autotune_level == AutotuneLevel.NO_AUTOTUNE:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
                 logger.warning(
                     f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)}",
                 )
             self.cached_configs[static_key] = {}
 
-        if get_triton_autotune_level() != AutotuneLevel.NO_AUTOTUNE:
-            need_tunning = run_key not in self.cached_configs.get(static_key, {})
+        if autotune_level != AutotuneLevel.NO_AUTOTUNE:
+            # In OVERWRITE mode, we force re-tuning of the current run_key
+            need_tuning = (
+                True
+                if autotune_level == AutotuneLevel.AUTOTUNE_OVERWRITE
+                else (run_key not in self.cached_configs.get(static_key, {}))
+            )
             if world_size > 1:
-                _need_tunnings = [None for _ in range(world_size)]
-                dist.all_gather_object(_need_tunnings, obj=need_tunning, group=_get_autotune_group())
-                need_tunning = any(_need_tunnings)
-            if need_tunning:
+                _need_tunings = [None for _ in range(world_size)]
+                dist.all_gather_object(_need_tunings, obj=need_tuning, group=_get_autotune_group())
+                need_tuning = any(_need_tunings)
+            if need_tuning:
                 self._autotune(
                     args=args,
                     kwargs=kwargs,
