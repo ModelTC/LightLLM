@@ -86,7 +86,6 @@ class Autotuner:
         run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
         mutates_args: List[str] = [],
     ):
-        self.autotune_level = get_triton_autotune_level()
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
@@ -114,7 +113,7 @@ class Autotuner:
         self._run_key_func_param_names = [name for name, _ in inspect.signature(self.run_key_func).parameters.items()]
         self.mutates_args = mutates_args
 
-        assert self.autotune_level in [
+        assert get_triton_autotune_level() in [
             AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG,
             AutotuneLevel.ADAPTIVE_AUTOTUNE,
             AutotuneLevel.FORCE_AUTOTUNE,
