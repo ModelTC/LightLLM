@@ -21,6 +21,7 @@ logger = init_logger(__name__)
 
 def _get_autotune_group():
     from lightllm.distributed.communication_op import dist_group_manager
+
     return dist_group_manager.get_default_group().autotune_group
 
 
@@ -70,6 +71,7 @@ def autotune(
         Callable: A callable object that wraps the original function and performs autotuning
         as needed before invocation.
     """
+
     def decorator(fn):
         return Autotuner(
             fn=fn,
@@ -121,8 +123,15 @@ class Autotuner:
         ]
         self._run_key_func_param_names = [name for name, _ in inspect.signature(self.run_key_func).parameters.items()]
         self.mutates_args = mutates_args
-        
-        assert self.autotune_level in [AutotuneLevel.NO_AUTOTUNE, AutotuneLevel.AUTOTUNE, AutotuneLevel.AUTOTUNE_OVERWRITE, AutotuneLevel.AUTOTUNE_RUNTIME, AutotuneLevel.AUTOTUNE_RUNTIME_OVERWRITE, AutotuneLevel.CLOSE_AUTOTUNE]
+
+        assert self.autotune_level in [
+            AutotuneLevel.NO_AUTOTUNE,
+            AutotuneLevel.AUTOTUNE,
+            AutotuneLevel.AUTOTUNE_OVERWRITE,
+            AutotuneLevel.AUTOTUNE_RUNTIME,
+            AutotuneLevel.AUTOTUNE_RUNTIME_OVERWRITE,
+            AutotuneLevel.CLOSE_AUTOTUNE,
+        ]
         return
 
     @torch.no_grad()
@@ -131,7 +140,7 @@ class Autotuner:
             return self.fn(*args, **kwargs)
 
         # if the autotune_level is AutotuneLevel.CLOSE_AUTOTUNE, ignore the autotune
-        if self.autotune_level == AutotuneLevel.CLOSE_AUTOTUNE:
+        if get_triton_autotune_level() == AutotuneLevel.CLOSE_AUTOTUNE:
             return self.fn(*args, **kwargs)
 
         rank_id = 0 if not dist.is_initialized() else get_global_rank()
@@ -141,23 +150,24 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        if self.autotune_level not in [AutotuneLevel.AUTOTUNE_OVERWRITE, AutotuneLevel.AUTOTUNE_RUNTIME_OVERWRITE]:
+        if get_triton_autotune_level() not in [
+            AutotuneLevel.AUTOTUNE_OVERWRITE,
+            AutotuneLevel.AUTOTUNE_RUNTIME_OVERWRITE,
+        ]:
             self._try_load_cache(static_key)
 
-        if static_key not in self.cached_configs and self.autotune_level == AutotuneLevel.NO_AUTOTUNE:
+        if static_key not in self.cached_configs and get_triton_autotune_level() == AutotuneLevel.NO_AUTOTUNE:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
                 logger.warning(
                     f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)}",
                 )
             self.cached_configs[static_key] = {}
 
-        if self.autotune_level != AutotuneLevel.NO_AUTOTUNE:
+        if get_triton_autotune_level() != AutotuneLevel.NO_AUTOTUNE:
             need_tunning = run_key not in self.cached_configs.get(static_key, {})
             if world_size > 1:
                 _need_tunnings = [None for _ in range(world_size)]
-                dist.all_gather_object(
-                    _need_tunnings, obj=need_tunning, group=_get_autotune_group()
-                )
+                dist.all_gather_object(_need_tunnings, obj=need_tunning, group=_get_autotune_group())
                 need_tunning = any(_need_tunnings)
             if need_tunning:
                 self._autotune(
@@ -239,9 +249,7 @@ class Autotuner:
         if world_size > 1:
             all_keys = [None for _ in range(world_size)]
             all_key_str = f"{run_key}_{static_key}"
-            dist.all_gather_object(
-                all_keys, obj=all_key_str, group=_get_autotune_group()
-            )
+            dist.all_gather_object(all_keys, obj=all_key_str, group=_get_autotune_group())
             is_key_all_same = all(all_keys[0] == k for k in all_keys)
             if not is_key_all_same:
                 logger.warning(
@@ -394,4 +402,4 @@ def split_configs(configs, global_rank, global_world_size):
 
 
 def closest_pow_of_2(x):
-    return triton.next_power_of_two(x - triton.next_power_of_two(x)//4)
+    return triton.next_power_of_two(x - triton.next_power_of_two(x) // 4)
