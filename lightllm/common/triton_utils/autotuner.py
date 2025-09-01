@@ -12,12 +12,22 @@ from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
 from typing import Callable, Optional, Union, List
-from lightllm.utils.envs_utils import is_triton_autotune_enabled
+from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
-from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
+
+
+class AutotuneLevel:
+    # Use the config of cached files in /lightllm/common/triton_utils/autotune_kernel_configs.
+    USE_AUTOTUNE_HIS_CONFIG = 0
+    # Autotune if no config is cached.
+    ADAPTIVE_AUTOTUNE = 1
+    # Autotune anyway to overwrite the config of cached files.
+    FORCE_AUTOTUNE = 2
+    # Close autotune and use the configs of cached files in lightllm/common/all_kernel_configs.
+    CLOSE_AUTOTUNE = 3
 
 
 def autotune(
@@ -28,6 +38,30 @@ def autotune(
     run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
     mutates_args: List[str] = [],
 ):
+    """Decorator that constructs and returns an Autotuner wrapper for a Triton kernel.
+
+    This decorator configures an Autotuner with the provided configuration
+    generator and key functions, enabling on-demand benchmarking and caching
+    of kernel run configurations across runs and processes.
+
+    Args:
+        kernel_name (str): Human-readable kernel name used for logging and cache paths.
+        configs_gen_func (Callable[[], List]): Function that returns candidate run configurations.
+        static_key_func (Callable): Function that derives a static key (dict-like) from call arguments.
+            This key identifies the cache file that stores tuned configs.
+        run_key_func (Callable): Function that derives a run-time key from call arguments.
+            This key indexes tuned configs within a static key's cache.
+        run_key_distance_func (Callable, optional): Distance metric taking ``(run_key, config_key)`` and
+            returning a comparable value; used to pick the closest config when an exact match is absent.
+            Defaults to ``abs(int(run_key) - int(config_key))``.
+        mutates_args (List[str], optional): Names of arguments that can be mutated by the kernel.
+            During benchmarking, defensive clones are made to avoid side effects. Defaults to ``[]``.
+
+    Returns:
+        Callable: A callable object that wraps the original function and performs autotuning
+        as needed before invocation.
+    """
+
     def decorator(fn):
         return Autotuner(
             fn=fn,
@@ -53,8 +87,6 @@ class Autotuner:
         run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
         mutates_args: List[str] = [],
     ):
-        # Whether to use this autotune decorator
-        self.disable_autotune = not is_triton_autotune_enabled()
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
@@ -81,6 +113,13 @@ class Autotuner:
         ]
         self._run_key_func_param_names = [name for name, _ in inspect.signature(self.run_key_func).parameters.items()]
         self.mutates_args = mutates_args
+
+        assert get_triton_autotune_level() in [
+            AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG,
+            AutotuneLevel.ADAPTIVE_AUTOTUNE,
+            AutotuneLevel.FORCE_AUTOTUNE,
+            AutotuneLevel.CLOSE_AUTOTUNE,
+        ]
         return
 
     @torch.no_grad()
@@ -88,34 +127,36 @@ class Autotuner:
         if kwargs.get("run_config", None) is not None:
             return self.fn(*args, **kwargs)
 
-        if self.disable_autotune:
+        # if the autotune_level is AutotuneLevel.CLOSE_AUTOTUNE, ignore the autotune
+        autotune_level = get_triton_autotune_level()
+        if autotune_level == AutotuneLevel.CLOSE_AUTOTUNE:
             return self.fn(*args, **kwargs)
 
         rank_id = 0 if not dist.is_initialized() else get_global_rank()
         world_size = 1 if not dist.is_initialized() else get_global_world_size()
 
-        static_key = self._static_key(*args, **kwargs)
+        static_key = frozendict(self._static_key(*args, **kwargs))
         run_key = str(self._run_key(*args, **kwargs))
 
-        # Lazy load
+        # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
         self._try_load_cache(static_key)
 
-        if static_key not in self.cached_configs:
+        if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
                 logger.warning(
                     f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)}",
                 )
             self.cached_configs[static_key] = {}
 
-        if is_triton_autotune_enabled():
-            need_tunning = run_key not in self.cached_configs.get(static_key, {})
+        if autotune_level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
+            need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (
+                run_key not in self.cached_configs.get(static_key, {})
+            )
             if world_size > 1:
-                _need_tunnings = [None for _ in range(world_size)]
-                dist.all_gather_object(
-                    _need_tunnings, obj=need_tunning, group=dist_group_manager.get_default_group().autotune_group
-                )
-                need_tunning = any(_need_tunnings)
-            if need_tunning:
+                _need_tunings = [None for _ in range(world_size)]
+                dist.all_gather_object(_need_tunings, obj=need_tuning, group=self._get_autotune_group())
+                need_tuning = any(_need_tunings)
+            if need_tuning:
                 self._autotune(
                     args=args,
                     kwargs=kwargs,
@@ -125,12 +166,12 @@ class Autotuner:
                     world_size=world_size,
                 )
 
-        if static_key in self.fast_match_configs and run_key in self.fast_match_configs[static_key]:
-            closest_config = self.fast_match_configs[static_key][run_key]
+        closest_config = self.fast_match_configs.get(static_key, {}).get(run_key, None)
+        if closest_config is not None:
             kwargs["run_config"] = closest_config
             return self.fn(*args, **kwargs)
 
-        all_configs = self.cached_configs.get(static_key)
+        all_configs = self.cached_configs.get(static_key, {})
         if len(all_configs) != 0:
             closest_config = min(
                 list(all_configs.items()), key=lambda item: self.run_key_distance_func(run_key, item[0])
@@ -146,6 +187,7 @@ class Autotuner:
 
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
+            logger.info(f"Loading cached configs for {self.kernel_name} - {static_key}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
         return
@@ -194,9 +236,7 @@ class Autotuner:
         if world_size > 1:
             all_keys = [None for _ in range(world_size)]
             all_key_str = f"{run_key}_{static_key}"
-            dist.all_gather_object(
-                all_keys, obj=all_key_str, group=dist_group_manager.get_default_group().autotune_group
-            )
+            dist.all_gather_object(all_keys, obj=all_key_str, group=self._get_autotune_group())
             is_key_all_same = all(all_keys[0] == k for k in all_keys)
             if not is_key_all_same:
                 logger.warning(
@@ -237,7 +277,7 @@ class Autotuner:
             dist.all_gather_object(
                 all_gather_configs,
                 obj=(best_time, run_key, dict(static_key), best_config),
-                group=dist_group_manager.get_default_group().autotune_group,
+                group=self._get_autotune_group(),
             )
             all_gather_configs = sorted(all_gather_configs, key=lambda x: x[0])
             key_set = set()
@@ -318,12 +358,18 @@ class Autotuner:
 
     def _static_key(self, *args, **kwargs):
         params = self._select_args(self._static_key_func_param_names, args, kwargs)
-        key = self.static_key_func(*params)
-        return frozendict(key)
+        return self.static_key_func(*params)
 
     def _run_key(self, *args, **kwargs):
         params = self._select_args(self._run_key_func_param_names, args, kwargs)
         return self.run_key_func(*params)
+
+    def _get_autotune_group(
+        self,
+    ):
+        from lightllm.distributed.communication_op import dist_group_manager
+
+        return dist_group_manager.get_default_group().autotune_group
 
 
 class _BenchmarkState:
