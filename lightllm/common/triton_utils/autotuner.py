@@ -113,11 +113,11 @@ class Autotuner:
         ]
         self._run_key_func_param_names = [name for name, _ in inspect.signature(self.run_key_func).parameters.items()]
         self.mutates_args = mutates_args
-
+        
         assert self.autotune_level in [
-            AutotuneLevel.NO_AUTOTUNE,
-            AutotuneLevel.AUTOTUNE,
-            AutotuneLevel.AUTOTUNE_OVERWRITE,
+            AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG,
+            AutotuneLevel.ADAPTIVE_AUTOTUNE,
+            AutotuneLevel.FORCE_AUTOTUNE,
             AutotuneLevel.CLOSE_AUTOTUNE,
         ]
         return
