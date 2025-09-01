@@ -19,21 +19,14 @@ from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, ge
 logger = init_logger(__name__)
 
 
-def _get_autotune_group():
-    from lightllm.distributed.communication_op import dist_group_manager
-
-    return dist_group_manager.get_default_group().autotune_group
-
-
 class AutotuneLevel:
-    # Do not autotune, only use the config of cached files.
-    NO_AUTOTUNE = 0
+    USE_AUTOTUNE_HIS_CONFIG = 0
     # Autotune if no config is cached.
-    AUTOTUNE = 1
+    ADAPTIVE_AUTOTUNE = 0
     # Autotune anyway to overwrite the config of cached files.
-    AUTOTUNE_OVERWRITE = 2
+    FORCE_AUTOTUNE = 1
     # Close autotune and not use the config of cached files.
-    CLOSE_AUTOTUNE = 3
+    CLOSE_AUTOTUNE = 2
 
 
 def autotune(
@@ -104,6 +97,7 @@ class Autotuner:
             get_current_device_name(),
             self.kernel_name,
         )
+        os.makedirs(self.cache_dir, exist_ok=True)
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -163,7 +157,7 @@ class Autotuner:
             )
             if world_size > 1:
                 _need_tunings = [None for _ in range(world_size)]
-                dist.all_gather_object(_need_tunings, obj=need_tuning, group=_get_autotune_group())
+                dist.all_gather_object(_need_tunings, obj=need_tuning, group=self._get_autotune_group())
                 need_tuning = any(_need_tunings)
             if need_tuning:
                 self._autotune(
@@ -245,7 +239,7 @@ class Autotuner:
         if world_size > 1:
             all_keys = [None for _ in range(world_size)]
             all_key_str = f"{run_key}_{static_key}"
-            dist.all_gather_object(all_keys, obj=all_key_str, group=_get_autotune_group())
+            dist.all_gather_object(all_keys, obj=all_key_str, group=self._get_autotune_group())
             is_key_all_same = all(all_keys[0] == k for k in all_keys)
             if not is_key_all_same:
                 logger.warning(
@@ -286,7 +280,7 @@ class Autotuner:
             dist.all_gather_object(
                 all_gather_configs,
                 obj=(best_time, run_key, dict(static_key), best_config),
-                group=_get_autotune_group(),
+                group=self._get_autotune_group(),
             )
             all_gather_configs = sorted(all_gather_configs, key=lambda x: x[0])
             key_set = set()
@@ -312,7 +306,6 @@ class Autotuner:
         if rank_id == 0:
             for _static_key in update_static_key_list:
                 cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(_static_key))
-                os.makedirs(self.cache_dir, exist_ok=True)
                 with open(cache_file, "wb") as f:
                     f.write(
                         orjson.dumps(
@@ -374,6 +367,12 @@ class Autotuner:
         params = self._select_args(self._run_key_func_param_names, args, kwargs)
         return self.run_key_func(*params)
 
+    def _get_autotune_group(self,):
+        from lightllm.distributed.communication_op import dist_group_manager
+
+        return dist_group_manager.get_default_group().autotune_group
+
+
 
 class _BenchmarkState:
     def __init__(self):
@@ -397,6 +396,3 @@ def split_configs(configs, global_rank, global_world_size):
     random.Random(0).shuffle(configs)
     return configs[global_rank::global_world_size]
 
-
-def closest_pow_of_2(x):
-    return triton.next_power_of_2(x - triton.next_power_of_2(x) // 4)
