@@ -20,12 +20,13 @@ logger = init_logger(__name__)
 
 
 class AutotuneLevel:
+    # Use the config of cached files in /lightllm/common/triton_utils/autotune_kernel_configs.
     USE_AUTOTUNE_HIS_CONFIG = 0
     # Autotune if no config is cached.
     ADAPTIVE_AUTOTUNE = 1
     # Autotune anyway to overwrite the config of cached files.
     FORCE_AUTOTUNE = 2
-    # Close autotune and not use the config of cached files.
+    # Close autotune and use the configs of cached files in lightllm/common/all_kernel_configs.
     CLOSE_AUTOTUNE = 3
 
 
@@ -148,7 +149,9 @@ class Autotuner:
             self.cached_configs[static_key] = {}
 
         if autotune_level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
-            need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (run_key not in self.cached_configs.get(static_key, {}))
+            need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (
+                run_key not in self.cached_configs.get(static_key, {})
+            )
             if world_size > 1:
                 _need_tunings = [None for _ in range(world_size)]
                 dist.all_gather_object(_need_tunings, obj=need_tuning, group=self._get_autotune_group())
@@ -162,7 +165,7 @@ class Autotuner:
                     rank_id=rank_id,
                     world_size=world_size,
                 )
-        
+
         closest_config = self.fast_match_configs.get(static_key, {}).get(run_key, None)
         if closest_config is not None:
             kwargs["run_config"] = closest_config
@@ -361,11 +364,12 @@ class Autotuner:
         params = self._select_args(self._run_key_func_param_names, args, kwargs)
         return self.run_key_func(*params)
 
-    def _get_autotune_group(self,):
+    def _get_autotune_group(
+        self,
+    ):
         from lightllm.distributed.communication_op import dist_group_manager
 
         return dist_group_manager.get_default_group().autotune_group
-
 
 
 class _BenchmarkState:
@@ -389,4 +393,3 @@ def get_triton_version():
 def split_configs(configs, global_rank, global_world_size):
     random.Random(0).shuffle(configs)
     return configs[global_rank::global_world_size]
-
