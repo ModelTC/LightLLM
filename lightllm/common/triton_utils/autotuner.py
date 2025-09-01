@@ -393,4 +393,4 @@ def split_configs(configs, global_rank, global_world_size):
 
 
 def closest_pow_of_2(x):
-    return triton.next_power_of_two(x - triton.next_power_of_two(x) // 4)
+    return triton.next_power_of_2(x - triton.next_power_of_2(x) // 4)
