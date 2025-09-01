@@ -732,7 +732,7 @@ class TpPartBaseModel:
     @torch.no_grad()
     @post_empty_cache
     def _autotune_warmup(self):
-        if get_triton_autotune_level() in [AutotuneLevel.NO_AUTOTUNE, AutotuneLevel.CLOSE_AUTOTUNE]:
+        if get_triton_autotune_level() in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
             return
 
         torch.distributed.barrier()
@@ -795,7 +795,7 @@ class TpPartBaseModel:
                 torch.cuda.empty_cache()
         self.layers_num = layer_num_bak
         torch.distributed.barrier()
-        set_triton_autotune_level(AutotuneLevel.NO_AUTOTUNE)
+        set_triton_autotune_level(AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG)
 
     @final
     @torch.no_grad()
