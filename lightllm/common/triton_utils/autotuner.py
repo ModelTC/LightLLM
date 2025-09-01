@@ -307,6 +307,7 @@ class Autotuner:
         if rank_id == 0:
             for _static_key in update_static_key_list:
                 cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(_static_key))
+                os.makedirs(self.cache_dir, exist_ok=True)
                 with open(cache_file, "wb") as f:
                     f.write(
                         orjson.dumps(
