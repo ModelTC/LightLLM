@@ -795,7 +795,10 @@ class TpPartBaseModel:
                 torch.cuda.empty_cache()
         self.layers_num = layer_num_bak
         torch.distributed.barrier()
-        if get_triton_autotune_level() not in [AutotuneLevel.AUTOTUNE_RUNTIME, AutotuneLevel.AUTOTUNE_RUNTIME_OVERWRITE]:
+        if get_triton_autotune_level() not in [
+            AutotuneLevel.AUTOTUNE_RUNTIME,
+            AutotuneLevel.AUTOTUNE_RUNTIME_OVERWRITE,
+        ]:
             set_triton_autotune_level(AutotuneLevel.NO_AUTOTUNE)
 
     @final
