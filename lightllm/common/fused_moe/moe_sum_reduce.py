@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 from .moe_sum_recude_config import MoeSumReduceKernelConfig
 from typing import Any, Callable, Dict, Optional, Tuple
-from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.common.triton_utils.autotuner import autotune, closest_pow_of_2
 
 
 @triton.jit
@@ -66,7 +66,7 @@ def _get_moe_sum_reduce_configs():
     kernel_name="moe_sum_reduce:v1",
     configs_gen_func=_get_moe_sum_reduce_configs,
     static_key_func=_get_moe_sum_reduce_static_key,
-    run_key_func=lambda input: input.shape[0],
+    run_key_func=lambda input: closest_pow_of_2(input.shape[0]),
     mutates_args=["output"],
 )
 def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict = None):

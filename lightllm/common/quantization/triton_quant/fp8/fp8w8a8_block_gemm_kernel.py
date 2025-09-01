@@ -7,7 +7,7 @@ from frozendict import frozendict
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from triton import Config
-from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.common.triton_utils.autotuner import autotune, closest_pow_of_2
 
 
 class Fp8BlockMMKernelConfig(KernelConfigs):
@@ -180,7 +180,7 @@ def _get_static_key(A, B, block_size, dtype):
     kernel_name="w8a8_block_fp8_matmul:v1",
     configs_gen_func=get_test_configs,
     static_key_func=_get_static_key,
-    run_key_func=lambda A: A.shape[0],
+    run_key_func=lambda A: closest_pow_of_2(A.shape[0]),
     mutates_args=["C"],
 )
 def w8a8_block_fp8_matmul(

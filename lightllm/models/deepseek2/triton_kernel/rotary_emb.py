@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 import itertools
-from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.common.triton_utils.autotuner import autotune, closest_pow_of_2
 
 
 @triton.jit
@@ -122,7 +122,7 @@ def get_static_key(q, k):
     kernel_name="rotary_emb_fwd:v1",
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
-    run_key_func=lambda q: q.shape[0],
+    run_key_func=lambda q: closest_pow_of_2(q.shape[0]),
     mutates_args=["q", "k"],
 )
 @torch.no_grad()

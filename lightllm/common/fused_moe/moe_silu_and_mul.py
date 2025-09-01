@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 from .moe_silu_and_mul_config import MoeSiluAndMulKernelConfig
-from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.common.triton_utils.autotuner import autotune, closest_pow_of_2
 
 
 @triton.jit
@@ -81,7 +81,7 @@ def _get_silu_and_mul_static_key(input: torch.Tensor, output: torch.Tensor):
     kernel_name="silu_and_mul_fwd:v1",
     configs_gen_func=_get_silu_and_mul_configs,
     static_key_func=_get_silu_and_mul_static_key,
-    run_key_func=lambda input: input.shape[0],
+    run_key_func=lambda input: closest_pow_of_2(input.shape[0]),
     mutates_args=["output"],
 )
 def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None):
