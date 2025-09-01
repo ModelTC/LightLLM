@@ -113,7 +113,7 @@ class Autotuner:
         ]
         self._run_key_func_param_names = [name for name, _ in inspect.signature(self.run_key_func).parameters.items()]
         self.mutates_args = mutates_args
-        
+
         assert self.autotune_level in [
             AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG,
             AutotuneLevel.ADAPTIVE_AUTOTUNE,
@@ -141,20 +141,15 @@ class Autotuner:
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
         self._try_load_cache(static_key)
 
-        if static_key not in self.cached_configs and autotune_level == AutotuneLevel.NO_AUTOTUNE:
+        if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
                 logger.warning(
                     f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)}",
                 )
             self.cached_configs[static_key] = {}
 
-        if autotune_level != AutotuneLevel.NO_AUTOTUNE:
-            # In OVERWRITE mode, we force re-tuning of the current run_key
-            need_tuning = (
-                True
-                if autotune_level == AutotuneLevel.AUTOTUNE_OVERWRITE
-                else (run_key not in self.cached_configs.get(static_key, {}))
-            )
+        if autotune_level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
+            need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (run_key not in self.cached_configs.get(static_key, {}))
             if world_size > 1:
                 _need_tunings = [None for _ in range(world_size)]
                 dist.all_gather_object(_need_tunings, obj=need_tuning, group=self._get_autotune_group())
@@ -168,10 +163,10 @@ class Autotuner:
                     rank_id=rank_id,
                     world_size=world_size,
                 )
-
-        fast_for_key = self.fast_match_configs.get(static_key)
-        if fast_for_key is not None and run_key in fast_for_key:
-            kwargs["run_config"] = fast_for_key[run_key]
+        
+        closest_config = self.fast_match_configs.get(static_key, {}).get(run_key, None)
+        if closest_config is not None:
+            kwargs["run_config"] = closest_config
             return self.fn(*args, **kwargs)
 
         all_configs = self.cached_configs.get(static_key, {})
