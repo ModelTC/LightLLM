@@ -4,6 +4,7 @@ import inspect
 from typing import Union, Optional
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.embed_cache.impl.naive_memory_cache import InMemoryCache
+from lightllm.server.embed_cache.impl.memory_cache_with_redis import MemoryCacheWithRedis
 from rpyc.utils.classic import obtain
 
 
@@ -21,6 +22,10 @@ class CacheServer(rpyc.Service):
         # code that runs after the connection has already closed
         # (to finalize the service, if needed)
         pass
+
+    def exposed__check_and_set_new_id_range(self, token_num: int) -> int:
+        token_num = obtain(token_num)
+        return self._impl._check_and_set_new_id_range(token_num)
 
     def exposed_alloc(self, md5sum_list: list[str], token_num_list: list[int]) -> Optional[list[dict]]:
         md5sum_list = obtain(md5sum_list)
@@ -49,11 +54,18 @@ class CacheServer(rpyc.Service):
         return self._impl.get_items_embed(ids)
 
 
+def get_cache_manager(args):
+    if args.enable_remote_vit or args.run_mode == "visual":
+        return MemoryCacheWithRedis(args)
+    else:
+        return InMemoryCache(args)
+
+
 def start_cache_manager(port: int, args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
-    manager = InMemoryCache(args)
+    manager = get_cache_manager(args)
     service = CacheServer(manager)
     from rpyc.utils.server import ThreadedServer
 

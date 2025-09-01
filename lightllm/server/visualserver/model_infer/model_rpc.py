@@ -17,7 +17,14 @@ from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
-from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
+from lightllm.server.embed_cache.utils import (
+    tensor2bytes,
+    read_shm,
+    create_shm,
+    create_afs,
+    get_shm_name_data,
+    get_shm_name_embed,
+)
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.dist_utils import init_vision_distributed_env
@@ -31,15 +38,20 @@ class VisualModelRpcServer(rpyc.Service):
         import torch
         import torch.distributed as dist
 
-        self.vit_dp = kvargs["vit_dp"]
-        self.vit_tp = kvargs["vit_tp"]
+        self.args = get_env_start_args()
+
+        weight_dir = self.args.model_dir
+        cache_port = self.args.cache_port
+        data_type = self.args.data_type
+        quant_type = self.args.vit_quant_type
+        quant_cfg = self.args.vit_quant_cfg
+        max_batch_size = min(self.args.visual_infer_batch_size // self.args.visual_dp, 1)
+
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
-        self.cache_port = kvargs["cache_port"]
-        weight_dir = kvargs["weight_dir"]
-        self.vit_rank_id = kvargs["vit_rank_id"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
-        self.data_type = kvargs["data_type"]
+        kvargs["vit_rank_id"] = self.dp_rank_id * self.args.visual_tp + self.tp_rank_id
+        print(cache_port)
+        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
 
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
@@ -47,10 +59,10 @@ class VisualModelRpcServer(rpyc.Service):
         try:
             kvargs = {
                 "weight_dir": weight_dir,
-                "data_type": self.data_type,
-                "quant_type": kvargs["quant_type"],
-                "quant_cfg": kvargs["quant_cfg"],
-                "max_batch_size": kvargs["max_batch_size"],
+                "data_type": data_type,
+                "quant_type": quant_type,
+                "quant_cfg": quant_cfg,
+                "max_batch_size": max_batch_size,
             }
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":
@@ -74,9 +86,10 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = Gemma3VisionModel()
             else:
                 raise Exception(f"can not support {self.model_type} now")
-
             self.model.load_model(weight_dir)
+            print("begin load model")
             self.model = self.model.cuda()
+            print("load model OK")
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -101,6 +114,7 @@ class VisualModelRpcServer(rpyc.Service):
 
         if self.tp_rank_id == 0:
             ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
+            print(f"ready_flags is {ready_flags}")
             ids_to_set = []
             for i, ready in enumerate(ready_flags):
                 if ready:
@@ -108,7 +122,10 @@ class VisualModelRpcServer(rpyc.Service):
                 uid = uuids[i]
                 start, end = valid_ids[i]
                 cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                if self.args.run_mode == "visual":
+                    create_afs(get_shm_name_embed(uid), cur_embed_bytes, self.args.image_embed_dir)
+                else:
+                    create_shm(get_shm_name_embed(uid), cur_embed_bytes)
                 ids_to_set.append(uid)
             if ids_to_set:
                 self.cache_client.root.set_items_embed(ids_to_set)

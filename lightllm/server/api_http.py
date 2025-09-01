@@ -40,8 +40,11 @@ from fastapi.responses import Response, StreamingResponse, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
+from .visualserver.manager import VisualManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
-from .api_lightllm import lightllm_get_score
+
+# from .visualserver.manager import VisualManager
+from .api_lightllm import lightllm_get_score, lightllm_get_image_embedding
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.error_utils import ServerBusyError
@@ -69,6 +72,7 @@ class G_Objs:
     g_generate_func: Callable = None
     g_generate_stream_func: Callable = None
     httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster] = None
+    visual_manager: VisualManager = None
     shared_token_load: TokenLoad = None
 
     def set_args(self, args):
@@ -89,6 +93,8 @@ class G_Objs:
                 args,
                 metric_port=args.metric_port,
             )
+        elif args.run_mode == "visual":
+            self.metric_client = MetricClient(args.metric_port)
         else:
             init_tokenizer(args)  # for openai api
             SamplingParams.load_generation_cfg(args.model_dir)
@@ -139,7 +145,7 @@ def get_model_name():
 @app.get("/health", summary="Check server health")
 @app.head("/health", summary="Check server health")
 async def healthcheck(request: Request):
-    if g_objs.args.run_mode == "pd_master":
+    if g_objs.args.run_mode in ["pd_master", "visual"]:
         return JSONResponse({"message": "Ok"}, status_code=200)
 
     if os.environ.get("DEBUG_HEALTHCHECK_RETURN_FAIL") == "true":
@@ -206,6 +212,18 @@ async def get_score(request: Request) -> Response:
     try:
         return await lightllm_get_score(request, g_objs.httpserver_manager)
     except Exception as e:
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
+
+
+@app.post("/get_image_embedding")
+async def get_image_embed(request: Request) -> Response:
+    try:
+        return await lightllm_get_image_embedding(request, g_objs.httpserver_manager)
+    except ServerBusyError as e:
+        logger.error("%s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+    except Exception as e:
+        logger.error("An error occurred: %s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
 
@@ -334,6 +352,8 @@ async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
+    if g_objs.httpserver_manager is None:
+        return
     loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return
