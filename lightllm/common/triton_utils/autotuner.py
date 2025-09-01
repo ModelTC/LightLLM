@@ -22,11 +22,11 @@ logger = init_logger(__name__)
 class AutotuneLevel:
     USE_AUTOTUNE_HIS_CONFIG = 0
     # Autotune if no config is cached.
-    ADAPTIVE_AUTOTUNE = 0
+    ADAPTIVE_AUTOTUNE = 1
     # Autotune anyway to overwrite the config of cached files.
-    FORCE_AUTOTUNE = 1
+    FORCE_AUTOTUNE = 2
     # Close autotune and not use the config of cached files.
-    CLOSE_AUTOTUNE = 2
+    CLOSE_AUTOTUNE = 3
 
 
 def autotune(
