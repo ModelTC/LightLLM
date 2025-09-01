@@ -7,7 +7,7 @@ from frozendict import frozendict
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from triton import Config
-from lightllm.common.triton_utils.autotuner import autotune, closest_pow_of_2
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 class Fp8BlockMMKernelConfig(KernelConfigs):

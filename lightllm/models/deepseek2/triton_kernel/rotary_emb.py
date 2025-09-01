@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 import itertools
-from lightllm.common.triton_utils.autotuner import autotune, closest_pow_of_2
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.jit
