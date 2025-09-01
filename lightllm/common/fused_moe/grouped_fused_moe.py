@@ -332,6 +332,7 @@ def grouped_matmul_kernel(
     GROUP_SIZE_M: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr = False,
     NEED_K_MASK: tl.constexpr = True,
+    NEED_TRANS: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
 
@@ -387,7 +388,7 @@ def grouped_matmul_kernel(
             b_scale = tl.load(weight_scale_ptr + expert_id, eviction_policy="evict_last")
             ab_scale = a_scale * b_scale
 
-    if use_fp8_w8a8:
+    if NEED_TRANS:
         a_ptrs = token_ptr + (a_m_index // topk_num)[None, :] * token_stride_0 + offs_k[:, None]
         b_ptrs = weights_ptr + weight_stride_0 * expert_id + offs_k[None, :] + offs_bn[:, None] * weight_stride_1
         accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
@@ -401,7 +402,7 @@ def grouped_matmul_kernel(
         # tl.multiple_of(a_ptrs, [16, 16])
         # tl.multiple_of(b_ptrs, [16, 16])
 
-        if use_fp8_w8a8:
+        if NEED_TRANS:
             if NEED_K_MASK:
                 a = tl.load(a_ptrs, mask=(token_mask[None, :]) & (offs_k[:, None] < k), other=0.0)
                 b = tl.load(b_ptrs, mask=(offs_k[None, :] < k), other=0.0)
@@ -421,9 +422,15 @@ def grouped_matmul_kernel(
                 offs_ks = step_k * BLOCK_SIZE_K // block_size_k
                 a_scale = tl.load(a_scale_ptrs + offs_ks, mask=token_mask, other=0.0)
                 b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
-                accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+                if NEED_TRANS:
+                    accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+                else:
+                    accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
             else:
-                accumulator = tl.dot(b, a, acc=accumulator)
+                if NEED_TRANS:
+                    accumulator = tl.dot(b, a, acc=accumulator)
+                else:
+                    accumulator = tl.dot(a, b, acc=accumulator)
         else:
             accumulator += tl.dot(a, b)
 
@@ -431,11 +438,11 @@ def grouped_matmul_kernel(
         b_ptrs += BLOCK_SIZE_K
         offs_k += BLOCK_SIZE_K
 
+    if NEED_TRANS:
+        accumulator = accumulator.T
+
     if use_fp8_w8a8:
-        if block_size_k > 0 and block_size_n > 0:
-            accumulator = accumulator.T
-        else:
-            accumulator = accumulator.T
+        if not (block_size_k > 0 and block_size_n > 0):
             accumulator *= ab_scale
 
     if MUL_ROUTED_WEIGHT:
@@ -478,6 +485,7 @@ def _get_grouped_matmul_configs():
             "GROUP_SIZE_M": gm,
             "num_warps": nw,
             "num_stages": ns,
+            "need_trans": need_trans,
         }
         for ns in [1, 2, 3, 4, 5]
         for gm in [1, 2, 4, 8]
@@ -485,6 +493,7 @@ def _get_grouped_matmul_configs():
         for bm in [16, 32, 64, 128]
         for bn in [16, 32, 64, 128]
         for bk in [16, 32, 64, 128]
+        for need_trans in [True, False]
     ]
 
 
@@ -559,6 +568,7 @@ def grouped_matmul(
     GROUP_SIZE_M = run_config["GROUP_SIZE_M"]
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
+    NEED_TRANS = run_config.get("NEED_TRANS", False)
 
     if block_size_k != 0:
         # 如果使用了 block wise 量化，分块大小不能超过 block size
@@ -638,6 +648,7 @@ def grouped_matmul(
         GROUP_SIZE_M=GROUP_SIZE_M,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         NEED_K_MASK=NEED_K_MASK,
+        NEED_TRANS=NEED_TRANS,
         num_warps=num_warps,
         num_stages=num_stages,
     )
