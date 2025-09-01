@@ -368,13 +368,6 @@ def grouped_matmul_kernel(
         mask=token_mask,
         other=0,
     )
-    if MUL_ROUTED_WEIGHT:
-        a_m_scale = tl.load(
-            expert_to_weights_ptr + expert_id * expert_to_weights_stride0 + offs_am,
-            mask=token_mask,
-            other=0.0,
-        )
-
     offs_bn = (tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % n
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
@@ -404,14 +397,18 @@ def grouped_matmul_kernel(
 
         if NEED_TRANS:
             if NEED_K_MASK:
-                a = tl.load(a_ptrs, mask=(token_mask[None, :]) & (offs_k[:, None] < k), other=0.0)
+                a = tl.load(
+                    a_ptrs, mask=(token_mask[None, :]) & (offs_k[:, None] < k - step_k * BLOCK_SIZE_K), other=0.0
+                )
                 b = tl.load(b_ptrs, mask=(offs_k[None, :] < k), other=0.0)
             else:
                 a = tl.load(a_ptrs, mask=(token_mask[None, :]), other=0.0)
                 b = tl.load(b_ptrs)
         else:
             if NEED_K_MASK:
-                a = tl.load(a_ptrs, mask=(token_mask[:, None]) & (offs_k[None, :] < k), other=0.0)
+                a = tl.load(
+                    a_ptrs, mask=(token_mask[:, None]) & (offs_k[None, :] < k - step_k * BLOCK_SIZE_K), other=0.0
+                )
                 b = tl.load(b_ptrs, mask=(offs_k[:, None] < k), other=0.0)
             else:
                 a = tl.load(a_ptrs, mask=(token_mask[:, None]), other=0.0)
@@ -436,7 +433,6 @@ def grouped_matmul_kernel(
 
         a_ptrs += BLOCK_SIZE_K
         b_ptrs += BLOCK_SIZE_K
-        offs_k += BLOCK_SIZE_K
 
     if NEED_TRANS:
         accumulator = accumulator.T
@@ -446,6 +442,11 @@ def grouped_matmul_kernel(
             accumulator *= ab_scale
 
     if MUL_ROUTED_WEIGHT:
+        a_m_scale = tl.load(
+            expert_to_weights_ptr + expert_id * expert_to_weights_stride0 + offs_am,
+            mask=token_mask,
+            other=0.0,
+        )
         accumulator *= a_m_scale[:, None]
 
     c = accumulator.to(compute_type)
