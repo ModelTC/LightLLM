@@ -126,6 +126,7 @@ def fused_moe_vllm_api(
     block_shape=None,
 ):
     from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_moe_vllm
+
     if block_shape is not None:
         return fused_moe_vllm(
             x,
@@ -177,6 +178,7 @@ def fused_moe_sglang_api(
     from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
         fused_moe as fused_moe_sglang,
     )
+
     topk_output = select_experts(
         hidden_states=x,
         router_logits=input_gating,
@@ -194,6 +196,7 @@ def fused_moe_sglang_api(
         a2_scale=a2_scale,
         block_shape=block_shape,
     )
+
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
