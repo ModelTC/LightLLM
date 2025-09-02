@@ -41,17 +41,6 @@ def _rms_norm_fwd_fused(
         tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
 
 
-def get_test_configs():
-    return [
-        {
-            "BLOCK_SIZE": bs,
-            "num_warps": nw,
-        }
-        for bs in [16, 32, 64, 128, 256, 512, 2048, 4096, 8192, 16384]
-        for nw in [1, 2, 4, 8]
-    ]
-
-
 def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None):
     # allocate output
     y = torch.empty_like(x) if out is None else out
@@ -67,11 +56,10 @@ def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None):
     if N > BLOCK_SIZE:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
+    num_warps = min(max(BLOCK_SIZE // 256, 1), 4)
     num_warps = triton.next_power_of_2(num_warps)
     if BLOCK_SIZE > 16384:
         BLOCK_SIZE = 16384
-
     # enqueue kernel
     _rms_norm_fwd_fused[(M,)](
         x_arg,
