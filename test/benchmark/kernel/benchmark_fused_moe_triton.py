@@ -177,14 +177,19 @@ def fused_moe_sglang_api(
     a2_scale=None,
     block_shape=None,
 ):
+    from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
+    from sglang.srt.layers.moe.topk import TopK, TopKConfig, select_experts
+
+    topk_output = select_experts(
+        hidden_states=x,
+        router_logits=input_gating,
+        topk_config=TopKConfig(top_k=topk, renormalize=False),
+    )
     return fused_moe_sglang(
         x,
         w1,
         w2,
-        input_gating,
-        topk,
-        renormalize=True,
-        inplace=True,
+        topk_output,
         use_fp8_w8a8=use_fp8_w8a8,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -193,11 +198,10 @@ def fused_moe_sglang_api(
         block_shape=block_shape,
     )
 
-
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["batch_size"],
-        x_vals=[1, 8, 16, 32, 64, 128],
+        x_vals=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
         line_arg="provider",
         line_vals=[
             "vllm_fused_moe_triton",
@@ -264,9 +268,9 @@ def benchmark(batch_size, provider, model_config, use_fp8=False):
     api_func = (
         fused_moe_vllm_api
         if provider == "vllm_fused_moe_triton"
-        else fused_moe_sglang_api
-        if provider == "lightllm_fused_moe_triton"
         else fused_moe_lightllm_api
+        if provider == "lightllm_fused_moe_triton"
+        else fused_moe_sglang_api
     )
     for _ in range(10):
         api_func(
@@ -285,7 +289,8 @@ def benchmark(batch_size, provider, model_config, use_fp8=False):
     torch.cuda.synchronize()
 
     quantiles = [0.5, 0.2, 0.8]
-    ms, min_ms, max_ms = triton.testing.do_bench(
+    do_bench = triton.testing.do_bench if batch_size > 256 else triton.testing.do_bench_cudagraph
+    ms, min_ms, max_ms = do_bench(
         lambda: api_func(
             x,
             w1,
