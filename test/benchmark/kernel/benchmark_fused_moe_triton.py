@@ -8,10 +8,6 @@ import vllm
 from transformers import AutoConfig
 from lightllm.common.fused_moe.topk_select import select_experts
 from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_moe_vllm
-from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
-    fused_moe as fused_moe_sglang,
-)
 
 
 def get_model_config(model_name: str, tp_size: int):
@@ -59,12 +55,10 @@ def get_model_config(model_name: str, tp_size: int):
         intermediate_size = config.intermediate_size
         shard_intermediate_size = 2 * intermediate_size // tp_size
 
-    vllm_version_num = vllm.__version_tuple__[0] * 100 + vllm.__version_tuple__[1] * 10 + vllm.__version_tuple__[2]
     block_shape = None
     if hasattr(config, "quantization_config") and "weight_block_size" in config.quantization_config:
         block_shape = config.quantization_config["weight_block_size"]
         assert len(block_shape) == 2
-        assert vllm_version_num >= 66, "Block-wise quantized fp8 fused_moe is only supported for VLLM>=0.6.6.post1"
 
     shape_configs = {
         "num_experts": E,
@@ -131,6 +125,7 @@ def fused_moe_vllm_api(
     a2_scale=None,
     block_shape=None,
 ):
+    from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_moe_vllm
     if block_shape is not None:
         return fused_moe_vllm(
             x,
@@ -179,7 +174,9 @@ def fused_moe_sglang_api(
 ):
     from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
     from sglang.srt.layers.moe.topk import TopK, TopKConfig, select_experts
-
+    from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
+        fused_moe as fused_moe_sglang,
+    )
     topk_output = select_experts(
         hidden_states=x,
         router_logits=input_gating,
