@@ -2,7 +2,6 @@ import torch
 
 import triton
 import triton.language as tl
-from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.jit
@@ -53,18 +52,7 @@ def get_test_configs():
     ]
 
 
-def get_static_key(x):
-    return {"N": x.shape[-1], "out_dtype": str(x.dtype)}
-
-
-@autotune(
-    kernel_name="rms_norm_fwd_fused:v1",
-    configs_gen_func=get_test_configs,
-    static_key_func=get_static_key,
-    run_key_func=lambda x: x.shape[0],
-    mutates_args=[],
-)
-def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None, run_config=None):
+def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None):
     # allocate output
     y = torch.empty_like(x) if out is None else out
     # reshape input data into 2D tensor
@@ -83,10 +71,6 @@ def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None, run_config=None):
     num_warps = triton.next_power_of_2(num_warps)
     if BLOCK_SIZE > 16384:
         BLOCK_SIZE = 16384
-
-    if run_config is not None:
-        BLOCK_SIZE = run_config["BLOCK_SIZE"]
-        num_warps = run_config["num_warps"]
 
     # enqueue kernel
     _rms_norm_fwd_fused[(M,)](
