@@ -1,5 +1,6 @@
 import uvloop
 import asyncio
+import setproctitle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -15,6 +16,7 @@ from ..tokenizer import get_tokenizer
 import pickle
 import time
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -173,6 +175,7 @@ class DeTokenizationManager:
 def start_detokenization_process(args, detokenization_port, detokenization_pub_port, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::detokenization_server")
 
     try:
         manager = DeTokenizationManager(
