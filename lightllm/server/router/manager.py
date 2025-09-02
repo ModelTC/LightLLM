@@ -4,6 +4,7 @@ import asyncio
 import torch
 import pickle
 import inspect
+import setproctitle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -507,6 +508,7 @@ class RouterManager:
 def start_router_process(args, router_port, detokenization_port, metric_port, pipe_writer):
     # 注册 graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::router_server")
     start_parent_check_thread()
 
     def handle_exception(loop, context):

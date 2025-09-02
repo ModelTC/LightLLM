@@ -11,6 +11,7 @@ import psutil
 import threading
 import inspect
 import collections
+import setproctitle
 from typing import List, Dict, Union
 from lightllm.utils.log_utils import init_logger
 from .prefill_infer_rpyc import PDPrefillInferRpcServer
@@ -227,6 +228,7 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::prefill_kv_move_manager")
 
     manager = PrefillKVMoveManager(args, info_queue, mem_queues)
     kv_trans_process_check = threading.Thread(target=manager.check_trans_process_loop, daemon=True)

@@ -4,6 +4,7 @@ import asyncio
 import threading
 import websockets
 import inspect
+import setproctitle
 
 from typing import Dict
 from dataclasses import asdict
@@ -12,6 +13,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.pd_io_struct import PD_Master_Obj
 import torch.multiprocessing as mp
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -108,6 +110,7 @@ class UpStatusManager:
 
 def _init_env(args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::up_kv_status")
     up_kv_manager = UpStatusManager(args, task_in_queue, task_out_queue)
     logger.info(f"up kv manager {str(up_kv_manager)} start ok")
     while True:

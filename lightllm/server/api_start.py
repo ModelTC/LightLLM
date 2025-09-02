@@ -94,7 +94,7 @@ def normal_or_p_d_start(args):
 
     if args.graph_max_len_in_batch == 0:
         args.graph_max_len_in_batch = args.max_req_total_len
-    
+
     # mode setting check.
     if args.output_constraint_mode != "none":
         assert args.disable_dynamic_prompt_cache is False

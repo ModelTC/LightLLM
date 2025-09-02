@@ -5,6 +5,7 @@ import asyncio
 import uvloop
 import rpyc
 import inspect
+import setproctitle
 from typing import List
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -14,6 +15,7 @@ from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.multimodal_params import AudioItem
 from .model_infer.model_rpc import start_model_process, AudioModelRpcClient
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -140,6 +142,7 @@ class AudioManager:
 def start_audio_process(args, router_port, audio_port, cache_port, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::audio_server")
 
     try:
         audioserver = AudioManager(args, router_port, audio_port, cache_port)
