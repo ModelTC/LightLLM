@@ -53,8 +53,8 @@ def get_test_configs():
     ]
 
 
-def get_static_key(x, out):
-    return {"N": x.shape[-1], "out_dtype": str(out.dtype)}
+def get_static_key(x):
+    return {"N": x.shape[-1], "out_dtype": str(x.dtype)}
 
 
 @autotune(
