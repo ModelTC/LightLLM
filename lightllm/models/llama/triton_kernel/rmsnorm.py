@@ -48,7 +48,7 @@ def get_test_configs():
             "BLOCK_SIZE": bs,
             "num_warps": nw,
         }
-        for bs in [16, 32, 64, 128, 256]
+        for bs in [16, 32, 64, 128, 256, 512, 2048, 4096, 8192, 16384]
         for nw in [1, 2, 4, 8]
     ]
 
