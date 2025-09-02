@@ -2,6 +2,7 @@ import torch
 
 import triton
 import triton.language as tl
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.jit
@@ -41,7 +42,29 @@ def _rms_norm_fwd_fused(
         tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
 
 
-def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None):
+def get_test_configs():
+    return [
+        {
+            "BLOCK_SIZE": bs,
+            "num_warps": nw,
+        }
+        for bs in [16, 32, 64, 128, 256]
+        for nw in [1, 2, 4, 8]
+    ]
+
+
+def get_static_key(x, out):
+    return {"N": x.shape[-1], "out_dtype": str(out.dtype)}
+
+
+@autotune(
+    kernel_name="rms_norm_fwd_fused:v1",
+    configs_gen_func=get_test_configs,
+    static_key_func=get_static_key,
+    run_key_func=lambda x: x.shape[0],
+    mutates_args=["out"],
+)
+def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None, run_config=None):
     # allocate output
     y = torch.empty_like(x) if out is None else out
     # reshape input data into 2D tensor
@@ -56,10 +79,15 @@ def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None):
     if N > BLOCK_SIZE:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    num_warps = min(max(BLOCK_SIZE // 256, 1), 4)
+    num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
     num_warps = triton.next_power_of_2(num_warps)
     if BLOCK_SIZE > 16384:
         BLOCK_SIZE = 16384
+
+    if run_config is not None:
+        BLOCK_SIZE = run_config["BLOCK_SIZE"]
+        num_warps = run_config["num_warps"]
+
     # enqueue kernel
     _rms_norm_fwd_fused[(M,)](
         x_arg,
