@@ -62,7 +62,7 @@ def get_static_key(x):
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=lambda x: x.shape[0],
-    mutates_args=["out"],
+    mutates_args=[],
 )
 def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None, run_config=None):
     # allocate output
