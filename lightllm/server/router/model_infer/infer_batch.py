@@ -340,9 +340,7 @@ class InferReq:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
                 # 从 cpu 到 gpu 是流内阻塞操作
-                g_infer_context.req_manager.mem_manager.set_prefix_cache_to_req(
-                    self.req_idx, 0, ready_cache_len, value_tensor
-                )
+                g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
@@ -460,7 +458,7 @@ class InferReqGroup:
             req = g_infer_context.requests_mapping[req_id]
             req.finish_status.set_status(FinishStatus.NO_FINISH)
             input_len = req.get_chuncked_input_token_len()
-            req_manager.mem_manager.set_prefix_cache_to_req(req.req_idx, prefix_len, input_len, cache_token_id)
+            req_manager.req_to_token_indexs[req.req_idx][prefix_len:input_len] = cache_token_id
             assert input_len == pre_input_len
 
 

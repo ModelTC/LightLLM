@@ -333,9 +333,7 @@ class RadixCache:
             self._print_helper(child, indent=indent + 2)
         return
 
-    def free_radix_cache_to_get_enough_token(
-        self, need_token_num=None, b_seq_len=None, b_ready_cache_len=None, is_prefill=False
-    ):
+    def free_radix_cache_to_get_enough_token(self, need_token_num=None, b_seq_len=None, b_ready_cache_len=None):
         assert self.mem_manager is not None
         if need_token_num > self.mem_manager.can_use_mem_size:
             need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size

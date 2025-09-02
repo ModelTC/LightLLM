@@ -36,7 +36,10 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
             length = cdiv(self.max_seq_len, self.page_size)
             self.page_table = torch.empty((self.batch_size, length), dtype=torch.int32, device=input_ids.device)
             if "page_size_variable" in model.mode:
-                self.page_table.copy_(model.req_manager.req_to_page_indexs[self.b_req_idx, :length])
+                token_indexs = model.req_manager.req_to_token_indexs[
+                    self.b_req_idx, : length * self.page_size : self.page_size
+                ]
+                self.page_table.copy_(token_indexs // self.page_size)
             else:
                 self.page_table.copy_(model.req_manager.req_to_token_indexs[self.b_req_idx, :length])
         else:
@@ -56,7 +59,10 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
 
             length = cdiv(max_seq_len_k, self.page_size)
             if "page_size_variable" in model.mode:
-                self.page_table[:, :length].copy_(model.req_manager.req_to_page_indexs[self.b_req_idx, :length])
+                token_indexs = model.req_manager.req_to_token_indexs[
+                    self.b_req_idx, : length * self.page_size : self.page_size
+                ]
+                self.page_table[:, :length].copy_(token_indexs // self.page_size)
             else:
                 self.page_table[:, :length].copy_(model.req_manager.req_to_token_indexs[self.b_req_idx, :length])
             self.page_table[:, length:].fill_(0)

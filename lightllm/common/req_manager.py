@@ -11,6 +11,10 @@ from lightllm.utils.config_utils import get_vocab_size
 logger = init_logger(__name__)
 
 
+def cdiv(a, b):
+    return (a + b - 1) // b
+
+
 class _ReqNode:
     def __init__(self, index):
         self.index = index
@@ -62,19 +66,68 @@ class ReqManager:
         self.req_to_token_indexs = torch.zeros(
             (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
         )
-        mem_manager.req_to_token_indexs = self.req_to_token_indexs
-        if hasattr(mem_manager, "req_to_page_indexs"):
-            page_size = get_page_size()
-            self.req_to_page_indexs = torch.zeros(
-                (max_request_num + 1, (max_sequence_length + page_size - 1) // page_size),
-                dtype=torch.int32,
-                device="cuda",
-            )
-            mem_manager.req_to_page_indexs = self.req_to_page_indexs
         self.mem_manager = mem_manager
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
+
+    def expand_by_page_size(self, b_token_len, page_size):
+        # 将seq_len按page整数倍展开，例如seq_len = [9,9,9] -> page_len = [4,4,1,4,4,1,4,4,1], page_size = 4
+        b_page_len = cdiv(b_token_len, page_size)
+        need_pages_num = b_page_len.sum()
+        p_token_len = torch.full((need_pages_num,), page_size, dtype=b_token_len.dtype, device=b_token_len.device)
+        cumsum_pages = torch.cumsum(b_page_len, dim=0)
+        last_page_positions = cumsum_pages - 1
+        remainders = b_token_len - (b_page_len - 1) * page_size
+        p_token_len[last_page_positions] = remainders
+        return need_pages_num, b_page_len, p_token_len
+
+    def alloc_paged_token_indices(self, b_req_idx, page_size, b_seq_len, b_ready_cache_len):
+        if b_ready_cache_len is not None:
+            # prefill
+            b_req_idx = b_req_idx.cuda()
+            b_seq_len = b_seq_len.cuda()
+            b_ready_cache_len = b_ready_cache_len.cuda()
+
+            b_token_len = b_seq_len - b_ready_cache_len
+            total_pages_needed, b_page_len, p_token_len = self.expand_by_page_size(b_token_len, page_size)
+            allocated_pages = self.mem_manager.alloc(total_pages_needed)
+
+            def get_offsets_by_length(b_len, max_len):
+                # 例：b_len = [3,4,5] -> [0,1,2,0,1,2,3,0,1,2,3,4]
+                offsets = torch.arange(max_len, dtype=b_len.dtype, device=b_len.device)
+                offset_mask = offsets.unsqueeze(0) < b_len.unsqueeze(1)
+                return torch.masked_select(offsets, offset_mask)
+
+            token_offsets = get_offsets_by_length(p_token_len, page_size)
+            page_bases = allocated_pages * page_size
+            return torch.repeat_interleave(page_bases, p_token_len) + token_offsets
+        else:
+            # decode
+            b_seq_len = b_seq_len.cuda()
+            b_req_idx = b_req_idx.cuda()
+            need_new_page_mask = (b_seq_len - 1) % page_size == 0
+            new_pages_num = need_new_page_mask.sum()
+            token_idxs = torch.zeros_like(b_seq_len, device=b_seq_len.device)
+            if new_pages_num > 0:
+                new_pages = self.mem_manager.alloc(new_pages_num)
+                token_idxs[need_new_page_mask] = new_pages * page_size
+
+            mask = ~need_new_page_mask
+            if mask.any():
+                seq_lens = b_seq_len[mask]
+                token_idxs[mask] = (
+                    self.req_to_token_indexs[b_req_idx[mask], seq_lens - 2] // page_size * page_size
+                    + (seq_lens - 1) % page_size
+                )
+        return token_idxs
+
+    def alloc_token_indices(self, need_size, b_req_idx, b_seq_len, b_ready_cache_len=None) -> torch.Tensor:
+        page_size = get_page_size()
+        if page_size > 1:
+            return self.alloc_paged_token_indices(b_req_idx, page_size, b_seq_len, b_ready_cache_len)
+        else:
+            return self.mem_manager.alloc(need_size)
 
     def alloc(self):
         return self.req_list.alloc()

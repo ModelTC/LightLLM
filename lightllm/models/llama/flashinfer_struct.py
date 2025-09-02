@@ -4,7 +4,7 @@ import numpy as np
 import torch.distributed as dist
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args, get_page_size
-from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
+from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index, repack_paged_kv_index_from_tokens
 
 
 def cdiv(a, b):
@@ -45,12 +45,13 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                     b_page_len = cdiv(self.b_seq_len, self.page_size)
                     self.kv_starts[1:] = b_page_len.cumsum(0)
                     self.kv_last_page_len = self.b_seq_len - (b_page_len - 1) * self.page_size
-                    repack_kv_index(
-                        self.req_manager.req_to_page_indexs,
+                    repack_paged_kv_index_from_tokens(
+                        self.req_manager.req_to_token_indexs,
                         self.b_req_idx,
                         b_page_len,
                         self.kv_starts[:-1],
                         cdiv(self.max_kv_seq_len, self.page_size),
+                        self.page_size,
                         self.kv_indices,
                     )
                 else:
@@ -99,12 +100,13 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                     b_page_len = cdiv(self.b_seq_len, self.page_size)
                     kv_starts[1:] = b_page_len.cumsum(0)
                     kv_last_page_len = self.b_seq_len - (b_page_len - 1) * self.page_size
-                    repack_kv_index(
-                        self.req_manager.req_to_page_indexs,
+                    repack_paged_kv_index_from_tokens(
+                        self.req_manager.req_to_token_indexs,
                         self.b_req_idx,
                         b_page_len,
                         kv_starts[:-1],
                         cdiv(self.max_kv_seq_len, self.page_size),
+                        self.page_size,
                         kv_indices,
                     )
                 else:

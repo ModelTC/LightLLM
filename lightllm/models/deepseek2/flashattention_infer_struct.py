@@ -56,7 +56,10 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
 
             if "page_size_variable" in model.mode:
                 length = cdiv(max_seq_len_k, self.page_size)
-                self.page_table[:, :length].copy_(model.req_manager.req_to_page_indexs[self.b_req_idx, :length])
+                token_indexs = model.req_manager.req_to_token_indexs[
+                    self.b_req_idx, : length * self.page_size : self.page_size
+                ]
+                self.page_table[:, :length].copy_(token_indexs // self.page_size)
                 self.page_table[:, length:].fill_(0)
             else:
                 self.page_table[:, :max_seq_len_k].copy_(
