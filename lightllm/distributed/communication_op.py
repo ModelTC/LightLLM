@@ -49,12 +49,7 @@ from .custom_all_gather import CustomAllgather
 
 try:
     import deep_ep
-    from deep_gemm.jit_kernels.utils import set_num_sms
 
-    deepep_sms = int(os.getenv("DEEPEP_SMS", deep_ep.Buffer.num_sms))
-    device_sms = get_device_sm_count()
-    deep_ep.Buffer.set_num_sms(deepep_sms)
-    set_num_sms(device_sms - deepep_sms)
     HAS_DEEPEP = True
 except:
     HAS_DEEPEP = False
@@ -141,6 +136,15 @@ class DistributeGroupManager:
             self.ep_buffer = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
+
+        # set num sms for deep_gemm
+        from deep_gemm.jit_kernels.utils import set_num_sms
+
+        deepep_sms = int(os.getenv("DEEPEP_SMS", deep_ep.Buffer.num_sms))
+        device_sms = get_device_sm_count()
+        deep_ep.Buffer.set_num_sms(deepep_sms)
+        set_num_sms(device_sms - deepep_sms)
+
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
         low_latency_mode, num_rdma_bytes = True, 0
