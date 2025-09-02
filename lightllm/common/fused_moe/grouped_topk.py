@@ -140,6 +140,7 @@ def grouped_topk_kernel(
     offs_group = tl.arange(0, EXPERT_GROUP_NUM)
     offs_group_v = tl.arange(0, EXPERT_GROUP_SIZE)
     tl.store(scores_buffer_ptr + scores_stride_m * token_index + offs_n, scores, mask=offs_n < total_expert_num)
+    tl.debug_barrier()
     group_scores = tl.load(
         scores_buffer_ptr
         + scores_stride_token_m * token_index
@@ -174,7 +175,7 @@ def grouped_topk_kernel(
         mask_group_scores,
         mask=((offs_group < group_num)[:, None]) & ((offs_group_v < group_expert_num)[None, :]),
     )  # [group, group_size]
-
+    tl.debug_barrier()
     mask_scores = tl.load(
         scores_buffer_ptr + scores_stride_m * token_index + offs_n, mask=offs_n < total_expert_num, other=-10000000.0
     )
@@ -227,6 +228,11 @@ def triton_grouped_topk(
 
     assert total_expert_num % num_expert_group == 0
 
+    if token_num <= 256:
+        num_warps = 4
+    else:
+        num_warps = 1
+
     grouped_topk_kernel[(token_num,)](
         gating_output,
         *gating_output.stride(),
@@ -250,7 +256,7 @@ def triton_grouped_topk(
         EXPERT_GROUP_SIZE=triton.next_power_of_2(total_expert_num // num_expert_group),
         RENORMALIZE=renormalize,
         GROUP_SCORE_USED_TOPK_NUM=group_score_used_topk_num,
-        num_warps=1,
+        num_warps=num_warps,
         num_stages=1,
     )
     return out_topk_weights, out_topk_ids

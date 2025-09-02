@@ -8,6 +8,7 @@ from lightllm.common.basemodel.infer_lock import g_router_lock
 class ChunkedPrefillQueue(BaseQueue):
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
+        self.batch_max_tokens = self.batch_max_tokens * 2
 
     def _init_cache_list(self, current_batch: Batch, is_busy):
         if current_batch is not None:

@@ -39,7 +39,8 @@ RUN pip install -r /lightllm/requirements.txt --no-cache-dir
 
 RUN pip install --no-cache-dir vllm --pre --extra-index-url https://wheels.vllm.ai/nightly 
 
-RUN git clone https://github.com/ModelTC/LightKernel.git && cd LightKernel && pip install --no-deps -v .
+# TODO: offline compile
+# RUN git clone https://github.com/ModelTC/LightKernel.git && cd LightKernel && pip install --no-deps -v .
 
 RUN apt-get update && apt-get install -y libnuma-dev wget devscripts debhelper dh-make build-essential dkms
 RUN apt-get install -y ibverbs-providers infiniband-diags perftest rdma-core libibverbs-dev librdmacm-dev

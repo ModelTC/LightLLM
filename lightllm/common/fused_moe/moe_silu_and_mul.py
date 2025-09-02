@@ -68,7 +68,7 @@ def _get_silu_and_mul_configs():
         {"BLOCK_M": bm, "BLOCK_N": bn, "num_warps": nw, "NUM_STAGES": ns}
         for ns in [1, 2, 4]
         for nw in [1, 4, 8]
-        for bm in [32, 64, 128, 256]
+        for bm in [1, 8, 32, 64, 128, 256]
         for bn in [32, 64, 128, 256]
     ]
 
