@@ -1,5 +1,6 @@
 import torch
 import torch.distributed as dist
+import functools
 
 import time
 from typing import Callable
@@ -62,6 +63,38 @@ def calculate_time(show=False, min_cost_ms=0.0):
                 cost_time = (time.time() - start_time) * 1000
                 if cost_time > min_cost_ms:
                     logger.debug(f"Function {func.__name__} took {cost_time} ms to run.")
+            return result
+
+        return inner_func
+
+    return wrapper
+
+
+def calculate_cpu_time_sync(show=False):
+    def wrapper(func):
+        @functools.wraps(func)
+        def inner_func(*args, **kwargs):
+            start_time = time.time()
+            result = func(*args, **kwargs)
+            cost_time = (time.time() - start_time) * 1000
+            if show:
+                logger.debug(f"Function {func.__name__} took {cost_time} ms to run.")
+            return result
+
+        return inner_func
+
+    return wrapper
+
+
+def calculate_cpu_time_async(show=False):
+    def wrapper(func):
+        @functools.wraps(func)
+        async def inner_func(*args, **kwargs):
+            start_time = time.time()
+            result = await func(*args, **kwargs)
+            cost_time = (time.time() - start_time) * 1000
+            if show:
+                logger.debug(f"Async Function {func.__name__} took {cost_time} ms to run.")
             return result
 
         return inner_func
