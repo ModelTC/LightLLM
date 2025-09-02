@@ -343,13 +343,13 @@ def grouped_matmul_kernel(
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + pid % num_pid_in_group % group_size_m
-    pid_n = (pid % num_pid_in_group) // group_size_m
-    # in_group_index = pid % num_pid_in_group
-    # back_mark = (in_group_index // group_size_m) % 2
-    # back_mark1 = -1 * (2 * back_mark - 1)
-    # pid_m = first_pid_m + back_mark * (group_size_m - 1) + back_mark1 * (in_group_index % group_size_m)
+    # pid_m = first_pid_m + pid % num_pid_in_group % group_size_m
     # pid_n = (pid % num_pid_in_group) // group_size_m
+    in_group_index = pid % num_pid_in_group
+    back_mark = (in_group_index // group_size_m) % 2
+    back_mark1 = -1 * (2 * back_mark - 1)
+    pid_m = first_pid_m + back_mark * (group_size_m - 1) + back_mark1 * (in_group_index % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
     expert_id = tl.load(mblocks_to_expert_id + pid_m)
 
