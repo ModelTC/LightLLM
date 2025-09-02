@@ -451,10 +451,10 @@ class PDManager:
         pd_client.websocket = websocket
         self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
 
-        if pd_client.mode == "prefill":
+        if pd_client.mode in ["prefill", "nixl_prefill"]:
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.prefill_nodes.append(pd_client)
-        elif pd_client.mode == "decode":
+        elif pd_client.mode in ["decode", "nixl_decode"]:
             self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.decode_nodes.append(pd_client)
         else:
