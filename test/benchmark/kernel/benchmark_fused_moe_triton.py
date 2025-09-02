@@ -223,7 +223,7 @@ def fused_moe_sglang_api(
         args={},
     )
 )
-def benchmark(batch_size, provider, model_config, use_fp8=False):
+def benchmark(batch_size, provider, model_config, use_fp8=False, use_cuda_graph=False):
     torch.set_default_device("cuda")
     torch.cuda.manual_seed_all(0)
 
@@ -289,7 +289,7 @@ def benchmark(batch_size, provider, model_config, use_fp8=False):
     torch.cuda.synchronize()
 
     quantiles = [0.5, 0.2, 0.8]
-    do_bench = triton.testing.do_bench if batch_size > 256 else triton.testing.do_bench_cudagraph
+    do_bench = triton.testing.do_bench if not use_cuda_graph else triton.testing.do_bench_cudagraph
     ms, min_ms, max_ms = do_bench(
         lambda: api_func(
             x,
@@ -314,6 +314,7 @@ def main():
     parser.add_argument("--model", type=str, default="mistralai/Mixtral-8x7B-Instruct-v0.1")
     parser.add_argument("--tp-size", type=int, default=8)
     parser.add_argument("--use-fp8", action="store_true")
+    parser.add_argument("--use-cuda-graph", action="store_true")
     parser.add_argument(
         "--save-path",
         type=str,
@@ -328,6 +329,7 @@ def main():
         save_path=args.save_path,
         model_config=model_config,
         use_fp8=args.use_fp8,
+        use_cuda_graph=args.use_cuda_graph,
     )
 
 
