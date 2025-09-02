@@ -16,7 +16,13 @@ from typing import Dict, List, Optional, Union
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
-from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd, StopStrMatchedReqCmd, NIXLRemotePrefillDoneCmd, ReqCmd
+from lightllm.server.core.objs.io_objs import (
+    GroupReqIndexes,
+    AbortedReqCmd,
+    StopStrMatchedReqCmd,
+    NIXLRemotePrefillDoneCmd,
+    ReqCmd,
+)
 from lightllm.server.core.objs import ShmReqManager, StartArgs, PDNIXLChunkedPrefillReq
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .shm_reqs_io_buffer import ShmReqsIOBuffer
@@ -335,7 +341,7 @@ class RouterManager:
         if stop_str_matched_reqs:
             filter_cmds.extend([StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs])
 
-        if self.args.run_mode == 'nixl_decode':
+        if self.args.run_mode == "nixl_decode":
             remote_prefill_done_reqs = self._get_nixl_rpd_reqs_from_running_batch()
             if remote_prefill_done_reqs:
                 filter_cmds.extend([NIXLRemotePrefillDoneCmd(req_id=r.request_id) for r in remote_prefill_done_reqs])
