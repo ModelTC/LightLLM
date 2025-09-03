@@ -125,6 +125,7 @@ def _token_id_counter_update_kernel(
     batch_size,
     HAS_MASK: tl.constexpr,
     BLOCK: tl.constexpr,
+    OLD_VERSION_TRITON: tl.constexpr,
 ):
 
     block_start_index = tl.program_id(0) * BLOCK
@@ -136,6 +137,8 @@ def _token_id_counter_update_kernel(
 
     if HAS_MASK:
         mask = tl.load(mask_ptr + offs, mask=loc_mask, other=False)
+        if OLD_VERSION_TRITON:
+            mask = mask != 0
         tl.atomic_add(
             req_to_out_token_id_counter_ptr + req_idx * counter_stride_m + token_ids * counter_stride_n,
             1,
@@ -170,6 +173,7 @@ def update_req_to_token_id_counter(
         batch_size=batch_size,
         HAS_MASK=has_mask,
         BLOCK=BLOCK,
+        OLD_VERSION_TRITON=triton.__version__ < "3.2.0",
         num_warps=1,
     )
     return

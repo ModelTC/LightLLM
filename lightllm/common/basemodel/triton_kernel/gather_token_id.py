@@ -16,6 +16,7 @@ def _fwd_kernel_scatter(
     num_size,
     HAS_OUT_IS_NONE: tl.constexpr,
     BLOCK: tl.constexpr,
+    OLD_VERSION_TRITON: tl.constexpr,
 ):
     block_index = tl.program_id(0)
     block_range = block_index * BLOCK + tl.arange(0, BLOCK)
@@ -27,6 +28,8 @@ def _fwd_kernel_scatter(
 
     if not HAS_OUT_IS_NONE:
         cur_has_out = tl.load(b_has_out + block_range, mask=block_mask, other=False)
+        if OLD_VERSION_TRITON:
+            cur_has_out = cur_has_out != 0
         tl.store(
             req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + cur_mtp_index,
             cur_next_token_id,
@@ -76,6 +79,7 @@ def scatter_token(
         num_size=batch_size,
         HAS_OUT_IS_NONE=b_has_out is None,
         BLOCK=BLOCK,
+        OLD_VERSION_TRITON=triton.__version__ < "3.2.0",
         num_warps=num_warps,
         num_stages=1,
     )
