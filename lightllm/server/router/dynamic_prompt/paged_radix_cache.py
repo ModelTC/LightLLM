@@ -391,31 +391,10 @@ class PagedRadixCache:
             self._print_helper(child, indent=indent + 2)
         return
 
-    def free_radix_cache_to_get_enough_token(self, need_token_num=None, b_seq_len=None, b_ready_cache_len=None):
+    def free_radix_cache_to_get_enough_token(self, need_token_num):
         assert self.mem_manager is not None
-        need_pages = 0
-        can_use_pages = 0
-        if hasattr(self.mem_manager, "can_use_page_size") and self.page_size > 1 and b_seq_len is not None:
-
-            def get_need_page_size(page_size, b_seq_len, b_ready_cache_len=None):
-                need_new_pages = 0
-                if b_ready_cache_len is not None:
-                    need_tokens_array = b_seq_len - b_ready_cache_len
-                    need_pages_array = (need_tokens_array + page_size - 1) // page_size
-                    need_new_pages = need_pages_array.sum()
-                else:
-                    mask = (b_seq_len - 1) % page_size == 0
-                    need_new_pages = mask.sum()
-                return need_new_pages
-
-            need_pages = get_need_page_size(self.page_size, b_seq_len, b_ready_cache_len)
-            can_use_pages = self.mem_manager.can_use_page_size
-        if need_token_num > self.mem_manager.can_use_mem_size or need_pages > can_use_pages:
-            need_evict_single_token_num = need_token_num - self.mem_manager.can_use_mem_size
-            need_evict_page_token_num = (need_pages - can_use_pages) * self.page_size
-            need_evict_token_num = max(need_evict_single_token_num, need_evict_page_token_num)
-            remaining_tokens = self.get_tree_total_tokens_num() - self.get_refed_tokens_num()
-            need_evict_token_num = min(need_evict_token_num, remaining_tokens)
+        if need_token_num > self.mem_manager.can_use_mem_size:
+            need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size
             release_mems = []
 
             def release_mem(mem_index):
@@ -423,7 +402,6 @@ class PagedRadixCache:
                 return
 
             self.evict(need_evict_token_num, release_mem)
-            if release_mems:
-                mem_index = torch.concat(release_mems)
-                self.mem_manager.free(mem_index)
+            mem_index = torch.concat(release_mems)
+            self.mem_manager.free(mem_index)
         return

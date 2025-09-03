@@ -18,12 +18,6 @@ logger = init_logger(__name__)
 class PagedMemoryManager(MemoryManager):
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
-        page_size = get_page_size()
-        self.mem_page_state = torch.arange(
-            0, cdiv(self.size, page_size), dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
-        )
-        self.mark_page_start = 0
-        self.can_use_page_size = cdiv(self.size, page_size)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.kv_buffer = torch.empty(
@@ -53,42 +47,23 @@ class PagedMemoryManager(MemoryManager):
         return True
 
     def alloc(self, need_size) -> torch.Tensor:
-        if self.can_use_page_size < need_size:
-            raise RuntimeError(
-                f"No available pages for alloc. remaining: {self.can_use_page_size}, needed: {need_size}"
-            )
-        new_pages = self.mem_page_state[self.mark_page_start : self.mark_page_start + need_size].cuda()
-        self.mark_page_start += need_size
-        self.can_use_page_size -= need_size
-        self.can_use_mem_size -= need_size * get_page_size()
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        return new_pages
+        assert need_size % get_page_size() == 0, "Need size must be a multiple of page size"
+        return super().alloc(need_size)
 
     def free(self, free_index: Union[torch.Tensor, List[int]]):
-        self.can_use_mem_size += len(free_index)
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-
         page_size = get_page_size()
+        if page_size == 1:
+            return super().free(free_index)
+
         if isinstance(free_index, list):
-            free_index = torch.tensor(free_index, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True)
-
-        if len(free_index) == 0:
-            return
-
+            free_index = torch.tensor(free_index)
         base_free_index = free_index[free_index % page_size == 0]
-        page_indices = base_free_index // page_size
-        for page_idx in sorted(page_indices, reverse=True):  # 逆序放回，保持池的相对顺序
-            self.mark_page_start -= 1
-            self.mem_page_state[self.mark_page_start] = page_idx
-            self.can_use_page_size += 1
-
+        if len(base_free_index) == 0:
+            return
+        token_idxs = base_free_index[:, None] + torch.arange(page_size, device=free_index.device)
+        token_idxs = token_idxs.flatten()
+        super().free(token_idxs)
         return
 
     def free_all(self):
         super().free_all()
-        page_size = get_page_size()
-        self.mark_page_start = 0
-        self.can_use_page_size = cdiv(self.size, page_size)
-        self.mem_page_state = torch.arange(
-            0, cdiv(self.size, page_size), dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
-        )
