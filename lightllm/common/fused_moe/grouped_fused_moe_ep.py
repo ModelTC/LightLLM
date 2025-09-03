@@ -31,7 +31,7 @@ except:
 
 
 def masked_group_gemm(
-    recv_x: Tuple[torch.Tensor],
+    recv_x: Tuple[torch.Tensor, torch.Tensor],
     masked_m: torch.Tensor,
     dtype: torch.dtype,
     w1: torch.Tensor,
@@ -227,19 +227,30 @@ def fused_experts_impl(
     return combined_x
 
 
-def _deepgemm_grouped_fp8_nt_contiguous(input_tensor, w_tuple, out, m_indices):
+def _deepgemm_grouped_fp8_nt_contiguous(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    m_indices: torch.Tensor,
+):
     if HAS_DEEPGEMM:
         if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous"):
-            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tensor, w_tuple, out, m_indices)
+            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tuple, w_tuple, out, m_indices)
         if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_contiguous"):
-            return deep_gemm.m_grouped_fp8_gemm_nt_contiguous(input_tensor, w_tuple, out, m_indices)
+            return deep_gemm.m_grouped_fp8_gemm_nt_contiguous(input_tuple, w_tuple, out, m_indices)
     raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
 
 
-def _deepgemm_grouped_fp8_nt_masked(input_tensor, w_tuple, out, masked_m, expected_m):
+def _deepgemm_grouped_fp8_nt_masked(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+):
     if HAS_DEEPGEMM:
         if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_masked"):
-            return deep_gemm.m_grouped_fp8_gemm_nt_masked(input_tensor, w_tuple, out, masked_m, expected_m)
+            return deep_gemm.m_grouped_fp8_gemm_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
         if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked"):
-            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(input_tensor, w_tuple, out, masked_m, expected_m)
+            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
     raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
