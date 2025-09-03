@@ -217,6 +217,7 @@ class VITConnectionManager:
             return
 
         uuids = data.multimodal_params.get_all_uuids()
+        print(f"uuids is {uuids}")
 
         async def wait_for_embeds():
             while not all(self.cache_client.root.get_items_embed(uuids)):

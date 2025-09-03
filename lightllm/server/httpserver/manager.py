@@ -374,6 +374,49 @@ class HttpServerManager:
             raise e
         return
 
+    async def get_image_embeding(
+        self,
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        is_health_req: bool = False,
+    ) -> Tuple[int, str, dict, FinishStatus]:
+        start_time = time.time()
+        request_headers = request.headers if request is not None else {}
+        group_request_id = self.alloc_req_id(sampling_params, is_health_req)
+
+        try:
+            original_multimodal_params = None
+            if self.is_multinode_tp_master:
+                original_multimodal_params = copy.deepcopy(multimodal_params)
+
+            if self.pd_mode.is_P_or_NORMAL():
+                await multimodal_params.verify_and_preload(request)
+
+            await multimodal_params.verify_and_preload(request)
+            image_count = len(multimodal_params.images)
+            # 记录请求到达的相关信息
+
+            await self._log_req_header(request_headers, group_request_id)
+            logger.info(f"image_count:{image_count}")
+            assert (
+                len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
+            ), "too many multimodal items!"
+
+            await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+
+            visual_req_status = GroupReqObjs(group_request_id, multimodal_params, None, start_time)
+
+            await self.transfer_to_next_module_or_node(
+                None, sampling_params, original_multimodal_params, visual_req_status
+            )
+
+        except Exception as e:
+            logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+            await self.abort(group_request_id)
+            raise e
+        return
+
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
         image_tokens = 0
         audio_tokens = 0
