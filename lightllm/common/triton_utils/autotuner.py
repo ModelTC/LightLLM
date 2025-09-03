@@ -144,7 +144,9 @@ class Autotuner:
         if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
                 logger.warning(
-                    f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)}",
+                    f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)}, \
+                    the performance may be suboptimal! \
+                    You can use LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 to enable autotune.",
                 )
             self.cached_configs[static_key] = {}
 
