@@ -2,13 +2,10 @@ import os
 import torch
 import numpy as np
 import torch.distributed as dist
+import triton
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args, get_page_size
-from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index, repack_paged_kv_index_from_tokens
-
-
-def cdiv(a, b):
-    return (a + b - 1) // b
+from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
 
 
 class LlamaFlashInferStateInfo(LlamaInferStateInfo):
@@ -28,7 +25,7 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
         if not self.is_prefill:
             if get_env_start_args().enable_flashinfer_decode:
                 self.kv_last_page_len = torch.full((self.batch_size,), 1, dtype=torch.int32, device=input_ids.device)
-                length = cdiv(self.flashinfer_extra_state.max_seq_length, self.page_size)
+                length = triton.cdiv(self.flashinfer_extra_state.max_seq_length, self.page_size)
                 if self.batch_size <= model.graph_max_batch_size:
                     self.kv_indices = self.flashinfer_extra_state.kv_indices_buffer[self.microbatch_index][
                         : self.batch_size * length
@@ -41,28 +38,19 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                     )
 
                 self.kv_starts = self.b1_cu_kv_seq_len.int()
-                if "page_size_variable" in model.mode:
-                    b_page_len = cdiv(self.b_seq_len, self.page_size)
+                b_page_len = triton.cdiv(self.b_seq_len, self.page_size)
+                if self.page_size > 1:
                     self.kv_starts[1:] = b_page_len.cumsum(0)
                     self.kv_last_page_len = self.b_seq_len - (b_page_len - 1) * self.page_size
-                    repack_paged_kv_index_from_tokens(
-                        self.req_manager.req_to_token_indexs,
-                        self.b_req_idx,
-                        b_page_len,
-                        self.kv_starts[:-1],
-                        cdiv(self.max_kv_seq_len, self.page_size),
-                        self.page_size,
-                        self.kv_indices,
-                    )
-                else:
-                    repack_kv_index(
-                        self.req_manager.req_to_token_indexs,
-                        self.b_req_idx,
-                        self.b_seq_len,
-                        self.b_start_loc,
-                        self.max_kv_seq_len,
-                        self.kv_indices,
-                    )
+                repack_kv_index(
+                    self.req_manager.req_to_token_indexs,
+                    self.b_req_idx,
+                    b_page_len,
+                    self.kv_starts[:-1],
+                    triton.cdiv(self.max_kv_seq_len, self.page_size),
+                    self.page_size,
+                    self.kv_indices,
+                )
                 if self.decode_wrapper is None:
                     self.decode_wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
                         self.flashinfer_extra_state.workspace_buffer,
@@ -90,34 +78,25 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                 q_starts = self.b1_cu_q_seq_len.int()
                 kv_starts = self.b1_cu_kv_seq_len.int()
                 kv_last_page_len = torch.full((self.batch_size,), 1, dtype=torch.int32, device=input_ids.device)
-                length = cdiv(self.flashinfer_extra_state.max_seq_length, self.page_size)
+                length = triton.cdiv(self.flashinfer_extra_state.max_seq_length, self.page_size)
                 kv_indices = torch.empty(
                     self.batch_size * length,
                     dtype=torch.int32,
                     device=input_ids.device,
                 )
-                if "page_size_variable" in model.mode:
-                    b_page_len = cdiv(self.b_seq_len, self.page_size)
+                b_page_len = triton.cdiv(self.b_seq_len, self.page_size)
+                if self.page_size > 1:
                     kv_starts[1:] = b_page_len.cumsum(0)
                     kv_last_page_len = self.b_seq_len - (b_page_len - 1) * self.page_size
-                    repack_paged_kv_index_from_tokens(
-                        self.req_manager.req_to_token_indexs,
-                        self.b_req_idx,
-                        b_page_len,
-                        kv_starts[:-1],
-                        cdiv(self.max_kv_seq_len, self.page_size),
-                        self.page_size,
-                        kv_indices,
-                    )
-                else:
-                    repack_kv_index(
-                        self.req_manager.req_to_token_indexs,
-                        self.b_req_idx,
-                        self.b_seq_len,
-                        kv_starts[:-1],
-                        self.max_kv_seq_len,
-                        kv_indices,
-                    )
+                repack_kv_index(
+                    self.req_manager.req_to_token_indexs,
+                    self.b_req_idx,
+                    b_page_len,
+                    kv_starts[:-1],
+                    triton.cdiv(self.max_kv_seq_len, self.page_size),
+                    self.page_size,
+                    kv_indices,
+                )
                 self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
                     self.flashinfer_extra_state.workspace_buffer,
                     qo_indptr_buf=q_starts,

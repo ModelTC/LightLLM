@@ -59,7 +59,7 @@ def prepare_prefill_inputs(
             input_ids.shape[0], b_seq_len, b_ready_cache_len
         )
         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_num)
-    mem_indexes = g_infer_context.req_manager.alloc_token_indices(
+    mem_indexes = g_infer_context.req_manager.alloc_mem_indices(
         input_ids.shape[0], b_req_idx, b_seq_len, b_ready_cache_len
     )
     g_infer_state_lock.release()
@@ -118,7 +118,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     if g_infer_context.radix_cache is not None:
         token_num = g_infer_context.req_manager.calc_real_need_token_num(b_seq_len.shape[0], b_seq_len)
         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_num)
-    mem_indexes = g_infer_context.req_manager.alloc_token_indices(b_seq_len.shape[0], b_req_idx, b_seq_len)
+    mem_indexes = g_infer_context.req_manager.alloc_mem_indices(b_seq_len.shape[0], b_req_idx, b_seq_len)
     g_infer_state_lock.release()
 
     model_input = ModelInput(

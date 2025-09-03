@@ -2,13 +2,10 @@ import os
 import torch
 import numpy as np
 import torch.distributed as dist
+import triton
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args, get_page_size
-from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index, repack_paged_kv_index_from_tokens
-
-
-def cdiv(a, b):
-    return (a + b - 1) // b
+from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
 
 
 class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
@@ -28,7 +25,7 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
         if not self.is_prefill:
             if get_env_start_args().enable_flashinfer_decode:
                 self.q_indptr = torch.arange(self.batch_size + 1, dtype=torch.int32).to(input_ids.device)
-                length = cdiv(self.flashinfer_extra_state.max_seq_length, self.page_size)
+                length = triton.cdiv(self.flashinfer_extra_state.max_seq_length, self.page_size)
                 if self.batch_size <= model.graph_max_batch_size:
                     self.kv_indices = self.flashinfer_extra_state.kv_indices_buffer[self.microbatch_index][
                         : self.batch_size * length
@@ -39,27 +36,17 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
                         dtype=torch.int32,
                         device=input_ids.device,
                     )
-                if "page_size_variable" in model.mode:
-                    b_page_len = cdiv(self.b_seq_len, self.page_size)
-                    self.kv_starts[1:] = b_page_len.cumsum(0)
-                    repack_paged_kv_index_from_tokens(
-                        self.req_manager.req_to_token_indexs,
-                        self.b_req_idx,
-                        b_page_len,
-                        self.kv_starts[:-1],
-                        cdiv(self.max_len_in_batch, self.page_size),
-                        self.page_size,
-                        self.kv_indices,
-                    )
-                else:
-                    repack_kv_index(
-                        self.req_manager.req_to_token_indexs,
-                        self.b_req_idx,
-                        self.b_seq_len,
-                        self.b_start_loc,
-                        self.max_len_in_batch,
-                        self.kv_indices,
-                    )
+                b_page_len = triton.cdiv(self.b_seq_len, self.page_size)
+                self.kv_starts[1:] = b_page_len.cumsum(0)
+                repack_kv_index(
+                    self.req_manager.req_to_token_indexs,
+                    self.b_req_idx,
+                    b_page_len,
+                    self.kv_starts[:-1],
+                    triton.cdiv(self.max_len_in_batch, self.page_size),
+                    self.page_size,
+                    self.kv_indices,
+                )
                 if self.decode_wrapper is None:
                     self.decode_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
                         self.flashinfer_extra_state.workspace_buffer,

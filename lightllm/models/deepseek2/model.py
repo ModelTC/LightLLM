@@ -10,7 +10,6 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.deepseek2_mem_manager import Deepseek2MemoryManager
-from lightllm.common.deepseek2_paged_mem_manager import Deepseek2PagedMemoryManager
 from lightllm.common.deepseek2_fp8kv_mem_manager import Deepseek2FP8KVMemoryManager
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
@@ -20,35 +19,6 @@ from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 
 
 logger = init_logger(__name__)
-
-
-class DeepSeek2FlashInferStateExtraInfo:
-    def __init__(self, model):
-        num_heads = model.config["num_attention_heads"]
-        self.tp_q_head_num = num_heads // get_dp_world_size()
-        self.qk_nope_head_dim = model.qk_nope_head_dim
-        self.qk_rope_head_dim = model.qk_rope_head_dim
-        self.kv_lora_rank = model.kv_lora_rank
-        self.q_data_type = model.data_type
-        self.kv_data_type = model.data_type
-        self.workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=get_current_device_id())
-        self.max_seq_length = model.max_seq_length
-        self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
-        self.kv_indices_buffer = [
-            torch.empty(
-                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
-            torch.empty(
-                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
-        ]
-        if model.config["rope_scaling"] is not None:
-            rope_scaling = model.config["rope_scaling"]
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
-            scaling_factor = rope_scaling["factor"]
-            if mscale_all_dim:
-                mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
-                self.softmax_scale = self.softmax_scale * mscale * mscale
 
 
 @ModelRegistry(["deepseek_v2", "deepseek_v3"])
@@ -98,10 +68,6 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         manager_class = Deepseek2MemoryManager
         if "triton_fp8kv" in self.mode:
             manager_class = Deepseek2FP8KVMemoryManager
-        elif "page_size_variable" in self.mode:
-            manager_class = Deepseek2PagedMemoryManager
-        elif self.mode:
-            raise ValueError(f"Unsupported mode for deepseek2: {self.mode}")
 
         # mtp 模式下需要在mem manger上扩展draft model使用的layer
         added_mtp_layer_num = 0
@@ -202,3 +168,32 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     def _context_forward(self, input_ids, infer_state):
         predict_logics = super()._context_forward(input_ids, infer_state)
         return predict_logics
+
+
+class DeepSeek2FlashInferStateExtraInfo:
+    def __init__(self, model):
+        num_heads = model.config["num_attention_heads"]
+        self.tp_q_head_num = num_heads // get_dp_world_size()
+        self.qk_nope_head_dim = model.qk_nope_head_dim
+        self.qk_rope_head_dim = model.qk_rope_head_dim
+        self.kv_lora_rank = model.kv_lora_rank
+        self.q_data_type = model.data_type
+        self.kv_data_type = model.data_type
+        self.workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=get_current_device_id())
+        self.max_seq_length = model.max_seq_length
+        self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
+        self.kv_indices_buffer = [
+            torch.empty(
+                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
+            ),
+            torch.empty(
+                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
+            ),
+        ]
+        if model.config["rope_scaling"] is not None:
+            rope_scaling = model.config["rope_scaling"]
+            mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
+            scaling_factor = rope_scaling["factor"]
+            if mscale_all_dim:
+                mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
+                self.softmax_scale = self.softmax_scale * mscale * mscale

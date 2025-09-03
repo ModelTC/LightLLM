@@ -70,7 +70,7 @@ def _fwd_kernel_repack_page_kv_index_from_tokens(
 
 
 @torch.no_grad()
-def repack_kv_index(kv_index, req_index, seq_len, start_loc, max_seq_len, out_kv_index):
+def repack_kv_index(req_to_token_indexs, req_index, seq_len, start_loc, max_seq_len, page_size, out_kv_index):
     batch_size = req_index.shape[0]
     # flashinfer requires out_kv_index to be zeroed before use
     out_kv_index.zero_()
@@ -80,51 +80,35 @@ def repack_kv_index(kv_index, req_index, seq_len, start_loc, max_seq_len, out_kv
         triton.cdiv(max_seq_len, BLOCK),
     )
 
-    _fwd_kernel_repack_kv_index[grid](
-        kv_index,
-        req_index,
-        out_kv_index,
-        seq_len,
-        start_loc,
-        kv_index.stride(0),
-        SEQ_BLOCK=BLOCK,
-        num_warps=8,
-        num_stages=1,
-    )
+    if page_size > 1:
+        _fwd_kernel_repack_page_kv_index_from_tokens[grid](
+            req_to_token_indexs,
+            req_index,
+            out_kv_index,
+            seq_len,
+            start_loc,
+            page_size,
+            req_to_token_indexs.stride(0),
+            SEQ_BLOCK=BLOCK,
+            num_warps=8,
+            num_stages=1,
+        )
+    else:
+        _fwd_kernel_repack_kv_index[grid](
+            req_to_token_indexs,
+            req_index,
+            out_kv_index,
+            seq_len,
+            start_loc,
+            req_to_token_indexs.stride(0),
+            SEQ_BLOCK=BLOCK,
+            num_warps=8,
+            num_stages=1,
+        )
     return
 
 
-@torch.no_grad()
-def repack_paged_kv_index_from_tokens(
-    req_to_token_indexs, req_index, seq_len, start_loc, max_seq_len, page_size, out_kv_index
-):
-    batch_size = req_index.shape[0]
-    out_kv_index.zero_()
-
-    BLOCK = 64
-    grid = (
-        batch_size,
-        triton.cdiv(max_seq_len, BLOCK),
-    )
-
-    _fwd_kernel_repack_page_kv_index_from_tokens[grid](
-        req_to_token_indexs,
-        req_index,
-        out_kv_index,
-        seq_len,
-        start_loc,
-        page_size,
-        req_to_token_indexs.stride(0),
-        SEQ_BLOCK=BLOCK,
-        num_warps=8,
-        num_stages=1,
-    )
-    return
-
-
-def ref_repack_page_kv_index_with_token_input(
-    req_to_token_indexs, req_index, seq_len, start_loc, max_seq_len, page_size, out_kv_index
-):
+def repack_kv_ref(req_to_token_indexs, req_index, seq_len, start_loc, max_seq_len, page_size, out_kv_index):
     page_indexs = torch.zeros_like(req_to_token_indexs)
     valid_mask = req_to_token_indexs % page_size == 0
     batch_size, seq_len_dim = req_to_token_indexs.shape
@@ -136,12 +120,9 @@ def ref_repack_page_kv_index_with_token_input(
         (torch.where(valid_mask, req_to_token_indexs // page_size, 0) * valid_mask.int()).flatten(),
     )
 
-    repack_kv_index(page_indexs, req_index, seq_len, start_loc, max_seq_len, out_kv_index)
-
-
-def repack_kv_ref(req_to_token_indexs, b_req_idx, b_seq_len, b_start_loc, output):
-    for b, sl, start in zip(b_req_idx, b_seq_len, b_start_loc):
-        output[start : start + sl] = req_to_token_indexs[b][:sl]
+    for b, sl, start in zip(req_index, seq_len, start_loc):
+        out_kv_index[start : start + sl] = page_indexs[b][:sl]
+    return
 
 
 if __name__ == "__main__":
@@ -172,25 +153,18 @@ if __name__ == "__main__":
     output = torch.zeros((b_seq_len.sum(),)).cuda().int()
     ref = torch.zeros((b_seq_len.sum(),)).cuda().int()
 
-    fn1 = lambda: repack_kv_ref(req_to_token_indexs, b_req_idx, b_seq_len, b_start_loc, ref)
-    fn2 = lambda: repack_kv_index(req_to_token_indexs, b_req_idx, b_seq_len, b_start_loc, MAX_SEQ_LEN, output)
-    ms1 = triton.testing.do_bench(fn1)
-    ms2 = triton.testing.do_bench_cudagraph(fn2)
-    print(f"repack_kv_index: ref={ms1:.3f}ms, triton={ms2:.3f}ms")
-    assert torch.allclose(output.float(), ref.float())
-
     b_page_len = triton.cdiv(b_seq_len, PAGE_SIZE)
     page_output = torch.zeros((b_page_len.sum(),)).cuda().int()
     page_ref = torch.zeros((b_page_len.sum(),)).cuda().int()
     b_start_loc[1:] = b_page_len.cumsum(0)[:-1]
     max_seq_len = triton.cdiv(MAX_SEQ_LEN, PAGE_SIZE)
-    fn3 = lambda: ref_repack_page_kv_index_with_token_input(
+    fn1 = lambda: repack_kv_ref(
         req_to_token_indexs, b_req_idx, b_page_len, b_start_loc, max_seq_len, PAGE_SIZE, page_ref
     )
-    fn4 = lambda: repack_paged_kv_index_from_tokens(
+    fn2 = lambda: repack_kv_index(
         req_to_token_indexs, b_req_idx, b_page_len, b_start_loc, max_seq_len, PAGE_SIZE, page_output
     )
-    ms3 = triton.testing.do_bench(fn3)
-    ms4 = triton.testing.do_bench_cudagraph(fn4)
-    print(f"repack_paged_kv_index_from_tokens: ref={ms3:.3f}ms, triton={ms4:.3f}ms")
+    ms1 = triton.testing.do_bench(fn1)
+    ms2 = triton.testing.do_bench_cudagraph(fn2)
+    print(f"repack_kv_index: ref={ms1:.3f}ms, triton={ms2:.3f}ms")
     assert torch.allclose(page_output.float(), page_ref.float())

@@ -27,7 +27,7 @@ from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, ge
 from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
 from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.distributed import dist_group_manager
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
@@ -140,7 +140,7 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
-        radix_cache_class = PagedRadixCache if "page_size_variable" in self.mode else RadixCache
+        radix_cache_class = PagedRadixCache if get_page_size() > 1 else RadixCache
         self.radix_cache = (
             radix_cache_class(
                 get_unique_server_name(),
