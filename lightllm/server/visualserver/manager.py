@@ -125,7 +125,7 @@ class VisualManager:
 
                     multimodal_params = group_req_indexes.multimodal_params
 
-                    img_uuids = [img.uuid for img in multimodal_params.images if not img.afs_embed]
+                    img_uuids = [img.uuid for img in multimodal_params.images]
                     ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
 
                     for img, ready in zip(multimodal_params.images, ready_image):

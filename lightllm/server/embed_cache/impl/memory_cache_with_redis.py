@@ -49,6 +49,9 @@ class MemoryCacheWithRedis(InMemoryCache):
     def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
         ret = []
         for id in ids:
+            # if self.redis_cache.query(str(id)):
+            #     ret.append(True)
+            #     continue
             # 避免重复的引用计数增加
             if self._records[id].embed:
                 ret.append(True)
