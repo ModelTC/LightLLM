@@ -202,7 +202,7 @@ def load_cpu_kv_to_gpu(
     grid = (page_num,)
     num_warps = 1
 
-    _offload_gpu_kv_to_cpu[grid](
+    _load_cpu_cache_to_gpu[grid](
         token_indexes_ptr=mem_indexes,
         gpu_kv_cache_ptr=gpu_kv_cache,
         gpu_stride0=gpu_kv_cache.stride(0),

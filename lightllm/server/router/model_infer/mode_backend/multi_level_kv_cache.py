@@ -181,28 +181,33 @@ class MultiLevelKvCacheModule(object):
 
             need_token_num = match_tokens - req.cur_kv_len
             # 多匹配了一定数量的token 才进行复制操作，不然操作效率不高
-            if need_token_num > 256:
+            if need_token_num > 128:
                 if need_token_num <= idle_token_num:
                     if self.backend.radix_cache is not None:
                         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
 
-                mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
+                    # 计算需要加载的页面（只加载未匹配的部分）
+                    cur_kv_pages = req.cur_kv_len // token_page_size
+                    need_pages = page_list[cur_kv_pages:]  # 只取需要的页面
+                    actual_need_tokens = len(need_pages) * token_page_size
 
-                # 将 cpu page 的内容拷贝到 gpu 页面中
-                load_cpu_kv_to_gpu(
-                    mem_indexes=mem_indexes,
-                    gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
-                    cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
-                    page_indexes=torch.tensor(page_list, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
-                )
+                    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=actual_need_tokens)
+
+                    # 将 cpu page 的内容拷贝到 gpu 页面中
+                    load_cpu_kv_to_gpu(
+                        mem_indexes=mem_indexes,
+                        gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
+                        cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
+                        page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
+                    )
 
                 torch.cuda.current_stream().synchronize()
 
-                idle_token_num -= need_token_num
+                idle_token_num -= actual_need_tokens
                 g_infer_context.req_manager.req_to_token_indexs[
-                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
+                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + actual_need_tokens)
                 ] = mem_indexes
-                req.cur_kv_len = req.cur_kv_len + need_token_num
+                req.cur_kv_len = req.cur_kv_len + actual_need_tokens
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
 
