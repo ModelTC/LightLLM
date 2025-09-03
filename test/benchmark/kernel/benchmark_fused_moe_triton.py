@@ -4,7 +4,6 @@ import argparse
 
 import torch
 import triton
-import vllm
 from transformers import AutoConfig
 from lightllm.common.fused_moe.topk_select import select_experts
 from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
@@ -173,8 +172,7 @@ def fused_moe_sglang_api(
     a2_scale=None,
     block_shape=None,
 ):
-    from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.topk import TopK, TopKConfig, select_experts
+    from sglang.srt.layers.moe.topk import TopKConfig, select_experts
     from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
         fused_moe as fused_moe_sglang,
     )
