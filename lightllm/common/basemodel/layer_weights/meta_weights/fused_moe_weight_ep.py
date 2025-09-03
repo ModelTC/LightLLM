@@ -4,7 +4,11 @@ import threading
 from typing import Optional, Tuple, List, Dict, Any
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_device_id
 from .base_weight import BaseWeight
-from lightllm.common.fused_moe.grouped_fused_moe_ep import fused_experts_impl, masked_group_gemm
+from lightllm.common.fused_moe.grouped_fused_moe_ep import (
+    fused_experts_impl,
+    masked_group_gemm,
+    _deepgemm_grouped_fp8_nt_contiguous,
+)
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.distributed import dist_group_manager
 from lightllm.common.fused_moe.topk_select import select_experts
@@ -25,8 +29,11 @@ logger = init_logger(__name__)
 
 try:
     import deep_gemm
+
+    HAS_DEEPGEMM = True
 except:
     logger.warning("no deepep or deep_gemm")
+    HAS_DEEPGEMM = False
 
 
 class FusedMoeWeightEP(BaseWeight):
@@ -336,7 +343,7 @@ class FusedMoeWeightEP(BaseWeight):
             # groupgemm (contiguous layout)
             gemm_out_a = torch.empty((all_tokens, N), device=device, dtype=hidden_dtype)
 
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
+            _deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
 
             # silu_and_mul_fwd + qaunt
             # TODO fused kernel
@@ -350,9 +357,7 @@ class FusedMoeWeightEP(BaseWeight):
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=device, dtype=hidden_dtype)
 
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices
-            )
+            _deepgemm_grouped_fp8_nt_contiguous((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices)
             # gather and local reduce
             ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
         else:
