@@ -27,14 +27,6 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
-try:
-    import deep_gemm
-
-    HAS_DEEPGEMM = True
-except:
-    logger.warning("no deepep or deep_gemm")
-    HAS_DEEPGEMM = False
-
 
 class FusedMoeWeightEP(BaseWeight):
     def __init__(
