@@ -21,7 +21,9 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 [English Docs](https://lightllm-en.readthedocs.io/en/latest/) | [中文文档](https://lightllm-cn.readthedocs.io/en/latest/) | [Blogs](https://modeltc.github.io/lightllm-blog/)
 
 ## News
-- [2025/05] LightLLM paper on constrained decoding accepted by [ACL25](https://arxiv.org/pdf/2506.03887) (Pre $^3$: Enabling Deterministic Pushdown Automata for Faster Structured LLM Generation). For a more accessible overview of the research with key insights and examples, check out our blog post: [LightLLM Blog](https://www.light-ai.top/lightllm-blog/2025/06/15/pre3.html)
+- [2025/09] 🔥 LightLLM [v1.1.0](https://www.light-ai.top/lightllm-blog/2025/09/03/lightllm.html) release!
+- [2025/08] Pre $^3$ achieves the outstanding paper award of [ACL2025](https://2025.aclweb.org/program/awards/).
+- [2025/05] LightLLM paper on constrained decoding accepted by [ACL2025](https://arxiv.org/pdf/2506.03887) (Pre $^3$: Enabling Deterministic Pushdown Automata for Faster Structured LLM Generation). For a more accessible overview of the research with key insights and examples, check out our blog post: [LightLLM Blog](https://www.light-ai.top/lightllm-blog/2025/06/15/pre3.html)
 - [2025/04] LightLLM paper on request scheduler published in [ASPLOS’25](https://dl.acm.org/doi/10.1145/3676641.3716011) (Past-Future Scheduler for LLM Serving under SLA Guarantees)
 - [2025/02] 🔥 LightLLM v1.0.0 release, achieving the **fastest DeepSeek-R1** serving performance on single H200 machine.
 
@@ -89,6 +91,19 @@ We learned a lot from the following projects when developing LightLLM.
 ## Citation
 
 We have published a number of papers around components or features of LightLLM, if you use LightLLM in your work, please consider citing the relevant paper.
+
+**constrained decoding**: accepted by [ACL2025](https://arxiv.org/pdf/2506.03887) and achieved the outstanding paper award.
+```bibtex
+@inproceedings{
+anonymous2025pre,
+title={Pre\${\textasciicircum}3\$: Enabling Deterministic Pushdown Automata for Faster Structured {LLM} Generation},
+author={Anonymous},
+booktitle={Submitted to ACL Rolling Review - February 2025},
+year={2025},
+url={https://openreview.net/forum?id=g1aBeiyZEi},
+note={under review}
+}
+```
 
 **Request scheduler**: accepted by [ASPLOS’25](https://dl.acm.org/doi/10.1145/3676641.3716011):
 ```bibtex
