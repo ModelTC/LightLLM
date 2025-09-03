@@ -6,7 +6,7 @@ import torch
 import triton
 from transformers import AutoConfig
 from lightllm.common.fused_moe.topk_select import select_experts
-from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
+from lightllm.common.fused_moe.grouped_fused_moe import fused_experts
 
 
 def get_model_config(model_name: str, tp_size: int):
@@ -98,7 +98,7 @@ def fused_moe_lightllm_api(
     )
     use_fp8_w8a8 = use_fp8_w8a8
 
-    return fused_experts_impl(
+    return fused_experts(
         hidden_states=x,
         w1=w1,
         w2=w2,
