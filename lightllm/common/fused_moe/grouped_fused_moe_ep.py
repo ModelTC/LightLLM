@@ -24,12 +24,14 @@ try:
     from deep_ep import Buffer, EventOverlap
     import deep_gemm
 
+    HAS_DEEPGEMM = True
 except:
     logger.warning("no deepep or deep_gemm")
+    HAS_DEEPGEMM = False
 
 
 def masked_group_gemm(
-    recv_x: Tuple[torch.Tensor],
+    recv_x: Tuple[torch.Tensor, torch.Tensor],
     masked_m: torch.Tensor,
     dtype: torch.dtype,
     w1: torch.Tensor,
@@ -49,12 +51,10 @@ def masked_group_gemm(
     # groupgemm (masked layout)
     gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
 
-    deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
+    _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
     silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m)
-    deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(
-        (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m
-    )
+    _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
 
@@ -168,7 +168,7 @@ def fused_experts_impl(
             # groupgemm (contiguous layout)
             gemm_out_a = torch.empty((all_tokens, N), device=hidden_states.device, dtype=hidden_states.dtype)
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
+            _deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
 
             # silu_and_mul_fwd + qaunt
             # TODO fused kernel
@@ -182,9 +182,7 @@ def fused_experts_impl(
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=hidden_states.device, dtype=hidden_states.dtype)
 
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices
-            )
+            _deepgemm_grouped_fp8_nt_contiguous((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices)
 
             # gather and local reduce
             ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
@@ -227,3 +225,32 @@ def fused_experts_impl(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
         )
     return combined_x
+
+
+def _deepgemm_grouped_fp8_nt_contiguous(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    m_indices: torch.Tensor,
+):
+    if HAS_DEEPGEMM:
+        if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous"):
+            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tuple, w_tuple, out, m_indices)
+        if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_contiguous"):
+            return deep_gemm.m_grouped_fp8_gemm_nt_contiguous(input_tuple, w_tuple, out, m_indices)
+    raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
+
+
+def _deepgemm_grouped_fp8_nt_masked(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+):
+    if HAS_DEEPGEMM:
+        if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_masked"):
+            return deep_gemm.m_grouped_fp8_gemm_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
+        if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked"):
+            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
+    raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")

@@ -1,0 +1,80 @@
+{
+  "1": {
+    "BLOCK_SEQ": 2,
+    "HEAD_PARALLEL_NUM": 16,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "100": {
+    "BLOCK_SEQ": 2,
+    "HEAD_PARALLEL_NUM": 16,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "1024": {
+    "BLOCK_SEQ": 1,
+    "HEAD_PARALLEL_NUM": 2,
+    "num_stages": 3,
+    "num_warps": 1
+  },
+  "128": {
+    "BLOCK_SEQ": 1,
+    "HEAD_PARALLEL_NUM": 8,
+    "num_stages": 3,
+    "num_warps": 1
+  },
+  "16": {
+    "BLOCK_SEQ": 1,
+    "HEAD_PARALLEL_NUM": 16,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "16384": {
+    "BLOCK_SEQ": 4,
+    "HEAD_PARALLEL_NUM": 1,
+    "num_stages": 1,
+    "num_warps": 1
+  },
+  "2048": {
+    "BLOCK_SEQ": 1,
+    "HEAD_PARALLEL_NUM": 2,
+    "num_stages": 3,
+    "num_warps": 1
+  },
+  "256": {
+    "BLOCK_SEQ": 4,
+    "HEAD_PARALLEL_NUM": 16,
+    "num_stages": 5,
+    "num_warps": 4
+  },
+  "32": {
+    "BLOCK_SEQ": 1,
+    "HEAD_PARALLEL_NUM": 16,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "4": {
+    "BLOCK_SEQ": 1,
+    "HEAD_PARALLEL_NUM": 8,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "4096": {
+    "BLOCK_SEQ": 1,
+    "HEAD_PARALLEL_NUM": 1,
+    "num_stages": 1,
+    "num_warps": 1
+  },
+  "64": {
+    "BLOCK_SEQ": 1,
+    "HEAD_PARALLEL_NUM": 8,
+    "num_stages": 5,
+    "num_warps": 1
+  },
+  "8": {
+    "BLOCK_SEQ": 1,
+    "HEAD_PARALLEL_NUM": 16,
+    "num_stages": 5,
+    "num_warps": 1
+  }
+}
