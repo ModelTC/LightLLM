@@ -201,8 +201,11 @@ class CudaGraph:
             )
             b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
             b_seq_len.fill_(seq_len)
+            b_last_mem_index = torch.zeros_like(b_seq_len)
             b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-            mem_indexes = model.req_manager.alloc_mem_indices(len(input_ids), b_req_idx, b_seq_len).cuda()
+            mem_indexes = model.req_manager.alloc_mem_indices(
+                len(input_ids), b_seq_len, b_last_mem_index=b_last_mem_index
+            ).cuda()
 
             model_input = ModelInput(
                 batch_size=batch_size,
@@ -257,8 +260,11 @@ class CudaGraph:
                 )
                 b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
                 b_seq_len.fill_(seq_len)
+                b_last_mem_index = torch.zeros_like(b_seq_len)
                 b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-                mem_indexes = model.req_manager.alloc_mem_indices(len(input_ids), b_req_idx, b_seq_len).cuda()
+                mem_indexes = model.req_manager.alloc_mem_indices(
+                    len(input_ids), b_seq_len, b_last_mem_index=b_last_mem_index
+                ).cuda()
 
                 micro_batch = ModelInput(
                     is_prefill=False,

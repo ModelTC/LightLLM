@@ -160,7 +160,7 @@ def set_triton_autotune_level(level: int):
 
 @lru_cache(maxsize=None)
 def get_page_size():
-    return int(os.getenv("PAGE_SIZE", 64))
+    return int(os.getenv("PAGE_SIZE", 1))
 
 
 g_model_init_done = False

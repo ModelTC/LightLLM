@@ -71,10 +71,21 @@ class ReqManager:
     def calc_real_need_token_num(self, need_token_num, b_seq_len, b_ready_cache_len=None):
         return max(need_token_num, self._get_need_paged_token_num(b_seq_len, b_ready_cache_len))
 
-    def alloc_mem_indices(self, need_size, b_req_idx=None, b_seq_len=None, b_ready_cache_len=None) -> torch.Tensor:
+    def calc_last_mem_index_in_prefill(self, mem_indices, b_seq_len, b_ready_cache_len=None):
+        b_token_len = b_seq_len
+        if b_ready_cache_len is not None:
+            b_token_len = b_seq_len - b_ready_cache_len
+        b_token_len_cumsum = torch.cumsum(b_token_len, dim=0)
+        b_last_mem_index = mem_indices[b_token_len_cumsum - 1]
+        return b_last_mem_index
+
+    # b_ready_cache_len为None时才需要b_last_mem_index
+    def alloc_mem_indices(
+        self, need_size, b_seq_len=None, b_ready_cache_len=None, b_last_mem_index=None
+    ) -> torch.Tensor:
         page_size = get_page_size()
-        if page_size > 1 and b_req_idx is not None and b_seq_len is not None:
-            return self._alloc_paged_mem_indices(b_req_idx, page_size, b_seq_len, b_ready_cache_len)
+        if page_size > 1 and b_seq_len is not None:
+            return self._alloc_paged_mem_indices(page_size, b_seq_len, b_ready_cache_len, b_last_mem_index)
         else:
             return self.mem_manager.alloc(need_size)
 
@@ -114,12 +125,11 @@ class ReqManager:
         p_token_len[last_page_positions] = remainders
         return need_pages_num, p_token_len
 
-    def _alloc_paged_mem_indices(self, b_req_idx, page_size, b_seq_len, b_ready_cache_len):
+    def _alloc_paged_mem_indices(self, page_size, b_seq_len, b_ready_cache_len, b_last_mem_index):
+        b_seq_len = b_seq_len.cpu()
         if b_ready_cache_len is not None:
             # prefill
-            b_seq_len = b_seq_len.cpu()
             b_ready_cache_len = b_ready_cache_len.cpu()
-
             b_token_len = b_seq_len - b_ready_cache_len
             total_pages_needed, p_token_len = self._expand_by_page_size(b_token_len, page_size)
             paged_token_idxs = self.mem_manager.alloc(total_pages_needed * page_size)
@@ -128,19 +138,17 @@ class ReqManager:
             return pages[mask]
         else:
             # decode
-            b_seq_len = b_seq_len.cuda()
-            b_req_idx = b_req_idx.cuda()
+            assert b_last_mem_index is not None
+            b_last_mem_index = b_last_mem_index.cpu()
             need_new_page_mask = (b_seq_len - 1) % page_size == 0
-            new_pages_num = need_new_page_mask.sum().cpu()
+            new_pages_num = need_new_page_mask.sum()
             token_idxs = torch.zeros_like(b_seq_len, device=b_seq_len.device)
             if new_pages_num > 0:
-                new_pages_tokens = self.mem_manager.alloc(new_pages_num * page_size).cuda()
+                new_pages_tokens = self.mem_manager.alloc(new_pages_num * page_size)
                 token_idxs[need_new_page_mask] = new_pages_tokens[::page_size]
-
             mask = ~need_new_page_mask
             if mask.any():
-                seq_lens = b_seq_len[mask]
-                token_idxs[mask] = self.req_to_token_indexs[b_req_idx[mask], seq_lens - 2] + 1
+                token_idxs[mask] = b_last_mem_index[mask] + 1
         return token_idxs
 
     def _get_need_paged_token_num(self, b_seq_len, b_ready_cache_len=None):
