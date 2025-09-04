@@ -141,8 +141,9 @@ class Autotuner:
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
         if self._try_load_cache(static_key):
             all_configs = self.cached_configs.get(static_key, {})
-            if len(all_configs) != 0:
+            for run_config in all_configs.values():
                 # warmup
+                kwargs["run_config"] = run_config
                 self._bench(*args, n_repeat=1, n_retries=1, warmup=True, **kwargs)
 
         if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
