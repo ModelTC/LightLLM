@@ -29,10 +29,17 @@ class GroupReqObjs:
 
 
 @dataclass
-class AbortedReqCmd:
+class ReqCmd:
     req_id: int
 
 
-@dataclass
-class StopStrMatchedReqCmd:
-    req_id: int
+class StopStrMatchedReqCmd(ReqCmd):
+    pass
+
+
+class AbortedReqCmd(ReqCmd):
+    pass
+
+
+class NIXLRemotePrefillDoneCmd(ReqCmd):
+    pass
