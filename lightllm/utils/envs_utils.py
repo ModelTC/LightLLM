@@ -157,6 +157,12 @@ def set_triton_autotune_level(level: int):
     os.environ["LIGHTLLM_TRITON_AUTOTUNE_LEVEL"] = str(level)
     return
 
+def set_triton_autotune_warmup(warmup: int):
+    os.environ["LIGHTLLM_TRITON_AUTOTUNE_WARMUP"] = str(warmup)
+    return
+
+def get_triton_autotune_warmup():
+    return os.getenv("LIGHTLLM_TRITON_AUTOTUNE_WARMUP", "0") == "1"
 
 g_model_init_done = False
 

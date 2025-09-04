@@ -26,7 +26,7 @@ from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status, set_triton_autotune_level, get_triton_autotune_level
+from lightllm.utils.envs_utils import set_model_init_status, set_triton_autotune_level, set_triton_autotune_warmup
 from lightllm.utils.infer_utils import post_empty_cache
 
 logger = init_logger(__name__)
@@ -732,9 +732,7 @@ class TpPartBaseModel:
     @torch.no_grad()
     @post_empty_cache
     def _autotune_warmup(self):
-        if get_triton_autotune_level() not in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
-            return
-
+        set_triton_autotune_warmup(1)
         torch.distributed.barrier()
 
         warmup_lengths = [1, 8, 16, 32, 64, 100, 128, 256, 1024, 2048, 4096]
@@ -796,7 +794,9 @@ class TpPartBaseModel:
         self.layers_num = layer_num_bak
         torch.distributed.barrier()
         set_triton_autotune_level(AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG)
-
+        set_triton_autotune_warmup(0)
+        
+        
     @final
     @torch.no_grad()
     def _init_padded_req(self):

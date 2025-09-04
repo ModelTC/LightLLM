@@ -12,7 +12,7 @@ from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
 from typing import Callable, Optional, Union, List
-from lightllm.utils.envs_utils import get_triton_autotune_level
+from lightllm.utils.envs_utils import get_triton_autotune_level, get_triton_autotune_warmup
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
 
@@ -139,7 +139,7 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        if self._try_load_cache(static_key):
+        if self._try_load_cache(static_key) or get_triton_autotune_warmup():
             all_configs = self.cached_configs.get(static_key, {})
             for run_config in all_configs.values():
                 # warmup
@@ -209,6 +209,7 @@ class Autotuner:
             try:
                 self.fn(*new_args, **new_kwargs)
             except Exception as e:
+                print(f"error: {e}")
                 raise e
             finally:
                 self._recover_mutated_args(origin_list=origin_list, new_list=new_list)
