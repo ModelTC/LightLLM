@@ -2,8 +2,10 @@ import os
 import torch
 import numpy as np
 import torch.distributed as dist
+import triton
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.envs_utils import get_page_size
 
 
 class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
@@ -11,6 +13,7 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
 
     def __init__(self):
         super().__init__()
+        self.page_size = get_page_size()
 
     @classmethod
     def get_page_table_buffer(cls, graph_max_batch_size: int, max_seq_len: int):
@@ -39,19 +42,19 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
             self.cu_seqlens_k = self.b1_cu_kv_seq_len
             max_seq_len_k = self.max_kv_seq_len
             if self.batch_size <= model.graph_max_batch_size and self.max_len_in_batch <= model.graph_max_len_in_batch:
-                page_buffer = Deepseek2FlashAttentionStateInfo.get_page_table_buffer(
-                    model.graph_max_batch_size, model.graph_max_len_in_batch
+                length = triton.cdiv(model.graph_max_len_in_batch, self.page_size)
+                page_buffer = Deepseek2FlashAttentionStateInfo.get_page_table_buffer(model.graph_max_batch_size, length)
+                self.page_table = page_buffer[self.microbatch_index][: self.batch_size * length].reshape(
+                    self.batch_size, length
                 )
-                self.page_table = page_buffer[self.microbatch_index][
-                    : self.batch_size * model.graph_max_len_in_batch
-                ].reshape(self.batch_size, model.graph_max_len_in_batch)
             else:
-                self.page_table = torch.empty((self.batch_size, self.max_len_in_batch), dtype=torch.int32).to(
-                    input_ids.device
-                )
+                length = triton.cdiv(self.max_len_in_batch, self.page_size)
+                self.page_table = torch.empty((self.batch_size, length), dtype=torch.int32).to(input_ids.device)
 
-            self.page_table[:, :max_seq_len_k].copy_(
-                model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k]
-            )
-            self.page_table[:, max_seq_len_k:].fill_(0)
+            length = triton.cdiv(max_seq_len_k, self.page_size)
+            token_indexs = model.req_manager.req_to_token_indexs[
+                self.b_req_idx, : length * self.page_size : self.page_size
+            ]
+            self.page_table[:, :length].copy_(token_indexs // self.page_size)
+            self.page_table[:, length:].fill_(0)
         return

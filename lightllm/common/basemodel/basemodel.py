@@ -684,10 +684,10 @@ class TpPartBaseModel:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int32, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-            mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+            mem_indexes = self.req_manager.alloc_mem_indices(len(dummy_input_ids), b_seq_len, b_ready_cache_len).cuda()
             total_token_num = self.batch_max_tokens
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
             model_input = ModelInput(
@@ -757,12 +757,14 @@ class TpPartBaseModel:
                     0, 10000, (input_len,), dtype=torch.int32, device="cuda", generator=rand_gen
                 )
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-                mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
                 total_token_num = input_len
                 b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+                mem_indexes = self.req_manager.alloc_mem_indices(
+                    len(dummy_input_ids), b_seq_len, b_ready_cache_len
+                ).cuda()
                 model_input = ModelInput(
                     batch_size=1,
                     total_token_num=total_token_num,

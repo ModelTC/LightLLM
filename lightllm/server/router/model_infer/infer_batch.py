@@ -288,6 +288,7 @@ class InferReq:
         self.shm_index = shm_index
         self.multimodal_params = multimodal_params
         self.vocab_size = vocab_size
+        self.last_kv_mem_index = -1
 
         # 请求需要被暂停
         self.wait_pause = False

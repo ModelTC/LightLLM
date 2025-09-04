@@ -124,7 +124,8 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
         b_seq_len[i] = input_len
 
     total_token_num = input_len * batch_size
-    mem_indexes = main_model.req_manager.mem_manager.alloc(test_data.shape[0]).cuda()
+    mem_indexes = main_model.req_manager.alloc_mem_indices(test_data.shape[0], b_seq_len, b_ready_cache_len).cuda()
+    b_last_mem_index = main_model.req_manager.calc_last_mem_index_in_prefill(mem_indexes, b_seq_len, b_ready_cache_len)
     # Main model Prefill
     model_input = ModelInput(
         batch_size=batch_size,
@@ -191,7 +192,9 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
 
     nopad_b_seq_idx = torch.tensor(nopad_b_seq_idx, dtype=torch.int32, device="cuda")
     nopad_b_seq_len = torch.tensor(nopad_b_seq_len, dtype=torch.int32, device="cuda")
-    mem_indexes = main_model.req_manager.mem_manager.alloc(batch_size * (len(draft_models) + 1)).cuda()
+    mem_indexes = main_model.req_manager.alloc_mem_indices(
+        batch_size * (len(draft_models) + 1), nopad_b_seq_len, b_last_mem_index=b_last_mem_index
+    ).cuda()
 
     model_input = ModelInput(
         batch_size=batch_size * (len(draft_models) + 1),

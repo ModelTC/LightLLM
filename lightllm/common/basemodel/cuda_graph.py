@@ -196,13 +196,16 @@ class CudaGraph:
             total_token_num = batch_size * seq_len
             max_len_in_batch = self.graph_max_len_in_batch
             input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
-            mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
             b_req_idx = torch.tensor(
                 [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
             )
             b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
             b_seq_len.fill_(seq_len)
+            b_last_mem_index = torch.zeros_like(b_seq_len)
             b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+            mem_indexes = model.req_manager.alloc_mem_indices(
+                len(input_ids), b_seq_len, b_last_mem_index=b_last_mem_index
+            ).cuda()
 
             model_input = ModelInput(
                 batch_size=batch_size,
@@ -252,13 +255,16 @@ class CudaGraph:
                 total_token_num = batch_size * seq_len
                 max_len_in_batch = self.graph_max_len_in_batch
                 input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
-                mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
                 b_req_idx = torch.tensor(
                     [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
                 )
                 b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
                 b_seq_len.fill_(seq_len)
+                b_last_mem_index = torch.zeros_like(b_seq_len)
                 b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+                mem_indexes = model.req_manager.alloc_mem_indices(
+                    len(input_ids), b_seq_len, b_last_mem_index=b_last_mem_index
+                ).cuda()
 
                 micro_batch = ModelInput(
                     is_prefill=False,

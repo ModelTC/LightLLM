@@ -2,6 +2,7 @@ import re
 import os
 import torch
 import torch.distributed as dist
+import triton
 from typing import List, Union
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
@@ -9,7 +10,7 @@ from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.utils.dist_utils import get_current_rank_in_node
-from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
+from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args, get_page_size
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
 
@@ -81,7 +82,12 @@ class MemoryManager:
         # 分配，内部实际也没有管理，这个token是预留来对一些特殊的运行模式，如多dp下，overlap microbatch
         # 等模式下 padding 一些请求，使推理过程可以正常运行采用的，其索引值为size，存储在HOLD_TOKEN_MEMINDEX
         # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
-        self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
+        page_size = get_page_size()
+        self.kv_buffer = torch.empty(
+            (layer_num, (size // page_size + 1) * page_size, 2 * head_num, head_dim),
+            dtype=dtype,
+            device="cuda",
+        )
 
     def alloc_kv_move_buffer(self, max_req_total_len):
         """
@@ -244,6 +250,7 @@ class MemoryManager:
         self.kv_buffer = None
 
     def alloc(self, need_size) -> torch.Tensor:
+        assert need_size % get_page_size() == 0, "Need size must be a multiple of page size"
         if need_size > self.mark_end - self.mark_start:
             logger.error(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
             assert False, "error alloc state"
@@ -265,18 +272,25 @@ class MemoryManager:
         """
 
         end = self.mark_start
-        start = self.mark_start - len(free_index)
-        assert start >= 0, f"error free state start: {self.mark_start} free len {len(free_index)}"
+        page_size = get_page_size()
+        free_len = page_size * triton.cdiv(len(free_index), page_size)
+        start = self.mark_start - free_len
+        assert start >= 0, f"error free state start: {self.mark_start} free len {free_len}"
 
         if isinstance(free_index, list):
-            self.mem_state.numpy()[start:end] = free_index
+            free_index = torch.tensor(free_index)
+
+        # 从 gpu 到 cpu 的拷贝操作是流内阻塞操作
+        if page_size > 1:
+            base_free_index = free_index[free_index % page_size == 0]
+            token_idxs = base_free_index[:, None] + torch.arange(page_size)
+            self.mem_state[start:end] = token_idxs.flatten()
         else:
-            # 从 gpu 到 cpu 的拷贝操作是流内阻塞操作
             self.mem_state[start:end] = free_index
 
-        self.mark_start -= len(free_index)
+        self.mark_start -= free_len
 
-        self.can_use_mem_size += len(free_index)
+        self.can_use_mem_size += free_len
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
 
         if self.can_use_mem_size == len(self.mem_state):

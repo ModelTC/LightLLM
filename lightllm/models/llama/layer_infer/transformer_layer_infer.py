@@ -257,8 +257,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, q, kv, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        kv = kv.unsqueeze(1)
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].view(
+            -1, infer_state.page_size, 2 * self.tp_k_head_num_, self.head_dim_
+        )
         infer_state.prefill_wrapper.run(
             q.view(q.shape[0], -1, self.head_dim_),
             (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
@@ -319,11 +320,11 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
     def _context_attention_flashattention(self, q, kv, infer_state: FlashAttentionStateInfo, layer_weight, out=None):
         cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :].reshape(
-            -1, 1, self.tp_k_head_num_, self.head_dim_
+            -1, infer_state.page_size, self.tp_k_head_num_, self.head_dim_
         )
         cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-        ].reshape(-1, 1, self.tp_v_head_num_, self.head_dim_)
+        ].reshape(-1, infer_state.page_size, self.tp_v_head_num_, self.head_dim_)
         q = q.reshape(-1, self.tp_q_head_num_, self.head_dim_)
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
@@ -538,7 +539,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
 
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].unsqueeze(1)
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].view(
+            -1, infer_state.page_size, 2 * self.tp_k_head_num_, self.head_dim_
+        )
         infer_state.decode_wrapper.run(
             q.view(calcu_shape1),
             (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
@@ -826,11 +829,11 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
     def _token_decode_attention_flashattention(self, q, infer_state: FlashAttentionStateInfo, layer_weight, out=None):
         cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :].reshape(
-            -1, 1, self.tp_k_head_num_, self.head_dim_
+            -1, infer_state.page_size, self.tp_k_head_num_, self.head_dim_
         )
         cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-        ].reshape(-1, 1, self.tp_v_head_num_, self.head_dim_)
+        ].reshape(-1, infer_state.page_size, self.tp_v_head_num_, self.head_dim_)
         q = q.reshape(-1, self.tp_q_head_num_, self.head_dim_)
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
