@@ -139,7 +139,11 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        self._try_load_cache(static_key)
+        if self._try_load_cache(static_key):
+            all_configs = self.cached_configs.get(static_key, {})
+            if len(all_configs) != 0:
+                # warmup
+                self._bench(*args, n_repeat=1, n_retries=1, warmup=True, **kwargs)
 
         if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
@@ -185,16 +189,16 @@ class Autotuner:
 
     def _try_load_cache(self, static_key):
         if static_key in self.cached_configs:
-            return
+            return False
 
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
             logger.info(f"Loading cached configs for {self.kernel_name} - {static_key}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
-        return
+        return True
 
-    def _bench(self, *args, n_repeat=3, n_retries=3, **kwargs):
+    def _bench(self, *args, n_repeat=3, n_retries=3, warmup=False, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
@@ -211,7 +215,9 @@ class Autotuner:
         try:
             # warmup
             kernel_call()
-
+            if warmup:
+                return
+            
             torch.cuda.current_stream().synchronize()
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g, stream=torch.cuda.Stream()):
