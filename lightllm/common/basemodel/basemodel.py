@@ -7,6 +7,7 @@ import json
 import torch
 import torch.nn.functional as F
 from typing import final
+from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -746,9 +747,8 @@ class TpPartBaseModel:
 
         layer_num_bak = self.layers_num
         self.layers_num = self.autotune_layers()
-        for input_len in warmup_lengths:
+        for input_len in tqdm(warmup_lengths, desc=f"warming up for input_len:{input_len}"):
             try:
-                logger.info(f"autotune warmup for length {input_len}")
                 rand_gen = torch.Generator(device="cuda")
                 rand_gen.manual_seed(input_len)
                 dummy_input_ids = torch.randint(
@@ -783,7 +783,6 @@ class TpPartBaseModel:
                 self.mem_manager.free_all()
                 gc.collect()
                 torch.cuda.empty_cache()
-                logger.info(f"autotune warmup for length {input_len} ok")
             except Exception as e:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
                 logger.exception(str(e))
