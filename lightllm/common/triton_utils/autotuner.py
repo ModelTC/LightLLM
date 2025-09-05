@@ -12,7 +12,7 @@ from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
 from typing import Callable, Optional, Union, List
-from lightllm.utils.envs_utils import enable_triton_autotune, get_triton_autotune_level
+from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
 
@@ -172,7 +172,7 @@ class Autotuner:
                 )
             self.cached_configs[static_key] = {}
 
-        if enable_triton_autotune():
+        if Autotuner.is_autotune_warmup():
             need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (
                 run_key not in self.cached_configs.get(static_key, {})
             )

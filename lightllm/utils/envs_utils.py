@@ -154,15 +154,6 @@ def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 
 
-def enable_triton_autotune():
-    from lightllm.common.triton_utils.autotuner import AutotuneLevel, Autotuner
-
-    return (
-        get_triton_autotune_level() in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
-        and Autotuner.is_autotune_warmup()
-    )
-
-
 g_model_init_done = False
 
 

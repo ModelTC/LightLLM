@@ -14,7 +14,7 @@ from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
 )
 from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
-from lightllm.utils.envs_utils import enable_triton_autotune
+from lightllm.common.triton_utils.autotuner import Autotuner
 import numpy as np
 
 logger = init_logger(__name__)
@@ -189,7 +189,7 @@ def fused_experts_impl(
             ######################################## warning ##################################################
             # here is used to match autotune feature, make moe model run same triton kernel in different rank.
             # in some special case, one rank will recv 0 token, so add a token to make it run triton kernel.
-            if enable_triton_autotune():
+            if Autotuner.is_autotune_warmup():
                 _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
                 _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
                 silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
