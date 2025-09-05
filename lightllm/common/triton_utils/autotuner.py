@@ -77,6 +77,22 @@ def autotune(
 
 
 class Autotuner:
+    _autotune_warmup: bool = False
+
+    @staticmethod
+    def start_autotune_warmup():
+        Autotuner._autotune_warmup = True
+        return
+
+    @staticmethod
+    def end_autotune_warmup():
+        Autotuner._autotune_warmup = False
+        return
+
+    @staticmethod
+    def is_autotune_warmup():
+        return Autotuner._autotune_warmup
+
     def __init__(
         self,
         fn,
@@ -139,12 +155,12 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        if self._try_load_cache(static_key) or get_triton_autotune_warmup():
+        if self._try_load_cache(static_key) or Autotuner.is_autotune_warmup():
             all_configs = self.cached_configs.get(static_key, {})
             for run_config in all_configs.values():
-                # warmup
+                # warmup all configs
                 kwargs["run_config"] = run_config
-                self._bench(*args, n_repeat=1, n_retries=1, warmup=True, **kwargs)
+                self.kernel_warmup(*args, **kwargs)
 
         if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
@@ -199,7 +215,18 @@ class Autotuner:
                 self.cached_configs[static_key] = orjson.loads(f.read())
         return True
 
-    def _bench(self, *args, n_repeat=3, n_retries=3, warmup=False, **kwargs):
+    def kernel_warmup(self, *args, **kwargs):
+        new_args, new_kwargs, origin_list, new_list = self._mutate_args_clone(args, kwargs)
+
+        try:
+            self.fn(*new_args, **new_kwargs)
+        except:
+            pass
+        finally:
+            self._recover_mutated_args(origin_list=origin_list, new_list=new_list)
+        return
+
+    def _bench(self, *args, n_repeat=3, n_retries=3, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
@@ -209,7 +236,6 @@ class Autotuner:
             try:
                 self.fn(*new_args, **new_kwargs)
             except Exception as e:
-                print(f"error: {e}")
                 raise e
             finally:
                 self._recover_mutated_args(origin_list=origin_list, new_list=new_list)
@@ -217,8 +243,6 @@ class Autotuner:
         try:
             # warmup
             kernel_call()
-            if warmup:
-                return
 
             torch.cuda.current_stream().synchronize()
             g = torch.cuda.CUDAGraph()
