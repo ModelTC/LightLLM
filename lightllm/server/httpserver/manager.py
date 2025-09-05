@@ -81,6 +81,7 @@ class HttpServerManager:
                 )
 
         self.enable_multimodal = enable_multimodal
+        print(f"[debug] enable_multimodal: {self.enable_multimodal}")
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
             self.send_to_visual = context.socket(zmq.PUSH)
@@ -155,6 +156,7 @@ class HttpServerManager:
                     data = img.read()
                     # must after init_imageitem_extral_params
                     token_num = self.tokenizer.get_image_token_length(img)
+                    print(f"[debug] img token_num: {token_num}")
                     md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
                     md5sums.append(md5sum)
                     tokens_nums.append(token_num)
@@ -277,6 +279,11 @@ class HttpServerManager:
             await self._log_req_header(request_headers, group_request_id)
             # 监控
 
+            print(
+                f"[debug] generate request: {prompt}, \
+                sampling_params: {sampling_params.to_dict()}, \
+                multimodal_params: {multimodal_params.to_dict()}"
+            )
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
             prompt_tokens = len(prompt_ids)
             # 监控
@@ -387,13 +394,14 @@ class HttpServerManager:
         self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
     ):
         if isinstance(prompt, str):
-            if self.enable_multimodal:
+            if self.enable_multimodal and not ("mineru2" in self.tokenizer.name_or_path.lower()):
                 assert (
                     len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
                 ), "too many multimodal items!"
                 if multimodal_params.audios:
                     assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                print(f"[debug] prompt: {prompt}, multimodal_params: {multimodal_params.to_dict()}")
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
                 )
