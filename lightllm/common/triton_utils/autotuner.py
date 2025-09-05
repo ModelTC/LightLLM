@@ -172,7 +172,10 @@ class Autotuner:
                 )
             self.cached_configs[static_key] = {}
 
-        if Autotuner.is_autotune_warmup():
+        if (
+            autotune_level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
+            and Autotuner.is_autotune_warmup()
+        ):
             need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (
                 run_key not in self.cached_configs.get(static_key, {})
             )
