@@ -219,7 +219,7 @@ class Autotuner:
             kernel_call()
             if warmup:
                 return
-            
+
             torch.cuda.current_stream().synchronize()
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g, stream=torch.cuda.Stream()):

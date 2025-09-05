@@ -747,7 +747,7 @@ class TpPartBaseModel:
 
         layer_num_bak = self.layers_num
         self.layers_num = self.autotune_layers()
-        for input_len in tqdm(warmup_lengths, desc=f"warming up for input_len:{input_len}"):
+        for input_len in tqdm(warmup_lengths, desc="warming up"):
             try:
                 rand_gen = torch.Generator(device="cuda")
                 rand_gen.manual_seed(input_len)
@@ -794,8 +794,7 @@ class TpPartBaseModel:
         torch.distributed.barrier()
         set_triton_autotune_level(AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG)
         set_triton_autotune_warmup(0)
-        
-        
+
     @final
     @torch.no_grad()
     def _init_padded_req(self):
