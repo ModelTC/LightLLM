@@ -27,7 +27,7 @@ from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status, set_triton_autotune_level, get_triton_autotune_level
+from lightllm.utils.envs_utils import set_model_init_status
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
 
