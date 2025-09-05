@@ -77,6 +77,22 @@ def autotune(
 
 
 class Autotuner:
+    _autotune_warmup: bool = False
+
+    @staticmethod
+    def start_autotune_warmup():
+        Autotuner._autotune_warmup = True
+        return
+
+    @staticmethod
+    def end_autotune_warmup():
+        Autotuner._autotune_warmup = False
+        return
+
+    @staticmethod
+    def is_autotune_warmup():
+        return Autotuner._autotune_warmup
+
     def __init__(
         self,
         fn,
@@ -104,6 +120,7 @@ class Autotuner:
         self.run_key_distance_func = run_key_distance_func
         self.cached_configs = {}
         self.fast_match_configs = collections.defaultdict(dict)
+        self.warmuped_configs_set = set()
         self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
         self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
@@ -139,7 +156,13 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        self._try_load_cache(static_key)
+        if self._try_load_cache(static_key) or Autotuner.is_autotune_warmup():
+            all_configs = self.cached_configs.get(static_key, {})
+            for run_config in all_configs.values():
+                # warmup all configs
+                _copy_kwargs = kwargs.copy()
+                _copy_kwargs["run_config"] = run_config
+                self.kernel_warmup(static_key, *args, **_copy_kwargs)
 
         if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
@@ -150,7 +173,10 @@ class Autotuner:
                 )
             self.cached_configs[static_key] = {}
 
-        if autotune_level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
+        if (
+            autotune_level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
+            and Autotuner.is_autotune_warmup()
+        ):
             need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (
                 run_key not in self.cached_configs.get(static_key, {})
             )
@@ -185,13 +211,28 @@ class Autotuner:
 
     def _try_load_cache(self, static_key):
         if static_key in self.cached_configs:
-            return
+            return False
 
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
             logger.info(f"Loading cached configs for {self.kernel_name} - {static_key}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
+        return True
+
+    def kernel_warmup(self, static_key, *args, **kwargs):
+        new_args, new_kwargs, origin_list, new_list = self._mutate_args_clone(args, kwargs)
+        run_config = kwargs.get("run_config", {})
+        hash_key = str(frozendict(run_config)) + str(static_key)
+        if hash_key in self.warmuped_configs_set:
+            return
+        try:
+            self.fn(*new_args, **new_kwargs)
+            self.warmuped_configs_set.add(hash_key)
+        except:
+            pass
+        finally:
+            self._recover_mutated_args(origin_list=origin_list, new_list=new_list)
         return
 
     def _bench(self, *args, n_repeat=3, n_retries=3, **kwargs):
