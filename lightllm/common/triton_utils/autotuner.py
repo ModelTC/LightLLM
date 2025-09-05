@@ -160,10 +160,9 @@ class Autotuner:
             all_configs = self.cached_configs.get(static_key, {})
             for run_config in all_configs.values():
                 # warmup all configs
-                ori_config = kwargs.get("run_config")
-                kwargs["run_config"] = run_config
-                self.kernel_warmup(static_key, *args, **kwargs)
-                kwargs["run_config"] = ori_config
+                _copy_kwargs = kwargs.copy()
+                _copy_kwargs["run_config"] = run_config
+                self.kernel_warmup(static_key, *args, **_copy_kwargs)
 
         if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
