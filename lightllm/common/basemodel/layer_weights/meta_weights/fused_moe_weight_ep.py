@@ -21,8 +21,7 @@ from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
 )
 from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
-from lightllm.utils.envs_utils import get_triton_autotune_level
-from lightllm.common.triton_utils.autotuner import AutotuneLevel
+from lightllm.utils.envs_utils import enable_triton_autotune
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -356,7 +355,7 @@ class FusedMoeWeightEP(BaseWeight):
             ######################################## warning ##################################################
             # here is used to match autotune feature, make moe model run same triton kernel in different rank.
             # in some special case, one rank will recv 0 token, so add a token to make it run triton kernel.
-            if get_triton_autotune_level() in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
+            if enable_triton_autotune():
                 _gemm_out_a = torch.zeros((1, N), device=device, dtype=hidden_dtype)
                 _silu_out = torch.zeros((1, N // 2), device=device, dtype=hidden_dtype)
                 silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)

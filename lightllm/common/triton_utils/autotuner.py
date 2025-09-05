@@ -12,7 +12,7 @@ from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
 from typing import Callable, Optional, Union, List
-from lightllm.utils.envs_utils import get_triton_autotune_level
+from lightllm.utils.envs_utils import enable_triton_autotune, get_triton_autotune_level
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
 
@@ -120,6 +120,7 @@ class Autotuner:
         self.run_key_distance_func = run_key_distance_func
         self.cached_configs = {}
         self.fast_match_configs = collections.defaultdict(dict)
+        self.warmuped_configs_set = set()
         self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
         self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
@@ -160,7 +161,7 @@ class Autotuner:
             for run_config in all_configs.values():
                 # warmup all configs
                 kwargs["run_config"] = run_config
-                self.kernel_warmup(*args, **kwargs)
+                self.kernel_warmup(static_key, *args, **kwargs)
 
         if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
@@ -171,10 +172,7 @@ class Autotuner:
                 )
             self.cached_configs[static_key] = {}
 
-        if (
-            autotune_level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
-            and Autotuner.is_autotune_warmup()
-        ):
+        if enable_triton_autotune():
             need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (
                 run_key not in self.cached_configs.get(static_key, {})
             )
@@ -218,11 +216,15 @@ class Autotuner:
                 self.cached_configs[static_key] = orjson.loads(f.read())
         return True
 
-    def kernel_warmup(self, *args, **kwargs):
+    def kernel_warmup(self, static_key, *args, **kwargs):
         new_args, new_kwargs, origin_list, new_list = self._mutate_args_clone(args, kwargs)
-
+        run_config = kwargs.get("run_config", {})
+        hash_key = str(frozendict(run_config)) + str(static_key)
+        if hash_key in self.warmuped_configs_set:
+            return
         try:
             self.fn(*new_args, **new_kwargs)
+            self.warmuped_configs_set.add(hash_key)
         except:
             pass
         finally:
