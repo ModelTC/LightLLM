@@ -153,7 +153,7 @@ def _load_cpu_cache_to_gpu(
 
     token_indexes = tl.load(token_indexes_ptr + token_range, mask=token_mask, other=0).to(tl.int64)
 
-    cpu_page_index = tl.load(page_indexes_ptr + block_index)
+    cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
     for layer_index in range(layer_num):
         cpu_ptr = (
             cpu_kv_cache_ptr

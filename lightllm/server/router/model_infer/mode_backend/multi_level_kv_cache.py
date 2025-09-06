@@ -33,6 +33,27 @@ class MultiLevelKvCacheModule(object):
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)
 
+    def _compute_full_sequence_hash(self, req: InferReq):
+        """
+        计算基于完整序列（输入+输出）的hash值，而不是只基于输入
+        """
+        from lightllm.utils.kv_cache_utils import compute_token_list_hash
+
+        # 获取完整的token序列：输入 + 已生成的输出
+        input_tokens = req.shm_req.get_prompt_ids()
+
+        # 获取已生成的输出token
+        total_len = req.shm_req.input_len + req.shm_req.shm_cur_output_len
+        if total_len > req.shm_req.input_len:
+            # 从共享内存中获取完整序列
+            full_sequence = req.shm_req.shm_prompt_ids.arr[:total_len].tolist()
+        else:
+            full_sequence = input_tokens
+
+        # 基于完整序列计算hash
+        hash_values = compute_token_list_hash(full_sequence, self.args.cpu_cache_token_page_size)
+        return hash_values
+
     def handle_finished_reqs(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """
         将满足cpu kv cache 卸载条件的请求进行处理，并返回需要真正退出的请求列表。
@@ -80,7 +101,8 @@ class MultiLevelKvCacheModule(object):
         self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
     ) -> Optional["TransTask"]:
         with torch.cuda.stream(cpu_kv_cache_stream):
-            all_token_hash_list = req.shm_req.token_hash_list.get_all()
+            # 重新计算基于完整序列的hash值，而不是只基于输入
+            all_token_hash_list = self._compute_full_sequence_hash(req)
             block_size = req.cur_kv_len // self.args.cpu_cache_token_page_size
             move_block_size = min(block_size, len(all_token_hash_list))
             if move_block_size == 0:
