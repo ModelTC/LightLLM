@@ -260,7 +260,7 @@ class MemoryManager:
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
 
         # 利用缓冲区返回，避免异步情况下的内存竞争
-        if self._return_start + need_size >= self._mem_state_return.shape[0]:
+        if self._return_start + need_size > self._mem_state_return.shape[0]:
             self._return_start = 0
         ans = self._mem_state_return[self._return_start : self._return_start + need_size]
         ans.copy_(self.mem_state[start:end])
