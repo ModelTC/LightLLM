@@ -39,8 +39,8 @@ RUN pip install -r /lightllm/requirements.txt --no-cache-dir
 
 RUN pip install --no-cache-dir vllm --pre --extra-index-url https://wheels.vllm.ai/nightly 
 
-RUN git clone https://github.com/ModelTC/LightKernel.git && cd LightKernel && pip install --no-deps -v . && \
-    cd flash-attention/hopper/ && python setup.py install
+RUN pip install https://github.com/ModelTC/LightKernel/releases/download/v1.0.1/lightllm_kernel-0.1.0-cp310-cp310-linux_x86_64.whl && \
+    pip install https://github.com/ModelTC/LightKernel/releases/download/v1.0.1/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl
 
 RUN apt-get update && apt-get install -y libnuma-dev wget devscripts debhelper dh-make build-essential dkms
 RUN apt-get install -y ibverbs-providers infiniband-diags perftest rdma-core libibverbs-dev librdmacm-dev

@@ -7,6 +7,7 @@ import json
 import torch
 import torch.nn.functional as F
 from typing import final
+from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -24,8 +25,10 @@ from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status, is_triton_autotune_enabled, disable_triton_autotune
+from lightllm.utils.envs_utils import set_model_init_status
+from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
 
 logger = init_logger(__name__)
@@ -731,12 +734,10 @@ class TpPartBaseModel:
     @torch.no_grad()
     @post_empty_cache
     def _autotune_warmup(self):
-        if not is_triton_autotune_enabled():
-            return
-
+        Autotuner.start_autotune_warmup()
         torch.distributed.barrier()
 
-        warmup_lengths = [1, 8, 16, 64, 128, 256, 1024, 2048, 4096]
+        warmup_lengths = [1, 8, 16, 32, 64, 100, 128, 256, 1024, 2048, 4096]
 
         if self.batch_max_tokens not in warmup_lengths:
             warmup_lengths.append(self.batch_max_tokens)
@@ -747,9 +748,8 @@ class TpPartBaseModel:
 
         layer_num_bak = self.layers_num
         self.layers_num = self.autotune_layers()
-        for input_len in warmup_lengths:
+        for input_len in tqdm(warmup_lengths, desc="warming up"):
             try:
-                logger.info(f"autotune warmup for length {input_len}")
                 rand_gen = torch.Generator(device="cuda")
                 rand_gen.manual_seed(input_len)
                 dummy_input_ids = torch.randint(
@@ -784,7 +784,6 @@ class TpPartBaseModel:
                 self.mem_manager.free_all()
                 gc.collect()
                 torch.cuda.empty_cache()
-                logger.info(f"autotune warmup for length {input_len} ok")
             except Exception as e:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
                 logger.exception(str(e))
@@ -794,7 +793,7 @@ class TpPartBaseModel:
                 torch.cuda.empty_cache()
         self.layers_num = layer_num_bak
         torch.distributed.barrier()
-        disable_triton_autotune()
+        Autotuner.end_autotune_warmup()
 
     @final
     @torch.no_grad()

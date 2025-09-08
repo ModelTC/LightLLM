@@ -149,15 +149,9 @@ def get_kv_quant_calibration_inference_count():
     return int(os.getenv("LIGHTLLM_KV_QUANT_CALIBRARTION_INFERENCE_COUNT", 4000))
 
 
-def is_triton_autotune_enabled():
-    # Whether Triton autotune is enabled (read-only check)
-    mark = os.getenv("LIGHTLLM_TRITON_AUTOTUNE", "False").upper() in ["ON", "TRUE", "1"]
-    return mark
-
-
-def disable_triton_autotune():
-    # Disable Triton autotune (setter)
-    os.environ["LIGHTLLM_TRITON_AUTOTUNE"] = "False"
+@lru_cache(maxsize=None)
+def get_triton_autotune_level():
+    return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 
 
 g_model_init_done = False

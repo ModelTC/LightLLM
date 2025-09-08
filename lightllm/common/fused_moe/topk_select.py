@@ -23,6 +23,7 @@ from lightllm.utils.sgl_utils import sgl_ops
 from lightllm.utils.light_utils import light_ops
 from typing import Callable, List, Optional, Tuple
 from lightllm.common.fused_moe.softmax_topk import softmax_topk
+from lightllm.common.triton_utils.autotuner import Autotuner
 
 use_cuda_grouped_topk = os.getenv("LIGHTLLM_CUDA_GROUPED_TOPK", "False").upper() in ["ON", "TRUE", "1"]
 
@@ -220,5 +221,13 @@ def select_experts(
         topk_weights, topk_ids = custom_routing_function(
             hidden_states=hidden_states, gating_output=router_logits, topk=top_k, renormalize=renormalize
         )
+
+    ######################################## warning ##################################################
+    # here is used to match autotune feature, make topk_ids more random
+    if Autotuner.is_autotune_warmup():
+        rand_gen = torch.Generator(device="cuda")
+        rand_gen.manual_seed(router_logits.shape[0])
+        router_logits = torch.randn(size=router_logits.shape, generator=rand_gen, dtype=torch.float32, device="cuda")
+        _, topk_ids = torch.topk(router_logits, k=top_k, dim=1)
 
     return topk_weights, topk_ids
