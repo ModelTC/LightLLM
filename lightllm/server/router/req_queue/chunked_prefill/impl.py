@@ -21,8 +21,7 @@ class ChunkedPrefillQueue(BaseQueue):
             self.cache_len_list = []
         return
 
-    # @calculate_time(show=True, min_cost_ms=0.1)
-    def _can_add_new_req(self, req: Req, is_busy, new_batch_first_router_need_tokens):
+    def _update_cache_len_list(self, req: Req, is_busy):
         self.cache_len_list.append(req.get_tuple_tokens(is_busy, self.router_max_new_token_len))  # hard to analysis
         self.cache_len_list.sort(key=lambda x: -x[1])
 
@@ -32,6 +31,11 @@ class ChunkedPrefillQueue(BaseQueue):
         size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
 
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
+        return need_max_token_num
+
+    # @calculate_time(show=True, min_cost_ms=0.1)
+    def _can_add_new_req(self, req: Req, is_busy, new_batch_first_router_need_tokens):
+        need_max_token_num = self._update_cache_len_list(req, is_busy)
         with g_router_lock.obj:
             ok_token_num = (
                 need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)

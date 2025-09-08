@@ -228,6 +228,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--router_max_new_token_len", type=int, default=1024, help="the request max new token len for router"
     )
+    parser.add_argument(
+        "--past_future_scheduler",
+        action="store_true",
+        help="""use past_future_scheduler for adaptive request new token len prediction,
+                override --router_token_ratio and --router_max_new_token_len (still used during warmup)""",
+    )
 
     parser.add_argument(
         "--router_max_wait_tokens",
