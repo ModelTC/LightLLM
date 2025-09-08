@@ -93,11 +93,11 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         qweights = torch.empty_like(weight, dtype=torch.float8_e4m3fn).cuda(self.device_id_)
         for i in range(num_experts):
             qweight, weight_scale = scaled_fp8_quant(
-                weight[i].contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=False
+                weight[i].contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
             )
             qweights[i] = qweight
             weight_scales.append(weight_scale)
-        weight_scale = torch.cat(weight_scales, dim=0).reshape(-1)
+        weight_scale = torch.stack(weight_scales, dim=0).contiguous()
         return qweights, weight_scale
 
     def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
