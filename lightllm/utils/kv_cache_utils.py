@@ -99,6 +99,15 @@ def create_shm_kv_cache_ptr() -> int:
 
     logger.info(f"Shared memory attached at address: {shm_addr}")
 
+    # 自动注册清理
+    try:
+        from lightllm.utils.auto_shm_cleanup import auto_register_sysv_shm
+
+        auto_register_sysv_shm(key, shmid)
+        logger.info(f"Auto-registered shared memory key {key} (shmid {shmid}) for cleanup")
+    except Exception as e:
+        logger.warning(f"Failed to register auto shm cleanup: {e}")
+
     return shm_addr
 
 

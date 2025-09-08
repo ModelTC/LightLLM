@@ -68,6 +68,14 @@ class ShmReqsIOBuffer:
                 shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
                 logger.info(f"link shm {self.name}")
 
+        # 自动注册清理
+        try:
+            from lightllm.utils.auto_shm_cleanup import auto_register_posix_shm
+
+            auto_register_posix_shm(self.name)
+        except Exception as e:
+            logger.warning(f"Failed to register auto shm cleanup for {self.name}: {e}")
+
         self.shm = shm
         self.int_view = self.shm.buf.cast("i")
         # 前4个字节是特殊的计数用途，router写入后，被各个推理进程在拿去所有数据后，减1后归0

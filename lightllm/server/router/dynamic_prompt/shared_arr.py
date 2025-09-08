@@ -30,6 +30,14 @@ class SharedArray:
                 shm = shared_memory.SharedMemory(name=name, create=False, size=dest_size)
                 logger.info(f"error {str(e)} to link shm {name}")
 
+        # 自动注册清理
+        try:
+            from lightllm.utils.auto_shm_cleanup import auto_register_posix_shm
+
+            auto_register_posix_shm(name)
+        except Exception as e:
+            logger.warning(f"Failed to register auto shm cleanup for {name}: {e}")
+
         self.shm = shm  # SharedMemory 对象一定要被持有，否则会被释放
         self.arr = np.ndarray(shape, dtype=dtype, buffer=self.shm.buf)
 

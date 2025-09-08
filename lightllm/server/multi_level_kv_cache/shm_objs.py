@@ -264,7 +264,25 @@ def _create_shm(name: str, byte_size: int):
     try:
         shm = shared_memory.SharedMemory(name=name, create=True, size=byte_size)
         logger.info(f"create lock shm {name}")
+
+        # 自动注册清理
+        try:
+            from lightllm.utils.auto_shm_cleanup import auto_register_posix_shm
+
+            auto_register_posix_shm(name)
+        except Exception as e:
+            logger.warning(f"Failed to register auto POSIX shm cleanup for {name}: {e}")
+
     except:
         shm = shared_memory.SharedMemory(name=name, create=False, size=byte_size)
         logger.info(f"link lock shm {name}")
+
+        # 自动注册清理（即使是链接的也要注册，因为进程退出时需要清理）
+        try:
+            from lightllm.utils.auto_shm_cleanup import auto_register_posix_shm
+
+            auto_register_posix_shm(name)
+        except Exception as e:
+            logger.warning(f"Failed to register auto POSIX shm cleanup for {name}: {e}")
+
     return shm
