@@ -201,6 +201,7 @@ try:
             num_splits=1,
             pack_gqa=None,
             sm_margin=0,
+            sinks=None,
         )
 
         return
@@ -215,7 +216,12 @@ def flash_attention_fwd(q, k, v, o, cu_seqlens, max_seqlen):
     统一的 Flash Attention 接口。如果 sgl_kernel 存在，
     则使用 sgl_kernel里的接口，否则使用 Triton 版本。
     """
+    global _flash_attn_v3_available
     if _flash_attn_v3_available and is_hopper():
-        flash_attention_v3_fwd(q, k, v, o, cu_seqlens, max_seqlen)
+        try:
+            flash_attention_v3_fwd(q, k, v, o, cu_seqlens, max_seqlen)
+        except Exception as e:
+            print(f"Failed to use sgl_kernel: {e}")
+            _flash_attn_v3_available = False
     else:
         _flash_attention_triton_fwd(q, k, v, o, cu_seqlens, max_seqlen)
