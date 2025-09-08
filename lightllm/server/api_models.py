@@ -48,6 +48,10 @@ class ToolChoice(BaseModel):
     type: Literal["function"] = Field(default="function", examples=["function"])
 
 
+class StreamOptions(BaseModel):
+    include_usage: Optional[bool] = False
+
+
 class CompletionRequest(BaseModel):
     model: str
     # prompt: string or tokens
@@ -58,6 +62,7 @@ class CompletionRequest(BaseModel):
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     logprobs: Optional[int] = None
     echo: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
@@ -82,6 +87,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     stop: Optional[Union[str, List[str]]] = None
     max_tokens: Optional[int] = 16
     presence_penalty: Optional[float] = 0.0
@@ -170,6 +176,7 @@ class ChatCompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionStreamResponseChoice]
+    usage: Optional[UsageInfo] = None
 
     @field_validator("id", mode="before")
     def ensure_id_is_str(cls, v):
@@ -216,6 +223,7 @@ class CompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[CompletionStreamChoice]
+    usage: Optional[UsageInfo] = None
 
     @field_validator("id", mode="before")
     def ensure_id_is_str(cls, v):
