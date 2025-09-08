@@ -30,6 +30,10 @@ class MemoryManager:
         self.mem_state = torch.arange(
             0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
         )
+        self._mem_state_return = torch.arange(
+            0, self.size * 3, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
+        )
+        self._return_start = 0
         self.mark_start = 0
         self.mark_end = self.size
 
@@ -250,11 +254,17 @@ class MemoryManager:
 
         start = self.mark_start
         end = self.mark_start + need_size
-        ans = self.mem_state[start:end]
         self.mark_start += need_size
 
         self.can_use_mem_size -= need_size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+
+        # 利用缓冲区返回，避免异步情况下的内存竞争
+        if self._return_start + need_size > self._mem_state_return.shape[0]:
+            self._return_start = 0
+        ans = self._mem_state_return[self._return_start : self._return_start + need_size]
+        ans.copy_(self.mem_state[start:end])
+        self._return_start += need_size
         return ans
 
     def free(self, free_index: Union[torch.Tensor, List[int]]):
