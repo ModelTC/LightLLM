@@ -21,32 +21,26 @@ def release_lock(lock_fd):
 
 def create_or_link_shm(name, expected_size):
     lock_fd = acquire_lock()
+    # In case the size mismatch.
+    safe_name = f"lightllm_{name}_{expected_size}"
     try:
         try:
-            shm = shared_memory.SharedMemory(name=name, create=True, size=expected_size)
+            shm = shared_memory.SharedMemory(name=safe_name, create=True, size=expected_size)
             logger.info(f"Created new shared memory: {name} ({expected_size=})")
             return shm
         except FileExistsError:
             try:
-                shm = shared_memory.SharedMemory(name=name)
+                shm = shared_memory.SharedMemory(name=safe_name)
             except FileNotFoundError:
                 logger.warning(f"Shared memory {name} disappeared, retrying...")
-                shm = shared_memory.SharedMemory(name=name, create=True, size=expected_size)
+                shm = shared_memory.SharedMemory(name=safe_name, create=True, size=expected_size)
             except Exception as e:
                 logger.error(f"Unexpected error attaching to shared memory {name}: {e}")
                 raise
-            if shm.size != expected_size:
-                logger.warning(f"Size mismatch: expected {expected_size}, got {shm.size}. Recreating {name}...")
-                shm.close()
-                try:
-                    shm.unlink()
-                except FileNotFoundError:
-                    pass
-                shm = shared_memory.SharedMemory(name=name, create=True, size=expected_size)
             logger.info(f"Attached to existing shared memory: {name} ({expected_size=})")
             return shm
     except Exception as e:
-        logger.error(f"Unexpected error creating shared memory {name}: {e}")
+        logger.error(f"Unexpected error creating shared memory {safe_name}: {e}")
         raise
     finally:
         release_lock(lock_fd)
