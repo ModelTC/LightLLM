@@ -1,0 +1,17 @@
+stages:
+  - build 
+
+
+py39-torch2.4-cu121:
+  image: pytorch/pytorch:2.4.0-cuda12.1-cudnn9-devel
+  stage: build
+  tags:
+    - cuda12-p4 
+  allow_failure: true
+  rules:
+    - when: manual  # 正确的规则格式  
+  script:
+    - python setup.py bdist_wheel
+    - pip install twine
+    - twine upload --repository-url http://spring.sensetime.com/pypi/ -u spring -p springpypi dist/*.whl
+

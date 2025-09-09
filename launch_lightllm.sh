@@ -2,7 +2,7 @@ export CUDA_VISIBLE_DEVICES=2,3
 export DISABLE_CHECK_MAX_LEN_INFER=1
 
 
-python -m lightllm.server.api_server --model_dir /data/nvme1/models/llama3-8b-instruct  \
+python -m lightllm.server.api_server --model_dir /data/nvme0/models/llama3-8b-instruct  \
                                      --host 0.0.0.0                 \
                                      --port 8888                   \
                                      --tp 1                        \

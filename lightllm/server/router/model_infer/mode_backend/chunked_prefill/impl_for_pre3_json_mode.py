@@ -61,8 +61,7 @@ class Pre3JsonModeBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
         self.json_ebnf_path = (
-            "/data/nvme1/chenjunyi/project/"
-            + "lightllm/lightllm/server/router/model_infer/mode_backend/chunked_prefill/pre3_core/json_grammar.ebnf"
+            "lightllm/server/router/model_infer/mode_backend/chunked_prefill/pre3_core/json_grammar.ebnf"
         )
         self.format = "ebnf"  # "ebnf" or "python"
         self.batched_mask = True
