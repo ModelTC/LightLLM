@@ -5,8 +5,8 @@ import random
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 10
-RETRY_DELAY = 0.1  # seconds
+MAX_RETRIES = 25
+RETRY_DELAY = 0.2  # seconds
 
 
 def create_or_link_shm(name: str, expected_size: int) -> shared_memory.SharedMemory:
