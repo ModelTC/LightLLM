@@ -160,13 +160,14 @@ class VisualManager:
             #     img for img in recv_req.multimodal_params.images
             #     if not self.cache_client.root.get_item_embed(img.uuid)  # embed已存在的被丢弃 , ref +1
             # ]
-            uuids = []
+            uuids = [img.uuid for img in recv_req.multimodal_params.images]
+            already_embed = self.cache_client.root.get_items_embed(uuids)
             token_nums = []
-            for img in recv_req.multimodal_params.images:
-                uuids.append(img.uuid)
-                token_nums.append(img.token_num)
-                record = self.cache_client.root.alloc(uuids, token_nums)
-            print(f"record is {record}")
+            for img, embed in zip(recv_req.multimodal_params.images, already_embed):
+                if not embed:
+                    uuids.append(img.uuid)
+                    token_nums.append(img.token_num)
+            self.cache_client.root.alloc(uuids, token_nums)
             return recv_req
         else:
             return self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
@@ -182,6 +183,7 @@ class VisualManager:
                     if isinstance(recv_req, GroupReqIndexes):
                         # print(recv_req, flush=True)
                         self.waiting_reqs.append(recv_req)
+                        print(f"recv_req.multimodal_params is {recv_req.multimodal_params}")
                     else:
                         assert False, f"Error Req Inf {recv_req}"
                 self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)

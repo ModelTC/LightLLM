@@ -49,6 +49,17 @@ class MemoryCacheWithRedis(InMemoryCache):
     def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
         ret = []
         for id in ids:
+            print(f"id is {id}")
+            print(f"self.redis_cache.query(str(id)) is {self.redis_cache.query(str(id))}")
+            exist = self.redis_cache.query(str(id))
+            ret.append(exist)
+            if exist:
+                self._records[id].embed = True
+        return ret
+
+    def get_items_embed_and_incre(self, ids: list[int]) -> list[Optional[bool]]:
+        ret = []
+        for id in ids:
             # if self.redis_cache.query(str(id)):
             #     ret.append(True)
             #     continue

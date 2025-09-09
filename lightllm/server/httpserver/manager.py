@@ -687,7 +687,6 @@ class HttpServerManager:
                 for req in req_status.group_req_objs.shm_req_objs:
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
-                print("begin release")
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
 
             # 先保留这个关键得日志，用于方便定位重构中的问题。

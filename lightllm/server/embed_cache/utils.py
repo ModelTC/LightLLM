@@ -326,17 +326,19 @@ if not val then
   return {-1, 0}  -- Not found
 end
 
+--ref 递减到 0 时保留键，只更新计数与 LRU
 local rc = tonumber(val) - 1
-if rc <= 0 then
-  redis.call('DEL', ref_key)
-  redis.call('ZREM', zset, md5)
-  return {0, 1}  -- Deleted
-else
-  redis.call('SET', ref_key, rc)
-  local now = redis.call('TIME')[1] * 1000
-  redis.call('ZADD', zset, now, md5)
-  return {rc, 0}  -- Updated
+if rc < 0 then
+  rc = 0
 end
+
+redis.call('SET', ref_key, rc)
+
+-- 更新 LRU 时间戳（最近释放的条目更不容易被立即逐出）
+local now = redis.call('TIME')[1] * 1000
+redis.call('ZADD', zset, now, md5)
+
+return {rc, 0}  -- 未删除
 """
 
     _EVICT_AND_INSERT_LUA = r"""

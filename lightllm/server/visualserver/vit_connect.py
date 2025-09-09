@@ -5,6 +5,8 @@ import time
 import pickle
 from typing import Dict, List, Optional, Any
 from lightllm.utils.log_utils import init_logger
+from lightllm.server.core.objs.io_objs import GroupReqObjs, GroupReqIndexes
+from lightllm.server.multimodal_params import MultimodalParams
 import httpx
 import base64
 from dataclasses import dataclass
@@ -48,8 +50,10 @@ class VITConnectionManager:
         """
         if self.remote_vit:
             # 远程VIT实例模式
+            print("remote")
             self._setup_remote_vit_connections()
         else:
+            print("not remote")
             self._setup_local_vit_connection()
 
     def _setup_local_vit_connection(self):
@@ -156,31 +160,33 @@ class VITConnectionManager:
         self.current_vit_index = index
         return list(self.remote_vit_instances.values())[index]
 
-    async def send_to_vit(self, data, protocol=pickle.HIGHEST_PROTOCOL):
+    async def send_to_vit(self, req: GroupReqIndexes, protocol=pickle.HIGHEST_PROTOCOL):
         """
         发送数据到VIT实例，支持本地和远程模式
         """
         instance = self._get_vit_instance()
         # 本地模式下，提前释放图片资源，降低传输开销
         if not self.remote_vit:
-            data.multimodal_params.free()
+            req.multimodal_params.free()
 
         try:
             print(instance, flush=True)
-            instance.send_pyobj(data, protocol=protocol)
+            instance.send_pyobj(req, protocol=protocol)
         except Exception as e:
             logger.error(f"Failed to send to VIT instance: {e}")
             raise Exception(f"Failed to send to VIT instance: {e}")
 
         # 远程模式下，发送完以后，在释放图片资源
-        await self._wait_visual_embed_ready(data)
+        await self._wait_visual_embed_ready(req)
         if self.remote_vit:
-            data.multimodal_params.free()
+            req.multimodal_params.free()
 
     async def vit_handle_loop(self):
         """
         异步VIT连接管理循环，由外部启动
         """
+        if not self.remote_vit:
+            return
         logger.info("Starting VIT connection management loop")
         while True:
             try:
@@ -211,12 +217,12 @@ class VITConnectionManager:
             logger.exception(f"Error getting VIT instances: {e}")
             return None
 
-    async def _wait_visual_embed_ready(self, data, timeout_seconds: int = 100):
+    async def _wait_visual_embed_ready(self, req: GroupReqIndexes, timeout_seconds: int = 100):
         # 本地模式不需要等待
         if not self.remote_vit:
             return
 
-        uuids = data.multimodal_params.get_all_uuids()
+        uuids = req.multimodal_params.get_all_uuids()
         print(f"uuids is {uuids}")
 
         async def wait_for_embeds():
@@ -227,5 +233,5 @@ class VITConnectionManager:
             await asyncio.wait_for(wait_for_embeds(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             logger.error(
-                f"Req {data.group_req_id}: timeout waiting for visual embed ready after {timeout_seconds} seconds"
+                f"Req {req.group_req_id}: timeout waiting for visual embed ready after {timeout_seconds} seconds"
             )
