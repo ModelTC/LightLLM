@@ -83,6 +83,7 @@ class RouterManager:
                 init_method=f"tcp://{args.nccl_host}:{args.multinode_router_gloo_port}",
                 world_size=args.nnodes,
                 rank=args.node_rank,
+                # TODO: add device_id = torch.device(f"cuda:{args.node_rank}")
             )
 
         self.metric_client = MetricClient(metric_port)
@@ -112,7 +113,7 @@ class RouterManager:
 
         assert (self.world_size % self.nnodes) == 0
         node_world_size = self.world_size // self.nnodes
-        
+
         # Create tasks for parallel startup
         tasks = []
         for rank_id in range(self.node_rank * node_world_size, (self.node_rank + 1) * node_world_size):
@@ -130,7 +131,7 @@ class RouterManager:
                 )
             )
             tasks.append(task)
-        
+
         # Wait for all tasks to complete in parallel
         self.model_rpc_servers = await asyncio.gather(*tasks)
 
