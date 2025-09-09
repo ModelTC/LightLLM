@@ -355,7 +355,6 @@ class ModeBackend:
         req_ids: List[int] = None,
         no_decode: bool = False,
         strict_prefill: bool = False,
-        recover_paused: bool = False,
     ):
         """
         当将参数 no_decode 设置为True后，返回的 decode_reqs 永远为空list，主要是
@@ -369,8 +368,8 @@ class ModeBackend:
         使用时，其他模式目前不使用。
 
         将请求分类返回:
-        1. wait_pause_reqs 因为推理资源不够，等待被暂停的请求。
-        2. paused_reqs 已经被暂停的请求，可能会被恢复。
+        1. wait_pause_reqs 因为推理资源不够，等待被暂停的请求, 由infer_context 管理。
+        2. paused_reqs 已经被暂停的请求，可能会被恢复，由infer_context 管理。
         3. finished_reqs 需要释放的请求, 包含正常结束和aborted退出的请求。
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
@@ -378,25 +377,24 @@ class ModeBackend:
 
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
-
         if len(req_ids) == 0:
             return [], []
 
         support_overlap = self.support_overlap
 
-        wait_pause_reqs = []
-        paused_reqs = []
         finished_reqs = []
         prefill_reqs = []
         decode_reqs = []
 
-        # 一次性最多暂停请求的数量, 防止盲目暂停大量请求
-        # 因为部分请求释放占用的token容量后，就会使推理可以正常进行。
-        # 如果因为一次推理容量不足，就以当前token容量的判断暂停了大量
-        # 请求，其逻辑是不适合的。
-        pause_max_req_num = 2
-        wait_pause_count = 0
         prefill_tokens = 0
+
+        # 暂停wait_pause_reqs中的请求
+        g_infer_context.pause_reqs(is_master_in_dp=self.is_master_in_dp)
+
+        # 先进行请求recover，更新radix cache 引用计数
+        g_infer_context.recover_paused_reqs(
+            is_master_in_dp=self.is_master_in_dp, is_chuncked_prefill=not self.disable_chunked_prefill
+        )
 
         # 因为会使用到 radix cache 和 mem_manager 的计数信息
         # 所以需要加锁保护。
@@ -410,12 +408,7 @@ class ModeBackend:
                 finished_reqs.append(req_obj)
                 continue
 
-            if req_obj.wait_pause:
-                wait_pause_reqs.append(req_obj)
-                continue
-
             if req_obj.paused:
-                paused_reqs.append(req_obj)
                 continue
 
             if req_obj.infer_aborted or req_obj.finish_status.is_finished():
@@ -440,9 +433,7 @@ class ModeBackend:
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num:
-                        req_obj.wait_pause = True
-                        wait_pause_count += 1
+                    g_infer_context.add_wait_pause_req(req_obj)
             else:
                 token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
@@ -452,19 +443,12 @@ class ModeBackend:
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num:
-                        req_obj.wait_pause = True
-                        wait_pause_count += 1
+                    g_infer_context.add_wait_pause_req(req_obj)
 
         g_infer_state_lock.release()
 
         self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
         g_infer_context.filter_reqs(finished_reqs=finished_reqs)
-
-        g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
-
-        if recover_paused:
-            g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp)
 
         return prefill_reqs, decode_reqs
 
