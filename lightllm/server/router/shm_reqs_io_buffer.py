@@ -1,10 +1,10 @@
 import os
 import pickle
-from multiprocessing import shared_memory
 from lightllm.server.core.objs.atomic_lock import AtomicShmLock
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
 
 LIGHTLLM_REQS_BUFFER_BYTE_SIZE = int(os.getenv("LIGHTLLM_REQS_BUFFER_BYTE_SIZE", 64 * 1024 * 1024))  # 默认64M buf
 
@@ -52,23 +52,7 @@ class ShmReqsIOBuffer:
         return obj
 
     def _create_or_link_shm(self):
-        try:
-            shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
-        except:
-            shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
-
-        if shm.size != LIGHTLLM_REQS_BUFFER_BYTE_SIZE:
-            logger.warning(f"size not same, unlink shm {self.name} and create again")
-            shm.close()
-            shm.unlink()
-            try:
-                shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
-                logger.info(f"create shm {self.name}")
-            except:
-                shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
-                logger.info(f"link shm {self.name}")
-
-        self.shm = shm
+        self.shm = create_or_link_shm(self.name, LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
         self.int_view = self.shm.buf.cast("i")
         # 前4个字节是特殊的计数用途，router写入后，被各个推理进程在拿去所有数据后，减1后归0
         self.int_view[0] = 0
