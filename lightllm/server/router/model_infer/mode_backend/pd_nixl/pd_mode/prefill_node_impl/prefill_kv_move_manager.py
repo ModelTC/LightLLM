@@ -97,7 +97,7 @@ class PrefillKVMoveManager:
                         # 当该请求的传输任务没有出现错误的时候，才进行后续的传输任务下发
                         if not req_status.is_error:
                             req_status.chuncked_task_list.append(task)
-                            device_id = task.trans_device_id
+                            device_id = task.src_device_id
                             try:
                                 from .prefill_trans_obj import KVTransProcess
 

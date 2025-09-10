@@ -227,13 +227,17 @@ class KVMoveTaskGroup:
 
 @dataclass
 class NIXLChunckedTransTask:
+    trans_id: int  # 每一个传送事件都有一个唯一id
     request_id: int
     dp_index: int
-    trans_device_id: int  # 当前设备使用的传输设备id，对应第几张显卡。
+    src_device_id: int  # 当前设备使用的传输设备id，对应第几张显卡。
     start_kv_index: int
     end_kv_index: int
     mem_indexes: List[int]
     is_last_chunk: bool
+    # transfer params
+    nixl_src_page_index: Optional[int] = None
+    nixl_dst_page_index: Optional[int] = None
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index <= self.start_kv_index:
@@ -246,6 +250,11 @@ class NIXLChunckedTransTask:
             raise ValueError(error_info)
         assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
         return
+
+
+@dataclass
+class NIXLChunckedTaskSuccessRet:
+    trans_id: int  # 每一个传送事件都有一个唯一id
 
 
 @dataclass
@@ -264,4 +273,6 @@ class NIXLStopTransTask:
 class NixlAgentMetadata:
     agent_name: str
     agent_metadata: bytes
-    agent_page_mem_descs: bytes
+    num_pages: int
+    page_reg_desc: Optional[bytes] = None
+    page_remote_xfer_handles: Optional[int] = None
