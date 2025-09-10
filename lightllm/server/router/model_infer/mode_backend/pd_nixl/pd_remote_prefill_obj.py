@@ -98,10 +98,7 @@ class KVMoveRequest:
 @dataclass
 class RemoteAgent:
     name: str
-    num_tokens: int
     num_pages: int
-    kv_mem_desc: nixlBind.nixlRegDList
-    kv_xfer_handles: nixl_prepped_dlist_handle
     kv_page_mem_desc: nixlBind.nixlRegDList
     kv_page_xfer_handles: nixl_prepped_dlist_handle
 

@@ -243,3 +243,10 @@ class PrefillTransTaskRet:
 @dataclass
 class NIXLStopTransTask:
     request_id: int
+
+
+@dataclass
+class NixlAgentMetadata:
+    agent_name: str
+    agent_metadata: bytes
+    agent_page_mem_descs: bytes
