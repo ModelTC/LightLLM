@@ -205,3 +205,41 @@ class KVMoveTask:
 class KVMoveTaskGroup:
     tasks: List[KVMoveTask]
     connect_id: str
+
+
+####### 下边是 NIXL模式下使用的特定对象 ########
+
+
+@dataclass
+class NIXLChunckedTransTask:
+    request_id: int
+    dp_index: int
+    trans_device_id: int  # 当前设备使用的传输设备id，对应第几张显卡。
+    start_kv_index: int
+    end_kv_index: int
+    mem_indexes: List[int]
+    is_last_chunk: bool
+
+    def __post_init__(self):
+        if self.start_kv_index < 0 or self.end_kv_index <= self.start_kv_index:
+            error_info = "start_kv_index must >=0 and end_kv_index > start_kv_index"
+            logger.error(error_info)
+            raise ValueError(error_info)
+        if len(self.mem_indexes) == 0:
+            error_info = "mem_indexes must len > 0"
+            logger.error(error_info)
+            raise ValueError(error_info)
+        assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
+        return
+
+
+@dataclass
+class PrefillTransTaskRet:
+    request_id: int
+    is_error: bool
+    error_info: str = None
+
+
+@dataclass
+class NIXLStopTransTask:
+    request_id: int
