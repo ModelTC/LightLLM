@@ -5,7 +5,6 @@ import ujson as json
 import socket
 import httpx
 import base64
-import zmq
 from typing import Dict, Optional
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
@@ -34,8 +33,6 @@ async def pd_handle_loop(manager: HttpServerManager):
         manager.host_ip = manager.args.host
 
     asyncio.create_task(timer_log(manager))
-    if manager.pd_mode.is_NP_or_ND():
-        asyncio.create_task(pd_handle_loop_from_d(manager))
 
     id_to_handle_task: Dict[int, asyncio.Task] = {}
 
@@ -210,33 +207,3 @@ def _get_load_info() -> dict:
         "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{g_objs.args.port}",
     }
     return load_info
-
-
-async def pd_handle_loop_from_d(manager: HttpServerManager):
-    if manager.pd_mode != NodeRole.NP:
-        return
-
-    context = zmq.asyncio.Context(2)
-    manager.recv_from_d = context.socket(zmq.PULL)
-    manager.recv_from_d.bind(f"tcp://*:{manager.args.pd_nixl_remote_prefill_http_port}")
-
-    while True:
-        try:
-            (
-                prompt,
-                sampling_params,
-                multimodal_params,
-            ) = await manager.recv_from_d.recv_pyobj()
-
-            # 触发推理的task
-            async def pd_process_generate(manager: "HttpServerManager", prompt, sampling_params, multimodal_params):
-                try:
-                    async for _, _, _, _ in manager.generate(prompt, sampling_params, multimodal_params, None):
-                        pass
-                except BaseException as e:
-                    logger.error(str(e))
-
-            asyncio.create_task(pd_process_generate(manager, prompt, sampling_params, multimodal_params))
-
-        except Exception as e:
-            logger.exception(f"pd loop generate error: {str(e)}")
