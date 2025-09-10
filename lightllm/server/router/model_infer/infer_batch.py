@@ -31,7 +31,8 @@ class InferenceContext:
     group_mapping = None  # 只有进行多输出模式下才有真的使用
     infer_req_ids = None
     vocab_size = None
-
+    paused_reqs: List["InferReq"] = None
+    wait_pause_reqs: List["InferReq"] = None
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
 
     def register(
@@ -47,6 +48,9 @@ class InferenceContext:
         self.infer_req_ids = []
 
         self.vocab_size = vocab_size
+        self.paused_reqs = []
+        self.wait_pause_reqs = []
+        self.paused_recover = False
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:
@@ -173,10 +177,13 @@ class InferenceContext:
             g_infer_state_lock.acquire()
             self._filter([req.req_id for req in finished_reqs])
             g_infer_state_lock.release()
+            # 有请求释放，可以尝试恢复一些暂停请求
+            self.paused_recover = True
         return
 
     @torch.no_grad()
-    def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
+    def pause_reqs(self, is_master_in_dp: bool, pause_reqs: List["InferReq"] = []):
+        pause_reqs = pause_reqs + self.wait_pause_reqs
         if pause_reqs:
             g_infer_state_lock.acquire()
 
@@ -191,26 +198,50 @@ class InferenceContext:
                 req.paused = True
                 if is_master_in_dp:
                     req.shm_req.is_paused = True
+                self.paused_reqs.append(req)
 
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
-
             g_infer_state_lock.release()
+        self.wait_pause_reqs = []
         return self
 
-    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
-        if paused_reqs:
-            g_infer_state_lock.acquire()
+    def add_wait_pause_req(self, req: "InferReq"):
+        # 至少保障一个请求在推理
+        if len(self.wait_pause_reqs) + len(self.paused_reqs) == len(self.infer_req_ids) - 1:
+            return
+        req.wait_pause = True
+        self.wait_pause_reqs.append(req)
+        return
 
-            for req in paused_reqs:
-                req._match_radix_cache()
-                assert req.paused is True
-                req.paused = False
-                if is_master_in_dp:
-                    req.shm_req.is_paused = False
+    def recover_paused_reqs(self, is_master_in_dp: bool, is_chuncked_prefill: bool):
+        if not self.paused_recover:
+            return
 
-            g_infer_state_lock.release()
+        if len(self.paused_reqs) == 0:
+            return
+
+        recover_count = 0
+        g_infer_state_lock.acquire()
+
+        for req in self.paused_reqs:
+            req._match_radix_cache()
+            assert req.paused is True
+            req.paused = False
+            if is_master_in_dp:
+                req.shm_req.is_paused = False
+            can_alloc_token_num = self.get_can_alloc_token_num()
+            prefill_need_token_num = req.prefill_need_token_num(is_chuncked_prefill=is_chuncked_prefill)
+            recover_count += 1
+
+            if prefill_need_token_num > can_alloc_token_num:
+                break
+
+        logger.info(f"recover {recover_count} paused reqs")
+        g_infer_state_lock.release()
+        self.paused_reqs = self.paused_reqs[recover_count:]
+        self.paused_recover = False
         return
 
     def get_can_alloc_token_num(self):
