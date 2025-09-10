@@ -26,7 +26,7 @@ def create_or_link_shm(name, expected_size):
     try:
         try:
             shm = shared_memory.SharedMemory(name=safe_name, create=True, size=expected_size)
-            logger.info(f"Created new shared memory: {name} ({expected_size=})")
+            logger.info(f"Created new shared memory: {name} (size={expected_size})")
             return shm
         except FileExistsError:
             try:
@@ -37,7 +37,7 @@ def create_or_link_shm(name, expected_size):
             except Exception as e:
                 logger.error(f"Unexpected error attaching to shared memory {name}: {e}")
                 raise
-            logger.info(f"Attached to existing shared memory: {name} ({expected_size=})")
+            logger.info(f"Attached to existing shared memory: {name} (size={expected_size})")
             return shm
     except Exception as e:
         logger.error(f"Unexpected error creating shared memory {safe_name}: {e}")
