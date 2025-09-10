@@ -21,7 +21,7 @@ class ShmArray:
         self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
 
     def link_shm(self):
-        self.shm = shared_memory.SharedMemory(name=self.name, create=False, size=self.dest_size)
+        self.shm = create_or_link_shm(self.name, self.dest_size)
         assert self.shm.size == self.dest_size
         self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
         return
