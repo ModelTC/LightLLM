@@ -13,23 +13,30 @@ logger = init_logger(__name__)
 class NodeRole(enum.Enum):
     P = "prefill"
     D = "decode"
+
+    NP = "nixl_prefill"
+    ND = "nixl_decode"
+
     NORMAL = "normal"
     PD_MASTER = "pd_master"
 
     def is_D(self):
-        return self == NodeRole.D
+        return self == NodeRole.D or self == NodeRole.ND
 
     def is_P(self):
-        return self == NodeRole.P
+        return self == NodeRole.P or self == NodeRole.NP
 
     def is_normal(self):
         return self == NodeRole.NORMAL
 
     def is_P_or_NORMAL(self):
-        return (self == NodeRole.P) or (self == NodeRole.NORMAL)
+        return self.is_P() or self.is_normal()
 
     def is_P_or_D(self):
-        return (self == NodeRole.P) or (self == NodeRole.D)
+        return self.is_P() or self.is_D()
+
+    def is_NP_or_ND(self):
+        return self == NodeRole.NP or self == NodeRole.ND
 
 
 class ObjType(enum.Enum):
@@ -53,8 +60,8 @@ class PD_Client_Obj:
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
 
     def __post_init__(self):
-        if self.mode not in ["prefill", "decode"]:
-            error_info = f"""mode must in ["prefill", "decode"], but get {self.mode}"""
+        if self.mode not in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+            error_info = f"""mode must in ["prefill", "decode", "nixl_prefill", "nixl_decode"], but get {self.mode}"""
             logger.error(error_info)
             raise ValueError(error_info)
         return
@@ -121,6 +128,23 @@ class PDTransJoinInfo:
 
 
 @dataclass
+class RemotePrefillServerInfo:
+    perfill_server_id: int
+    prefill_server_ip: str
+    prefill_server_port: int
+
+
+@dataclass
+class DistInfo:
+    world_size: int
+    nnodes: int
+    dp_size: int
+    dp_world_size: int
+    dp_size_in_node: int
+    node_world_size: int
+
+
+@dataclass
 class PDTransLeaveInfo:
     decode_id: int
     prefill_id: int
@@ -181,3 +205,48 @@ class KVMoveTask:
 class KVMoveTaskGroup:
     tasks: List[KVMoveTask]
     connect_id: str
+
+
+####### 下边是 NIXL模式下使用的特定对象 ########
+
+
+@dataclass
+class NIXLChunckedTransTask:
+    request_id: int
+    dp_index: int
+    trans_device_id: int  # 当前设备使用的传输设备id，对应第几张显卡。
+    start_kv_index: int
+    end_kv_index: int
+    mem_indexes: List[int]
+    is_last_chunk: bool
+
+    def __post_init__(self):
+        if self.start_kv_index < 0 or self.end_kv_index <= self.start_kv_index:
+            error_info = "start_kv_index must >=0 and end_kv_index > start_kv_index"
+            logger.error(error_info)
+            raise ValueError(error_info)
+        if len(self.mem_indexes) == 0:
+            error_info = "mem_indexes must len > 0"
+            logger.error(error_info)
+            raise ValueError(error_info)
+        assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
+        return
+
+
+@dataclass
+class PrefillTransTaskRet:
+    request_id: int
+    is_error: bool
+    error_info: str = None
+
+
+@dataclass
+class NIXLStopTransTask:
+    request_id: int
+
+
+@dataclass
+class NixlAgentMetadata:
+    agent_name: str
+    agent_metadata: bytes
+    agent_page_mem_descs: bytes

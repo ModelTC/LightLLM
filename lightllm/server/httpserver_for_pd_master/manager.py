@@ -1,20 +1,15 @@
 import sys
-import zmq
-import zmq.asyncio
 import asyncio
 import uvloop
-import rpyc
 import time
-import hashlib
 import datetime
-import aiohttp
 import ujson as json
 import pickle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType
+from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType, NodeRole
 from lightllm.server.core.objs import SamplingParams
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
@@ -109,6 +104,10 @@ class HttpServerManagerForPDMaster:
             self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
 
             p_node, d_node = await self.select_p_d_node(prompt, sampling_params, multimodal_params)
+
+            if not p_node or not d_node:
+                logger.error(f"{group_request_id}: No p_node or d_node found")
+                raise Exception(f"{group_request_id}: No p_node or d_node found")
 
             results_generator = self._wait_to_token_package(
                 p_node,
@@ -230,6 +229,47 @@ class HttpServerManagerForPDMaster:
 
         return
 
+    async def fetch_nixl_stream(
+        self,
+        p_node: PD_Client_Obj,
+        d_node: PD_Client_Obj,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+    ):
+        group_request_id = sampling_params.group_request_id
+
+        req_status = ReqStatus(group_request_id, p_node, d_node)
+        self.req_id_to_out_inf[group_request_id] = req_status
+
+        up_status_event = req_status.up_status_event
+
+        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+
+        try:
+            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
+            raise ServerBusyError()
+
+        nixl_params: bytes = up_status_event.nixl_params
+        sampling_params.nixl_params.set(nixl_params)
+        sampling_params.max_new_tokens = 1
+
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+
+        while True:
+            await req_status.wait_to_ready()
+            if await request.is_disconnected():
+                raise Exception(f"req_id {group_request_id} disconnected")
+            if await req_status.can_read(self.req_id_to_out_inf):
+                token_list = await req_status.pop_all_tokens()
+                for sub_req_id, request_output, metadata, finish_status in token_list:
+                    yield sub_req_id, request_output, metadata, finish_status
+
+        return
+
     async def _wait_to_token_package(
         self,
         p_node: PD_Client_Obj,
@@ -246,7 +286,11 @@ class HttpServerManagerForPDMaster:
         unfinished_count = sampling_params.best_of
         is_first_token = True
 
-        async for sub_req_id, out_str, metadata, finish_status in self.fetch_stream(
+        client_mode: NodeRole = NodeRole(d_node.mode)
+
+        fetch_stream = self.fetch_nixl_stream if client_mode.is_NP_or_ND() else self.fetch_stream
+
+        async for sub_req_id, out_str, metadata, finish_status in fetch_stream(
             p_node, d_node, prompt, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
@@ -411,10 +455,10 @@ class PDManager:
         pd_client.websocket = websocket
         self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
 
-        if pd_client.mode == "prefill":
+        if pd_client.mode in ["prefill", "nixl_prefill"]:
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.prefill_nodes.append(pd_client)
-        elif pd_client.mode == "decode":
+        elif pd_client.mode in ["decode", "nixl_decode"]:
             self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.decode_nodes.append(pd_client)
         else:
