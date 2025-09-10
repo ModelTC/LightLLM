@@ -288,7 +288,7 @@ class HttpServerManagerForPDMaster:
 
         client_mode: NodeRole = NodeRole(d_node.mode)
 
-        fetch_stream = self.fetch_stream_nixl if client_mode.is_NP_or_ND() else self.fetch_stream
+        fetch_stream = self.fetch_nixl_stream if client_mode.is_NP_or_ND() else self.fetch_stream
 
         async for sub_req_id, out_str, metadata, finish_status in fetch_stream(
             p_node, d_node, prompt, sampling_params, multimodal_params, request
