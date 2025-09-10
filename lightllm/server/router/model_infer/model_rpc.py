@@ -256,7 +256,7 @@ async def start_model_process(
         ),
     )
     proc.start()
-    
+
     # Use asyncio.to_thread to make the blocking wait non-blocking
     await asyncio.to_thread(success_event.wait, timeout=40)
     assert proc.is_alive()
