@@ -44,22 +44,11 @@ class NixlMetadata:
 
 
 class NixlKVTransporter:
-    def __init__(self, node_id: int, tp_idx: int):
+    def __init__(self, node_id: int, tp_idx: int, kv_move_buffer: Tensor):
         self.node_id = node_id
         self.tp_idx = tp_idx
         self.nixl_agent = NixlWrapper(self.agent_name, None)
-
-        self.num_layers = -1
-        self.num_heads = -1
-        self.head_dims = -1
-        self.token_len = -1
-        self.num_pages = -1
-        self.page_size = -1
-        self.page_len = -1
-
-        self.page_reg_desc = None
-        self.page_local_xfer_handles = None
-
+        self._register_kv_move_buffer(kv_move_buffer=kv_move_buffer)
         self.remote_agents = defaultdict(list)
 
         self.inflight_transfers: ThreadSafeDict = ThreadSafeDict()
@@ -80,6 +69,12 @@ class NixlKVTransporter:
     def get_new_notifs(self):
         return self.nixl_agent.get_new_notifs()
 
+    def _register_kv_move_buffer(self, kv_move_buffer: Tensor):
+        self.num_pages, self.page_size, self.num_layers, self.kv_head_num, self.head_dims = kv_move_buffer.shape
+        self.page_len = self.page_size * self.num_layers * self.kv_head_num * self.head_dims
+        self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)
+        self.page_local_xfer_handles = self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages)
+
     def _create_paged_xfer_handles(self, reg_desc: nixlBind.nixlRegDList, page_num: int, agent_name: str = ""):
         base_addr, _, device_id, _ = reg_desc[0]
         pages_data = []
@@ -87,12 +82,6 @@ class NixlKVTransporter:
             pages_data.append((base_addr + page_id * self.page_len, self.page_len, device_id))
         descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM", True)
         return self.nixl_agent.prep_xfer_dlist(agent_name, descs, is_sorted=True)
-
-    def register_kv_move_buffer(self, kv_move_buffer: Tensor):
-        self.num_pages, self.page_size, _, _, _ = kv_move_buffer.shape
-        self.page_len = self.page_size * self.num_layers * self.token_len
-        self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)
-        self.page_local_xfer_handles = self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages)
 
     def add_remote_agent(self, remote_agent: NixlMetadata):
         for idx, (agent_metadata, num_pages, agent_page_mem_desc) in enumerate(
