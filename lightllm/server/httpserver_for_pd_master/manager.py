@@ -107,7 +107,7 @@ class HttpServerManagerForPDMaster:
 
             if not p_node or not d_node:
                 logger.error(f"{group_request_id}: No p_node or d_node found")
-                return
+                raise Exception(f"{group_request_id}: No p_node or d_node found")
 
             results_generator = self._wait_to_token_package(
                 p_node,
@@ -229,7 +229,7 @@ class HttpServerManagerForPDMaster:
 
         return
 
-    async def fetch_stream_nixl(
+    async def fetch_nixl_stream(
         self,
         p_node: PD_Client_Obj,
         d_node: PD_Client_Obj,
@@ -243,19 +243,21 @@ class HttpServerManagerForPDMaster:
         req_status = ReqStatus(group_request_id, p_node, d_node)
         self.req_id_to_out_inf[group_request_id] = req_status
 
-        p_start_args = p_node.start_args
-        prefill_node_dict = {
-            "node_id": p_start_args["pd_node_id"],
-            "ip": p_start_args["host"],
-            "rpyc_port": p_start_args["pd_nixl_remote_prefill_port"],
-            "max_new_tokens": sampling_params.max_new_tokens,
-            "pd_master_node_id": self.args.pd_node_id,
-        }
-
-        sampling_params.move_kv_to_decode_node.initialize(prefill_node_dict)
-        sampling_params.suggested_dp_index = -1
+        up_status_event = req_status.up_status_event
 
         await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+
+        try:
+            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
+            raise ServerBusyError()
+
+        nixl_params: bytes = up_status_event.nixl_params
+        sampling_params.nixl_params.set(nixl_params)
+        sampling_params.max_new_tokens = 1
+
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         while True:
             await req_status.wait_to_ready()
@@ -265,6 +267,8 @@ class HttpServerManagerForPDMaster:
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     yield sub_req_id, request_output, metadata, finish_status
+
+        return
 
     async def _wait_to_token_package(
         self,
