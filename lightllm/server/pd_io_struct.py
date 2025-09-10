@@ -81,17 +81,32 @@ class PD_Master_Obj:
 
 @dataclass
 class UpKVStatus:
-    type: str = "kv_move_status"
-    group_request_id: int = None
-    dp_index: int = None
+    group_request_id: int
     #  The identifier of the pd_master node handling the request.
-    pd_master_node_id: int = None
+    pd_master_node_id: int
+    # decode node dp_index to handle this request
+    dp_index: int
 
     def __post_init__(self):
-        if self.type != "kv_move_status":
-            error_info = "type only can be 'kv_move_status'"
+        if not isinstance(self.group_request_id, int):
+            error_info = "group_request_id only can be int"
             logger.error(error_info)
             raise ValueError(error_info)
+
+        if not isinstance(self.pd_master_node_id, int):
+            error_info = "pd_master_node_id only can be int"
+            logger.error(error_info)
+            raise ValueError(error_info)
+        return
+
+
+@dataclass
+class NixlUpKVStatus:
+    group_request_id: int
+    pd_master_node_id: int
+    nixl_params: bytes  # nixl 建立连接所使用的元数据对象
+
+    def __post_init__(self):
 
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"

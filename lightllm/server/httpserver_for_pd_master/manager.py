@@ -9,7 +9,7 @@ import pickle
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType, NodeRole
+from ..pd_io_struct import PD_Client_Obj, UpKVStatus, NixlUpKVStatus, ObjType, NodeRole
 from lightllm.server.core.objs import SamplingParams
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
@@ -54,7 +54,7 @@ class HttpServerManagerForPDMaster:
         self.pd_manager.remove_pd(pd_info_json)
         return
 
-    async def update_req_status(self, upkv_status: UpKVStatus):
+    async def update_req_status(self, upkv_status: Union[UpKVStatus, NixlUpKVStatus]):
         try:
             group_request_id = convert_sub_id_to_group_id(upkv_status.group_request_id)
             up_status_event = self.req_id_to_out_inf[group_request_id].up_status_event
@@ -214,7 +214,8 @@ class HttpServerManagerForPDMaster:
 
         sampling_params.move_kv_to_decode_node.initialize(None)
         sampling_params.max_new_tokens = old_max_new_tokens - 1
-        sampling_params.suggested_dp_index = up_status_event.upkv_status.dp_index
+        upkv_status: UpKVStatus = up_status_event.upkv_status
+        sampling_params.suggested_dp_index = upkv_status.dp_index
 
         await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, multimodal_params))))
 
@@ -253,7 +254,8 @@ class HttpServerManagerForPDMaster:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
 
-        nixl_params: bytes = up_status_event.nixl_params
+        upkv_status: NixlUpKVStatus = up_status_event.upkv_status
+        nixl_params: bytes = upkv_status.nixl_params
         sampling_params.nixl_params.set(nixl_params)
         sampling_params.max_new_tokens = 1
 
