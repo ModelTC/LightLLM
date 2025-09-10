@@ -137,11 +137,6 @@ class NixlKVTransporter:
         self.inflight_page_transfers[trans_task.trans_id] = (trans_task, handle)
         return
 
-    def send_transfer_notify(self, agent_name: str, acks: List[PageTransferAck]):
-        assert len(acks) > 0, "Acks should not be empty"
-        acks_noti = Notification(type=NotificationType.TRANSFER_NOTIFY_ACK, data=[ack.serialize() for ack in acks])
-        self.nixl_agent.send_notif(agent_name, acks_noti.to_bytes())
-
     async def get_done_page_transfers(self):
         done_taskes = []
         for trans_id, (trans_task, handle) in self.inflight_page_transfers.items():
