@@ -276,3 +276,27 @@ class NixlAgentMetadata:
     num_pages: int
     page_reg_desc: Optional[bytes] = None
     page_remote_xfer_handles: Optional[int] = None
+
+
+@dataclass
+class NIXLDecodeKVMoveTask:
+    request_id: int
+    wait_fill_mem_indexes: List[int]
+    start_kv_index: int
+    end_kv_index: int
+    mark_start_time: float
+
+    def __post_init__(self):
+        assert len(self.wait_fill_mem_indexes) == (self.end_kv_index - self.start_kv_index)
+        return
+    
+
+    def to_task_info(self):
+        return f"request_id: {self.request_id} " + f"start_kv_index: {self.start_kv_index} " + f"end_kv_index: {self.end_kv_index} " + f"wait_fill_mem_indexes len: {len(self.wait_fill_mem_indexes)}"
+
+    def id(self):
+        return self.request_id
+
+    def get_cost_time(self):
+        return time.time() - self.mark_start_time
+
