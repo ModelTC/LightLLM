@@ -10,7 +10,7 @@ import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskRet
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
-from lightllm.server.core.objs.shm_reqs_io_buffer import ShmObjsIOBuffer
+from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 
 logger = init_logger(__name__)
 
@@ -67,10 +67,10 @@ class PrefillKVMoveManager:
             self.kv_trans_processes_ret_threads[device_id].start()
 
         # 通过 io buffer 将命令写入到推理进程中
-        self.shm_reqs_io_buffer = ShmObjsIOBuffer()
+        self.shm_nixl_trans_io_buffer = ShmObjsIOBuffer(tail_str="nixl")
         self.dispatch_task = threading.Thread(target=self.task_dispatcher_loop, daemon=True)
         self.dispatch_task.start()
-        self.release_task = threading.Thread(target=self.task_release_loop, daemon=True)
+        self.release_task = threading.Thread(target=self.task_ret_upload_loop, daemon=True)
         self.release_task.start()
         self.check_task = threading.Thread(target=self.check_trans_process_loop, daemon=True)
         self.check_task.start()
@@ -102,23 +102,37 @@ class PrefillKVMoveManager:
     # ==================================================================================
     #  将收集到的传输返回信息，批量写回给推理进程，触发其进行相关管理信息的更新。
     # ==================================================================================
-    def task_release_loop(self):
+    def task_ret_upload_loop(self):
         try:
             while True:
-                req_objs: List[ChunckedTransTaskRet] = []
                 ret_obj: ChunckedTransTaskRet = self.ret_obj_queue.get()
+                ret_objs: List[ChunckedTransTaskRet] = [ret_obj]
+                ret_objs.extend(self._collect_return_objects())
+               
                 while True:
-                    try:
-                        ret_obj = self.ret_obj_queue.get_nowait()
-                        req_objs.append(ret_obj)
-                    except queue.Empty:
+                    if self.shm_nixl_trans_io_buffer.is_empty():
+                        # to do, 这里写入的数量，可能会超过共享管道的大小。
+                        self.shm_nixl_trans_io_buffer.write_obj(ret_objs)
+                        self.shm_nixl_trans_io_buffer.set_ready()
                         break
-                
-                # 将命令进行写回操作。
-                self.shm_reqs_io_buffer.release_reqs(req_ids)
+                    else:
+                        time.sleep(0.01)
+                        ret_objs.extend(self._collect_return_objects())
+        
         except (BaseException, RuntimeError) as e:
             logger.exception(str(e))
             raise e
+        
+    def _collect_return_objects(self):
+        """ 从队列中收集所有返回对象 """
+        ret_objs = []
+        try:
+            while True:
+                ret_obj = self.ret_obj_queue.get_nowait()
+                ret_objs.append(ret_obj)
+        except queue.Empty:
+            pass
+        return ret_objs
 
     # ==================================================================================
     # 处理各个传输任务的返回的信息
