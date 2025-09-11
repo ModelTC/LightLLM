@@ -25,7 +25,7 @@ from lightllm.server.core.objs.io_objs import (
 )
 from lightllm.server.core.objs import ShmReqManager, StartArgs, PDNIXLChunkedPrefillReq
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
-from .shm_reqs_io_buffer import ShmReqsIOBuffer
+from lightllm.server.core.objs.shm_reqs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
@@ -101,7 +101,7 @@ class RouterManager:
         self.router_lock = mp.Lock()
         g_router_lock.obj = self.router_lock
 
-        self.shm_reqs_io_buffer = ShmReqsIOBuffer()
+        self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         return
 
     async def wait_to_model_ready(self):
