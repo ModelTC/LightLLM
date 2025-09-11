@@ -99,3 +99,5 @@ class StartArgs:
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
+    nixl_pd_kv_page_num: int = field(default=16)
+    nixl_pd_kv_page_size: int = field(default=1024)
