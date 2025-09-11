@@ -31,6 +31,7 @@ from lightllm.distributed import dist_group_manager
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.server.pd_io_struct import ChunckedTransTaskRet
 
 
 class ModeBackend:
@@ -82,6 +83,7 @@ class ModeBackend:
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
         self.disable_cudagraph = self.args.disable_cudagraph
         self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
+        self.is_nixl_pd_mode = self.run_mode in ["nixl_prefill", "nixl_decode"]
 
         self.logger = init_logger(__name__)
 
@@ -189,6 +191,7 @@ class ModeBackend:
 
         self.init_custom()
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
+        # 只会在 nixl pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_nixl_trans_io_buffer = ShmObjsIOBuffer(tail_str="nixl")
 
         # 开启 mtp 模式，需要完成mtp model的初始化
@@ -291,6 +294,20 @@ class ModeBackend:
         new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
+        
+        # nixl pd mode 从 shm_nixl_trans_io_buffer 读取分块传输的完成进度。
+        if self.is_nixl_pd_mode:
+            if self.is_master_in_node:
+                if self.shm_nixl_trans_io_buffer.is_ready():
+                    self.node_broadcast_tensor.fill_(1)
+                else:
+                    self.node_broadcast_tensor.fill_(0)
+
+            src_rank_id = self.args.node_rank * self.node_world_size
+            dist.broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
+            new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+            if new_buffer_is_ready:
+                self._read_nixl_trans_io_buffer_and_update_req_status()
         return
 
     def _try_read_new_reqs_multinode_tp(self):
@@ -312,6 +329,8 @@ class ModeBackend:
 
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
+
+        assert self.is_nixl_pd_mode is False
         return
 
     def _read_reqs_buffer_and_init_reqs(self):
@@ -329,8 +348,23 @@ class ModeBackend:
                 else:
                     assert False, f"error type {type(obj)}"
             if init_reqs:
-                self._init_reqs(reqs=cmds)
+                self._init_reqs(reqs=init_reqs)
         return
+    
+
+    def _read_nixl_trans_io_buffer_and_update_req_status(self):
+        cmds: List[ChunckedTransTaskRet] = self.shm_nixl_trans_io_buffer.read_obj()
+        self.shm_nixl_trans_io_buffer.sub_state()
+        if cmds:
+            for obj in cmds:
+                if obj.request_id in g_infer_context.requests_mapping:
+                    req: InferReq = g_infer_context.requests_mapping[obj.request_id]
+                    if obj.has_error:
+                        req.nixl_pd_task_failed_num += 1
+                    else:
+                        req.nixl_pd_task_sunccess_num += 1
+        return
+    
 
     # 一些可以复用的通用功能函数
     def _init_reqs(self, reqs: List[Tuple]):
