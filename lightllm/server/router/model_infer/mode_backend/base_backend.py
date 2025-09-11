@@ -47,7 +47,6 @@ class ModeBackend:
         self.decode_mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None
         # extra_post_req_handle_func 用于添加请求InferReq的状态变化中添加额外的后处理信息，主要是状态机相关的调整等。
         self.extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None
-        self.call_post_handle_for_chunk: bool = False
 
         self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
@@ -55,6 +54,9 @@ class ModeBackend:
         # 控制 _get_classed_reqs 分类的参数变量，不同的 backend 具有可能需要不同的分类运行条件。
         self.classed_req_no_decode = False
         self.classed_req_strict_prefill = True
+
+        # nixl pd mode callback func
+        self.nixl_prefill_chuncked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None
         pass
 
     def init_model(self, kvargs):
@@ -509,7 +511,7 @@ class ModeBackend:
         next_token_logprobs: List[float],
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
-        call_post_handle_for_chunk: bool = False,
+        nixl_prefill_chuncked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
     ):
         """
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
@@ -526,7 +528,7 @@ class ModeBackend:
                 eos_ids=self.eos_id,
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 is_master_in_dp=self.is_master_in_dp,
-                call_post_handle_for_chunk=call_post_handle_for_chunk,
+                nixl_prefill_chuncked_handle_func=nixl_prefill_chuncked_handle_func,
             )
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
