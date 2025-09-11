@@ -25,7 +25,7 @@ from lightllm.server.core.objs.io_objs import (
 )
 from lightllm.server.core.objs import ShmReqManager, StartArgs, PDNIXLChunkedPrefillReq
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
-from lightllm.server.core.objs.shm_reqs_io_buffer import ShmObjsIOBuffer
+from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
