@@ -39,7 +39,6 @@ class KVTransProcess:
 
             self.process = start_prefill_trans_process(
                 manager.args,
-                manager.host_ip,
                 device_id,
                 self.task_in_queue,
                 self.task_out_queue,

@@ -4,14 +4,13 @@ import inspect
 import threading
 import torch.multiprocessing as mp
 import collections
-from torch.distributed import TCPStore
-from typing import List, Dict, Union
+import queue
+from typing import List, Dict, Union, Deque
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskRet
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
-from lightllm.distributed.pynccl import StatelessP2PProcessGroup, PyNcclCommunicator
 from lightllm.server.core.objs import StartArgs
 
 
@@ -51,7 +50,7 @@ def _init_env(
         task_out_queue.put("get_mem_managers_ok")
 
         manager = _PrefillTransModule(args, device_id, task_in_queue, task_out_queue, mem_managers)
-        manager.sb = dp_size_in_node
+        manager.transfer_loop()
 
     except Exception as e:
         logger.error(f"Fatal error happened in kv trans process: {e}")
@@ -72,8 +71,20 @@ class _PrefillTransModule:
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
         self.mem_managers = mem_managers
-        self.trans_page_link = collections.deque()
+        
+        self.waiting_dict_lock = threading.Lock()
+        self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
+
+        self.page_index_queue = queue.Queue()
+        for page_index in range(self.args.nixl_pd_kv_page_num):
+            self.page_index_queue.put(page_index)
+
+        self.notify_queue = queue.Queue()
+
         self._create_nixl_agent()
+
+        self.update_status_thread = threading.Thread(target=self.update_task_status_loop, daemon=True)
+        self.update_status_thread.start()
         return
 
     def _create_nixl_agent(self):
@@ -81,6 +92,104 @@ class _PrefillTransModule:
 
         self.nixl_agent = NixlKVTransporter(self.args, self.device_id)
 
-    def handle_task(self, task: NIXLChunckedTransTask):
-        # 查看连接是否存在
-        pass
+        
+    def transfer_loop(self):
+        try:
+            while True:
+                trans_task : NIXLChunckedTransTask = self.task_in_queue.get()
+                
+                # 初次校验 time out
+                if trans_task.time_out():
+                    self._create_error_ret(trans_task=trans_task, error_info="time_out")
+                    continue
+
+                page_index = self.page_index_queue.get()
+                # 再次校验是否发生了 time out
+                if trans_task.time_out():
+                    self._create_error_ret(trans_task=trans_task, error_info="time_out")
+                    self.page_index_queue.put(page_index)
+                    continue
+
+                trans_task.nixl_src_page_index = page_index
+
+                # to do 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
+                pass
+
+                trans_task.start_trans_time = time.time()
+                with self.waiting_dict_lock:
+                    self.waiting_dict[trans_task.get_key()] = trans_task
+                
+        except BaseException as e:
+            logger.exception(str(e))
+            raise e
+    
+    def update_task_status_loop(self,):
+        try:
+            while True:
+                if len(self.waiting_dict) == 0:
+                    time.sleep(0.01)
+                    continue
+                
+                for notify in self._collect_notifys():
+                    # to do 
+                    key = f"xx"
+                    with self.waiting_dict_lock:
+                        trans_task = self.waiting_dict.pop(key)
+
+                    # success or failed update
+                    self._create_success_ret(trans_task=trans_task)
+                    
+                    # 回收 kv move page 页面
+                    self.page_index_queue.put(trans_task.nixl_src_page_index)
+
+                
+                # check time_out
+                with self.waiting_dict_lock:
+                    del_keys = []
+                    for key, trans_task in self.waiting_dict.items():
+                        if trans_task.time_out():
+                            del_keys.append(key)
+                    
+                    for key in del_keys:
+                        trans_task = self.waiting_dict.pop(key)
+                        self._create_error_ret(trans_task=trans_task, error_info="time out")
+                        self.page_index_queue.put(trans_task.nixl_src_page_index)
+                            
+        except BaseException as e:
+            logger.exception(str(e))
+            raise e
+        
+    def _collect_notifys(self) -> List[bytes]:
+        ret_objs = []
+        try:
+            while True:
+                ret_obj = self.notify_queue.get_nowait()
+                ret_objs.append(ret_obj)
+        except queue.Empty:
+            pass
+        return ret_objs
+    
+    def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
+        ret_obj = ChunckedTransTaskRet(
+            request_id=trans_task.request_id,
+            start_kv_index=trans_task.start_kv_index,
+            end_kv_index=trans_task.end_kv_index,
+            has_error=True,
+            error_info=error_info,
+        )
+        self.task_out_queue.put(ret_obj)
+        logger.error(f"trans error in device id {self.device_id}: info {ret_obj}")
+        return
+    
+    def _create_success_ret(self, trans_task: NIXLChunckedTransTask):
+        ret_obj = ChunckedTransTaskRet(
+            request_id=trans_task.request_id,
+            start_kv_index=trans_task.start_kv_index,
+            end_kv_index=trans_task.end_kv_index,
+            has_error=False,
+            error_info=""
+        )
+        self.task_out_queue.put(ret_obj)
+        logger.info(f"trans success in device id {self.device_id}: info {ret_obj}")
+        return
+    
