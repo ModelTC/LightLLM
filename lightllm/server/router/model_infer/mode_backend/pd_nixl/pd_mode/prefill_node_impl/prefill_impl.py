@@ -74,6 +74,7 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
             if req_obj.nixl_trans_device_id == -1:
                 req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
             
+            nixl_decode_node_info = req_obj.sampling_param.nixl_decode_node
             mem_indexes = self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index].detach().cpu().tolist()
             trans_task = NIXLChunckedTransTask(request_id=req_obj.req_id,
                                   start_kv_index=kv_start_index,
@@ -83,6 +84,11 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
                                   src_device_id=req_obj.nixl_trans_device_id,
                                   dst_device_id=None,
                                   mem_indexes=mem_indexes,
+                                  peer_agent_name=nixl_decode_node_info.agent_name,
+                                  peer_agent_metadata=nixl_decode_node_info.agent_metadata,
+                                  peer_num_pages=nixl_decode_node_info.num_pages,
+                                  peer_page_req_desc=nixl_decode_node_info.page_reg_desc,
+                                  peer_page_xfer_handles=None,
                                   nixl_src_page_index=None,
                                   nixl_dst_page_index=None
                                   )

@@ -219,6 +219,15 @@ class NIXLDecodeNodeInfo:
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
 
 @dataclass
+class NixlAgentMetadata:
+    agent_name: str
+    agent_metadata: bytes
+    num_pages: int
+    page_reg_desc: Optional[bytes] = None
+    page_xfer_handles: Optional[int] = None
+
+
+@dataclass
 class NIXLChunckedTransTask:
     request_id: int
     start_kv_index: int
@@ -231,9 +240,17 @@ class NIXLChunckedTransTask:
      
     mem_indexes: List[int]
 
+    peer_agent_name: Optional[str]
+    peer_agent_metadata: Optional[bytes]
+    peer_num_pages: Optional[int]
+    peer_page_req_desc: Optional[bytes]
+    peer_page_xfer_handles: Optional[int]
+
     # transfer params
     nixl_src_page_index: Optional[int] = None
     nixl_dst_page_index: Optional[int] = None
+
+
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index <= self.start_kv_index:
@@ -262,34 +279,4 @@ class ChunckedTransTaskRet:
     error_info: str = None
 
 
-@dataclass
-class NixlAgentMetadata:
-    agent_name: str
-    agent_metadata: bytes
-    num_pages: int
-    page_reg_desc: Optional[bytes] = None
-    page_remote_xfer_handles: Optional[int] = None
-
-
-@dataclass
-class NIXLDecodeKVMoveTask:
-    request_id: int
-    wait_fill_mem_indexes: List[int]
-    start_kv_index: int
-    end_kv_index: int
-    mark_start_time: float
-
-    def __post_init__(self):
-        assert len(self.wait_fill_mem_indexes) == (self.end_kv_index - self.start_kv_index)
-        return
-    
-
-    def to_task_info(self):
-        return f"request_id: {self.request_id} " + f"start_kv_index: {self.start_kv_index} " + f"end_kv_index: {self.end_kv_index} " + f"wait_fill_mem_indexes len: {len(self.wait_fill_mem_indexes)}"
-
-    def id(self):
-        return self.request_id
-
-    def get_cost_time(self):
-        return time.time() - self.mark_start_time
 
