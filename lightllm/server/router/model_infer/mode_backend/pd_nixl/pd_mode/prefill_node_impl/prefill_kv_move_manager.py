@@ -10,7 +10,7 @@ import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskRet
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
-from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
+from lightllm.server.core.objs.shm_reqs_io_buffer import ShmObjsIOBuffer
 
 logger = init_logger(__name__)
 
@@ -67,7 +67,7 @@ class PrefillKVMoveManager:
             self.kv_trans_processes_ret_threads[device_id].start()
 
         # 通过 io buffer 将命令写入到推理进程中
-        self.shm_reqs_io_buffer = ShmReqsIOBuffer()
+        self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         self.dispatch_task = threading.Thread(target=self.task_dispatcher_loop, daemon=True)
         self.dispatch_task.start()
         self.release_task = threading.Thread(target=self.task_release_loop, daemon=True)

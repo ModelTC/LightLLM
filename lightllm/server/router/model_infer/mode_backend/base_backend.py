@@ -28,7 +28,7 @@ from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in
 from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
-from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
+from lightllm.server.core.objs.shm_reqs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 
@@ -173,11 +173,11 @@ class ModeBackend:
                 [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
             )
 
-        # 用于协同读取 ShmReqsIOBuffer 中的请求信息的通信tensor和通信组对象。
+        # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
-        # 用于在多节点tp模式下协同读取 ShmReqsIOBuffer 中的请求信息的通信tensor和通信组对象。
+        # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         if self.is_multinode_tp:
             self.multinode_tp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda")
             self.multinode_tp_all_gather_tensor = torch.tensor(
@@ -188,7 +188,7 @@ class ModeBackend:
             )
 
         self.init_custom()
-        self.shm_reqs_io_buffer = ShmReqsIOBuffer()
+        self.shm_reqs_io_buffer = ShmObjsIOBuffer()
 
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
