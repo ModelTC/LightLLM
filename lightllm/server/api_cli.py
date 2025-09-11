@@ -62,17 +62,17 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="The port number for the config server in config_server mode.",
     )
     parser.add_argument(
-        "--pd_nixl_remote_prefill_http_port",
+        "--nixl_pd_kv_page_num",
         type=int,
-        default=42001,
-        help="nixl pd mode, prefill node used for triggering prefill http port.",
+        default=16,
+        help="nixl pd mode, kv move page_num",
     )
 
     parser.add_argument(
-        "--pd_nixl_remote_prefill_port",
+        "--nixl_pd_kv_page_size",
         type=int,
-        default=42002,
-        help="nixl pd mode, prefill and decode used for meta exchange.",
+        default=1024,
+        help="nixl pd mode, kv page size.",
     )
 
     parser.add_argument(
