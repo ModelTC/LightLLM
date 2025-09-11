@@ -223,6 +223,21 @@ class KVMoveTaskGroup:
 
 
 ####### 下边是 NIXL模式下使用的特定对象 ########
+
+@dataclass
+class NIXLDecodeNodeInfo:
+    decode_node_id: int
+    pd_master_node_id: int
+
+    agent_name: str
+    agent_metadata: bytes
+    num_pages: int
+    page_reg_desc: bytes
+
+    ready_kv_len: int  # decode 节点上已经准备好的kv长度
+
+
+
 @dataclass
 class NIXLTransReq:
     request_id: int
