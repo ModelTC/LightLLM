@@ -101,26 +101,6 @@ class UpKVStatus:
 
 
 @dataclass
-class NixlUpKVStatus:
-    group_request_id: int
-    pd_master_node_id: int
-    nixl_params: bytes  # nixl 建立连接所使用的元数据对象
-
-    def __post_init__(self):
-
-        if not isinstance(self.group_request_id, int):
-            error_info = "group_request_id only can be int"
-            logger.error(error_info)
-            raise ValueError(error_info)
-
-        if not isinstance(self.pd_master_node_id, int):
-            error_info = "pd_master_node_id only can be int"
-            logger.error(error_info)
-            raise ValueError(error_info)
-        return
-
-
-@dataclass
 class DecodeNodeInfo:
     node_id: int
     ip: str
@@ -208,6 +188,25 @@ class KVMoveTaskGroup:
 ####### 下边是 NIXL模式下使用的特定对象 ########
 
 @dataclass
+class NixlUpKVStatus:
+    group_request_id: int
+    pd_master_node_id: int
+    nixl_params: bytes  # nixl 建立连接所使用的元数据对象
+
+    def __post_init__(self):
+
+        if not isinstance(self.group_request_id, int):
+            error_info = "group_request_id only can be int"
+            logger.error(error_info)
+            raise ValueError(error_info)
+
+        if not isinstance(self.pd_master_node_id, int):
+            error_info = "pd_master_node_id only can be int"
+            logger.error(error_info)
+            raise ValueError(error_info)
+        return
+
+@dataclass
 class NIXLDecodeNodeInfo:
     decode_node_id: int
     pd_master_node_id: int
@@ -218,13 +217,6 @@ class NIXLDecodeNodeInfo:
     page_reg_desc: bytes
 
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
-
-
-
-@dataclass
-class NIXLTransReq:
-    request_id: int
-    req_shm_idx: int
 
 @dataclass
 class NIXLChunckedTransTask:
