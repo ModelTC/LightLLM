@@ -50,7 +50,6 @@ class VITConnectionManager:
         """
         if self.remote_vit:
             # 远程VIT实例模式
-            print("remote")
             self._setup_remote_vit_connections()
         else:
             print("not remote")

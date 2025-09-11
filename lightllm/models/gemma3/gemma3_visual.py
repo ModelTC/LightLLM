@@ -16,7 +16,8 @@ logger = init_logger(__name__)
 
 
 class Gemma3VisionModel:
-    def __init__(self):
+    def __init__(self, kvargs):
+        self.remote_vit = kvargs.get("remote_vit", False)
         pass
 
     def load_model(self, weight_dir):
@@ -122,7 +123,10 @@ class Gemma3VisionModel:
         for i, img in enumerate(images):
             if isinstance(img, ImageItem):
                 uuids.append(img.uuid)
-                image_data = read_shm(get_shm_name_data(img.uuid))
+                if self.remote_vit:
+                    image_data = img._preload_data
+                else:
+                    image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
                 t = self.image_processor.preprocess(image_data, return_tensors="pt")["pixel_values"]
                 img_tensors.append(t)

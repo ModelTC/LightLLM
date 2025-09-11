@@ -46,6 +46,7 @@ class VisualModelRpcServer(rpyc.Service):
         quant_type = self.args.vit_quant_type
         quant_cfg = self.args.vit_quant_cfg
         max_batch_size = min(self.args.visual_infer_batch_size // self.args.visual_dp, 1)
+        remote_vit = True if self.args.run_mode == "visual" else False
 
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
@@ -62,10 +63,11 @@ class VisualModelRpcServer(rpyc.Service):
                 "quant_type": quant_type,
                 "quant_cfg": quant_cfg,
                 "max_batch_size": max_batch_size,
+                "remote_vit": remote_vit,
             }
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":
-                self.model = QWenVisionTransformer(**model_cfg["visual"]).eval().bfloat16()
+                self.model = QWenVisionTransformer(kvargs, **model_cfg["visual"]).eval().bfloat16()
             elif self.model_type == "qwen2_vl":
                 self.model = (
                     Qwen2VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
@@ -75,14 +77,14 @@ class VisualModelRpcServer(rpyc.Service):
                     Qwen2_5_VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
             elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
-                self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
+                self.model = TarsierVisionTransformerPretrainedModel(kvargs, **model_cfg).eval().bfloat16()
             elif self.model_type == "llava":
-                self.model = LlavaVisionModel()
+                self.model = LlavaVisionModel(kvargs)
             elif self.model_type == "internvl_chat":
                 self.model = VisionTransformer(kvargs)
                 # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
-                self.model = Gemma3VisionModel()
+                self.model = Gemma3VisionModel(kvargs)
             else:
                 raise Exception(f"can not support {self.model_type} now")
             self.model.load_model(weight_dir)

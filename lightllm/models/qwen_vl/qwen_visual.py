@@ -333,6 +333,7 @@ class TransformerBlock(nn.Module):
 class QWenVisionTransformer(nn.Module):
     def __init__(
         self,
+        kvargs,
         image_size: int,
         patch_size: int,
         width: int,
@@ -344,6 +345,7 @@ class QWenVisionTransformer(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        self.remote_vit = kvargs.get("remote_vit", False)
         image_height, image_width = self.image_size = (image_size, image_size)
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
         self.grid_size = (image_height // patch_height, image_width // patch_width)
@@ -422,7 +424,10 @@ class QWenVisionTransformer(nn.Module):
         for i, item in enumerate(image_uuids):
             if isinstance(item, int):
                 uuids.append(item)
-                image_data = read_shm(get_shm_name_data(item))
+                if self.remote_vit:
+                    image_data = item._preload_data
+                else:
+                    image_data = read_shm(get_shm_name_data(item.uuid))
                 image_data = Image.open(BytesIO(image_data)).convert("RGB")
                 t = self.image_transform(image_data)
                 img_tensors.append(t)

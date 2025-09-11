@@ -47,6 +47,7 @@ class VisionTransformer:
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.load_image_func = get_load_image_func(self.weight_dir_)
         self.max_batch_size = kvargs.get("max_batch_size", 1)
+        self.remote_vit = kvargs.get("remote_vit", False)
 
         self._init_datatype()
         self._init_config()
@@ -178,8 +179,10 @@ class VisionTransformer:
         for i, img in enumerate(images):
             if isinstance(img, ImageItem):
                 uuids.append(img.uuid)
-                image_data = img._preload_data
-                # image_data = read_shm(get_shm_name_data(img.uuid))
+                if self.remote_vit:
+                    image_data = img._preload_data
+                else:
+                    image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
                 t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
                 img_tensors.append(t)
