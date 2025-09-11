@@ -112,7 +112,6 @@ class Req(ctypes.Structure):
             f"shm_cur_kv_len:{self.shm_cur_kv_len},"
             f"shm_cur_output_len:{self.shm_cur_output_len},"
             f"finish_status:{self.finish_status.is_finished()}"
-            f"group_id: {self.group_req_id}"
         )
 
     def init(
