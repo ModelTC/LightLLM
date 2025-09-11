@@ -316,6 +316,7 @@ class InferReq:
         self.nixl_pd_task_num : int = 0
         self.nixl_pd_task_sunccess_num : int = 0
         self.nixl_pd_task_failed_num : int = 0
+        self.nixl_trans_device_id : int = -1 
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
