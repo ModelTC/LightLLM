@@ -3,7 +3,7 @@ import numpy as np
 from lightllm.utils.envs_utils import get_unique_server_name
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
-from .req import Req, ChunkedPrefillReq, TokenHealingReq, PDNIXLChunkedPrefillReq
+from .req import Req, ChunkedPrefillReq, TokenHealingReq
 from .shm_array import ShmArray
 from .atomic_array_lock import AtomicShmArrayLock, AtomicLockItem
 from .atomic_lock import AtomicShmLock
@@ -32,9 +32,6 @@ class ShmReqManager:
         args: StartArgs = get_env_start_args()
         if args.token_healing_mode:
             return TokenHealingReq
-
-        if args.run_mode in ["nixl_prefill", "nixl_decode"]:
-            return PDNIXLChunkedPrefillReq
 
         return ChunkedPrefillReq
 
