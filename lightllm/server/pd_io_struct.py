@@ -249,8 +249,9 @@ class NIXLChunckedTransTask:
     # transfer params
     nixl_src_page_index: Optional[int] = None
     nixl_dst_page_index: Optional[int] = None
-
-
+    
+    create_time: float = None
+    start_trans_time: float = None # 用于标记传输开始的时间。同时标记是否正在传输中
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index <= self.start_kv_index:
@@ -262,7 +263,23 @@ class NIXLChunckedTransTask:
             logger.error(error_info)
             raise ValueError(error_info)
         assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
+        self.create_time = time.time()
         return
+    
+    def time_out(self) -> bool:
+        if self.start_trans_time is None:
+            if time.time() - self.create_time > 60:
+                return True
+            return False
+        else:
+            if time.time() - self.start_trans_time > 60:
+                return True
+            else:
+                return False
+        
+    
+    def get_key(self) -> str:
+        return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
 
 
 @dataclass
