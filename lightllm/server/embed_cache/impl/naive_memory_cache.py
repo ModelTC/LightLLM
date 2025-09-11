@@ -78,9 +78,10 @@ class InMemoryCache:
                     free_shm(get_shm_name_data(id))
                 if record.embed:
                     # 仅vit释放掉afs里的, llm端不做释放
-                    if self.args.run_mode == "visual":
-                        free_afs(get_shm_name_embed(id), self.args.image_embed_dir)
-                    elif not self.args.enable_remote_vit:
+                    # if self.args.run_mode == "visual":
+                    #     free_afs(get_shm_name_embed(id), self.args.image_embed_dir)
+                    # elif not self.args.enable_remote_vit:
+                    if not self.args.run_mode == "visual":
                         free_shm(get_shm_name_embed(id))
                 del self._md5_to_record[record.md5sum]
                 del self._records[id]

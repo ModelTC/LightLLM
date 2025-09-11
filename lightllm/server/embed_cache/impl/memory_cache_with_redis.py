@@ -36,7 +36,7 @@ class MemoryCacheWithRedis(InMemoryCache):
                 self._records[id_].ref -= 1
                 if self.redis_cache.query(str(id_)):
                     self.redis_cache.decr(str(id_))
-                    print(self.redis_cache.stats(), flush=True)
+                    # print(self.redis_cache.stats(), flush=True)
 
     # vit 负责set
     def set_items_embed(self, ids: list[int]) -> None:
@@ -44,13 +44,11 @@ class MemoryCacheWithRedis(InMemoryCache):
             for id in ids:
                 self.redis_cache.insert(str(id))
                 self._records[id].embed = True
-                self._records[id].ref -= 1
+                self._records[id].ref -= 1  # vit端alloc之后ref+1 vit完成后ref-1
 
     def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
         ret = []
         for id in ids:
-            print(f"id is {id}")
-            print(f"self.redis_cache.query(str(id)) is {self.redis_cache.query(str(id))}")
             exist = self.redis_cache.query(str(id))
             ret.append(exist)
             if exist:

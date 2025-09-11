@@ -137,7 +137,7 @@ class VITConnectionManager:
             if id not in self.remote_vit_instances:
                 try:
                     socket = self.context.socket(zmq.PUSH)
-                    print(vit_obj.host_ip_port, self.args.remote_vit_port, flush=True)
+                    # print(vit_obj.host_ip_port, self.args.remote_vit_port, flush=True)
                     ip, port = vit_obj.host_ip_port.split(":")
                     socket.connect(f"tcp://{ip}:{port}")
                     self.remote_vit_instances[id] = socket
@@ -223,7 +223,6 @@ class VITConnectionManager:
             return
 
         uuids = req.multimodal_params.get_all_uuids()
-        print(f"uuids is {uuids}")
 
         async def wait_for_embeds():
             while not all(self.cache_client.root.get_items_embed(uuids)):

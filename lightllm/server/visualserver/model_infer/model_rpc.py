@@ -50,7 +50,6 @@ class VisualModelRpcServer(rpyc.Service):
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
         kvargs["vit_rank_id"] = self.dp_rank_id * self.args.visual_tp + self.tp_rank_id
-        print(cache_port)
         self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
 
         init_vision_distributed_env(kvargs)
@@ -87,9 +86,7 @@ class VisualModelRpcServer(rpyc.Service):
             else:
                 raise Exception(f"can not support {self.model_type} now")
             self.model.load_model(weight_dir)
-            print("begin load model")
             self.model = self.model.cuda()
-            print("load model OK")
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -113,12 +110,11 @@ class VisualModelRpcServer(rpyc.Service):
         all_img_embeds = all_img_embeds.to(torch.device("cpu"))
 
         if self.tp_rank_id == 0:
-            ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
-            print(f"ready_flags is {ready_flags}")
+            # ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
             ids_to_set = []
-            for i, ready in enumerate(ready_flags):
-                if ready:
-                    continue
+            for i, img in enumerate(images):
+                # if ready:
+                #     continue
                 uid = uuids[i]
                 start, end = valid_ids[i]
                 cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])

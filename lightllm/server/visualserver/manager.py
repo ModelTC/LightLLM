@@ -153,21 +153,28 @@ class VisualManager:
                     processing_group_reqs = []
                     images_need_infer = []
 
-    def _recv_reqs(self):
+    async def _recv_reqs(self):
         if self.remote_vit:
             recv_req: GroupReqIndexes = self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
             # recv_req.multimodal_params.images[:]= [
             #     img for img in recv_req.multimodal_params.images
             #     if not self.cache_client.root.get_item_embed(img.uuid)  # embed已存在的被丢弃 , ref +1
             # ]
+            logger.info(f"Receive req {recv_req.group_req_id}, image_count:{len(recv_req.multimodal_params.images)}")
             uuids = [img.uuid for img in recv_req.multimodal_params.images]
             already_embed = self.cache_client.root.get_items_embed(uuids)
+            if all(already_embed):
+                return None
             token_nums = []
             for img, embed in zip(recv_req.multimodal_params.images, already_embed):
                 if not embed:
                     uuids.append(img.uuid)
                     token_nums.append(img.token_num)
-            self.cache_client.root.alloc(uuids, token_nums)
+            while True:
+                records = self.cache_client.root.alloc(uuids, token_nums)
+                if records is not None:
+                    break
+                await asyncio.sleep(0.1)
             return recv_req
         else:
             return self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
@@ -179,11 +186,11 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self._recv_reqs()
+                    recv_req: GroupReqIndexes = await self._recv_reqs()
+                    if recv_req is None:
+                        continue
                     if isinstance(recv_req, GroupReqIndexes):
-                        # print(recv_req, flush=True)
                         self.waiting_reqs.append(recv_req)
-                        print(f"recv_req.multimodal_params is {recv_req.multimodal_params}")
                     else:
                         assert False, f"Error Req Inf {recv_req}"
                 self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
@@ -210,11 +217,21 @@ class VisualManager:
                         images_need_infer.append(img)
 
                         if len(images_need_infer) == self.infer_batch_size:
+                            _t0 = time.perf_counter()
                             await self.infer_imgs(images_need_infer)
+                            logger.info(
+                                f"[visual] batch infer complete, image_count: {len(images_need_infer)}, "
+                                f"elapsed_time {(time.perf_counter()-_t0) * 1000}ms"
+                            )
                             images_need_infer = []
 
                     if len(images_need_infer) > 0:
+                        _t1 = time.perf_counter()
                         await self.infer_imgs(images_need_infer)
+                        logger.info(
+                            f"[visual] batch infer complete, image_count:{len(images_need_infer)}, "
+                            f"elapsed_time {(time.perf_counter()-_t1) * 1000}ms"
+                        )
                         images_need_infer = []
                     # 在这里release这个image，ref-1
                     logger.info(f"req-id {visual_req.group_req_id} has been release ok")

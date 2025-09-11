@@ -8,6 +8,9 @@ from io import BytesIO
 from pathlib import Path
 import multiprocessing.shared_memory as shm
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 def tensor2bytes(t: torch.Tensor):
@@ -247,7 +250,7 @@ class EmbedRefCountRedis:
         """Convert md5 to AFS file path."""
         if not self.image_embed_dir:
             return None
-        filename = md5 + self.path_ext
+        filename = self.image_embed_dir + md5 + self.path_ext
         return filename
 
     def _delete_afs_files(self, victims: List[str]) -> None:
@@ -260,9 +263,9 @@ class EmbedRefCountRedis:
                 file_path = self._md5_to_afs_path(md5)
                 if file_path and os.path.exists(file_path):
                     os.remove(file_path)
-                    print(f"Deleted AFS file: {file_path}")
+                    logger.debug(f"Deleted AFS file: {file_path}")
             except Exception as e:
-                print(f"Warning: Failed to delete AFS file for {md5}: {e}")
+                logger.debug(f"Warning: Failed to delete AFS file for {md5}: {e}")
 
     # ---------------- Lua scripts ----------------
     _INSERT_LUA = r"""
@@ -273,6 +276,7 @@ local ref_prefix = KEYS[2]
 local md5 = ARGV[1]
 local capacity = tonumber(ARGV[2])
 
+local unpack = unpack or table.unpack
 local ref_key = ref_prefix .. md5
 if redis.call('GET', ref_key) then
   return {0}  -- Already exists
@@ -385,7 +389,7 @@ if #victims >= need then
     local now = redis.call('TIME')[1] * 1000
     redis.call('ZADD', zset, now, new_md5)
     
-    return {1, table.unpack(victims)}  -- success + victims
+    return {1, unpack(victims)}  -- success + victims
 else
     return {0}  -- 逐出失败，没有足够的候选
 end
