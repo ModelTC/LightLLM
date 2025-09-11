@@ -294,3 +294,6 @@ class ChunckedTransTaskRet:
     end_kv_index: int
     has_error: bool
     error_info: str = None
+
+    def get_key(self) -> str:
+        return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
