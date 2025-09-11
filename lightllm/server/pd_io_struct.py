@@ -1,7 +1,7 @@
 import enum
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Set
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
@@ -187,6 +187,7 @@ class KVMoveTaskGroup:
 
 ####### 下边是 NIXL模式下使用的特定对象 ########
 
+
 @dataclass
 class NixlUpKVStatus:
     group_request_id: int
@@ -206,6 +207,7 @@ class NixlUpKVStatus:
             raise ValueError(error_info)
         return
 
+
 @dataclass
 class NIXLDecodeNodeInfo:
     decode_node_id: int
@@ -217,6 +219,7 @@ class NIXLDecodeNodeInfo:
     page_reg_desc: bytes
 
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
+
 
 @dataclass
 class NixlAgentMetadata:
@@ -237,7 +240,7 @@ class NIXLChunckedTransTask:
     decode_dp_index: Optional[int]
     src_device_id: Optional[int]  # 传输设备 id
     dst_device_id: Optional[int]  # 接收设备 id
-     
+
     mem_indexes: List[int]
 
     peer_agent_name: Optional[str]
@@ -249,9 +252,12 @@ class NIXLChunckedTransTask:
     # transfer params
     nixl_src_page_index: Optional[int] = None
     nixl_dst_page_index: Optional[int] = None
-    
+
+    # xfer_handle
+    xfer_handle: Optional[int] = None
+
     create_time: float = None
-    start_trans_time: float = None # 用于标记传输开始的时间。同时标记是否正在传输中
+    start_trans_time: float = None  # 用于标记传输开始的时间。同时标记是否正在传输中
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index <= self.start_kv_index:
@@ -265,7 +271,7 @@ class NIXLChunckedTransTask:
         assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
         self.create_time = time.time()
         return
-    
+
     def time_out(self) -> bool:
         if self.start_trans_time is None:
             if time.time() - self.create_time > 60:
@@ -276,15 +282,9 @@ class NIXLChunckedTransTask:
                 return True
             else:
                 return False
-        
-    
+
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
-
-
-@dataclass
-class NIXLChunckedTaskSuccessRet:
-    trans_id: int  # 每一个传送事件都有一个唯一id
 
 
 @dataclass
@@ -294,6 +294,3 @@ class ChunckedTransTaskRet:
     end_kv_index: int
     has_error: bool
     error_info: str = None
-
-
-
