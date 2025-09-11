@@ -6,20 +6,6 @@ from torch import Tensor
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NixlAgentMetadata, NIXLChunckedTaskSuccessRet
 from lightllm.utils.log_utils import init_logger
 
-from ..pd_remote_prefill_obj import (
-    RemoteAgent,
-    KVMoveRequest,
-    PrefillRequest,
-    RemotePrefillStatus,
-    ThreadSafeDict,
-    KVMoveRequestState,
-    PageTransferAck,
-    RemoteTransferStatusType,
-    RemoteTransferType,
-    NotificationType,
-    Notification,
-)
-
 
 logger = init_logger(__name__)
 
