@@ -19,7 +19,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_verify import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
-from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd, NIXLRemotePrefillDoneCmd, ReqCmd
+from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
@@ -189,6 +189,7 @@ class ModeBackend:
 
         self.init_custom()
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
+        self.shm_nixl_trans_io_buffer = ShmObjsIOBuffer(tail_str="nixl")
 
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
@@ -317,15 +318,17 @@ class ModeBackend:
         cmds: List = self.shm_reqs_io_buffer.read_obj()
         self.shm_reqs_io_buffer.sub_state()
         if cmds:
-            if isinstance(cmds[0], ReqCmd):
-                for obj in cmds:
+            init_reqs = []
+            for obj in cmds:
+                if isinstance(obj, tuple):
+                    init_reqs.append(obj)
+                elif isinstance(obj, (AbortedReqCmd, StopStrMatchedReqCmd)):
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
-                        if isinstance(obj, AbortedReqCmd) or isinstance(obj, StopStrMatchedReqCmd):
-                            req.infer_aborted = True
-                        elif isinstance(obj, NIXLRemotePrefillDoneCmd):
-                            req.infer_nixl_rpd = True
-            else:
+                        req.infer_aborted = True
+                else:
+                    assert False, f"error type {type(obj)}"
+            if init_reqs:
                 self._init_reqs(reqs=cmds)
         return
 
