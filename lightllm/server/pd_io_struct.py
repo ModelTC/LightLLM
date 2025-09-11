@@ -226,8 +226,8 @@ class NIXLChunckedTransTask:
 
     prefill_dp_index: Optional[int]
     decode_dp_index: Optional[int]
-    src_device_id: int  # 传输设备 id
-    dst_device_id: int  # 接收设备 id
+    src_device_id: Optional[int]  # 传输设备 id
+    dst_device_id: Optional[int]  # 接收设备 id
      
     mem_indexes: List[int]
 

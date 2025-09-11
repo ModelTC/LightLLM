@@ -1,14 +1,9 @@
-import os
-import time
-import threading
-import torch
 import torch.multiprocessing as mp
-import torch.distributed as dist
+import random
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.pd_io_struct import KVMoveTask, DecodeNodeInfo
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.infer_lock import g_router_lock, g_infer_state_lock
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 
@@ -48,8 +43,9 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
             while req_obj.nixl_trans_kv_start_index < cur_kv_len:
                 cur_page_size = min(page_size, cur_kv_len - req_obj.nixl_trans_kv_start_index)
                 # 生成页面传输任务， 放入kv move manager 的处理队列中
-                # todo
-
+                self._create_nixl_trans_task(req_obj=req_obj,
+                                             kv_start_index=req_obj.nixl_trans_kv_start_index,
+                                             kv_end_index=req_obj.nixl_trans_kv_start_index + cur_page_size)
                 # update
                 req_obj.nixl_trans_kv_start_index += cur_page_size
                 req_obj.nixl_pd_task_num += 1
@@ -62,11 +58,32 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         cur_kv_len = req_obj.cur_kv_len
         while req_obj.nixl_trans_kv_start_index + page_size <= cur_kv_len:
             cur_page_size = page_size
-
             # 生成页面传输任务， 放入kv move manager 的处理队列中
-            # todo
+            self._create_nixl_trans_task(req_obj=req_obj,
+                                            kv_start_index=req_obj.nixl_trans_kv_start_index,
+                                            kv_end_index=req_obj.nixl_trans_kv_start_index + cur_page_size)
 
             # update
             req_obj.nixl_trans_kv_start_index += cur_page_size
             req_obj.nixl_pd_task_num += 1
         return
+    
+    def _create_nixl_trans_task(self, req_obj: InferReq, kv_start_index: int, kv_end_index: int):
+        if self.is_master_in_dp:
+            # 确定传输设备
+            if req_obj.nixl_trans_device_id == -1:
+                req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
+            
+            mem_indexes = self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index].detach().cpu().tolist()
+            trans_task = NIXLChunckedTransTask(request_id=req_obj.req_id,
+                                  start_kv_index=kv_start_index,
+                                  end_kv_index=kv_end_index,
+                                  prefill_dp_index=self.dp_rank_in_node,
+                                  decode_dp_index=None,
+                                  src_device_id=req_obj.nixl_trans_device_id,
+                                  dst_device_id=None,
+                                  mem_indexes=mem_indexes,
+                                  nixl_src_page_index=None,
+                                  nixl_dst_page_index=None
+                                  )
+            self.info_queue.put(trans_task)
