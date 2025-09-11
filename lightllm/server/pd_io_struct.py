@@ -143,23 +143,6 @@ class PDTransJoinInfo:
 
 
 @dataclass
-class RemotePrefillServerInfo:
-    perfill_server_id: int
-    prefill_server_ip: str
-    prefill_server_port: int
-
-
-@dataclass
-class DistInfo:
-    world_size: int
-    nnodes: int
-    dp_size: int
-    dp_world_size: int
-    dp_size_in_node: int
-    node_world_size: int
-
-
-@dataclass
 class PDTransLeaveInfo:
     decode_id: int
     prefill_id: int
