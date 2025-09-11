@@ -220,14 +220,17 @@ class NIXLDecodeNodeInfo:
 
 @dataclass
 class NIXLChunckedTransTask:
-    trans_id: int  # 每一个传送事件都有一个唯一id
     request_id: int
-    dp_index: int
-    src_device_id: int  # 当前设备使用的传输设备id，对应第几张显卡。
     start_kv_index: int
     end_kv_index: int
+
+    prefill_dp_index: Optional[int]
+    decode_dp_index: Optional[int]
+    src_device_id: int  # 传输设备 id
+    dst_device_id: int  # 接收设备 id
+     
     mem_indexes: List[int]
-    is_last_chunk: bool
+
     # transfer params
     nixl_src_page_index: Optional[int] = None
     nixl_dst_page_index: Optional[int] = None
@@ -251,15 +254,12 @@ class NIXLChunckedTaskSuccessRet:
 
 
 @dataclass
-class PrefillTransTaskRet:
+class ChunckedTransTaskRet:
     request_id: int
+    start_kv_index: int
+    end_kv_index: int
     is_error: bool
     error_info: str = None
-
-
-@dataclass
-class NIXLStopTransTask:
-    request_id: int
 
 
 @dataclass
