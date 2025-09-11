@@ -5,6 +5,7 @@ import threading
 import torch.multiprocessing as mp
 import collections
 import queue
+import pickle
 from typing import List, Dict, Union, Deque
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
@@ -12,6 +13,7 @@ from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTas
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
+from ..nixl_kv_transporter import NixlKVTransporter
 
 
 logger = init_logger(__name__)
@@ -71,15 +73,16 @@ class _PrefillTransModule:
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
         self.mem_managers = mem_managers
-
+        
+        self.transporter = NixlKVTransporter(node_id=self.args.pd_node_id,
+                                             tp_idx=device_id,
+                                             kv_move_buffer=None)
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
 
         self.page_index_queue = queue.Queue()
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
-
-        self.notify_queue = queue.Queue()
 
         self._create_nixl_agent()
 
@@ -113,6 +116,8 @@ class _PrefillTransModule:
 
                 # to do 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
                 pass
+                self.transporter.send_readtask_to_decode_node(peer_name=trans_task.peer_agent_name,
+                                                              trans_task=trans_task)
 
                 trans_task.start_trans_time = time.time()
                 with self.waiting_dict_lock:
@@ -130,20 +135,32 @@ class _PrefillTransModule:
                 if len(self.waiting_dict) == 0:
                     time.sleep(0.01)
                     continue
+                
+                # notify update
+                notifies_dict = self.transporter.get_new_notifs()
+                if notifies_dict:
+                    for _, _notify_list in notifies_dict.items():
+                        for notify in _notify_list:
+                            try:
+                                notify_obj = pickle.loads(notify)
+                            except:
+                                notify_obj = None
+                        
+                        if isinstance(notify_obj, ChunckedTransTaskRet):
+                            key = notify_obj.get_key()
+                            with self.waiting_dict_lock:
+                                trans_task = self.waiting_dict.pop(key, None)
 
-                for notify in self._collect_notifys():
-                    # to do
-                    key = f"xx"
-                    with self.waiting_dict_lock:
-                        trans_task = self.waiting_dict.pop(key, None)
+                            if trans_task is not None:
+                                if  not notify_obj.has_error:
+                                    self._create_success_ret(trans_task=trans_task)
+                                else:
+                                    self._create_error_ret(trans_task=trans_task, error_info=notify_obj.error_info)
+                                
+                                # 回收 kv move page 页面
+                                self.page_index_queue.put(trans_task.nixl_src_page_index)
 
-                    if trans_task is not None:
-                        # success or failed update
-                        self._create_success_ret(trans_task=trans_task)
-                        # 回收 kv move page 页面
-                        self.page_index_queue.put(trans_task.nixl_src_page_index)
-
-                # check time_out
+                # check time_out update
                 with self.waiting_dict_lock:
                     del_keys = []
                     for key, trans_task in self.waiting_dict.items():
@@ -159,16 +176,6 @@ class _PrefillTransModule:
         except BaseException as e:
             logger.exception(str(e))
             raise e
-
-    def _collect_notifys(self) -> List[bytes]:
-        ret_objs = []
-        try:
-            while True:
-                ret_obj = self.notify_queue.get_nowait()
-                ret_objs.append(ret_obj)
-        except queue.Empty:
-            pass
-        return ret_objs
 
     def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
         ret_obj = ChunckedTransTaskRet(
