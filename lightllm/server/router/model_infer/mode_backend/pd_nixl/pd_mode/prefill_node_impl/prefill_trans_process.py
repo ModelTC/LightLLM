@@ -71,7 +71,7 @@ class _PrefillTransModule:
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
         self.mem_managers = mem_managers
-        
+
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
 
@@ -92,12 +92,11 @@ class _PrefillTransModule:
 
         self.nixl_agent = NixlKVTransporter(self.args, self.device_id)
 
-        
     def transfer_loop(self):
         try:
             while True:
-                trans_task : NIXLChunckedTransTask = self.task_in_queue.get()
-                
+                trans_task: NIXLChunckedTransTask = self.task_in_queue.get()
+
                 # 初次校验 time out
                 if trans_task.time_out():
                     self._create_error_ret(trans_task=trans_task, error_info="time_out")
@@ -118,47 +117,49 @@ class _PrefillTransModule:
                 trans_task.start_trans_time = time.time()
                 with self.waiting_dict_lock:
                     self.waiting_dict[trans_task.get_key()] = trans_task
-                
+
         except BaseException as e:
             logger.exception(str(e))
             raise e
-    
-    def update_task_status_loop(self,):
+
+    def update_task_status_loop(
+        self,
+    ):
         try:
             while True:
                 if len(self.waiting_dict) == 0:
                     time.sleep(0.01)
                     continue
-                
+
                 for notify in self._collect_notifys():
-                    # to do 
+                    # to do
                     key = f"xx"
                     with self.waiting_dict_lock:
-                        trans_task = self.waiting_dict.pop(key)
+                        trans_task = self.waiting_dict.pop(key, None)
 
-                    # success or failed update
-                    self._create_success_ret(trans_task=trans_task)
-                    
-                    # 回收 kv move page 页面
-                    self.page_index_queue.put(trans_task.nixl_src_page_index)
+                    if trans_task is not None:
+                        # success or failed update
+                        self._create_success_ret(trans_task=trans_task)
+                        # 回收 kv move page 页面
+                        self.page_index_queue.put(trans_task.nixl_src_page_index)
 
-                
                 # check time_out
                 with self.waiting_dict_lock:
                     del_keys = []
                     for key, trans_task in self.waiting_dict.items():
                         if trans_task.time_out():
                             del_keys.append(key)
-                    
+
                     for key in del_keys:
-                        trans_task = self.waiting_dict.pop(key)
-                        self._create_error_ret(trans_task=trans_task, error_info="time out")
-                        self.page_index_queue.put(trans_task.nixl_src_page_index)
-                            
+                        trans_task = self.waiting_dict.pop(key, None)
+                        if trans_task is not None:
+                            self._create_error_ret(trans_task=trans_task, error_info="time out")
+                            self.page_index_queue.put(trans_task.nixl_src_page_index)
+
         except BaseException as e:
             logger.exception(str(e))
             raise e
-        
+
     def _collect_notifys(self) -> List[bytes]:
         ret_objs = []
         try:
@@ -168,7 +169,7 @@ class _PrefillTransModule:
         except queue.Empty:
             pass
         return ret_objs
-    
+
     def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
         ret_obj = ChunckedTransTaskRet(
             request_id=trans_task.request_id,
@@ -180,16 +181,15 @@ class _PrefillTransModule:
         self.task_out_queue.put(ret_obj)
         logger.error(f"trans error in device id {self.device_id}: info {ret_obj}")
         return
-    
+
     def _create_success_ret(self, trans_task: NIXLChunckedTransTask):
         ret_obj = ChunckedTransTaskRet(
             request_id=trans_task.request_id,
             start_kv_index=trans_task.start_kv_index,
             end_kv_index=trans_task.end_kv_index,
             has_error=False,
-            error_info=""
+            error_info="",
         )
         self.task_out_queue.put(ret_obj)
         logger.info(f"trans success in device id {self.device_id}: info {ret_obj}")
         return
-    
