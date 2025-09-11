@@ -4,11 +4,10 @@ import signal
 import threading
 import inspect
 import queue
-import dataclasses
 from typing import List, Dict, Union
 from lightllm.utils.log_utils import init_logger
 import torch.multiprocessing as mp
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLStopTransTask, PrefillTransTaskRet
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskRet
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
@@ -51,9 +50,7 @@ class PrefillKVMoveManager:
 
         self.info_queue = info_queue
         self.mem_queues = mem_queues
-        self.realese_queue = queue.Queue()
-        self.req_id_to_status: Dict[int, _ReqStatus] = {}
-        self.req_id_to_status_lock: threading.Lock = threading.Lock()
+        self.ret_obj_queue = queue.Queue()
 
         from .prefill_trans_obj import KVTransProcess
 
@@ -80,41 +77,45 @@ class PrefillKVMoveManager:
         return
 
     # ==================================================================================
-    # 主任务循环，接收需要进行kv传输的请求进行处理
+    # 主任务循环，接收需要进行kv传输的请求, 转发给 KV_TRANS_PROCESS
     # ==================================================================================
 
     def task_dispatcher_loop(self):
         try:
             # 获取任务，并分发给相关卡的处理队列
             while True:
-                task: Union[NIXLChunckedTransTask, NIXLStopTransTask] = self.info_queue.get()
-                # 传输任务
-                if isinstance(task, NIXLChunckedTransTask):
-                    with self.req_id_to_status_lock:
-                        if task.request_id not in self.req_id_to_status:
-                            self.req_id_to_status[task.request_id] = _ReqStatus(request_id=task.request_id)
-                        req_status = self.req_id_to_status[task.request_id]
-                        # 当该请求的传输任务没有出现错误的时候，才进行后续的传输任务下发
-                        if not req_status.is_error:
-                            req_status.chuncked_task_list.append(task)
-                            device_id = task.src_device_id
-                            try:
-                                from .prefill_trans_obj import KVTransProcess
+                task:NIXLChunckedTransTask = self.info_queue.get()
 
-                                trans_process: KVTransProcess = self.kv_trans_processes[device_id]
-                                trans_process.task_in_queue.put(task)
-                            except BaseException as e:
-                                logger.exception(str(e))
-                # 停止任务
-                elif isinstance(task, NIXLStopTransTask):
-                    with self.req_id_to_status_lock:
-                        if task.request_id in self.req_id_to_status:
-                            self.req_id_to_status.pop(task.request_id, None)
-                        else:
-                            logger.warning(f"no exist req id {task.request_id} in req_id_to_status")
-                else:
-                    assert False, f"error task type {type(task)}"
+                device_id = task.src_device_id
+                try:
+                    from .prefill_trans_obj import KVTransProcess
 
+                    trans_process: KVTransProcess = self.kv_trans_processes[device_id]
+                    trans_process.task_in_queue.put(task)
+                except BaseException as e:
+                    logger.exception(str(e))
+
+        except (BaseException, RuntimeError) as e:
+            logger.exception(str(e))
+            raise e
+        
+    # ==================================================================================
+    #  将收集到的传输返回信息，批量写回给推理进程，触发其进行相关管理信息的更新。
+    # ==================================================================================
+    def task_release_loop(self):
+        try:
+            while True:
+                req_objs: List[ChunckedTransTaskRet] = []
+                ret_obj: ChunckedTransTaskRet = self.ret_obj_queue.get()
+                while True:
+                    try:
+                        ret_obj = self.ret_obj_queue.get_nowait()
+                        req_objs.append(ret_obj)
+                    except queue.Empty:
+                        break
+                
+                # 将命令进行写回操作。
+                self.shm_reqs_io_buffer.release_reqs(req_ids)
         except (BaseException, RuntimeError) as e:
             logger.exception(str(e))
             raise e
@@ -129,64 +130,14 @@ class PrefillKVMoveManager:
 
         try:
             while True:
-                ret_obj: PrefillTransTaskRet = trans_process.task_out_queue.get()
-                with self.req_id_to_status_lock:
-                    if ret_obj.is_error:
-                        if ret_obj.request_id in self.req_id_to_status:
-                            req_status = self.req_id_to_status[ret_obj.request_id]
-                            req_status.is_error = True
-                            req_status.failed_count += 1
-                        else:
-                            logger.warning(
-                                f"task_ret_handle_loop no exist req id {ret_obj.request_id} in req_id_to_status"
-                            )
-                    else:
-                        if ret_obj.request_id in self.req_id_to_status:
-                            req_status = self.req_id_to_status[ret_obj.request_id]
-                            req_status.success_count += 1
-                        else:
-                            logger.warning(
-                                f"task_ret_handle_loop no exist req id {ret_obj.request_id} in req_id_to_status"
-                            )
-
-                    # 因为发生的传输错误进行退出
-                    if req_status.is_error and (req_status.success_count + req_status.failed_count) == len(
-                        req_status.chuncked_task_list
-                    ):
-                        self.realese_queue.put(ret_obj.request_id)
-
-                    # 该请求的所有传输任务都已经完成进行退出
-                    has_chunck = len(req_status.chuncked_task_list) > 0
-                    has_last_chunck = req_status.chuncked_task_list[-1].is_last_chunk
-                    all_chunck_finished = req_status.success_count == len(req_status.chuncked_task_list)
-                    no_error = not req_status.is_error
-                    if has_chunck and has_last_chunck and all_chunck_finished and no_error:
-                        self.realese_queue.put(ret_obj.request_id)
+                ret_obj: ChunckedTransTaskRet = trans_process.task_out_queue.get()
+                self.ret_obj_queue.put(ret_obj)
 
         except BaseException as e:
             logger.exception(str(e))
             raise e
 
-    # ==================================================================================
-    #  将完成或者因为出错导致可以进行释放的请求，通知给推理进程进行释放
-    # ==================================================================================
-    def task_release_loop(self):
-        try:
-            while True:
-                req_ids: List[int] = []
-                req_id = self.realese_queue.get()
-                req_ids.append(req_id)
-                while True:
-                    try:
-                        req_id = self.realese_queue.get_nowait()
-                        req_ids.append(req_id)
-                    except queue.Empty:
-                        break
 
-                self.shm_reqs_io_buffer.release_reqs(req_ids)
-        except (BaseException, RuntimeError) as e:
-            logger.exception(str(e))
-            raise e
 
     # ==================================================================================
     # 定时检测传输进程的健康状态，出现问题拉崩整个系统触发重启
@@ -211,11 +162,3 @@ class PrefillKVMoveManager:
             os.kill(os.getpid(), signal.SIGKILL)
             raise e
 
-
-@dataclasses
-class _ReqStatus:
-    request_id: int
-    is_error: bool = False  # 发生了传输错误
-    chuncked_task_list: List[NIXLChunckedTransTask] = dataclasses.field(default_factory=list)  # 该请求下发的所有传输任务
-    success_count: int = 0  # 成功传输的块的数量
-    failed_count: int = 0  # 失败传输的块的数量
