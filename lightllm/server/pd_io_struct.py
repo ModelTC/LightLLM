@@ -223,7 +223,10 @@ class KVMoveTaskGroup:
 
 
 ####### 下边是 NIXL模式下使用的特定对象 ########
-
+@dataclass
+class NIXLTransReq:
+    request_id: int
+    req_shm_idx: int
 
 @dataclass
 class NIXLChunckedTransTask:
