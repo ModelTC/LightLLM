@@ -275,7 +275,7 @@ class ChunckedTransTaskRet:
     request_id: int
     start_kv_index: int
     end_kv_index: int
-    is_error: bool
+    has_error: bool
     error_info: str = None
 
 
