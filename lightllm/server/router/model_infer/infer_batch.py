@@ -124,7 +124,7 @@ class InferenceContext:
         https://arxiv.org/abs/2403.01241
         """
         prompt_cache_token_id = list(self.radix_cache.root_node.children.values())[0].token_id_key
-        # print(f"prompt_cache_token_id : {prompt_cache_token_id}")
+        print(f"prompt_cache_token_id : {prompt_cache_token_id}")
         index = range(len(prompt_cache_token_id))
         prompt_cache_kv_buffer = self.radix_cache.mem_manager.get_index_kv_buffer(index)
         torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
