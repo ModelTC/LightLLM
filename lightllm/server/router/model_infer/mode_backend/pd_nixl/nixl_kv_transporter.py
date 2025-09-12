@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from collections import defaultdict
 from typing import Dict, List, Any, Optional, Tuple
 from torch import Tensor
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NixlAgentMetadata, ChunckedTransTaskRet
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NixlAgentMetadata, NIXLChunckedTransTaskRet
 from lightllm.utils.log_utils import init_logger
 
 
@@ -121,7 +121,7 @@ class NixlKVTransporter:
             remote_agent: NixlAgentMetadata = self.remote_agents[peer_name]
             src_handle = remote_agent.page_xfer_handles
             dst_handle = self.page_local_xfer_handles
-            notify_obj = ChunckedTransTaskRet(
+            notify_obj = NIXLChunckedTransTaskRet(
                 request_id=trans_task.request_id,
                 start_kv_index=trans_task.start_kv_index,
                 end_kv_index=trans_task.end_kv_index,

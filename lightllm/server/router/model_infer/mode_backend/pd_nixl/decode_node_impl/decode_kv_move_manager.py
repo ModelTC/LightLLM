@@ -3,7 +3,7 @@ import pickle
 import torch.multiprocessing as mp
 from typing import List, Dict, Optional, Tuple, Union, Callable
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import ChunckedTransTaskGroup, NIXLChunckedTransTask, NixlUpKVStatus, NIXLDecodeNodeInfo
+from lightllm.server.pd_io_struct import ChunckedTransTaskGroup
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.graceful_utils import graceful_registry
 from ..trans_process_obj import KVTransProcess

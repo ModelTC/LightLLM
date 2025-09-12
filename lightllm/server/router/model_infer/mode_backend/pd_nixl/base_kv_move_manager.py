@@ -6,7 +6,7 @@ import queue
 import torch.multiprocessing as mp
 from typing import List, Dict, Union, Callable, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import ChunckedTransTaskRet
+from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
@@ -66,8 +66,8 @@ class BaseKVMoveManager:
     def task_ret_upload_loop(self):
         try:
             while True:
-                ret_obj: ChunckedTransTaskRet = self.ret_obj_queue.get()
-                ret_objs: List[ChunckedTransTaskRet] = [ret_obj]
+                ret_obj: NIXLChunckedTransTaskRet = self.ret_obj_queue.get()
+                ret_objs: List[NIXLChunckedTransTaskRet] = [ret_obj]
                 ret_objs.extend(self._collect_return_objects())
                
                 while True:
@@ -103,7 +103,7 @@ class BaseKVMoveManager:
 
         try:
             while True:
-                ret_obj: ChunckedTransTaskRet = trans_process.task_out_queue.get()
+                ret_obj: NIXLChunckedTransTaskRet = trans_process.task_out_queue.get()
                 self.ret_obj_queue.put(ret_obj)
 
         except BaseException as e:
