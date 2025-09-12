@@ -5,7 +5,9 @@ import ujson as json
 import socket
 import httpx
 import base64
-from typing import Dict, Optional
+import weakref
+from typing import Dict, Optional, Union, List
+from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip
@@ -13,6 +15,8 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Master_Obj
+from lightllm.server.core.objs import StartArgs
+from lightllm.server.core.objs import SamplingParams
 
 logger = init_logger(__name__)
 
@@ -94,19 +98,37 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 转发任务
                 if manager.pd_mode != NodeRole.NP:  # nixl prefill don't need up token to master
                     forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
-
+                
+                group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
                 while True:
                     recv_bytes = await websocket.recv()
                     obj = pickle.loads(recv_bytes)
                     if obj[0] == ObjType.REQ:
                         prompt, sampling_params, multimodal_params = obj[1]
+                        group_req_id = sampling_params.group_req_id
+                        nixl_pd_event = asyncio.Event()
+                        group_req_id_to_event[group_req_id] = nixl_pd_event
                         asyncio.create_task(
-                            _pd_process_generate(manager, prompt, sampling_params, multimodal_params, forwarding_queue)
+                            _pd_process_generate(manager=manager,
+                                                 prompt=prompt,
+                                                 sampling_params=sampling_params,
+                                                 multimodal_params=multimodal_params,
+                                                 forwarding_queue=forwarding_queue,
+                                                 nixl_pd_upload_websocket=websocket,
+                                                 nixl_pd_event=nixl_pd_event)
                         )
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         await manager.abort(group_req_id)
+                    elif obj[0] == ObjType.NIXL_REQ_DECODE_NODE_INFO:
+                        _, group_req_id, decode_node_info = obj
+                        nixl_pd_event = group_req_id_to_event.pop(group_req_id, None)
+                        if nixl_pd_event is None:
+                            logger.error(f"error in find nixl_pd_event, info: {obj}")
+                            continue
+                        nixl_pd_event.decode_node_info = decode_node_info
+                        nixl_pd_event.set()
                     else:
                         logger.error(f"recevie error obj {str(obj)}")
 
@@ -127,7 +149,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.info("reconnection to pd_master")
 
 
-async def _get_pd_master_objs(args) -> Optional[Dict[int, PD_Master_Obj]]:
+async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_Obj]]:
     """
     get_pd_master_objs 主要负责从 pd master 获取所有的pd master对象。
     """
@@ -162,11 +184,22 @@ async def _get_pd_master_objs(args) -> Optional[Dict[int, PD_Master_Obj]]:
 
 # 触发推理的task
 async def _pd_process_generate(
-    manager: HttpServerManager, prompt, sampling_params, multimodal_params, forwarding_queue: AsyncQueue
+    manager: HttpServerManager,
+    prompt: Union[str, List[int]],
+    sampling_params: SamplingParams, 
+    multimodal_params: Dict, 
+    forwarding_queue: AsyncQueue,
+    nixl_pd_upload_websocket: ClientConnection,
+    nixl_pd_event: asyncio.Event,
 ):
     try:
         async for sub_req_id, request_output, metadata, finish_status in manager.generate(
-            prompt, sampling_params, multimodal_params, None
+            prompt=prompt,
+            sampling_params=sampling_params,
+            multimodal_params=multimodal_params,
+            request=None,
+            nixl_pd_upload_websocket=nixl_pd_upload_websocket,
+            nixl_pd_event=nixl_pd_event,
         ):
             # p d 模式下，将 token 数据放入到转发队列中, 请求id 小于0的请求是health探测请求，不用转发。
             is_health_check_req = sub_req_id < 0
@@ -178,7 +211,7 @@ async def _pd_process_generate(
 
 
 # 转发token的task
-async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket):
+async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: ClientConnection):
     while True:
         handle_list = await forwarding_queue.wait_to_get_all_data()
 
