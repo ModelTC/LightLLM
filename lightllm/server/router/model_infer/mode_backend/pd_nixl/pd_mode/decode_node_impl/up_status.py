@@ -5,9 +5,9 @@ import threading
 import websockets
 import inspect
 
-from typing import Dict
+from typing import Dict, Union
 from dataclasses import asdict
-from lightllm.server.pd_io_struct import UpKVStatus
+from lightllm.server.pd_io_struct import UpKVStatus, NixlUpKVStatus
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.pd_io_struct import PD_Master_Obj
@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 class UpStatusManager:
     def __init__(self, args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
         self.args = args
-        self.task_queue: mp.Queue[UpKVStatus] = task_in_queue
+        self.task_queue: mp.Queue[Union[UpKVStatus, NixlUpKVStatus]] = task_in_queue
         self.task_out_queue = task_out_queue
         self.daemon_thread = threading.Thread(target=self.thread_loop, daemon=True)
         self.daemon_thread.start()
@@ -87,7 +87,7 @@ class UpStatusManager:
                         try:
                             if pd_master_obj.node_id in self.id_to_handle_queue:
                                 task_queue = self.id_to_handle_queue[pd_master_obj.node_id]
-                                upkv_status: UpKVStatus = await task_queue.get()
+                                upkv_status: Union[UpKVStatus, NixlUpKVStatus] = await task_queue.get()
                                 await websocket.send(json.dumps(asdict(upkv_status)))
                                 logger.info(f"up status: {upkv_status}")
                             else:

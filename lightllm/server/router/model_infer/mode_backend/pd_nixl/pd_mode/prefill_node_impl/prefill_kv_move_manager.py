@@ -1,16 +1,12 @@
-import time
-import os
-import signal
-import threading
 import inspect
-import queue
-from typing import List, Dict, Union
-from lightllm.utils.log_utils import init_logger
 import torch.multiprocessing as mp
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskRet
+from typing import List, Dict, Union, Callable
+from lightllm.utils.log_utils import init_logger
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
-from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
+from ..trans_process_obj import KVTransProcess
+from ..base_kv_move_manager import BaseKVMoveManager
 
 logger = init_logger(__name__)
 
@@ -30,50 +26,24 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
-
-    manager = PrefillKVMoveManager(args, info_queue, mem_queues)
+    
+    from .prefill_trans_process import start_prefill_trans_process
+    manager = PrefillKVMoveManager(args=args, 
+                                   info_queue=info_queue,
+                                   mem_queues=mem_queues,
+                                   start_trans_process_func=start_prefill_trans_process)
     event.set()
     # 阻塞等待子线程退出
     manager.dispatch_task.join()
     return
 
 
-class PrefillKVMoveManager:
-    def __init__(self, args: StartArgs, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
-        self.args = args
-        # args.dp // args.nnodes 在跨机tp的场景下，可能为0
-        self.dp_size_in_node = max(1, args.dp // args.nnodes)
-        self.node_world_size = args.tp // args.nnodes
-        self.dp_world_size = args.tp // args.dp
-        # 不支持跨机tp的pd 分离策略
-        assert self.dp_world_size <= self.node_world_size
-
-        self.info_queue = info_queue
-        self.mem_queues = mem_queues
-        self.ret_obj_queue = queue.Queue()
-
-        from .prefill_trans_obj import KVTransProcess
-
-        self.kv_trans_processes: List[KVTransProcess] = [None] * self.node_world_size
-        for device_id in range(self.node_world_size):
-            self.kv_trans_processes[device_id] = KVTransProcess()
-            assert self.kv_trans_processes[device_id].init_all(device_id, self)
-        self.kv_trans_processes_ret_threads: List[threading.Thread] = [None] * self.node_world_size
-        for device_id in range(self.node_world_size):
-            kv_trans_process = self.kv_trans_processes[device_id]
-            self.kv_trans_processes_ret_threads[device_id] = threading.Thread(
-                target=self.task_ret_handle_loop, args=(kv_trans_process,), daemon=True
-            )
-            self.kv_trans_processes_ret_threads[device_id].start()
-
-        # 通过 io buffer 将命令写入到推理进程中
-        self.shm_nixl_trans_io_buffer = ShmObjsIOBuffer(tail_str="nixl")
-        self.dispatch_task = threading.Thread(target=self.task_dispatcher_loop, daemon=True)
-        self.dispatch_task.start()
-        self.release_task = threading.Thread(target=self.task_ret_upload_loop, daemon=True)
-        self.release_task.start()
-        self.check_task = threading.Thread(target=self.check_trans_process_loop, daemon=True)
-        self.check_task.start()
+class PrefillKVMoveManager(BaseKVMoveManager):
+    def __init__(self, args: StartArgs, info_queue: mp.Queue, mem_queues: List[mp.Queue], start_trans_process_func:Callable):
+        super().__init__(args=args,
+                         info_queue=info_queue,
+                         mem_queues=mem_queues,
+                         start_trans_process_func=start_trans_process_func)
         return
 
     # ==================================================================================
@@ -88,8 +58,6 @@ class PrefillKVMoveManager:
 
                 device_id = task.src_device_id
                 try:
-                    from .prefill_trans_obj import KVTransProcess
-
                     trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                     trans_process.task_in_queue.put(task)
                 except BaseException as e:
@@ -98,81 +66,3 @@ class PrefillKVMoveManager:
         except (BaseException, RuntimeError) as e:
             logger.exception(str(e))
             raise e
-        
-    # ==================================================================================
-    #  将收集到的传输返回信息，批量写回给推理进程，触发其进行相关管理信息的更新。
-    # ==================================================================================
-    def task_ret_upload_loop(self):
-        try:
-            while True:
-                ret_obj: ChunckedTransTaskRet = self.ret_obj_queue.get()
-                ret_objs: List[ChunckedTransTaskRet] = [ret_obj]
-                ret_objs.extend(self._collect_return_objects())
-               
-                while True:
-                    if self.shm_nixl_trans_io_buffer.is_empty():
-                        # to do, 这里写入的数量，可能会超过共享管道的大小。
-                        self.shm_nixl_trans_io_buffer.write_obj(ret_objs)
-                        self.shm_nixl_trans_io_buffer.set_ready()
-                        break
-                    else:
-                        time.sleep(0.01)
-                        ret_objs.extend(self._collect_return_objects())
-        
-        except (BaseException, RuntimeError) as e:
-            logger.exception(str(e))
-            raise e
-        
-    def _collect_return_objects(self):
-        """ 从队列中收集所有返回对象 """
-        ret_objs = []
-        try:
-            while True:
-                ret_obj = self.ret_obj_queue.get_nowait()
-                ret_objs.append(ret_obj)
-        except queue.Empty:
-            pass
-        return ret_objs
-
-    # ==================================================================================
-    # 处理各个传输任务的返回的信息
-    # ==================================================================================
-    def task_ret_handle_loop(self, trans_process):
-        from .prefill_trans_obj import KVTransProcess
-
-        trans_process: KVTransProcess = trans_process
-
-        try:
-            while True:
-                ret_obj: ChunckedTransTaskRet = trans_process.task_out_queue.get()
-                self.ret_obj_queue.put(ret_obj)
-
-        except BaseException as e:
-            logger.exception(str(e))
-            raise e
-
-
-
-    # ==================================================================================
-    # 定时检测传输进程的健康状态，出现问题拉崩整个系统触发重启
-    # ==================================================================================
-
-    def check_trans_process_loop(self):
-        try:
-            while True:
-                for device_id in range(self.node_world_size):
-                    if not self.kv_trans_processes[device_id].is_trans_process_health():
-                        raise Exception(f"device_id {device_id} kv process is unhealth")
-
-                time.sleep(10.0)
-        except (BaseException, RuntimeError) as e:
-            logger.exception(str(e))
-
-            for device_id in range(self.node_world_size):
-                self.kv_trans_processes[device_id].killself()
-
-            # 杀掉当前进程的父进程（router), 触发全局崩溃
-            os.kill(os.getppid(), signal.SIGKILL)
-            os.kill(os.getpid(), signal.SIGKILL)
-            raise e
-
