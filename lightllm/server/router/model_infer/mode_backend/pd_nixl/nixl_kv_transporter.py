@@ -107,6 +107,11 @@ class NixlKVTransporter:
         else:
             logger.warning(f"peer_name {peer_name} not exist")
         return
+    
+    def send_notify_to_prefill_node(self, peer_name: str, notify: bytes):
+        self.nixl_agent.send_notif(remote_agent_name=peer_name,
+                                   notif_msg=notify)
+        return
 
     def read_blocks_paged(
         self,

@@ -9,7 +9,8 @@ import pickle
 from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskRet
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskGroup, NIXLChunckedTransTaskRet, NixlUpKVStatus
+from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
@@ -99,49 +100,92 @@ class _DecodeTransModule:
     def transfer_loop(self):
         try:
             while True:
-                trans_task: NIXLChunckedTransTask = self.task_in_queue.get()
+                trans_task_group: NIXLChunckedTransTaskGroup = self.task_in_queue.get()
+                task = trans_task_group.task_list[0]
+                decode_node_info = NIXLDecodeNodeInfo(
+                    decode_node_id=self.args.pd_node_id,
+                    pd_master_node_id=task.pd_master_node_id,
+                    agent_name=self.transporter.agent_name,
+                    agent_metadata=self.transporter.agent_metadata,
+                    num_pages=self.transporter.num_pages,
+                    page_reg_desc=self.transporter.local_page_mem_desc,
+                    ready_kv_len=task.start_kv_index,
+                )
+
+                up_status = NixlUpKVStatus(
+                    group_request_id=task.request_id,
+                    pd_master_node_id=task.pd_master_node_id,
+                    nixl_params=pickle.dumps(decode_node_info)
+                )
+
+                self.up_status_in_queue.put(up_status)
+
                 with self.waiting_dict_lock:
-                    self.waiting_dict[trans_task.get_key()] = trans_task
+                    for task in trans_task_group.task_list:
+                        self.waiting_dict[task.get_key()] = task
 
         except BaseException as e:
             logger.exception(str(e))
             raise e
 
-    def update_task_status_loop(
+    def trans_kv_loop(
         self,
     ):
         torch.cuda.set_device(self.device_id)
         try:
             while True:
-                if len(self.waiting_dict) == 0:
-                    time.sleep(0.01)
-                    continue
                 
                 # notify update
                 notifies_dict = self.transporter.get_new_notifs()
-                if notifies_dict:
-                    for _, _notify_list in notifies_dict.items():
-                        for notify in _notify_list:
-                            try:
-                                notify_obj = pickle.loads(notify)
-                            except:
-                                notify_obj = None
+                if not notifies_dict:
+                    time.sleep(0.005)
+                    continue
+
+
+                for remote_agent_name, _notify_list in notifies_dict.items():
+                    for notify in _notify_list:
+                        try:
+                            notify_obj = pickle.loads(notify)
+                        except:
+                            notify_obj = None
+                    
+                    if isinstance(notify_obj, NIXLChunckedTransTask):
+                        remote_trans_task = notify_obj
+                        key = remote_trans_task.get_key()
+                        with self.waiting_dict_lock:
+                            local_trans_task = self.waiting_dict.get(key, None)
                         
-                        if isinstance(notify_obj, NIXLChunckedTransTask):
-                            remote_trans_task = notify_obj
-                            key = remote_trans_task.get_key()
-                            with self.waiting_dict_lock:
-                                local_trans_task = self.waiting_dict.get(key, None)
-                              
-                            if local_trans_task is not None:
-                                if  not notify_obj.has_error:
-                                    self._create_success_ret(trans_task=trans_task)
-                                else:
-                                    self._create_error_ret(trans_task=trans_task, error_info=notify_obj.error_info)
-                                
-                                # 回收 kv move page 页面
-                                self.page_index_queue.put(trans_task.nixl_src_page_index)
-                            else:
+                        if local_trans_task is None:
+                            self.transporter.send_notify_to_prefill_node(peer_name=remote_agent_name,
+                                                                            notify=pickle.dumps(remote_trans_task.createRetObj(has_error=True,
+                                                                                                                            error_info="decode node didnot find this task")))
+                            continue
+
+                        # to do 发起传输
+                        page_index = self.page_index_queue.get()
+                        local_trans_task.nixl_dst_page_index = page_index
+                        local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
+
+                        self.transporter.read_blocks_paged(peer_name=remote_agent_name, 
+                                                            trans_task=local_trans_task)
+                        local_trans_task.start_trans_time = time.time()
+
+        except BaseException as e:
+            logger.exception(str(e))
+            raise e
+        
+    def update_task_status_loop(
+        self,
+    ):
+        try:
+            while True:
+                if len(self.waiting_dict) == 0:
+                    time.sleep(0.01)
+                    continue
+
+                # check xfer state
+                with self.waiting_dict_lock:
+                    for key, trans_task in self.waiting_dict.items():
 
 
                 # check time_out update
@@ -155,31 +199,28 @@ class _DecodeTransModule:
                         trans_task = self.waiting_dict.pop(key, None)
                         if trans_task is not None:
                             self._create_error_ret(trans_task=trans_task, error_info="time out")
-                            self.page_index_queue.put(trans_task.nixl_src_page_index)
+                            if trans_task.nixl_dst_page_index is not None:
+                                self.page_index_queue.put(trans_task.nixl_dst_page_index)
+                            if trans_task.xfer_handle is not None:
+                                self.transporter.xxx
 
         except BaseException as e:
             logger.exception(str(e))
             raise e
 
     def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
-        ret_obj = NIXLChunckedTransTaskRet(
-            request_id=trans_task.request_id,
-            start_kv_index=trans_task.start_kv_index,
-            end_kv_index=trans_task.end_kv_index,
-            has_error=True,
-            error_info=error_info,
-        )
+        ret_obj = trans_task.createRetObj(
+                has_error=True,
+                error_info=error_info
+            )
         self.task_out_queue.put(ret_obj)
         logger.error(f"trans error in device id {self.device_id}: info {ret_obj}")
         return
 
     def _create_success_ret(self, trans_task: NIXLChunckedTransTask):
-        ret_obj = NIXLChunckedTransTaskRet(
-            request_id=trans_task.request_id,
-            start_kv_index=trans_task.start_kv_index,
-            end_kv_index=trans_task.end_kv_index,
+        ret_obj = trans_task.createRetObj(
             has_error=False,
-            error_info="",
+            error_info=None,
         )
         self.task_out_queue.put(ret_obj)
         logger.info(f"trans success in device id {self.device_id}: info {ret_obj}")
