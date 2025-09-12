@@ -114,6 +114,7 @@ class HttpServerManager:
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
 
+    # 唯一的一处给img id
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
 
         while True:
@@ -271,13 +272,21 @@ class HttpServerManager:
                 original_multimodal_params = copy.deepcopy(multimodal_params)
 
             if self.pd_mode.is_P_or_NORMAL():
+                print(f"[debug] generate verify_and_preload: {multimodal_params.to_dict()}")
                 await multimodal_params.verify_and_preload(request)
 
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
             # 监控
 
+            print(
+                f"[debug] generate request: {prompt}, \
+                sampling_params: {sampling_params.to_dict()}, \
+                multimodal_params: {multimodal_params.to_dict()}"
+            )
+            # 给img id
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+            print(f"[debug] generate prompt_ids: {prompt_ids}")
             prompt_tokens = len(prompt_ids)
             # 监控
             if group_request_id > 0:
@@ -394,6 +403,8 @@ class HttpServerManager:
                 if multimodal_params.audios:
                     assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                print(f"[debug] _encode: {prompt}, multimodal_params: {multimodal_params.to_dict()}")
+                print(f"[debug] model_name: {self.args.model_name}, model_path: {self.args.model_dir}")
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
                 )

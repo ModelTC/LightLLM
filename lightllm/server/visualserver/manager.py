@@ -33,9 +33,11 @@ class VisualManager:
         visual_model_rpc_ports,
     ):
         context = zmq.Context(2)
+        # 向下一模块（路由服务器或音频服务器）发送数据的 PUSH socket
         self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
         self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
 
+        # 从 HTTP 服务器接收数据的 PULL socket
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
         self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
@@ -45,6 +47,7 @@ class VisualManager:
         self.tp_world_size = args.tp
         self.vit_dp = args.visual_dp
         self.vit_tp = args.visual_tp
+        # visual server 的推理 batch size,默认为1
         self.infer_batch_size = args.visual_infer_batch_size
         self.trust_remote_code = args.trust_remote_code
         self.args = args
@@ -55,6 +58,7 @@ class VisualManager:
 
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
 
+        # 每个设备启动一个visual manager
         for dp_rank_id in range(self.vit_dp):
             tp_ports_each_dp = self.visual_model_rpc_ports[dp_rank_id]
             for tp_rank_id in range(self.vit_tp):
@@ -65,6 +69,7 @@ class VisualManager:
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
+        # 每个设备启动一个visual manager
         for dp_rank_id in range(self.vit_dp):  # async init model process
             for tp_rank_id in range(self.vit_tp):
                 kvargs = {
@@ -87,15 +92,19 @@ class VisualManager:
         await asyncio.gather(*init_model_ret)
         return
 
+    # 对图片进行推理
     async def infer_imgs(self, images: List[ImageItem]):
         if len(images) == 0:
             return
 
         tasks = []
+        # 进行dp方式的推理
         for vit_dp_rank in range(self.vit_dp):
             assigned_images = [images[i] for i in range(vit_dp_rank, len(images), self.vit_dp)]
             if assigned_images:
+                # 进行tp方式的推理
                 for vit_tp_rank in range(self.vit_tp):
+                    # 调用encode函数进行相应的推理
                     task = asyncio.create_task(self.model_rpcs[vit_dp_rank][vit_tp_rank].encode(assigned_images))
                     tasks.append(task)
 
@@ -110,9 +119,11 @@ class VisualManager:
                 processing_group_reqs = []
                 images_need_infer = []
                 while len(self.waiting_reqs) > 0:
+                    # 得到一个请求
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
                     is_aborted = shm_req.is_aborted
+                    # 将请求放回请求管理器
                     self.shm_req_manager.put_back_req_obj(shm_req)
                     if is_aborted:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
@@ -121,18 +132,25 @@ class VisualManager:
                         self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
                         continue
 
+                    # 得到相应的参数
                     multimodal_params = group_req_indexes.multimodal_params
 
+                    # 管理相应的请求数据
                     img_uuids = [img.uuid for img in multimodal_params.images]
+                    # 获取相应的数据
                     ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
 
+                    # 将img进行相应的推理
                     for img, ready in zip(multimodal_params.images, ready_image):
                         if not ready:
                             images_need_infer.append(img)
 
+                        # 按照batch size进行相应的推理
                         if len(images_need_infer) == self.infer_batch_size:
                             await self.infer_imgs(images_need_infer)
+                            # 完成推理，清空
                             images_need_infer = []
+                            # 将请求发送给下一个模块
                             for _group_req_indexes in processing_group_reqs:
                                 self.send_to_next_module.send_pyobj(
                                     _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
@@ -144,6 +162,7 @@ class VisualManager:
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
+                # 如果还有剩余的图片，则进行相应的推理
                 if len(images_need_infer) > 0:
                     await self.infer_imgs(images_need_infer)
                     for _group_req_indexes in processing_group_reqs:
@@ -151,12 +170,14 @@ class VisualManager:
                     processing_group_reqs = []
                     images_need_infer = []
 
+    # 接受请求放入waiting_reqs队列中
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):
             self.visual_recv_max_count = 64
 
         while True:
             try:
+                # 接受相应的请求
                 for _ in range(self.visual_recv_max_count):
                     recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
@@ -198,6 +219,8 @@ def start_visual_process(args, next_module_port, visual_port, cache_port, model_
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
+    # 创建一个循环进行相应的多模态推理
     loop.create_task(visualserver.loop_for_fwd())
+    # 创建一个循环进行相应的网络io请求
     loop.run_until_complete(visualserver.loop_for_netio_req())
     return
