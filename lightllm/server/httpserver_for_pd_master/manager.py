@@ -9,8 +9,8 @@ import pickle
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, UpKVStatus, NixlUpKVStatus, ObjType, NodeRole
-from lightllm.server.core.objs import SamplingParams
+from ..pd_io_struct import PD_Client_Obj, UpKVStatus, NixlUpKVStatus, ObjType, NodeRole, NIXLDecodeNodeInfo
+from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
 from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
@@ -28,8 +28,8 @@ logger = init_logger(__name__)
 class HttpServerManagerForPDMaster:
     def __init__(
         self,
-        args,
-        metric_port,
+        args : StartArgs,
+        metric_port: int,
     ):
         self.args = args
         self.metric_client = MetricClient(metric_port)
@@ -217,7 +217,7 @@ class HttpServerManagerForPDMaster:
         upkv_status: UpKVStatus = up_status_event.upkv_status
         sampling_params.suggested_dp_index = upkv_status.dp_index
 
-        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, multimodal_params))))
+        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams()))))
 
         while True:
             await req_status.wait_to_ready()
@@ -245,21 +245,34 @@ class HttpServerManagerForPDMaster:
         self.req_id_to_out_inf[group_request_id] = req_status
 
         up_status_event = req_status.up_status_event
-
-        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        nixl_np_up_prompt_ids_event = req_status.nixl_np_up_prompt_ids_event
+        
+        old_max_new_tokens = sampling_params.max_new_tokens
+        sampling_params.max_new_tokens = 1
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        
+        try:
+            await asyncio.wait_for(nixl_np_up_prompt_ids_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning(f"group_request_id: {group_request_id} wait np up prompt ids time out")
+            raise ServerBusyError()
+        
+        prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
+        
+        sampling_params.max_new_tokens = old_max_new_tokens
+        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams()))))
 
         try:
             await asyncio.wait_for(up_status_event.wait(), timeout=60)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
-
+        
+        # 将 decode 节点上报的当前请求使用的decode节点的信息下发给 p 节点，这样 p 节点才知道将 kv 传输给那个 d 节点。
         upkv_status: NixlUpKVStatus = up_status_event.upkv_status
         nixl_params: bytes = upkv_status.nixl_params
-        sampling_params.nixl_params.set(nixl_params)
-        sampling_params.max_new_tokens = 1
-
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        decode_node_info: NIXLDecodeNodeInfo = pickle.loads(nixl_params)
+        p_node.websocket.send_bytes(pickle.dumps((ObjType.NIXL_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info)))
 
         while True:
             await req_status.wait_to_ready()
@@ -404,6 +417,15 @@ class HttpServerManagerForPDMaster:
                                     req_status.event.set()
                             except:
                                 pass
+                    if obj[0] == ObjType.NIXL_UPLOAD_NP_PROMPT_IDS:
+                        _, group_req_id, prompt_ids = obj
+                        try:
+                            req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
+                            async with req_status.lock:
+                                req_status.nixl_np_up_prompt_ids_event.prompt_ids = prompt_ids
+                                req_status.nixl_np_up_prompt_ids_event.set()
+                        except:
+                            logger.error(f"NIXL_UPLOAD_NP_PROMPT_IDS fail find req status for group_req_id: {group_req_id}")
                     else:
                         logger.error(f"recevie error obj {obj}")
             except BaseException as e:
@@ -417,6 +439,7 @@ class ReqStatus:
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
         self.up_status_event = asyncio.Event()
+        self.nixl_np_up_prompt_ids_event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
@@ -444,8 +467,8 @@ class ReqStatus:
 
 
 class PDManager:
-    def __init__(self, args):
-        self.args = args
+    def __init__(self, args : StartArgs):
+        self.args : StartArgs = args
         self.prefill_nodes: List[PD_Client_Obj] = []
         self.decode_nodes: List[PD_Client_Obj] = []
         self.url_to_pd_nodes: Dict[str, PD_Client_Obj] = {}
