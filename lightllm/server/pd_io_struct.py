@@ -244,6 +244,9 @@ class NIXLChunckedTransTask:
     start_kv_index: int
     end_kv_index: int
 
+    is_first_chuncked : bool
+
+    pd_master_node_id : int
     prefill_dp_index: Optional[int]
     decode_dp_index: Optional[int]
     src_device_id: Optional[int]  # 传输设备 id

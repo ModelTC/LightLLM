@@ -1,22 +1,11 @@
-import time
-import rpyc
-import copy
-import uuid
-import numpy as np
-import psutil
 import threading
-from dataclasses import dataclass
-from typing import List, Dict, Union
-from lightllm.utils.log_utils import init_logger
+import psutil
 import torch.multiprocessing as mp
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask
-from rpyc.utils.classic import obtain
-from ..task_queue import TaskQueue
-from lightllm.utils.device_utils import kv_trans_use_p2p
-from lightllm.utils.time_utils import TimeChecker
-from .prefill_kv_move_manager import PrefillKVMoveManager
-from lightllm.utils.net_utils import find_available_port
-from ..utils import join_if_alive, clear_queue
+from typing import List, Callable
+from dataclasses import dataclass
+from lightllm.utils.log_utils import init_logger
+from lightllm.server.pd_io_struct import NixlAgentMetadata
+from .base_kv_move_manager import BaseKVMoveManager
 
 logger = init_logger(__name__)
 
@@ -27,17 +16,15 @@ class KVTransProcess:
     task_in_queue: mp.Queue = None
     task_out_queue: mp.Queue = None
     device_id: int = None
+    agent_meta_data: NixlAgentMetadata = None
 
-    def init_all(self, device_id: int, manager: "PrefillKVMoveManager"):
+    def init_all(self, device_id: int, manager: BaseKVMoveManager, start_func: Callable):
         self.device_id = device_id
-        self.device_lock = threading.Lock()
         self.task_in_queue = mp.Queue()
         self.task_out_queue = mp.Queue()
 
         try:
-            from .prefill_trans_process import start_prefill_trans_process
-
-            self.process = start_prefill_trans_process(
+            self.process = start_func(
                 manager.args,
                 device_id,
                 self.task_in_queue,
@@ -46,12 +33,19 @@ class KVTransProcess:
             )
             assert self.task_out_queue.get(timeout=30) == "proc_start"
             assert self.task_out_queue.get(timeout=60) == "get_mem_managers_ok"
-
+            agent_meta : NixlAgentMetadata = self.task_out_queue.get(timeout=30)
+            assert isinstance(agent_meta, NixlAgentMetadata)
+            self.agent_meta_data = agent_meta
             return True
+
         except Exception as e:
             logger.warning(f"Failed start kv trans process for device {device_id}: {e}")
             logger.exception(str(e))
             return False
+        
+    def start_ret_handle_thread(self, func):
+        self.ret_handle_tread = threading.Thread(target=func, args=(self,), daemon=True)
+        self.ret_handle_tread.start()
 
     def is_trans_process_health(self):
         try:
