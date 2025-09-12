@@ -3,7 +3,7 @@ import pickle
 import torch.multiprocessing as mp
 from typing import List, Dict, Optional, Tuple, Union, Callable
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import ChunckedTransTaskGroup
+from lightllm.server.pd_io_struct import NIXLChunckedTransTaskGroup
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.graceful_utils import graceful_registry
 from ..trans_process_obj import KVTransProcess
@@ -60,7 +60,7 @@ class DecodeKVMoveManager(BaseKVMoveManager):
         try:
             # 获取任务，并分发给相关卡的处理队列
             while True:
-                task_group:ChunckedTransTaskGroup = self.info_queue.get()
+                task_group:NIXLChunckedTransTaskGroup = self.info_queue.get()
                 device_id = task_group.task_list[0].dst_device_id
                 try:
                     trans_process: KVTransProcess = self.kv_trans_processes[device_id]
