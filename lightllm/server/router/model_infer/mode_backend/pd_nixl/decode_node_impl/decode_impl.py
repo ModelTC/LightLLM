@@ -1,6 +1,6 @@
 import random
 import torch.multiprocessing as mp
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskGroup
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskGroup
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, g_infer_state_lock
@@ -98,7 +98,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
         self.model.req_manager.req_to_token_indexs[req_obj.req_idx, req_obj.cur_kv_len:(req_obj.cur_kv_len + need_mem_size)] = mem_indexes
          
-        group = ChunckedTransTaskGroup() if self.is_master_in_dp else None
+        group = NIXLChunckedTransTaskGroup() if self.is_master_in_dp else None
 
         while req_obj.nixl_trans_kv_start_index < input_len:
             cur_page_size = min(page_size, input_len - req_obj.nixl_trans_kv_start_index)
@@ -119,7 +119,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             self.info_queue.put(group)
         return
     
-    def _create_nixl_trans_task(self, req_obj: InferReq, mem_indexes:List[int], kv_start_index: int, kv_end_index: int, group: ChunckedTransTaskGroup):
+    def _create_nixl_trans_task(self, req_obj: InferReq, mem_indexes:List[int], kv_start_index: int, kv_end_index: int, group: NIXLChunckedTransTaskGroup):
         if self.is_master_in_dp:
             # 确定传输设备
             if req_obj.nixl_trans_device_id == -1:
