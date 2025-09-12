@@ -1,24 +1,17 @@
-import os
-import torch
+import random
 import torch.multiprocessing as mp
-import torch.distributed as dist
-import threading
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, g_infer_state_lock
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.log_utils import init_logger
-from rpyc.utils.server import ThreadedServer
-from lightllm.common.basemodel.infer_lock import g_router_lock
-from .decode_task_cache import g_success_kv_move_task_cache, KVMoveTask
 from lightllm.utils.device_utils import kv_trans_use_p2p
-from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.dist_utils import create_new_group_for_current_dp
 
 logger = init_logger(__name__)
 
 
-class DecodeNode(ChunkedPrefillBackend):
+class NIXLDecodeNode(ChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
         super().__init__()
         self.info_queue: mp.Queue = info_queue
@@ -27,25 +20,14 @@ class DecodeNode(ChunkedPrefillBackend):
 
     def init_custom(self):
 
-        self.lock_nccl_group = create_new_group_for_current_dp("gloo")
-        logger.info(f"lock_nccl_group ranks {dist.get_rank(self.lock_nccl_group)}")
-
-        from .decode_infer_rpyc import PDDecodeInferRpcServer
-
-        socket_path = f"/tmp/{get_unique_server_name()}_decode_node_infer_rpyc_{self.pd_rpyc_ports[self.rank_in_node]}"
-        if os.path.exists(socket_path):
-            os.remove(socket_path)
-
-        t = ThreadedServer(
-            PDDecodeInferRpcServer(self), socket_path=socket_path, protocol_config={"allow_pickle": True}
-        )
-        threading.Thread(target=lambda: t.start(), daemon=True).start()
-
         if kv_trans_use_p2p():
             from ..p2p_fix import reduce_tensor
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 
+        # 将当前的内存管理器放入到队列中，供kv传输进程获取后使用
+        for _ in range(self.node_world_size):
+            self.mem_queue.put(self.model.mem_manager)
         return
 
     def _init_reqs(self, reqs: List[Tuple]):
@@ -73,21 +55,15 @@ class DecodeNode(ChunkedPrefillBackend):
         if len(uninit_reqs) == 0:
             return
 
-        remove_count = 0
-        estimated_peak_token_count = 0
         for req_obj in uninit_reqs:
             req_obj: InferReq = req_obj  # for easy typing
             request_id = req_obj.req_id
-            if request_id in g_success_kv_move_task_cache:
-                task, share_node, _ = g_success_kv_move_task_cache.pop(request_id)
-                task: KVMoveTask = task  # for easy typing
-                self.radix_cache.dec_node_ref_counter(share_node)
-                req_all_len = len(task.input_tokens) + task.decode_node.max_new_tokens
-                remove_count += req_all_len
-                estimated_peak_token_count += req_all_len
+            if request_id > 0:
                 req_obj._match_radix_cache()
+                # 构建 chuncked trans task
+                self._decode_node_gen_trans_tasks(req_obj=req_obj)
             else:
-                # 对于不合法的请求，直接模拟将其finished掉
+                # 对于不合法的请求， 主要是health请求，直接模拟将其finished掉
                 req_obj.cur_output_len += 1
                 req_obj.set_next_gen_token_id(0, 0.0, 1)
                 req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
@@ -101,9 +77,65 @@ class DecodeNode(ChunkedPrefillBackend):
 
                     req_id = req_obj.shm_req.request_id
                     logger.error(f"req_id: {req_id} forced to finished, it not in g_success_kv_move_task_cache")
-
-        if self.is_master_in_dp:
-            with g_router_lock.obj:
-                self.shared_token_load.add_frozened_token_count(-remove_count, self.dp_rank_in_node)
-                self.shared_token_load.add_estimated_peak_token_count(estimated_peak_token_count, self.dp_rank_in_node)
         return
+    
+    def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
+        """
+        decode node 生成所有的传输任务对象。
+        """
+        # 传输的 kv 要少一个，不然decode 无法有下一个输入除非推理出下一个token
+        input_len = req_obj.shm_req.input_len - 1
+        page_size = self.args.nixl_pd_kv_page_size
+        req_obj.nixl_trans_kv_start_index = req_obj.cur_kv_len
+        
+        need_mem_size = input_len - req_obj.cur_kv_len
+        if need_mem_size <= 0:
+            return
+        
+        if self.radix_cache is not None:
+            self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
+        
+        mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
+        self.model.req_manager.req_to_token_indexs[req_obj.req_idx, req_obj.cur_kv_len:(req_obj.cur_kv_len + need_mem_size)] = mem_indexes
+
+        while req_obj.nixl_trans_kv_start_index < input_len:
+            cur_page_size = min(page_size, input_len - req_obj.nixl_trans_kv_start_index)
+            # 生成页面传输任务， 放入kv move manager 的处理队列中
+            start_index = req_obj.nixl_trans_kv_start_index
+            end_index = req_obj.nixl_trans_kv_start_index + cur_page_size
+            is_first = start_index == req_obj.cur_kv_len
+            page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
+            self._create_nixl_trans_task(req_obj=req_obj,
+                                         mem_indexes=page_mem_indexes.tolist(),
+                                         kv_start_index=start_index,
+                                         kv_end_index=end_index,
+                                         is_first_task=is_first)
+            # update
+            req_obj.nixl_trans_kv_start_index += cur_page_size
+            req_obj.nixl_pd_task_num += 1
+        return
+    
+    def _create_nixl_trans_task(self, req_obj: InferReq, mem_indexes:List[int], kv_start_index: int, kv_end_index: int, is_first_task: bool):
+        if self.is_master_in_dp:
+            # 确定传输设备
+            if req_obj.nixl_trans_device_id == -1:
+                req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
+            
+            trans_task = NIXLChunckedTransTask(request_id=req_obj.req_id,
+                                  start_kv_index=kv_start_index,
+                                  end_kv_index=kv_end_index,
+                                  is_first_chuncked=is_first_task,
+                                  prefill_dp_index=None,
+                                  decode_dp_index=self.dp_rank_in_node,
+                                  src_device_id=None,
+                                  dst_device_id=req_obj.nixl_trans_device_id,
+                                  mem_indexes=mem_indexes,
+                                  peer_agent_name=None,
+                                  peer_agent_metadata=None,
+                                  peer_num_pages=None,
+                                  peer_page_req_desc=None,
+                                  peer_page_xfer_handles=None,
+                                  nixl_src_page_index=None,
+                                  nixl_dst_page_index=None
+                                  )
+            self.info_queue.put(trans_task)
