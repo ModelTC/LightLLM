@@ -13,14 +13,15 @@ from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
+from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
-from ..pd_io_struct import NodeRole
+from ..pd_io_struct import NodeRole, ObjType, NIXLDecodeNodeInfo
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
-from lightllm.server.core.objs import Req, FinishStatus
+from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
@@ -40,7 +41,7 @@ logger = init_logger(__name__)
 class HttpServerManager:
     def __init__(
         self,
-        args,
+        args: StartArgs,
         router_port,
         cache_port,
         detokenization_pub_port,
@@ -48,7 +49,7 @@ class HttpServerManager:
         metric_port,
         enable_multimodal,
     ):
-        self.args = args
+        self.args : StartArgs = args
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
@@ -260,6 +261,9 @@ class HttpServerManager:
         multimodal_params: MultimodalParams,
         request: Request,
         is_health_req: bool = False,
+        # 该参数只会在 nixl pd mode 中使用，用于一些信息给 pd_master
+        nixl_pd_upload_websocket: ClientConnection = None, 
+        nixl_pd_event: asyncio.Event = None,  # 用于等待 pd_master 下发的交换信息
     ) -> Tuple[int, str, dict, FinishStatus]:
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
@@ -278,6 +282,22 @@ class HttpServerManager:
             # 监控
 
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+
+            if nixl_pd_upload_websocket is not None and not is_health_req and self.pd_mode.is_NP():
+                # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
+                # 在等待 pd_master 传输下来的对应的进行 decode 节点的decode信息，然后再执行后续的推理。
+                logger.info(f"nixl np node upload_websocket upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}")
+                await nixl_pd_upload_websocket.send(pickle.dumps((ObjType.NIXL_UPLOAD_NP_PROMPT_IDS, group_request_id, prompt_ids)))
+                try:
+                    await asyncio.wait_for(nixl_pd_event.wait(), timeout=36)
+                except asyncio.TimeoutError:
+                    logger.error(f"nixl np node wait nixl_pd_event 36s time out, group_req_id {group_request_id}")
+                    raise Exception(f"group_req_id {group_request_id} wait nixl_pd_event time out")
+                
+                decode_node_info : NIXLDecodeNodeInfo = nixl_pd_event.decode_node_info
+                assert sampling_params.nixl_params.data_len == 0
+                sampling_params.nixl_params.set(pickle.dumps(decode_node_info))
+
             prompt_tokens = len(prompt_ids)
             # 监控
             if group_request_id > 0:

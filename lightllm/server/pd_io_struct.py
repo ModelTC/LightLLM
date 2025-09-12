@@ -25,6 +25,12 @@ class NodeRole(enum.Enum):
 
     def is_P(self):
         return self == NodeRole.P or self == NodeRole.NP
+    
+    def is_NP(self):
+        return self == NodeRole.NP
+    
+    def is_ND(self):
+        return self == NodeRole.ND
 
     def is_normal(self):
         return self == NodeRole.NORMAL
@@ -43,6 +49,8 @@ class ObjType(enum.Enum):
     ABORT = 1
     REQ = 2
     TOKEN_PACKS = 3
+    NIXL_UPLOAD_NP_PROMPT_IDS = 4 # nixl p 节点上报生成的 prompt ids 信息。
+    NIXL_REQ_DECODE_NODE_INFO = 5 # nixl pd master 节点下发给 nixl p 节点的对应请求对应的 d 节点的信息。
 
 
 @dataclass
