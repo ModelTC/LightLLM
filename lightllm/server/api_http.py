@@ -49,6 +49,7 @@ from lightllm.utils.error_utils import ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
+from lightllm.server.core.objs.start_args_type import StartArgs
 
 from .api_openai import chat_completions_impl, completions_impl
 from .api_models import (
@@ -66,7 +67,7 @@ logger = init_logger(__name__)
 class G_Objs:
     app: FastAPI = None
     metric_client: MetricClient = None
-    args: object = None
+    args: StartArgs = None
     g_generate_func: Callable = None
     g_generate_stream_func: Callable = None
     httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster] = None
