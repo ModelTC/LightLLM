@@ -21,6 +21,7 @@ class StartArgs:
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
     pd_decode_rpyc_port: int = field(default=42000)
+    select_p_d_node_strategy: str = field(default=None)
     model_name: str = field(default="default_model_name")
     model_dir: Optional[str] = field(default=None)
     tokenizer_mode: str = field(default="slow")
