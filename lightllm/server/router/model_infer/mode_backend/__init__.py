@@ -14,7 +14,7 @@ from .continues_batch.pd_mode.decode_node_impl.decode_impl import DecodeNode
 from .continues_batch.pd_mode.decode_node_impl.decode_impl_for_dp import DPForDecodeNode
 from .continues_batch.pd_mode.prefill_node_impl.prefill_impl import ChunckedPrefillForPrefillNode
 from .continues_batch.pd_mode.prefill_node_impl.prefill_impl_for_dp import DPChunkedForPrefillNode
-from .pd_nixl.impl_for_pd_prefill import PDNIXLBackendForPrefillNode
-from .pd_nixl.impl_for_pd_decode import PDNIXLBackendForDecodeNode
-from .pd_nixl.impl_for_pd_decode_dp import PDNIXLDPBackendForDecodeNode
-from .pd_nixl.impl_for_pd_prefill_dp import PDNIXLDPBackendForPrefillNode
+from .pd_nixl.prefill_node_impl.prefill_impl import NIXLChunckedPrefillForPrefillNode
+from .pd_nixl.prefill_node_impl.prefill_impl_for_dp import NIXLDPChunkedForPrefillNode
+from .pd_nixl.decode_node_impl.decode_impl import NIXLDecodeNode
+from .pd_nixl.decode_node_impl.decode_impl_for_dp import NIXLDPForDecodeNode
