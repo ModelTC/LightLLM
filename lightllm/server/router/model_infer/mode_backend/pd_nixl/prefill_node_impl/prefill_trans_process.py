@@ -9,7 +9,7 @@ import pickle
 from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskRet
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskRet
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
@@ -144,7 +144,7 @@ class _PrefillTransModule:
                             except:
                                 notify_obj = None
                         
-                        if isinstance(notify_obj, ChunckedTransTaskRet):
+                        if isinstance(notify_obj, NIXLChunckedTransTaskRet):
                             key = notify_obj.get_key()
                             with self.waiting_dict_lock:
                                 trans_task = self.waiting_dict.pop(key, None)

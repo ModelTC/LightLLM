@@ -296,8 +296,8 @@ class NIXLChunckedTransTask:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
     
 
-    def createRetObj(self, has_error:bool, error_info:Optional[str] = None) -> "ChunckedTransTaskRet":
-        return ChunckedTransTaskRet(
+    def createRetObj(self, has_error:bool, error_info:Optional[str] = None) -> "NIXLChunckedTransTaskRet":
+        return NIXLChunckedTransTaskRet(
             request_id=self.request_id,
             start_kv_index=self.start_kv_index,
             end_kv_index=self.end_kv_index,
@@ -308,7 +308,7 @@ class NIXLChunckedTransTask:
 
 
 @dataclass
-class ChunckedTransTaskRet:
+class NIXLChunckedTransTaskRet:
     request_id: int
     start_kv_index: int
     end_kv_index: int
@@ -320,6 +320,6 @@ class ChunckedTransTaskRet:
     
 
 @dataclass
-class ChunckedTransTaskGroup:
+class NIXLChunckedTransTaskGroup:
     task_list: List[NIXLChunckedTransTask] = field(default_factory=list)
 

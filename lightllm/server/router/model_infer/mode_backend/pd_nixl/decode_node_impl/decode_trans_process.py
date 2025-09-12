@@ -9,7 +9,7 @@ import pickle
 from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskRet
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskRet
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
@@ -162,7 +162,7 @@ class _DecodeTransModule:
             raise e
 
     def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
-        ret_obj = ChunckedTransTaskRet(
+        ret_obj = NIXLChunckedTransTaskRet(
             request_id=trans_task.request_id,
             start_kv_index=trans_task.start_kv_index,
             end_kv_index=trans_task.end_kv_index,
@@ -174,7 +174,7 @@ class _DecodeTransModule:
         return
 
     def _create_success_ret(self, trans_task: NIXLChunckedTransTask):
-        ret_obj = ChunckedTransTaskRet(
+        ret_obj = NIXLChunckedTransTaskRet(
             request_id=trans_task.request_id,
             start_kv_index=trans_task.start_kv_index,
             end_kv_index=trans_task.end_kv_index,

@@ -31,7 +31,7 @@ from lightllm.distributed import dist_group_manager
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from lightllm.server.pd_io_struct import ChunckedTransTaskRet
+from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 
 
 class ModeBackend:
@@ -353,7 +353,7 @@ class ModeBackend:
     
 
     def _read_nixl_trans_io_buffer_and_update_req_status(self):
-        cmds: List[ChunckedTransTaskRet] = self.shm_nixl_trans_io_buffer.read_obj()
+        cmds: List[NIXLChunckedTransTaskRet] = self.shm_nixl_trans_io_buffer.read_obj()
         self.shm_nixl_trans_io_buffer.sub_state()
         if cmds:
             for obj in cmds:
