@@ -176,24 +176,18 @@ class _PrefillTransModule:
             raise e
 
     def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
-        ret_obj = ChunckedTransTaskRet(
-            request_id=trans_task.request_id,
-            start_kv_index=trans_task.start_kv_index,
-            end_kv_index=trans_task.end_kv_index,
-            has_error=True,
-            error_info=error_info,
-        )
+        ret_obj = trans_task.createRetObj(
+                has_error=True,
+                error_info=error_info
+            )
         self.task_out_queue.put(ret_obj)
         logger.error(f"trans error in device id {self.device_id}: info {ret_obj}")
         return
 
     def _create_success_ret(self, trans_task: NIXLChunckedTransTask):
-        ret_obj = ChunckedTransTaskRet(
-            request_id=trans_task.request_id,
-            start_kv_index=trans_task.start_kv_index,
-            end_kv_index=trans_task.end_kv_index,
+        ret_obj = trans_task.createRetObj(
             has_error=False,
-            error_info="",
+            error_info=None,
         )
         self.task_out_queue.put(ret_obj)
         logger.info(f"trans success in device id {self.device_id}: info {ret_obj}")

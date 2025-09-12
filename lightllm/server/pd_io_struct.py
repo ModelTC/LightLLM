@@ -295,6 +295,9 @@ class NIXLChunckedTransTask:
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
     
+    def to_str(self) -> str:
+        return f"trans task req id {self.request_id} start {self.start_kv_index} end {self.end_kv_index}"
+    
 
     def createRetObj(self, has_error:bool, error_info:Optional[str] = None) -> "NIXLChunckedTransTaskRet":
         return NIXLChunckedTransTaskRet(
