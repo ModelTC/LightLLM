@@ -1,7 +1,7 @@
 import threading
 import psutil
 import torch.multiprocessing as mp
-from typing import List, Callable
+from typing import List, Callable, Optional
 from dataclasses import dataclass
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.pd_io_struct import NixlAgentMetadata
@@ -16,9 +16,8 @@ class KVTransProcess:
     task_in_queue: mp.Queue = None
     task_out_queue: mp.Queue = None
     device_id: int = None
-    agent_meta_data: NixlAgentMetadata = None
 
-    def init_all(self, device_id: int, manager: BaseKVMoveManager, start_func: Callable):
+    def init_all(self, device_id: int, manager: BaseKVMoveManager, start_func: Callable, up_status_in_queue: Optional[mp.SimpleQueue]):
         self.device_id = device_id
         self.task_in_queue = mp.Queue()
         self.task_out_queue = mp.Queue()
@@ -30,12 +29,11 @@ class KVTransProcess:
                 self.task_in_queue,
                 self.task_out_queue,
                 manager.mem_queues,
+                up_status_in_queue,
             )
             assert self.task_out_queue.get(timeout=30) == "proc_start"
             assert self.task_out_queue.get(timeout=60) == "get_mem_managers_ok"
-            agent_meta : NixlAgentMetadata = self.task_out_queue.get(timeout=30)
-            assert isinstance(agent_meta, NixlAgentMetadata)
-            self.agent_meta_data = agent_meta
+            
             return True
 
         except Exception as e:

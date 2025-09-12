@@ -17,10 +17,9 @@ logger = init_logger(__name__)
 
 
 class UpStatusManager:
-    def __init__(self, args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
+    def __init__(self, args, task_in_queue: mp.SimpleQueue):
         self.args = args
-        self.task_queue: mp.Queue[Union[UpKVStatus, NixlUpKVStatus]] = task_in_queue
-        self.task_out_queue = task_out_queue
+        self.task_queue: mp.SimpleQueue[Union[UpKVStatus, NixlUpKVStatus]] = task_in_queue
         self.daemon_thread = threading.Thread(target=self.thread_loop, daemon=True)
         self.daemon_thread.start()
 
@@ -106,17 +105,17 @@ class UpStatusManager:
                 logger.info("reconnection to pd_master")
 
 
-def _init_env(args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
+def _init_env(args, task_in_queue: mp.SimpleQueue):
     graceful_registry(inspect.currentframe().f_code.co_name)
-    up_kv_manager = UpStatusManager(args, task_in_queue, task_out_queue)
+    up_kv_manager = UpStatusManager(args, task_in_queue)
     logger.info(f"up kv manager {str(up_kv_manager)} start ok")
     while True:
         time.sleep(666)
     return
 
 
-def start_up_kv_status_process(args, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
-    proc = mp.Process(target=_init_env, args=(args, task_in_queue, task_out_queue))
+def start_up_kv_status_process(args, task_in_queue: mp.SimpleQueue):
+    proc = mp.Process(target=_init_env, args=(args, task_in_queue))
     proc.start()
     assert proc.is_alive()
     logger.info("up_kv_status_process start")

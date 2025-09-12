@@ -6,7 +6,7 @@ import torch.multiprocessing as mp
 import collections
 import queue
 import pickle
-from typing import List, Dict, Union, Deque
+from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskRet
@@ -25,6 +25,7 @@ def start_prefill_trans_process(
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
     mem_queues: List[mp.Queue],
+    up_status_in_queue: Optional[mp.SimpleQueue] = None
 ):
     proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, mem_queues))
     proc.start()
@@ -51,7 +52,11 @@ def _init_env(
         mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
         task_out_queue.put("get_mem_managers_ok")
 
-        manager = _PrefillTransModule(args, device_id, task_in_queue, task_out_queue, mem_managers)
+        manager = _PrefillTransModule(args=args,
+                                      device_id=device_id,
+                                      task_in_queue=task_in_queue,
+                                      task_out_queue=task_out_queue,
+                                      mem_managers=mem_managers)
         manager.transfer_loop()
 
     except Exception as e:
@@ -84,16 +89,9 @@ class _PrefillTransModule:
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
 
-        self._create_nixl_agent()
-
         self.update_status_thread = threading.Thread(target=self.update_task_status_loop, daemon=True)
         self.update_status_thread.start()
         return
-
-    def _create_nixl_agent(self):
-        from ..nixl_kv_transporter import NixlKVTransporter
-
-        self.nixl_agent = NixlKVTransporter(self.args, self.device_id)
 
     def transfer_loop(self):
         try:

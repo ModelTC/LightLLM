@@ -244,8 +244,6 @@ class NIXLChunckedTransTask:
     start_kv_index: int
     end_kv_index: int
 
-    is_first_chuncked : bool
-
     pd_master_node_id : int
     prefill_dp_index: Optional[int]
     decode_dp_index: Optional[int]
@@ -296,6 +294,17 @@ class NIXLChunckedTransTask:
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
+    
+
+    def createRetObj(self, has_error:bool, error_info:Optional[str] = None) -> "ChunckedTransTaskRet":
+        return ChunckedTransTaskRet(
+            request_id=self.request_id,
+            start_kv_index=self.start_kv_index,
+            end_kv_index=self.end_kv_index,
+            has_error=has_error,
+            error_info=error_info,
+        )
+
 
 
 @dataclass
@@ -308,3 +317,9 @@ class ChunckedTransTaskRet:
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
+    
+
+@dataclass
+class ChunckedTransTaskGroup:
+    task_list: List[NIXLChunckedTransTask] = field(default_factory=list)
+
