@@ -1,3 +1,7 @@
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
+
 class ServerBusyError(Exception):
     """Custom exception for server busy/overload situations"""
 
@@ -16,3 +20,14 @@ class ServerBusyError(Exception):
     def __str__(self):
         """String representation of the error"""
         return f"{self.message} (Status code: {self.status_code})"
+
+def log_exception(func):
+    def wrapper(*args, **kwargs):
+        try:
+            result = func(*args, **kwargs)
+        except BaseException as e:
+            logger.exception(str(e))
+            raise e
+        return result
+
+    return wrapper

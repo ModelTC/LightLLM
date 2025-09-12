@@ -117,7 +117,7 @@ class NixlKVTransporter:
         self,
         peer_name: str,
         trans_task: NIXLChunckedTransTask,
-    ):
+    ) -> int:
         """
         decode node call this function to read kv blocks from prefill node
         """
@@ -142,8 +142,7 @@ class NixlKVTransporter:
                 pickle.dumps(notify_obj),
             )
             self.nixl_agent.transfer(handle)
-            trans_task.xfer_handle = handle
-        return
+        return handle
 
     def check_task_status(self, trans_task: NIXLChunckedTransTask) -> str:
         if trans_task.xfer_handle is not None:
