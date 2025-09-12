@@ -47,14 +47,12 @@ class ModelRpcServer:
         rpc_event: multiprocessing.Event,
         rpc_finished_event: multiprocessing.Event,
         info_queue: mp.Queue,
-        result_queue: mp.Queue,
         mem_queue: mp.Queue,
     ):
         super().__init__()
         self.args: StartArgs = args
         self.node_world_size = node_world_size
         self.info_queue = info_queue
-        self.result_queue = result_queue
         self.mem_queue = mem_queue
         self.rpc_event = rpc_event
         self.rpc_finished_event = rpc_finished_event
@@ -220,7 +218,6 @@ def _init_env(
     rank_in_node,
     node_world_size,
     info_queue,
-    result_queue,
     mem_queue,
     router_lock,
     rpc_event: mp.Event,
@@ -240,7 +237,7 @@ def _init_env(
     g_router_lock.obj = router_lock
 
     model_rpc_server = ModelRpcServer(
-        args, rank, rank_in_node, node_world_size, rpc_event, rpc_finished_event, info_queue, result_queue, mem_queue
+        args, rank, rank_in_node, node_world_size, rpc_event, rpc_finished_event, info_queue, mem_queue
     )
     success_event.set()
 
@@ -256,7 +253,6 @@ async def start_model_process(
     rpc_event,
     rpc_finished_event,
     info_queue: mp.Queue,
-    result_queue: mp.Queue,
     mem_queue: mp.Queue,
     router_lock: mp.Queue,
 ):
@@ -271,7 +267,6 @@ async def start_model_process(
             rank_in_node,
             node_world_size,
             info_queue,
-            result_queue,
             mem_queue,
             router_lock,
             rpc_event,
