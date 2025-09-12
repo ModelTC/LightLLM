@@ -1,6 +1,6 @@
 import random
 import torch.multiprocessing as mp
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskGroup
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, g_infer_state_lock
@@ -97,25 +97,29 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         
         mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
         self.model.req_manager.req_to_token_indexs[req_obj.req_idx, req_obj.cur_kv_len:(req_obj.cur_kv_len + need_mem_size)] = mem_indexes
+         
+        group = ChunckedTransTaskGroup() if self.is_master_in_dp else None
 
         while req_obj.nixl_trans_kv_start_index < input_len:
             cur_page_size = min(page_size, input_len - req_obj.nixl_trans_kv_start_index)
             # 生成页面传输任务， 放入kv move manager 的处理队列中
             start_index = req_obj.nixl_trans_kv_start_index
             end_index = req_obj.nixl_trans_kv_start_index + cur_page_size
-            is_first = start_index == req_obj.cur_kv_len
             page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
             self._create_nixl_trans_task(req_obj=req_obj,
                                          mem_indexes=page_mem_indexes.tolist(),
                                          kv_start_index=start_index,
                                          kv_end_index=end_index,
-                                         is_first_task=is_first)
+                                         group=group)
             # update
             req_obj.nixl_trans_kv_start_index += cur_page_size
             req_obj.nixl_pd_task_num += 1
+        
+        if self.is_master_in_dp:
+            self.info_queue.put(group)
         return
     
-    def _create_nixl_trans_task(self, req_obj: InferReq, mem_indexes:List[int], kv_start_index: int, kv_end_index: int, is_first_task: bool):
+    def _create_nixl_trans_task(self, req_obj: InferReq, mem_indexes:List[int], kv_start_index: int, kv_end_index: int, group: ChunckedTransTaskGroup):
         if self.is_master_in_dp:
             # 确定传输设备
             if req_obj.nixl_trans_device_id == -1:
@@ -124,7 +128,6 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             trans_task = NIXLChunckedTransTask(request_id=req_obj.req_id,
                                   start_kv_index=kv_start_index,
                                   end_kv_index=kv_end_index,
-                                  is_first_chuncked=is_first_task,
                                   prefill_dp_index=None,
                                   decode_dp_index=self.dp_rank_in_node,
                                   src_device_id=None,
@@ -138,4 +141,6 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                                   nixl_src_page_index=None,
                                   nixl_dst_page_index=None
                                   )
-            self.info_queue.put(trans_task)
+            if group is not None:
+                group.task_list.append(trans_task)
+            return

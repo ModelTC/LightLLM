@@ -1,146 +1,186 @@
 import torch
 import time
-import sys
 import inspect
 import threading
 import torch.multiprocessing as mp
-from torch.distributed import TCPStore
-from datetime import timedelta
-from typing import List, Dict, Union
+import collections
+import queue
+import pickle
+from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import KVMoveTask, PDTransJoinInfo, PDTransLeaveInfo, KVMoveTaskGroup
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, ChunckedTransTaskRet
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
-from lightllm.distributed.pynccl import PyNcclCommunicator, StatelessP2PProcessGroup
+from lightllm.server.core.objs import StartArgs
+from ..nixl_kv_transporter import NixlKVTransporter
+
 
 logger = init_logger(__name__)
 
 
-def _handle_kvmove_task(
-    move_tasks: List[KVMoveTask],
-    task_out_queue: mp.Queue,
-    mem_managers: List[MemoryManager],
-    connect_id_to_comm: Dict[str, PyNcclCommunicator],
-    connect_id: str,
-    dp_size_in_node: int,
-):
-    total_move_kv_len = sum([task.move_kv_len for task in move_tasks])
-    try:
-        device_index = connect_id_to_comm[connect_id].device.index
-        start = time.time()
-        if total_move_kv_len != 0:
-            cur_mem = mem_managers[device_index]
-            logger.info(f"trans start: {move_tasks[0].to_decode_log_info()}")
-            if kv_trans_use_p2p():
-                cur_mem.receive_from_prefill_node_p2p(
-                    move_tasks, mem_managers, dp_size_in_node, connect_id_to_comm[connect_id]
-                )
-            else:
-                cur_mem.receive_from_prefill_node(
-                    move_tasks, mem_managers, dp_size_in_node, connect_id_to_comm[connect_id]
-                )
-            logger.info(f"trans finished: {move_tasks[0].to_decode_log_info()} move len: {total_move_kv_len}")
-        torch.cuda.synchronize()
-        logger.info(f"trans cost time: {(time.time() - start)}, {move_tasks[0].to_decode_log_info()}")
-        task_out_queue.put("ok")
-    except BaseException as e:
-        logger.exception(str(e))
-        task_out_queue.put("fail")
-        raise e
-
-
-def _handle_prefill_join(
-    node_info: PDTransJoinInfo, task_out_queue: mp.Queue, connect_id_to_comm: Dict[str, PyNcclCommunicator]
-):
-    try:
-        logger.info(f"connect start {node_info}")
-        store_client = TCPStore(
-            host_name=node_info.pd_prefill_nccl_ip,
-            port=node_info.pd_prefill_nccl_port,
-            is_master=False,
-            use_libuv=True,
-            timeout=timedelta(seconds=30),
-        )
-        src_id = node_info.prefill_id
-        dest_id = node_info.connect_id
-        logger.info(f"connect src_id {src_id} dest_id {dest_id}")
-
-        result_list = []
-
-        def async_connect():
-            torch.cuda.set_device(node_info.decode_device_id)
-            group = StatelessP2PProcessGroup.create(src_id=src_id, dest_id=dest_id, is_server=False, store=store_client)
-            comm = PyNcclCommunicator(group, node_info.decode_device_id)
-            result_list.append(comm)
-            return
-
-        connect_task = threading.Thread(target=async_connect, daemon=True)
-        connect_task.start()
-        connect_task.join(timeout=36)
-        if connect_task.is_alive():
-            raise Exception(f"{node_info} connect time out")
-
-        connect_id_to_comm[node_info.connect_id] = result_list[0]
-        logger.info(f"{node_info} kv trans connected")
-        task_out_queue.put("nccl_ok")
-    except Exception as e:
-        task_out_queue.put("nccl_fail")
-        logger.warning(f"error while connect to prefill node: {e}")
-
-
-def _init_env(args, device_id: int, task_in_queue: mp.Queue, task_out_queue: mp.Queue, mem_queues: List[mp.Queue]):
-    import os
-
-    # os.environ["NCCL_DEBUG"] = "INFO"
-    os.environ["NCCL_MAX_NCHANNELS"] = "2"
-    os.environ["NCCL_NSOCKS_PER_CHANNEL"] = "1"
-    os.environ["NCCL_SOCKET_NTHREADS"] = "1"
-    torch.backends.cudnn.enabled = False
-
-    dp_size_in_node = max(1, args.dp // args.nnodes)
-
-    try:
-        torch.cuda.set_device(device_id)
-        graceful_registry(inspect.currentframe().f_code.co_name)
-        task_out_queue.put("proc_start")
-
-        mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
-
-        task_out_queue.put("get_mem_managers_ok")
-        connect_id_to_comm: Dict[str, PyNcclCommunicator] = {}
-        while True:
-            task: Union[KVMoveTaskGroup, PDTransJoinInfo, PDTransLeaveInfo] = task_in_queue.get()
-            if isinstance(task, KVMoveTaskGroup):
-                _handle_kvmove_task(
-                    task.tasks, task_out_queue, mem_managers, connect_id_to_comm, task.connect_id, dp_size_in_node
-                )
-            elif isinstance(task, PDTransJoinInfo):
-                _handle_prefill_join(task, task_out_queue, connect_id_to_comm)
-            elif isinstance(task, PDTransLeaveInfo):
-                if task.connect_id in connect_id_to_comm:
-                    connect_id_to_comm[task.connect_id].destroy()
-                    logger.info(f"destory {task} nccl communicator.")
-                else:
-                    logger.info(f"no connect_id {task.connect_id} found in connect_id_to_comm")
-
-            else:
-                logger.warning(f"unexpected task type: {task}")
-
-    except Exception as e:
-        logger.error(f"Fatal error happened in kv trans process: {e}")
-        raise
-
-
 def start_decode_trans_process(
     args,
+    device_id,
+    task_in_queue: mp.Queue,
+    task_out_queue: mp.Queue,
+    mem_queues: List[mp.Queue],
+    up_status_in_queue: Optional[mp.SimpleQueue],
+):
+    proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, mem_queues, up_status_in_queue))
+    proc.start()
+    assert proc.is_alive()
+    logger.info(f"prefill trans kv process for device: {device_id} started!")
+    return proc
+
+
+def _init_env(
+    args: StartArgs,
     device_id: int,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
     mem_queues: List[mp.Queue],
+    up_status_in_queue: Optional[mp.SimpleQueue],
 ):
-    proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, mem_queues))
-    proc.start()
-    assert proc.is_alive()
-    logger.info(f"decode trans kv process for device: {device_id} start!")
-    return proc
+    torch.backends.cudnn.enabled = False
+
+    try:
+        torch.cuda.set_device(device_id)
+        graceful_registry(inspect.currentframe().f_code.co_name)
+
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        task_out_queue.put("proc_start")
+        mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
+        task_out_queue.put("get_mem_managers_ok")
+
+        manager = _DecodeTransModule(args=args, 
+                                     device_id=device_id,
+                                    task_in_queue=task_in_queue,
+                                    task_out_queue=task_out_queue,
+                                    mem_managers=mem_managers,
+                                    up_status_in_queue=up_status_in_queue)
+        manager.transfer_loop()
+
+    except Exception as e:
+        logger.error(f"Fatal error happened in kv trans process: {e}")
+        pass
+
+
+class _DecodeTransModule:
+    def __init__(
+        self,
+        args: StartArgs,
+        device_id: int,
+        task_in_queue: mp.Queue,
+        task_out_queue: mp.Queue,
+        mem_managers: List[mp.Queue],
+        up_status_in_queue: Optional[mp.SimpleQueue]):
+        self.args = args
+        self.device_id = device_id
+        self.task_in_queue = task_in_queue
+        self.task_out_queue = task_out_queue
+        self.mem_managers = mem_managers
+        self.up_status_in_queue = up_status_in_queue
+        
+        self.transporter = NixlKVTransporter(node_id=self.args.pd_node_id,
+                                             tp_idx=device_id,
+                                             kv_move_buffer=None)
+        self.waiting_dict_lock = threading.Lock()
+        self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
+
+        self.page_index_queue = queue.Queue()
+        for page_index in range(self.args.nixl_pd_kv_page_num):
+            self.page_index_queue.put(page_index)
+
+        self.update_status_thread = threading.Thread(target=self.update_task_status_loop, daemon=True)
+        self.update_status_thread.start()
+        return
+
+    def transfer_loop(self):
+        try:
+            while True:
+                trans_task: NIXLChunckedTransTask = self.task_in_queue.get()
+                with self.waiting_dict_lock:
+                    self.waiting_dict[trans_task.get_key()] = trans_task
+
+        except BaseException as e:
+            logger.exception(str(e))
+            raise e
+
+    def update_task_status_loop(
+        self,
+    ):
+        torch.cuda.set_device(self.device_id)
+        try:
+            while True:
+                if len(self.waiting_dict) == 0:
+                    time.sleep(0.01)
+                    continue
+                
+                # notify update
+                notifies_dict = self.transporter.get_new_notifs()
+                if notifies_dict:
+                    for _, _notify_list in notifies_dict.items():
+                        for notify in _notify_list:
+                            try:
+                                notify_obj = pickle.loads(notify)
+                            except:
+                                notify_obj = None
+                        
+                        if isinstance(notify_obj, NIXLChunckedTransTask):
+                            remote_trans_task = notify_obj
+                            key = remote_trans_task.get_key()
+                            with self.waiting_dict_lock:
+                                local_trans_task = self.waiting_dict.get(key, None)
+                              
+                            if local_trans_task is not None:
+                                if  not notify_obj.has_error:
+                                    self._create_success_ret(trans_task=trans_task)
+                                else:
+                                    self._create_error_ret(trans_task=trans_task, error_info=notify_obj.error_info)
+                                
+                                # 回收 kv move page 页面
+                                self.page_index_queue.put(trans_task.nixl_src_page_index)
+                            else:
+
+
+                # check time_out update
+                with self.waiting_dict_lock:
+                    del_keys = []
+                    for key, trans_task in self.waiting_dict.items():
+                        if trans_task.time_out():
+                            del_keys.append(key)
+
+                    for key in del_keys:
+                        trans_task = self.waiting_dict.pop(key, None)
+                        if trans_task is not None:
+                            self._create_error_ret(trans_task=trans_task, error_info="time out")
+                            self.page_index_queue.put(trans_task.nixl_src_page_index)
+
+        except BaseException as e:
+            logger.exception(str(e))
+            raise e
+
+    def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
+        ret_obj = ChunckedTransTaskRet(
+            request_id=trans_task.request_id,
+            start_kv_index=trans_task.start_kv_index,
+            end_kv_index=trans_task.end_kv_index,
+            has_error=True,
+            error_info=error_info,
+        )
+        self.task_out_queue.put(ret_obj)
+        logger.error(f"trans error in device id {self.device_id}: info {ret_obj}")
+        return
+
+    def _create_success_ret(self, trans_task: NIXLChunckedTransTask):
+        ret_obj = ChunckedTransTaskRet(
+            request_id=trans_task.request_id,
+            start_kv_index=trans_task.start_kv_index,
+            end_kv_index=trans_task.end_kv_index,
+            has_error=False,
+            error_info="",
+        )
+        self.task_out_queue.put(ret_obj)
+        logger.info(f"trans success in device id {self.device_id}: info {ret_obj}")
+        return

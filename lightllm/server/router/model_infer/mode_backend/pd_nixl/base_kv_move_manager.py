@@ -4,7 +4,7 @@ import signal
 import threading
 import queue
 import torch.multiprocessing as mp
-from typing import List, Dict, Union, Callable
+from typing import List, Dict, Union, Callable, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.pd_io_struct import ChunckedTransTaskRet
 from lightllm.utils.graceful_utils import graceful_registry
@@ -16,7 +16,12 @@ logger = init_logger(__name__)
 
 
 class BaseKVMoveManager:
-    def __init__(self, args: StartArgs, info_queue: mp.Queue, mem_queues: List[mp.Queue], start_trans_process_func:Callable):
+    def __init__(self, 
+                 args: StartArgs, 
+                 info_queue: mp.Queue, 
+                 mem_queues: List[mp.Queue],
+                 start_trans_process_func:Callable,
+                 up_status_in_queue: Optional[mp.SimpleQueue]=None):
         self.args = args
         # args.dp // args.nnodes 在跨机tp的场景下，可能为0
         self.dp_size_in_node = max(1, args.dp // args.nnodes)
@@ -32,7 +37,10 @@ class BaseKVMoveManager:
         self.kv_trans_processes: List[KVTransProcess] = [None] * self.node_world_size
         for device_id in range(self.node_world_size):
             self.kv_trans_processes[device_id] = KVTransProcess()
-            assert self.kv_trans_processes[device_id].init_all(device_id, self, start_func=start_trans_process_func)
+            assert self.kv_trans_processes[device_id].init_all(device_id=device_id,
+                                                               manager=self,
+                                                               start_func=start_trans_process_func,
+                                                               up_status_in_queue=up_status_in_queue)
             self.kv_trans_processes[device_id].start_ret_handle_thread(func=self.task_ret_handle_loop)
 
         # 通过 io buffer 将命令写入到推理进程中
