@@ -100,7 +100,7 @@ class _DecodeTransModule:
         return
     
     @log_exception
-    def recive_task_loop(self):
+    def recv_task_loop(self):
         while True:
             trans_task_group: NIXLChunckedTransTaskGroup = self.task_in_queue.get()
             task = trans_task_group.task_list[0]
@@ -184,33 +184,30 @@ class _DecodeTransModule:
 
             # check xfer state
             with self.waiting_dict_lock:
-                trans_taskes = list(self.waiting_dict.values())
+                trans_task_keys = list(self.waiting_dict.keys())
             
-            remove_keys = []
-            for trans_task in trans_taskes:
-                removed: bool = False
+            for _key in trans_task_keys:
+                with self.waiting_dict_lock:
+                    trans_task = self.waiting_dict.pop(_key, None)
+                if trans_task is None:
+                    continue
+
                 if trans_task.xfer_handle is not None:
                     ret = self.transporter.check_task_status(trans_task=trans_task)
                     if ret == "DONE":
                         self.success_queue.put(trans_task)
-                        remove_keys.append(trans_task.get_key())
-                        removed = True
-                    elif ret == "PROC":
-                        pass
-                    else:
-                        remove_keys.append(trans_task.get_key())
+                        continue
+                    elif ret == "ERR":
                         self.failed_queue.put(trans_task)
-                        removed = True
+                        continue
                 
-                if not removed and trans_task.time_out():
-                    remove_keys.append(trans_task.get_key())
+                if trans_task.time_out():
                     self.failed_queue.put(trans_task)
+                    continue
 
-            # check time_out update
-            with self.waiting_dict_lock:
-                for key in remove_keys:
-                    trans_task = self.waiting_dict.pop(key, None)
-            
+                with self.waiting_dict_lock:
+                    self.waiting_dict[trans_task.get_key()] = trans_task
+
 
     def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
         ret_obj = trans_task.createRetObj(
