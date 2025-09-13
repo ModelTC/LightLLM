@@ -14,6 +14,7 @@ from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..nixl_kv_transporter import NixlKVTransporter
+from lightllm.utils.error_utils import log_exception
 
 
 logger = init_logger(__name__)
@@ -92,88 +93,81 @@ class _PrefillTransModule:
         self.update_status_thread = threading.Thread(target=self.update_task_status_loop, daemon=True)
         self.update_status_thread.start()
         return
-
+    
+    @log_exception
     def transfer_loop(self):
-        try:
-            while True:
-                trans_task: NIXLChunckedTransTask = self.task_in_queue.get()
+        while True:
+            trans_task: NIXLChunckedTransTask = self.task_in_queue.get()
 
-                # 初次校验 time out
-                if trans_task.time_out():
-                    self._create_error_ret(trans_task=trans_task, error_info="time_out")
-                    continue
+            # 初次校验 time out
+            if trans_task.time_out():
+                self._create_error_ret(trans_task=trans_task, error_info="time_out")
+                continue
 
-                page_index = self.page_index_queue.get()
-                # 再次校验是否发生了 time out
-                if trans_task.time_out():
-                    self._create_error_ret(trans_task=trans_task, error_info="time_out")
-                    self.page_index_queue.put(page_index)
-                    continue
+            page_index = self.page_index_queue.get()
+            # 再次校验是否发生了 time out
+            if trans_task.time_out():
+                self._create_error_ret(trans_task=trans_task, error_info="time_out")
+                self.page_index_queue.put(page_index)
+                continue
 
-                trans_task.nixl_src_page_index = page_index
+            trans_task.nixl_src_page_index = page_index
 
-                # to do 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
-                pass
-                self.transporter.send_readtask_to_decode_node(peer_name=trans_task.peer_agent_name,
-                                                              trans_task=trans_task)
+            # to do 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
+            pass
+            self.transporter.send_readtask_to_decode_node(peer_name=trans_task.peer_agent_name,
+                                                            trans_task=trans_task)
 
-                trans_task.start_trans_time = time.time()
-                with self.waiting_dict_lock:
-                    self.waiting_dict[trans_task.get_key()] = trans_task
-
-        except BaseException as e:
-            logger.exception(str(e))
-            raise e
-
+            trans_task.start_trans_time = time.time()
+            with self.waiting_dict_lock:
+                self.waiting_dict[trans_task.get_key()] = trans_task
+    
+    @log_exception
     def update_task_status_loop(
         self,
     ):
-        try:
-            while True:
-                if len(self.waiting_dict) == 0:
-                    time.sleep(0.01)
-                    continue
-                
-                # notify update
-                notifies_dict = self.transporter.get_new_notifs()
-                if notifies_dict:
-                    for _, _notify_list in notifies_dict.items():
-                        for notify in _notify_list:
-                            try:
-                                notify_obj = pickle.loads(notify)
-                            except:
-                                notify_obj = None
-                        
-                        if isinstance(notify_obj, NIXLChunckedTransTaskRet):
-                            key = notify_obj.get_key()
-                            with self.waiting_dict_lock:
-                                trans_task = self.waiting_dict.pop(key, None)
+        while True:
+            if len(self.waiting_dict) == 0:
+                time.sleep(0.01)
+                continue
+            
+            # notify update
+            notifies_dict = self.transporter.get_new_notifs()
+            if notifies_dict:
+                for _, _notify_list in notifies_dict.items():
+                    for notify in _notify_list:
+                        try:
+                            notify_obj = pickle.loads(notify)
+                        except:
+                            notify_obj = None
+                    
+                    if isinstance(notify_obj, NIXLChunckedTransTaskRet):
+                        key = notify_obj.get_key()
+                        with self.waiting_dict_lock:
+                            trans_task = self.waiting_dict.pop(key, None)
 
-                            if trans_task is not None:
-                                if  not notify_obj.has_error:
-                                    self._create_success_ret(trans_task=trans_task)
-                                else:
-                                    self._create_error_ret(trans_task=trans_task, error_info=notify_obj.error_info)
-                                
-                                # 回收 kv move page 页面
-                                self.page_index_queue.put(trans_task.nixl_src_page_index)
-
-                # check time_out update
-                with self.waiting_dict_lock:
-                    del_keys = []
-                    for key, trans_task in self.waiting_dict.items():
-                        if trans_task.time_out():
-                            del_keys.append(key)
-
-                    for key in del_keys:
-                        trans_task = self.waiting_dict.pop(key, None)
                         if trans_task is not None:
-                            self._create_error_ret(trans_task=trans_task, error_info="time out")
+                            if  not notify_obj.has_error:
+                                self._create_success_ret(trans_task=trans_task)
+                            else:
+                                self._create_error_ret(trans_task=trans_task, error_info=notify_obj.error_info)
+                            
+                            # 回收 kv move page 页面
                             self.page_index_queue.put(trans_task.nixl_src_page_index)
 
-        except BaseException as e:
-            logger.exception(str(e))
-            raise e
+            # check time_out update
+            with self.waiting_dict_lock:
+                del_keys = []
+                for key, trans_task in self.waiting_dict.items():
+                    if trans_task.time_out():
+                        del_keys.append(key)
+
+                for key in del_keys:
+                    trans_task = self.waiting_dict.pop(key, None)
+                    if trans_task is not None:
+                        self._create_error_ret(trans_task=trans_task, error_info="time out")
+                        self.page_index_queue.put(trans_task.nixl_src_page_index)
+
 
     def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
         ret_obj = trans_task.createRetObj(
