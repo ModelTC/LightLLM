@@ -88,6 +88,9 @@ class _DecodeTransModule:
                                              kv_move_buffer=None)
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
+        self.read_kv_queue = queue.Queue()
+        self.update_status_task_list_lock = threading.Lock()
+        self.update_status_task_list: List[NIXLChunckedTransTask] = []
         self.success_queue = queue.Queue()
         self.failed_queue = queue.Queue()
 
@@ -127,7 +130,7 @@ class _DecodeTransModule:
                     self.waiting_dict[task.get_key()] = task
 
     @log_exception
-    def read_kv_loop(
+    def accept_peer_task_loop(
         self,
     ):
         torch.cuda.set_device(self.device_id)
@@ -157,20 +160,26 @@ class _DecodeTransModule:
                         self.transporter.send_notify_to_prefill_node(peer_name=remote_agent_name,
                                                                         notify=pickle.dumps(remote_trans_task.createRetObj(has_error=True,
                                                                                                                         error_info="decode node didnot find this task")))
-                        continue
+                    else:
+                        local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
+                        self.read_kv_queue.put((remote_agent_name, local_trans_task))
+    
 
-                    # to do 发起传输
-                    page_index = self.page_index_queue.get()
-                    local_trans_task.nixl_dst_page_index = page_index
-                    local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
+    @log_exception
+    def read_kv_loop(self):
+        while True:
 
-                    xfer_handle = self.transporter.read_blocks_paged(peer_name=remote_agent_name, 
-                                                        trans_task=local_trans_task)
-                    local_trans_task.xfer_handle = xfer_handle
-                    local_trans_task.start_trans_time = time.time()
+            remote_agent_name, local_trans_task = self.read_kv_queue.get()
+            local_trans_task: NIXLChunckedTransTask = local_trans_task
+            page_index = self.page_index_queue.get()
+            local_trans_task.nixl_dst_page_index = page_index
 
-                    with self.waiting_dict_lock:
-                        self.waiting_dict[local_trans_task.get_key()] = local_trans_task
+            xfer_handle = self.transporter.read_blocks_paged(peer_name=remote_agent_name, 
+                                                trans_task=local_trans_task)
+            local_trans_task.xfer_handle = xfer_handle
+            local_trans_task.start_trans_time = time.time()
+            with self.update_status_task_list_lock:
+                self.update_status_task_list.append(local_trans_task)
 
 
     @log_exception
@@ -178,20 +187,16 @@ class _DecodeTransModule:
         self,
     ):
         while True:
-            if len(self.waiting_dict) == 0:
+            if len(self.update_status_task_list) == 0:
                 time.sleep(0.003)
                 continue
 
             # check xfer state
-            with self.waiting_dict_lock:
-                trans_task_keys = list(self.waiting_dict.keys())
+            with self.update_status_task_list_lock:
+                trans_taskes = self.update_status_task_list.copy()
+                self.update_status_task_list.clear()
             
-            for _key in trans_task_keys:
-                with self.waiting_dict_lock:
-                    trans_task = self.waiting_dict.pop(_key, None)
-                if trans_task is None:
-                    continue
-
+            for trans_task in trans_taskes:
                 if trans_task.xfer_handle is not None:
                     ret = self.transporter.check_task_status(trans_task=trans_task)
                     if ret == "DONE":
@@ -205,9 +210,9 @@ class _DecodeTransModule:
                     self.failed_queue.put(trans_task)
                     continue
 
-                with self.waiting_dict_lock:
-                    self.waiting_dict[trans_task.get_key()] = trans_task
-
+                with self.update_status_task_list_lock:
+                    self.update_status_task_list.append(trans_task)
+    
     @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
