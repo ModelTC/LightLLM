@@ -151,7 +151,7 @@ class _DecodeTransModule:
                     remote_trans_task = notify_obj
                     key = remote_trans_task.get_key()
                     with self.waiting_dict_lock:
-                        local_trans_task = self.waiting_dict.get(key, None)
+                        local_trans_task = self.waiting_dict.pop(key, None)
                     
                     if local_trans_task is None:
                         self.transporter.send_notify_to_prefill_node(peer_name=remote_agent_name,
@@ -166,9 +166,12 @@ class _DecodeTransModule:
 
                     xfer_handle = self.transporter.read_blocks_paged(peer_name=remote_agent_name, 
                                                         trans_task=local_trans_task)
+                    local_trans_task.xfer_handle = xfer_handle
+                    local_trans_task.start_trans_time = time.time()
+
                     with self.waiting_dict_lock:
-                        local_trans_task.xfer_handle = xfer_handle
-                        local_trans_task.start_trans_time = time.time()
+                        self.waiting_dict[local_trans_task.get_key()] = local_trans_task
+
 
     @log_exception
     def update_task_status_loop(
