@@ -208,6 +208,26 @@ class _DecodeTransModule:
                 with self.waiting_dict_lock:
                     self.waiting_dict[trans_task.get_key()] = trans_task
 
+    @log_exception
+    def success_loop(self):
+        torch.cuda.set_device(self.device_id)
+        while True:
+            trans_task: NIXLChunckedTransTask = self.success_queue.get()
+            # 将数据写回 mem manger
+
+            # 写回后，回收页面
+            self.page_index_queue.put(trans_task.nixl_dst_page_index)
+            self._create_success_ret(trans_task=trans_task)
+    
+    @log_exception
+    def fail_loop(self):
+        torch.cuda.set_device(self.device_id)
+        while True:
+            trans_task: NIXLChunckedTransTask = self.failed_queue.get()
+
+            # 回收页面
+            self.page_index_queue.put(trans_task.nixl_dst_page_index)
+            self._create_error_ret(trans_task=trans_task, error_info="not known")
 
     def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
         ret_obj = trans_task.createRetObj(
