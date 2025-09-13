@@ -171,6 +171,10 @@ class _DecodeTransModule:
 
             remote_agent_name, local_trans_task = self.read_kv_queue.get()
             local_trans_task: NIXLChunckedTransTask = local_trans_task
+            if local_trans_task.time_out():
+                self.failed_queue.put(local_trans_task)
+                continue
+            
             page_index = self.page_index_queue.get()
             local_trans_task.nixl_dst_page_index = page_index
 
