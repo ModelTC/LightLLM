@@ -106,7 +106,7 @@ class Qwen2VLTpPartModel(Qwen2TpPartModel):
         return
 
     def _init_inferstate_cls(self):
-        if get_env_start_args().enable_fa3:
+        if not get_env_start_args().disable_fa3:
             self.infer_state_class = Qwen2VLFlashAttentionStateInfo
 
     def _init_config(self):

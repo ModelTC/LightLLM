@@ -25,6 +25,31 @@ def is_hopper():
 
 
 @lru_cache(maxsize=None)
+def is_fa3_supported():
+    """
+    Check if the current hardware and software environment supports FA3.
+    FA3 requires:
+    1. Hopper architecture (H100, H200, H800) or newer
+    2. sgl_kernel package installed
+    """
+    # Check hardware support (Hopper or newer)
+    if not is_hopper():
+        # Check if it's Ada Lovelace (40 series) which might also support FA3
+        device_name = torch.cuda.get_device_name(0)
+        if not ("RTX_40" in device_name.replace(" ", "_") or "L40" in device_name or "Ada" in device_name):
+            return False
+
+    # Check software support (sgl_kernel installed)
+    try:
+        import sgl_kernel
+        from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+
+        return flash_attn_varlen_func is not None and flash_attn_with_kvcache is not None
+    except ImportError:
+        return False
+
+
+@lru_cache(maxsize=None)
 def get_device_sm_count():
     import triton
     from triton.runtime import driver

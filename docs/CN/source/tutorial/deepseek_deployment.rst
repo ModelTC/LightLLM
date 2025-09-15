@@ -32,13 +32,11 @@ LightLLM 支持以下几种部署模式：
     # H200 单机 DeepSeek-R1 TP 模式
     LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
     --model_dir /path/DeepSeek-R1 \
-    --tp 8 \
-    --enable_fa3
+    --tp 8 
 
 **参数说明:**
 - `LOADWORKER=18`: 模型加载线程数，提高加载速度
 - `--tp 8`: 张量并行度，使用8个GPU
-- `--enable_fa3`: 启用 Flash Attention 3.0
 - `--port 8088`: 服务端口
 
 1.2 单机 DP + EP 模式 (Data Parallel + Expert Parallel)
@@ -55,13 +53,11 @@ LightLLM 支持以下几种部署模式：
     --model_dir /path/DeepSeek-R1 \
     --tp 8 \
     --dp 8 \
-    --enable_fa3
 
 **参数说明:**
 - `MOE_MODE=EP`: 设置专家并行模式
 - `--tp 8`: 张量并行度
 - `--dp 8`: 数据并行度，通常设置为与 tp 相同的值
-- `--enable_fa3`: 启用 Flash Attention 3.0
 
 **可选优化参数:**
 - `--enable_prefill_microbatch_overlap`: 启用预填充微批次重叠
@@ -85,7 +81,6 @@ LightLLM 支持以下几种部署模式：
     LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
     --model_dir /path/DeepSeek-R1 \
     --tp 16 \
-    --enable_fa3 \
     --nnodes 2 \
     --node_rank 0 \
     --nccl_host $nccl_host \
@@ -101,7 +96,6 @@ LightLLM 支持以下几种部署模式：
     LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
     --model_dir /path/DeepSeek-R1 \
     --tp 16 \
-    --enable_fa3 \
     --nnodes 2 \
     --node_rank 1 \
     --nccl_host $nccl_host \
@@ -129,7 +123,6 @@ LightLLM 支持以下几种部署模式：
     --model_dir /path/DeepSeek-R1 \
     --tp 16 \
     --dp 16 \
-    --enable_fa3 \
     --nnodes 2 \
     --node_rank 0 \
     --nccl_host $nccl_host \
@@ -146,7 +139,6 @@ LightLLM 支持以下几种部署模式：
     --model_dir /path/DeepSeek-R1 \
     --tp 16 \
     --dp 16 \
-    --enable_fa3 \
     --nnodes 2 \
     --node_rank 1 \
     --nccl_host $nccl_host \
@@ -195,7 +187,6 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --host $host \
     --port 8019 \
     --nccl_port 2732 \
-    --enable_fa3 \
     --disable_cudagraph \
     --pd_master_ip $pd_master_ip \
     --pd_master_port 60011
@@ -219,7 +210,6 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --host $host \
     --port 8121 \
     --nccl_port 12322 \
-    --enable_fa3 \
     --disable_cudagraph \
     --pd_master_ip $pd_master_ip \
     --pd_master_port 60011
@@ -287,7 +277,6 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --tp 8 \
     --dp 8 \
     --nccl_port 2732 \
-    --enable_fa3 \
     --disable_cudagraph \
     --config_server_host $config_server_host \
     --config_server_port 60088
@@ -306,7 +295,6 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --nccl_port 12322 \
     --tp 8 \
     --dp 8 \
-    --enable_fa3 \
     --config_server_host $config_server_host \
     --config_server_port 60088
     # 如果需要启用微批次重叠，可以取消注释以下行

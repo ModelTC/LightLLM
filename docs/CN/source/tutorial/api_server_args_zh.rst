@@ -333,9 +333,9 @@ attention类型选择参数
 
     推理后端将为解码使用 flashinfer 的注意力 kernel
     
-.. option:: --enable_fa3
+.. option:: --disable_fa3
 
-    推理后端将为预填充和解码使用 fa3 注意力 kernel
+    推理后端将不为预填充和解码使用 fa3 注意力 kernel（FA3 默认启用）
 
 .. option:: --disable_cudagraph
 

@@ -95,7 +95,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             )
         else:
             self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-            if get_env_start_args().enable_fa3:
+            if not get_env_start_args().disable_fa3:
                 self._token_attention_kernel = partial(
                     Deepseek2TransformerLayerInfer._token_gqa_decode_attention_flashattention, self
                 )
@@ -118,7 +118,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                         Deepseek2TransformerLayerInfer._context_attention_kernel_with_CC_fp8, self
                     )
             else:
-                if get_env_start_args().enable_fa3:
+                if not get_env_start_args().disable_fa3:
                     self._context_attention_kernel = partial(
                         Deepseek2TransformerLayerInfer._context_attention_flashattention_kernel_with_CC, self
                     )
