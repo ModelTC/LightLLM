@@ -261,9 +261,10 @@ class HttpServerManager:
         multimodal_params: MultimodalParams,
         request: Request,
         is_health_req: bool = False,
-        # 该参数只会在 nixl pd mode 中使用，用于一些信息给 pd_master
+        # 该参数只会在 nixl pd mode 中使用，用于上报一些信息给 pd_master
         nixl_pd_upload_websocket: ClientConnection = None, 
-        nixl_pd_event: asyncio.Event = None,  # 用于等待 pd_master 下发的交换信息
+        # 用于等待 pd_master 下发的交换信息
+        nixl_pd_event: asyncio.Event = None, 
     ) -> Tuple[int, str, dict, FinishStatus]:
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
@@ -285,7 +286,7 @@ class HttpServerManager:
 
             if nixl_pd_upload_websocket is not None and not is_health_req and self.pd_mode.is_NP():
                 # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
-                # 在等待 pd_master 传输下来的对应的进行 decode 节点的decode信息，然后再执行后续的推理。
+                # 再等待 pd_master 传输下来的对应的进行 decode 节点的decode信息，然后再执行后续的流程
                 logger.info(f"nixl np node upload_websocket upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}")
                 await nixl_pd_upload_websocket.send(pickle.dumps((ObjType.NIXL_UPLOAD_NP_PROMPT_IDS, group_request_id, prompt_ids)))
                 try:
@@ -295,7 +296,6 @@ class HttpServerManager:
                     raise Exception(f"group_req_id {group_request_id} wait nixl_pd_event time out")
                 
                 decode_node_info : NIXLDecodeNodeInfo = nixl_pd_event.decode_node_info
-                assert sampling_params.nixl_params.data_len == 0
                 sampling_params.nixl_params.set(pickle.dumps(decode_node_info))
 
             prompt_tokens = len(prompt_ids)
@@ -474,7 +474,7 @@ class HttpServerManager:
         # 多节点纯tp 运行模式下，master 节点需要将请求转发给slave节点.
         if self.is_multinode_tp_master:
             for sender in self.multinode_req_manager:
-                await sender.send_pyobj(
+                sender.send_pyobj(
                     (prompt, sampling_params, original_multimodal_params),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
@@ -487,16 +487,14 @@ class HttpServerManager:
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
 
-        if self.pd_mode.is_P():
+        if self.pd_mode.is_P() or self.pd_mode.is_normal():
             if self.enable_multimodal:
-                await self.send_to_visual.send_pyobj(
+                self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
             else:
-
-                # P 模式下，直接将请求发送到路由器
-                await self.send_to_router.send_pyobj(
+                self.send_to_router.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
@@ -504,23 +502,12 @@ class HttpServerManager:
 
         if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了, 传输一个空的即可
-            await self.send_to_router.send_pyobj(
+            self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
             return
 
-        if self.pd_mode.is_normal():
-            if self.enable_multimodal:
-                await self.send_to_visual.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
-            else:
-                await self.send_to_router.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
             return
 
         assert False, "dead code path"
@@ -671,7 +658,7 @@ class HttpServerManager:
                         continue
 
                     logger.info(
-                        f"left req id {req_status.group_req_objs.group_req_id} "
+                        f"left req id {req_status.group_req_objs.group_req_id}"
                         f"can release {req_status.group_req_objs.shm_req_objs[0].can_released_mark} "
                         f"refcount {req_status.group_req_objs.shm_req_objs[0].ref_count}"
                     )
