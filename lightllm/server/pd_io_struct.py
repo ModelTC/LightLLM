@@ -293,6 +293,12 @@ class NIXLChunckedTransTask:
                 return True
             else:
                 return False
+            
+    def waiting_time(self):
+        return time.time() - self.create_time
+    
+    def transfer_time(self):
+        return time.time() - self.start_trans_time
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"

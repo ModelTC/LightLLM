@@ -93,9 +93,9 @@ class _PrefillTransModule:
         self.page_index_queue = queue.Queue()
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
-
-        self.update_status_thread = threading.Thread(target=self.update_task_status_loop, daemon=True)
-        self.update_status_thread.start()
+        
+        for func in [self.recv_task_loop, self.transfer_kv_loop, self.update_task_status_loop, self.success_loop, self.fail_loop]:
+            threading.Thread(target=func, daemon=True).start()
         return
     
     @log_exception
@@ -122,6 +122,7 @@ class _PrefillTransModule:
             trans_task: NIXLChunckedTransTask = self.ready_transfer_queue.get()
 
             # to do 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
+            trans_task.start_trans_time = time.time()
             pass
             self.transporter.send_readtask_to_decode_node(peer_name=trans_task.peer_agent_name, trans_task=trans_task)
             trans_task.start_trans_time = time.time()
@@ -178,8 +179,6 @@ class _PrefillTransModule:
                     with self.waiting_dict_lock:
                         self.waiting_dict[trans_task.get_key()] = trans_task
 
-
-        @log_exception
     
     @log_exception
     def success_loop(self):
