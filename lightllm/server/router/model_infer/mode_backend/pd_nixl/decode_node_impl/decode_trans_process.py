@@ -228,7 +228,8 @@ class _DecodeTransModule:
             # 将数据写回 mem manger
 
             # 写回后，回收页面
-            self.page_index_queue.put(trans_task.nixl_dst_page_index)
+            if trans_task.nixl_dst_page_index is not None:
+                self.page_index_queue.put(trans_task.nixl_dst_page_index)
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
     
@@ -239,5 +240,6 @@ class _DecodeTransModule:
             trans_task: NIXLChunckedTransTask = self.failed_queue.get()
 
             # 回收页面
-            self.page_index_queue.put(trans_task.nixl_dst_page_index)
+            if trans_task.nixl_dst_page_index is not None:
+                self.page_index_queue.put(trans_task.nixl_dst_page_index)
             self.task_out_queue.put(trans_task.createRetObj())
