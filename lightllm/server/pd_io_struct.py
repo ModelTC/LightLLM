@@ -297,8 +297,13 @@ class NIXLChunckedTransTask:
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
     
-    def to_str(self) -> str:
-        return f"trans task req id {self.request_id} start {self.start_kv_index} end {self.end_kv_index}"
+    def to_str(self):
+        if self.mem_indexes is not None:
+            obj : NIXLChunckedTransTask = self.copy()
+            obj.mem_indexes = None
+        else:
+            obj = self
+        return obj.__str__()
     
 
     def createRetObj(self) -> "NIXLChunckedTransTaskRet":
