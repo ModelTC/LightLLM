@@ -114,7 +114,6 @@ class DecodeNodeInfo:
     ip: str
     rpyc_port: str
     max_new_tokens: int
-    pd_master_node_id: int
 
 
 @dataclass
@@ -153,6 +152,7 @@ class KVMoveTask:
     # 如果是deepseekv2的tp dp 混合模式, 才有真正的意义。
     prefill_dp_index: int
     decode_dp_index: int
+    pd_master_node_id: int
     mark_start_time: float = None
     # 标记任务使用某个连接id进行传输
     connect_id: str = None

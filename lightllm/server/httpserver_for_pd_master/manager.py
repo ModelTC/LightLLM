@@ -161,6 +161,7 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         group_request_id = sampling_params.group_request_id
+        sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
 
         req_status = ReqStatus(group_request_id, p_node, d_node)
         self.req_id_to_out_inf[group_request_id] = req_status
@@ -173,7 +174,6 @@ class HttpServerManagerForPDMaster:
             "ip": d_start_args["host"],
             "rpyc_port": d_start_args["pd_decode_rpyc_port"],
             "max_new_tokens": sampling_params.max_new_tokens - 1,
-            "pd_master_node_id": self.args.pd_node_id,
         }
 
         old_max_new_tokens = sampling_params.max_new_tokens
@@ -240,6 +240,7 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         group_request_id = sampling_params.group_request_id
+        sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
 
         req_status = ReqStatus(group_request_id, p_node, d_node)
         self.req_id_to_out_inf[group_request_id] = req_status
