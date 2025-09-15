@@ -47,8 +47,6 @@ def _init_env(
     try:
         torch.cuda.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
-
-        dp_size_in_node = max(1, args.dp // args.nnodes)
         task_out_queue.put("proc_start")
         mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
         task_out_queue.put("get_mem_managers_ok")
@@ -75,6 +73,7 @@ class _PrefillTransModule:
         mem_managers: List[MemoryManager],
     ) -> None:
         self.args = args
+        self.dp_world_size = self.args.tp // self.args.dp
         self.device_id = device_id
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
@@ -83,6 +82,7 @@ class _PrefillTransModule:
         cur_mem_manager: MemoryManager = self.mem_managers[device_id]
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(page_num=self.args.nixl_pd_kv_page_num,
                                                                     page_size=self.args.nixl_pd_kv_page_size)
+        self.copy_cuda_stream = torch.cuda.Stream()
         self.transporter = NixlKVTransporter(node_id=self.args.pd_node_id,
                                              tp_idx=device_id,
                                              kv_move_buffer=kv_move_buffer)
@@ -126,7 +126,15 @@ class _PrefillTransModule:
 
             # to do 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             trans_task.start_trans_time = time.time()
-            pass
+            with torch.cuda.stream(stream=self.copy_cuda_stream):
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.write_mem_to_page_kv_move_buffer(
+                    trans_task.mem_indexes,
+                    page_index=trans_task.nixl_src_page_index,
+                    dp_index=trans_task.prefill_dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size,
+                )
             self.transporter.send_readtask_to_decode_node(peer_name=trans_task.peer_agent_name, trans_task=trans_task)
 
             with self.waiting_dict_lock:

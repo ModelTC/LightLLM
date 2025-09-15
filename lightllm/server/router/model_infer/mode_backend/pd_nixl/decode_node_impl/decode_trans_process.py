@@ -49,7 +49,6 @@ def _init_env(
         torch.cuda.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
 
-        dp_size_in_node = max(1, args.dp // args.nnodes)
         task_out_queue.put("proc_start")
         mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
         task_out_queue.put("get_mem_managers_ok")
@@ -77,6 +76,7 @@ class _DecodeTransModule:
         mem_managers: List[MemoryManager],
         up_status_in_queue: Optional[mp.SimpleQueue]):
         self.args = args
+        self.dp_world_size = self.args.tp // self.args.dp
         self.device_id = device_id
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
@@ -85,14 +85,16 @@ class _DecodeTransModule:
         cur_mem_manager: MemoryManager = self.mem_managers[device_id]
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(page_num=self.args.nixl_pd_kv_page_num,
                                                                     page_size=self.args.nixl_pd_kv_page_size)
+        self.copy_cuda_stream = torch.cuda.Stream()
         self.transporter = NixlKVTransporter(node_id=self.args.pd_node_id,
                                              tp_idx=device_id,
                                              kv_move_buffer=kv_move_buffer)
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
-        self.read_kv_queue = queue.Queue()
+        self.read_peer_kv_queue = queue.Queue()
         self.update_status_task_list_lock = threading.Lock()
         self.update_status_task_list: List[NIXLChunckedTransTask] = []
+        self.ready_page_task_queue = queue.Queue()
         self.success_queue = queue.Queue()
         self.failed_queue = queue.Queue()
 
@@ -100,7 +102,7 @@ class _DecodeTransModule:
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
  
-        for func in [self.recv_task_loop, self.accept_peer_task_loop, self.read_kv_loop, self.update_task_status_loop, self.success_loop, self.fail_loop]:
+        for func in [self.recv_task_loop, self.accept_peer_task_loop, self.read_peer_kv_loop, self.update_task_status_loop, self.read_page_to_mems_loop, self.success_loop, self.fail_loop]:
             threading.Thread(target=func, daemon=True).start()
         return
     
@@ -164,15 +166,15 @@ class _DecodeTransModule:
                         self.transporter.send_notify_to_prefill_node(peer_name=remote_agent_name, notify=pickle.dumps(remote_trans_task.createRetObj()))
                     else:
                         local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
-                        self.read_kv_queue.put((remote_agent_name, local_trans_task))
+                        self.read_peer_kv_queue.put((remote_agent_name, local_trans_task))
     
 
     @log_exception
-    def read_kv_loop(self):
+    def read_peer_kv_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
             page_index = self.page_index_queue.get()
-            remote_agent_name, local_trans_task = self.read_kv_queue.get()
+            remote_agent_name, local_trans_task = self.read_peer_kv_queue.get()
             local_trans_task: NIXLChunckedTransTask = local_trans_task
             local_trans_task.nixl_dst_page_index = page_index
 
@@ -207,7 +209,7 @@ class _DecodeTransModule:
             for trans_task in trans_taskes:
                 ret = self.transporter.check_task_status(trans_task=trans_task)
                 if ret == "DONE":
-                    self.success_queue.put(trans_task)
+                    self.ready_page_task_queue.put(trans_task)
                     continue
                 elif ret == "ERR":
                     trans_task.error_info = "xfer error"
@@ -221,15 +223,31 @@ class _DecodeTransModule:
 
                 with self.update_status_task_list_lock:
                     self.update_status_task_list.append(trans_task)
+
+    
+    @log_exception
+    def read_page_to_mems_loop(self):
+        torch.cuda.set_device(self.device_id)
+        while True:
+            trans_task: NIXLChunckedTransTask = self.ready_page_task_queue.get()
+            # 将数据写回 mem manger
+            with torch.cuda.stream(stream=self.copy_cuda_stream):
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.read_page_kv_move_buffer_to_mem(
+                    mem_indexes=trans_task.mem_indexes,
+                    page_index=trans_task.nixl_dst_page_index,
+                    dp_index=trans_task.decode_dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size
+                )
+            self.success_queue.put(trans_task)
+        return
     
     @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: NIXLChunckedTransTask = self.success_queue.get()
-            # 将数据写回 mem manger
-
-            # 写回后，回收页面
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
             if trans_task.xfer_handle is not None:

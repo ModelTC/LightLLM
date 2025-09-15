@@ -20,6 +20,8 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         self._nixl_prefill_chuncked_handle_func = self._prefill_chuncked_handle_func
 
     def init_custom(self):
+        assert kv_trans_use_p2p()
+        
         if kv_trans_use_p2p():
             from ..p2p_fix import reduce_tensor
 
