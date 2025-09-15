@@ -274,6 +274,9 @@ class InferSamplingParams:
             self.nixl_decode_node : NIXLDecodeNodeInfo = pickle.loads(self.shm_param.nixl_params.get())
         else:
             self.nixl_decode_node : NIXLDecodeNodeInfo = None
+
+        # only pd mode used.
+        self.pd_master_node_id: int = self.shm_param.pd_master_node_id.get()
         return
 
     def has_constraint_setting(self) -> bool:

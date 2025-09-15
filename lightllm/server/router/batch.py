@@ -1,7 +1,7 @@
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
-from lightllm.server.core.objs import ShmReqManager, Req, PDNIXLChunkedPrefillReq
+from lightllm.server.core.objs import ShmReqManager, Req
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)

@@ -129,6 +129,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             trans_task = NIXLChunckedTransTask(request_id=req_obj.req_id,
                                   start_kv_index=kv_start_index,
                                   end_kv_index=kv_end_index,
+                                  pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
                                   prefill_dp_index=None,
                                   decode_dp_index=self.dp_rank_in_node,
                                   src_device_id=None,
@@ -137,7 +138,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                                   peer_agent_name=None,
                                   peer_agent_metadata=None,
                                   peer_num_pages=None,
-                                  peer_page_req_desc=None,
+                                  peer_page_reg_desc=None,
                                   peer_page_xfer_handles=None,
                                   nixl_src_page_index=None,
                                   nixl_dst_page_index=None

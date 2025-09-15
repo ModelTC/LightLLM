@@ -256,7 +256,7 @@ class NIXLChunckedTransTask:
     peer_agent_name: Optional[str]
     peer_agent_metadata: Optional[bytes]
     peer_num_pages: Optional[int]
-    peer_page_req_desc: Optional[bytes]
+    peer_page_reg_desc: Optional[bytes]
     peer_page_xfer_handles: Optional[int]
 
     # transfer params

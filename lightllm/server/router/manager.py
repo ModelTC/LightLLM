@@ -20,10 +20,8 @@ from lightllm.server.core.objs.io_objs import (
     GroupReqIndexes,
     AbortedReqCmd,
     StopStrMatchedReqCmd,
-    NIXLRemotePrefillDoneCmd,
-    ReqCmd,
 )
-from lightllm.server.core.objs import ShmReqManager, StartArgs, PDNIXLChunkedPrefillReq
+from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
@@ -34,7 +32,6 @@ from lightllm.common.mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.server.pd_io_struct import DistInfo
 
 
 logger = init_logger(__name__)
@@ -115,14 +112,12 @@ class RouterManager:
         self.mem_queues: List[torch.multiprocessing.Queue] = [
             torch.multiprocessing.Queue() for _ in range(self.node_world_size)
         ]
-        self.result_queues: List[mp.Queue] = [mp.Queue() for _ in range(self.node_world_size)]
         self.rpc_event = multiprocessing.Event()
         self.rpc_finished_event = multiprocessing.Event()
 
         assert (self.world_size % self.nnodes) == 0
         node_world_size = self.world_size // self.nnodes
         for rank_id in range(self.node_rank * node_world_size, (self.node_rank + 1) * node_world_size):
-
             rpc_model = await start_model_process(
                 args=self.args,
                 rank=rank_id,
@@ -131,8 +126,7 @@ class RouterManager:
                 rpc_event=self.rpc_event,
                 rpc_finished_event=self.rpc_finished_event,
                 info_queue=self.info_queue,
-                result_queue=self.result_queues[rank_id % node_world_size],
-                mem_queue=self.mem_queues[rank_id % node_world_size],
+                mem_queue=self.mem_queues[(rank_id % node_world_size)],
                 router_lock=self.router_lock,
             )
             self.model_rpc_servers.append(rpc_model)
@@ -199,28 +193,10 @@ class RouterManager:
             start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
         if self.args.run_mode == "nixl_prefill":
-            from lightllm.server.router.model_infer.mode_backend.pd_nixl.pd_remote_prefill import (
-                start_pd_remote_prefill_server_process,
+            from lightllm.server.router.model_infer.mode_backend.pd_nixl.prefill_node_impl import (
+                start_prefill_kv_move_manager_process
             )
-
-            dist_info = DistInfo(
-                self.world_size,
-                self.nnodes,
-                self.dp_size,
-                self.dp_world_size,
-                self.dp_size_in_node,
-                self.node_world_size,
-            )
-
-            start_pd_remote_prefill_server_process(
-                self.args.pd_node_id,
-                dist_info=dist_info,
-                http_server_port=self.args.pd_nixl_remote_prefill_http_port,
-                server_port=self.args.pd_nixl_remote_prefill_port,
-                from_backend_queue=self.info_queue,
-                to_backend_queues=self.result_queues,
-                agent_meta_queues=self.mem_queues,
-            )
+            start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
         if self.args.run_mode == "decode":
             # 启动 decode kv move 管理进程
@@ -231,27 +207,11 @@ class RouterManager:
             start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
         if self.args.run_mode == "nixl_decode":
-            from lightllm.server.router.model_infer.mode_backend.pd_nixl.pd_remote_prefill import (
-                start_pd_remote_prefill_client_process,
+            from lightllm.server.router.model_infer.mode_backend.pd_nixl.decode_node_impl import (
+                start_decode_kv_move_manager_process,
             )
-
-            dist_info = DistInfo(
-                self.world_size,
-                self.nnodes,
-                self.dp_size,
-                self.dp_world_size,
-                self.dp_size_in_node,
-                self.node_world_size,
-            )
-
-            start_pd_remote_prefill_client_process(
-                self.args.pd_node_id,
-                dist_info,
-                from_backend_queue=self.info_queue,
-                to_backend_queues=self.result_queues,
-                agent_meta_queues=self.mem_queues,
-            )
-
+            start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+        
         return
 
     def _get_schedule_time_interval(self):
@@ -330,24 +290,12 @@ class RouterManager:
             await self._add_batch(new_batch)
 
         self._filter_reqs_from_running_batch()
-
-        filter_cmds = []
-
         aborted_reqs = self._get_aborted_reqs_from_running_batch()
         if aborted_reqs:
-            filter_cmds.extend([AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs])
-
+            await self._aborted_reqs(aborted_reqs=aborted_reqs)
         stop_str_matched_reqs = self._get_stop_str_reqs_from_running_batch()
         if stop_str_matched_reqs:
-            filter_cmds.extend([StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs])
-
-        if self.args.run_mode == "nixl_decode":
-            remote_prefill_done_reqs = self._get_nixl_rpd_reqs_from_running_batch()
-            if remote_prefill_done_reqs:
-                filter_cmds.extend([NIXLRemotePrefillDoneCmd(req_id=r.request_id) for r in remote_prefill_done_reqs])
-
-        if filter_cmds:
-            await self._filter_running_reqs(filter_cmds)
+            await self._stop_str_matched_reqs(stop_str_matched_reqs=stop_str_matched_reqs)
         return
 
     async def _add_batch(self, batch: Batch):
@@ -361,7 +309,17 @@ class RouterManager:
         logger.debug(f"Prefill Batch: {batch.simple_log()} \n")
         return
 
-    async def _filter_running_reqs(self, cmds: List[ReqCmd]):
+    async def _aborted_reqs(self, aborted_reqs: List[Req]):
+        cmds = [AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs]
+        while not self.shm_reqs_io_buffer.is_empty():
+            await asyncio.sleep(0.02)
+
+        self.shm_reqs_io_buffer.write_obj(cmds)
+        self.shm_reqs_io_buffer.set_ready()
+        return
+
+    async def _stop_str_matched_reqs(self, stop_str_matched_reqs: List[Req]):
+        cmds = [StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs]
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.02)
 
@@ -407,16 +365,6 @@ class RouterManager:
                 ans.append(req)
         return ans
 
-    def _get_nixl_rpd_reqs_from_running_batch(self) -> List[Req]:
-        ans = []
-        if self.running_batch is None:
-            return ans
-        for req in self.running_batch.reqs:
-            req: PDNIXLChunkedPrefillReq
-            if req.set_pd_req_state() != 0:
-                ans.append(req)
-        return ans
-
     def _get_paused_req_num(self) -> int:
         if self.running_batch is None:
             return 0
@@ -458,10 +406,6 @@ class RouterManager:
             req._router_aborted = False
             # 作用同 _router_aborted 类似
             req._router_stop_str_matched = False
-
-            if isinstance(req, PDNIXLChunkedPrefillReq):
-                req.set_dp_world_size(self.dp_world_size)
-
             req_group.append(req)
 
             logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")

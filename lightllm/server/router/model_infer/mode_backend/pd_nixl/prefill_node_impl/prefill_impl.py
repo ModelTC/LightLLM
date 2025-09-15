@@ -21,7 +21,7 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
 
     def init_custom(self):
         assert kv_trans_use_p2p()
-        
+
         if kv_trans_use_p2p():
             from ..p2p_fix import reduce_tensor
 
@@ -81,6 +81,7 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
             trans_task = NIXLChunckedTransTask(request_id=req_obj.req_id,
                                   start_kv_index=kv_start_index,
                                   end_kv_index=kv_end_index,
+                                  pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
                                   prefill_dp_index=self.dp_rank_in_node,
                                   decode_dp_index=None,
                                   src_device_id=req_obj.nixl_trans_device_id,
@@ -89,7 +90,7 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
                                   peer_agent_name=nixl_decode_node_info.agent_name,
                                   peer_agent_metadata=nixl_decode_node_info.agent_metadata,
                                   peer_num_pages=nixl_decode_node_info.num_pages,
-                                  peer_page_req_desc=nixl_decode_node_info.page_reg_desc,
+                                  peer_page_reg_desc=nixl_decode_node_info.page_reg_desc,
                                   peer_page_xfer_handles=None,
                                   nixl_src_page_index=None,
                                   nixl_dst_page_index=None

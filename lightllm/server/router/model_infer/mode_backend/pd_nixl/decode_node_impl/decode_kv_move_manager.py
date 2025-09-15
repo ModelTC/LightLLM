@@ -1,6 +1,7 @@
 import inspect
 import pickle
 import torch.multiprocessing as mp
+import time
 from typing import List, Dict, Optional, Tuple, Union, Callable
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskGroup
@@ -39,8 +40,7 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
                                    start_trans_process_func=start_decode_trans_process,
                                    up_status_in_queue=up_status_in_queue)
     event.set()
-    # 阻塞等待子线程退出
-    manager.dispatch_task.join()
+    while True: time.sleep(100)
     return
 
 
