@@ -172,6 +172,7 @@ class _DecodeTransModule:
             remote_agent_name, local_trans_task = self.read_kv_queue.get()
             local_trans_task: NIXLChunckedTransTask = local_trans_task
             if local_trans_task.time_out():
+                local_trans_task.error_info = "time out"
                 self.failed_queue.put(local_trans_task)
                 continue
             
@@ -207,10 +208,12 @@ class _DecodeTransModule:
                         self.success_queue.put(trans_task)
                         continue
                     elif ret == "ERR":
+                        trans_task.error_info = "xfer error"
                         self.failed_queue.put(trans_task)
                         continue
                 
                 if trans_task.time_out():
+                    trans_task.error_info = "time out"
                     self.failed_queue.put(trans_task)
                     continue
 
@@ -226,7 +229,8 @@ class _DecodeTransModule:
 
             # 写回后，回收页面
             self.page_index_queue.put(trans_task.nixl_dst_page_index)
-            self._create_success_ret(trans_task=trans_task)
+            ret = trans_task.createRetObj()
+            self.task_out_queue.put(ret)
     
     @log_exception
     def fail_loop(self):
@@ -236,22 +240,4 @@ class _DecodeTransModule:
 
             # 回收页面
             self.page_index_queue.put(trans_task.nixl_dst_page_index)
-            self._create_error_ret(trans_task=trans_task, error_info="not known")
-
-    def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
-        ret_obj = trans_task.createRetObj(
-                has_error=True,
-                error_info=error_info
-            )
-        self.task_out_queue.put(ret_obj)
-        logger.error(f"trans error in device id {self.device_id}: info {ret_obj}")
-        return
-
-    def _create_success_ret(self, trans_task: NIXLChunckedTransTask):
-        ret_obj = trans_task.createRetObj(
-            has_error=False,
-            error_info=None,
-        )
-        self.task_out_queue.put(ret_obj)
-        logger.info(f"trans success in device id {self.device_id}: info {ret_obj}")
-        return
+            self.task_out_queue.put(trans_task.createRetObj())

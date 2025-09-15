@@ -148,9 +148,12 @@ class _PrefillTransModule:
 
                         if trans_task is not None:
                             if  not notify_obj.has_error:
-                                self._create_success_ret(trans_task=trans_task)
+                                ret = trans_task.createRetObj()
+                                self.task_out_queue.put(ret)
                             else:
-                                self._create_error_ret(trans_task=trans_task, error_info=notify_obj.error_info)
+                                trans_task.error_info = "peer notify error"
+                                ret = trans_task.createRetObj()
+                                self.task_out_queue.put(ret)
                             
                             # 回收 kv move page 页面
                             self.page_index_queue.put(trans_task.nixl_src_page_index)
@@ -167,22 +170,3 @@ class _PrefillTransModule:
                     if trans_task is not None:
                         self._create_error_ret(trans_task=trans_task, error_info="time out")
                         self.page_index_queue.put(trans_task.nixl_src_page_index)
-
-
-    def _create_error_ret(self, trans_task: NIXLChunckedTransTask, error_info=""):
-        ret_obj = trans_task.createRetObj(
-                has_error=True,
-                error_info=error_info
-            )
-        self.task_out_queue.put(ret_obj)
-        logger.error(f"trans error in device id {self.device_id}: info {ret_obj}")
-        return
-
-    def _create_success_ret(self, trans_task: NIXLChunckedTransTask):
-        ret_obj = trans_task.createRetObj(
-            has_error=False,
-            error_info=None,
-        )
-        self.task_out_queue.put(ret_obj)
-        logger.info(f"trans success in device id {self.device_id}: info {ret_obj}")
-        return

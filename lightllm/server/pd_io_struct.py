@@ -268,6 +268,8 @@ class NIXLChunckedTransTask:
     create_time: float = None
     start_trans_time: float = None  # 用于标记传输开始的时间。同时标记是否正在传输中
 
+    error_info: Optional[str] = None
+
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index <= self.start_kv_index:
             error_info = "start_kv_index must >=0 and end_kv_index > start_kv_index"
@@ -299,14 +301,16 @@ class NIXLChunckedTransTask:
         return f"trans task req id {self.request_id} start {self.start_kv_index} end {self.end_kv_index}"
     
 
-    def createRetObj(self, has_error:bool, error_info:Optional[str] = None) -> "NIXLChunckedTransTaskRet":
-        return NIXLChunckedTransTaskRet(
+    def createRetObj(self) -> "NIXLChunckedTransTaskRet":
+        ret = NIXLChunckedTransTaskRet(
             request_id=self.request_id,
             start_kv_index=self.start_kv_index,
             end_kv_index=self.end_kv_index,
-            has_error=has_error,
-            error_info=error_info,
+            has_error=self.error_info is not None,
+            error_info=self.error_info,
         )
+        logger.error(f"trans ret: {ret}")
+        return ret
 
 
 
