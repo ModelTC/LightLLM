@@ -84,6 +84,7 @@ class ModeBackend:
         self.disable_cudagraph = self.args.disable_cudagraph
         self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
         self.is_nixl_pd_mode = self.run_mode in ["nixl_prefill", "nixl_decode"]
+        self.is_nixl_decode_mode = (self.run_mode == "nixl_decode")
 
         self.logger = init_logger(__name__)
 
@@ -356,13 +357,24 @@ class ModeBackend:
         cmds: List[NIXLChunckedTransTaskRet] = self.shm_nixl_trans_io_buffer.read_obj()
         self.shm_nixl_trans_io_buffer.sub_state()
         if cmds:
-            for obj in cmds:
-                if obj.request_id in g_infer_context.requests_mapping:
-                    req: InferReq = g_infer_context.requests_mapping[obj.request_id]
-                    if obj.has_error:
-                        req.nixl_pd_task_failed_num += 1
-                    else:
-                        req.nixl_pd_task_sunccess_num += 1
+            if self.is_nixl_decode_mode:
+                for obj in cmds:
+                    if obj.request_id in g_infer_context.requests_mapping:
+                        req: InferReq = g_infer_context.requests_mapping[obj.request_id]
+                        if obj.has_error:
+                            req.nixl_pd_task_failed_num += 1
+                        else:
+                            req.nixl_pd_task_sunccess_num += 1
+                        
+                        req.cur_kv_len += obj.end_kv_index - obj.start_kv_index
+            else:
+                for obj in cmds:
+                    if obj.request_id in g_infer_context.requests_mapping:
+                        req: InferReq = g_infer_context.requests_mapping[obj.request_id]
+                        if obj.has_error:
+                            req.nixl_pd_task_failed_num += 1
+                        else:
+                            req.nixl_pd_task_sunccess_num += 1
         return
     
 
