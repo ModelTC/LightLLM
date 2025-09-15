@@ -58,7 +58,7 @@ def _init_env(
                                       task_in_queue=task_in_queue,
                                       task_out_queue=task_out_queue,
                                       mem_managers=mem_managers)
-        manager.transfer_loop()
+        while True: time.sleep(100)
 
     except Exception as e:
         logger.error(f"Fatal error happened in kv trans process: {e}")

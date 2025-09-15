@@ -60,7 +60,7 @@ def _init_env(
                                     task_out_queue=task_out_queue,
                                     mem_managers=mem_managers,
                                     up_status_in_queue=up_status_in_queue)
-        manager.transfer_loop()
+        while True: time.sleep(100)
 
     except Exception as e:
         logger.error(f"Fatal error happened in kv trans process: {e}")
@@ -97,9 +97,9 @@ class _DecodeTransModule:
         self.page_index_queue = queue.Queue()
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
-
-        self.update_status_thread = threading.Thread(target=self.update_task_status_loop, daemon=True)
-        self.update_status_thread.start()
+ 
+        for func in [self.recv_task_loop, self.accept_peer_task_loop, self.read_kv_loop, self.update_task_status_loop, self.success_loop, self.fail_loop]:
+            threading.Thread(target=func, daemon=True).start()
         return
     
     @log_exception
