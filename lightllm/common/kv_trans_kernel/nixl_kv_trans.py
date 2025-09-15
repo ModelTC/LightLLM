@@ -5,7 +5,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _write_to_page(
+def _page_io(
     mem_index_ptr,
     k_page_ptr,
     k_page_stride_size,
@@ -31,6 +31,8 @@ def _write_to_page(
     layer_num,
     head_dim,
     HEAD_DIM_BLOCK: tl.constexpr,
+    IS_WRITE: tl.constexpr,
+    NEED_MASK: tl.constexpr,
 ):
     k_page_stride_size = tl.cast(k_page_stride_size, dtype=tl.int64)
     v_page_stride_size = tl.cast(v_page_stride_size, dtype=tl.int64)
@@ -46,14 +48,26 @@ def _write_to_page(
 
     mem_index = tl.load(mem_index_ptr + tid)
     off_dim = tl.arange(0, HEAD_DIM_BLOCK)
+    if NEED_MASK:
+        mask = off_dim < head_dim
+    else:
+        mask = None
+
     for layer_index in tl.range(layer_num, num_stages=3):
-        k_tensor = tl.load(k_ptr + layer_index * k_stride_layer_num + mem_index * k_stride_size + kv_head_id * k_stride_head + off_dim * k_stride_dim, mask= off_dim < head_dim)
-        v_tensor = tl.load(v_ptr + layer_index * v_stride_layer_num + mem_index * v_stride_size + kv_head_id * v_stride_head + off_dim * v_stride_dim, mask= off_dim < head_dim)
-        tl.store(k_page_ptr + tid * k_page_stride_size + layer_index * k_page_stride_layer_num + page_head_id * k_page_stride_head + off_dim * k_page_stride_dim, k_tensor, mask=off_dim < head_dim)
-        tl.store(v_page_ptr + tid * v_page_stride_size + layer_index * v_page_stride_layer_num + page_head_id * v_page_stride_head + off_dim * v_page_stride_dim, v_tensor, mask=off_dim < head_dim)
+        if IS_WRITE:
+            k_tensor = tl.load(k_ptr + layer_index * k_stride_layer_num + mem_index * k_stride_size + kv_head_id * k_stride_head + off_dim * k_stride_dim, mask=mask)
+            v_tensor = tl.load(v_ptr + layer_index * v_stride_layer_num + mem_index * v_stride_size + kv_head_id * v_stride_head + off_dim * v_stride_dim, mask=mask)
+            tl.store(k_page_ptr + tid * k_page_stride_size + layer_index * k_page_stride_layer_num + page_head_id * k_page_stride_head + off_dim * k_page_stride_dim, k_tensor, mask=mask)
+            tl.store(v_page_ptr + tid * v_page_stride_size + layer_index * v_page_stride_layer_num + page_head_id * v_page_stride_head + off_dim * v_page_stride_dim, v_tensor, mask=mask)
+        else:
+            k_page_tensor = tl.load(k_page_ptr + tid * k_page_stride_size + layer_index * k_page_stride_layer_num + page_head_id * k_page_stride_head + off_dim * k_page_stride_dim, mask=mask)
+            v_page_tensor = tl.load(v_page_ptr + tid * v_page_stride_size + layer_index * v_page_stride_layer_num + page_head_id * v_page_stride_head + off_dim * v_page_stride_dim, mask=mask)
+            tl.store(k_ptr + layer_index * k_stride_layer_num + mem_index * k_stride_size + kv_head_id * k_stride_head + off_dim * k_stride_dim, k_page_tensor, mask=mask)
+            tl.store(v_ptr + layer_index * v_stride_layer_num + mem_index * v_stride_size + kv_head_id * v_stride_head + off_dim * v_stride_dim, v_page_tensor, mask=mask)
     return
 
-def write_to_page(mem_indexes:torch.Tensor, page_tensor: torch.Tensor, kv_buffer: torch.Tensor, tp_index:int, tp_world_size:int):
+def page_io(mem_indexes:torch.Tensor, page_tensor: torch.Tensor, kv_buffer: torch.Tensor, tp_index:int, tp_world_size:int, mode:str):
+    assert mode in ["read", "write"]
     assert mem_indexes.is_contiguous()
     assert page_tensor.is_contiguous()
     assert kv_buffer.is_contiguous()
@@ -82,7 +96,7 @@ def write_to_page(mem_indexes:torch.Tensor, page_tensor: torch.Tensor, kv_buffer
     token_num = len(mem_indexes)
     grid = (token_num, page_write_head_num)
 
-    _write_to_page[grid](
+    _page_io[grid](
         mem_index_ptr=mem_indexes,
         k_page_ptr=k_page_tensor,
         k_page_stride_size=k_page_tensor.stride(0),
@@ -108,6 +122,8 @@ def write_to_page(mem_indexes:torch.Tensor, page_tensor: torch.Tensor, kv_buffer
         layer_num=layer_num,
         head_dim=head_dim,
         HEAD_DIM_BLOCK=triton.next_power_of_2(head_dim),
+        IS_WRITE=mode=="write",
+        NEED_MASK=triton.next_power_of_2(head_dim) != head_dim,
         num_warps=1,
     )
     return

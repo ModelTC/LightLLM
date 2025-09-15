@@ -13,6 +13,7 @@ from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.config_utils import get_num_key_value_heads
+from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 
 logger = init_logger(__name__)
 
@@ -110,6 +111,44 @@ class MemoryManager:
             (page_num, page_size, self.layer_num, 2 * num_kv_head, self.head_dim), dtype=self.dtype, device="cuda"
         )
         return
+    
+    def write_mem_to_page_kv_move_buffer(self,
+                                        mem_indexes: List[int], 
+                                        page_index: int,
+                                        dp_index: int,
+                                        mem_managers: List["MemoryManager"],
+                                        dp_world_size:int):
+        cur_page = self.kv_move_buffer[page_index]
+        repeat_count = dp_world_size * self.kv_buffer.shape[2] // self.kv_move_buffer.shape[3]
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        for tp_index in range(dp_world_size):
+            if tp_index % repeat_count == 0:
+                page_io(torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
+                              page_tensor=cur_page,
+                              kv_buffer=dp_mems[tp_index].kv_buffer,
+                              tp_index=tp_index,
+                              tp_world_size=dp_world_size,
+                              mode="write")
+        torch.cuda.current_stream().synchronize()
+        return
+    
+    def read_page_kv_move_buffer_to_mem(self,
+                                        mem_indexes: List[int], 
+                                        page_index: int,
+                                        dp_index: int,
+                                        mem_managers: List["MemoryManager"],
+                                        dp_world_size:int):
+        cur_page = self.kv_move_buffer[page_index]
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        for tp_index in range(dp_world_size):
+            page_io(torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
+                            page_tensor=cur_page,
+                            kv_buffer=dp_mems[tp_index].kv_buffer,
+                            tp_index=tp_index,
+                            tp_world_size=dp_world_size,
+                            mode="read")
+        torch.cuda.current_stream().synchronize()
+
 
     def send_to_decode_node(
         self,
