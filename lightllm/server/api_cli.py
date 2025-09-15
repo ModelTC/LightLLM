@@ -466,9 +466,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
     )
     parser.add_argument(
-        "--enable_fused_shared_experts",
+        "--disable_fused_shared_experts",
         action="store_true",
-        help="""Whether to enable fused shared experts for deepseekv3 model. only work when MOE_MODE=TP """,
+        help="""Whether to disable fused shared experts for deepseekv3 model. only work when MOE_MODE=TP """,
     )
     parser.add_argument(
         "--mtp_mode",
