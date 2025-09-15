@@ -125,7 +125,6 @@ class _PrefillTransModule:
             trans_task.start_trans_time = time.time()
             pass
             self.transporter.send_readtask_to_decode_node(peer_name=trans_task.peer_agent_name, trans_task=trans_task)
-            trans_task.start_trans_time = time.time()
 
             with self.waiting_dict_lock:
                 self.waiting_dict[trans_task.get_key()] = trans_task
