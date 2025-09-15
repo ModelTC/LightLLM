@@ -12,6 +12,7 @@ from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.config_utils import get_num_key_value_heads
 
 logger = init_logger(__name__)
 
@@ -103,8 +104,10 @@ class MemoryManager:
     def alloc_paged_kv_move_buffer(self, page_num, page_size):
         if isinstance(self, MemoryManager) and type(self) != MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
+        
+        num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
         self.kv_move_buffer = torch.empty(
-            (page_num, page_size, self.layer_num, 2 * self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
+            (page_num, page_size, self.layer_num, 2 * num_kv_head, self.head_dim), dtype=self.dtype, device="cuda"
         )
         return
 
