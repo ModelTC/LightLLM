@@ -114,6 +114,7 @@ class _DecodeTransModule:
                 agent_metadata=self.transporter.agent_metadata,
                 num_pages=self.transporter.num_pages,
                 page_reg_desc=self.transporter.local_page_mem_desc,
+                request_id=task.request_id,
                 ready_kv_len=task.start_kv_index,
             )
 
@@ -154,12 +155,11 @@ class _DecodeTransModule:
                     remote_trans_task = notify_obj
                     key = remote_trans_task.get_key()
                     with self.waiting_dict_lock:
-                        local_trans_task = self.waiting_dict.pop(key, None)
+                        local_trans_task : NIXLChunckedTransTask = self.waiting_dict.pop(key, None)
                     
                     if local_trans_task is None:
-                        self.transporter.send_notify_to_prefill_node(peer_name=remote_agent_name,
-                                                                        notify=pickle.dumps(remote_trans_task.createRetObj(has_error=True,
-                                                                                                                        error_info="decode node didnot find this task")))
+                        remote_trans_task.error_info = "peer not find"
+                        self.transporter.send_notify_to_prefill_node(peer_name=remote_agent_name, notify=pickle.dumps(remote_trans_task.createRetObj()))
                     else:
                         local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
                         self.read_kv_queue.put((remote_agent_name, local_trans_task))
@@ -168,16 +168,16 @@ class _DecodeTransModule:
     @log_exception
     def read_kv_loop(self):
         while True:
-
+            page_index = self.page_index_queue.get()
             remote_agent_name, local_trans_task = self.read_kv_queue.get()
             local_trans_task: NIXLChunckedTransTask = local_trans_task
+            local_trans_task.nixl_dst_page_index = page_index
+
             if local_trans_task.time_out():
                 local_trans_task.error_info = "time out"
                 self.failed_queue.put(local_trans_task)
                 continue
             
-            page_index = self.page_index_queue.get()
-            local_trans_task.nixl_dst_page_index = page_index
 
             xfer_handle = self.transporter.read_blocks_paged(peer_name=remote_agent_name, 
                                                 trans_task=local_trans_task)
@@ -202,15 +202,14 @@ class _DecodeTransModule:
                 self.update_status_task_list.clear()
             
             for trans_task in trans_taskes:
-                if trans_task.xfer_handle is not None:
-                    ret = self.transporter.check_task_status(trans_task=trans_task)
-                    if ret == "DONE":
-                        self.success_queue.put(trans_task)
-                        continue
-                    elif ret == "ERR":
-                        trans_task.error_info = "xfer error"
-                        self.failed_queue.put(trans_task)
-                        continue
+                ret = self.transporter.check_task_status(trans_task=trans_task)
+                if ret == "DONE":
+                    self.success_queue.put(trans_task)
+                    continue
+                elif ret == "ERR":
+                    trans_task.error_info = "xfer error"
+                    self.failed_queue.put(trans_task)
+                    continue
                 
                 if trans_task.time_out():
                     trans_task.error_info = "time out"
@@ -230,6 +229,8 @@ class _DecodeTransModule:
             # 写回后，回收页面
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
+            if trans_task.xfer_handle is not None:
+                self.transporter.release_xfer_handle(trans_task.xfer_handle)
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
     
@@ -242,4 +243,6 @@ class _DecodeTransModule:
             # 回收页面
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
+            if trans_task.xfer_handle is not None:
+                self.transporter.release_xfer_handle(trans_task.xfer_handle)
             self.task_out_queue.put(trans_task.createRetObj())

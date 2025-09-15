@@ -225,7 +225,8 @@ class NIXLDecodeNodeInfo:
     agent_metadata: bytes
     num_pages: int
     page_reg_desc: bytes
-
+    
+    request_id: int
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
 
 
@@ -285,7 +286,7 @@ class NIXLChunckedTransTask:
 
     def time_out(self) -> bool:
         if self.start_trans_time is None:
-            if time.time() - self.create_time > 60:
+            if time.time() - self.create_time > 80:
                 return True
             return False
         else:

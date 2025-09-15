@@ -158,6 +158,10 @@ class NixlKVTransporter:
                 logger.warning(f"Transfer failed with trans task {trans_task} for handle {handle}")
                 self.nixl_agent.release_xfer_handle(handle)
                 return "ERR"
+            
+    def release_xfer_handle(self, handle):
+        self.nixl_agent.release_xfer_handle(handle=handle)
+        return
 
     def shutdown(self):
         self.nixl_agent.deregister_memory(self.page_reg_desc)
