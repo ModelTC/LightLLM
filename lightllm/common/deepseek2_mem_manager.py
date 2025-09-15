@@ -8,6 +8,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_d_node, kv_trans_v2_for_p_node
 from lightllm.distributed.pynccl import PyNcclCommunicator
+from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
 
 logger = init_logger(__name__)
 
@@ -41,6 +42,42 @@ class Deepseek2MemoryManager(MemoryManager):
             (page_num, page_size, self.layer_num, self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
         )
         return
+    
+    def write_mem_to_page_kv_move_buffer(self,
+                                        mem_indexes: List[int], 
+                                        page_index: int,
+                                        dp_index: int,
+                                        mem_managers: List["MemoryManager"],
+                                        dp_world_size:int):
+        cur_page = self.kv_move_buffer[page_index]
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        mla_page_io(
+            mem_indexes=torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
+            page_tensor=cur_page,
+            kv_buffer=dp_mems[0].kv_buffer,
+            mode="write",
+        )
+        torch.cuda.current_stream().synchronize()
+        return
+    
+    def read_page_kv_move_buffer_to_mem(self,
+                                        mem_indexes: List[int], 
+                                        page_index: int,
+                                        dp_index: int,
+                                        mem_managers: List["MemoryManager"],
+                                        dp_world_size:int):
+        cur_page = self.kv_move_buffer[page_index]
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        mem_indexes = torch.tensor(mem_indexes, dtype=torch.int64, device="cuda")
+        for mem in dp_mems:
+            mla_page_io(
+                mem_indexes=mem_indexes,
+                page_tensor=cur_page,
+                kv_buffer=mem.kv_buffer,
+                mode="read",
+            )
+        torch.cuda.current_stream().synchronize()
+
 
     def send_to_decode_node(
         self,

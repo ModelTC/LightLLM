@@ -127,3 +127,84 @@ def page_io(mem_indexes:torch.Tensor, page_tensor: torch.Tensor, kv_buffer: torc
         num_warps=1,
     )
     return
+
+
+
+@triton.jit
+def _mla_page_io(
+    mem_index_ptr,
+    page_ptr,
+    page_stride_size,
+    page_stride_layer_num,
+    page_stride_head,
+    page_stride_dim,
+    kv_ptr,
+    kv_stride_layer_num,
+    kv_stride_size,
+    kv_stride_head,
+    kv_stride_dim,
+    layer_num,
+    head_dim,
+    HEAD_DIM_BLOCK: tl.constexpr,
+    IS_WRITE: tl.constexpr,
+    NEED_MASK: tl.constexpr,
+):
+    page_stride_size = tl.cast(page_stride_size, dtype=tl.int64)
+    kv_stride_layer_num = tl.cast(kv_stride_layer_num, dtype=tl.int64)
+    kv_stride_size = tl.cast(kv_stride_size, dtype=tl.int64)
+    
+    tid = tl.program_id(0)
+
+    mem_index = tl.load(mem_index_ptr + tid)
+    off_dim = tl.arange(0, HEAD_DIM_BLOCK)
+    if NEED_MASK:
+        mask = off_dim < head_dim
+    else:
+        mask = None
+
+    for layer_index in tl.range(layer_num, num_stages=3):
+        if IS_WRITE:
+            kv_tensor = tl.load(kv_ptr + layer_index * kv_stride_layer_num + mem_index * kv_stride_size + 0 * kv_stride_head + off_dim * kv_stride_dim, mask=mask)
+            tl.store(page_ptr + tid * page_stride_size + layer_index * page_stride_layer_num + 0 * page_stride_head + off_dim * page_stride_dim, kv_tensor, mask=mask)
+        else:
+            page_tensor = tl.load(page_ptr + tid * page_stride_size + layer_index * page_stride_layer_num + 0 * page_stride_head + off_dim * page_stride_dim, mask=mask)
+            tl.store(kv_ptr + layer_index * kv_stride_layer_num + mem_index * kv_stride_size + 0 * kv_stride_head + off_dim * kv_stride_dim, page_tensor, mask=mask)
+    return
+
+def mla_page_io(mem_indexes:torch.Tensor, page_tensor: torch.Tensor, kv_buffer: torch.Tensor, mode:str):
+    assert mode in ["read", "write"]
+    assert mem_indexes.is_contiguous()
+    assert page_tensor.is_contiguous()
+    assert kv_buffer.is_contiguous()
+
+    page_size, layer_num, page_head_num, page_head_dim = page_tensor.shape
+    _layer_num, size, kv_head_num, head_dim = kv_buffer.shape
+    assert layer_num == _layer_num
+    assert len(mem_indexes) <= page_size
+    assert page_head_dim == head_dim
+    assert page_head_num == kv_head_num == 1
+
+
+    token_num = len(mem_indexes)
+    grid = (token_num,)
+
+    _mla_page_io[grid](
+        mem_index_ptr=mem_indexes,
+        page_ptr=page_tensor,
+        page_stride_size=page_tensor.stride(0),
+        page_stride_layer_num=page_tensor.stride(1),
+        page_stride_head=page_tensor.stride(2),
+        page_stride_dim=page_tensor.stride(3),
+        kv_ptr=kv_buffer,
+        kv_stride_layer_num=kv_buffer.stride(0),
+        kv_stride_size=kv_buffer.stride(1),
+        kv_stride_head=kv_buffer.stride(2),
+        kv_stride_dim=kv_buffer.stride(3),
+        layer_num=layer_num,
+        head_dim=head_dim,
+        HEAD_DIM_BLOCK=triton.next_power_of_2(head_dim),
+        IS_WRITE=mode=="write",
+        NEED_MASK=triton.next_power_of_2(head_dim) != head_dim,
+        num_warps=1,
+    )
+    return
