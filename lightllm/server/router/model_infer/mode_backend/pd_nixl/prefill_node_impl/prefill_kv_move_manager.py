@@ -7,6 +7,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..trans_process_obj import KVTransProcess
 from ..base_kv_move_manager import BaseKVMoveManager
+from lightllm.utils.error_utils import log_exception
 
 logger = init_logger(__name__)
 
@@ -49,20 +50,15 @@ class PrefillKVMoveManager(BaseKVMoveManager):
     # ==================================================================================
     # 主任务循环，接收需要进行kv传输的请求, 转发给 KV_TRANS_PROCESS
     # ==================================================================================
-
+    @log_exception
     def task_dispatcher_loop(self):
-        try:
-            # 获取任务，并分发给相关卡的处理队列
-            while True:
-                task:NIXLChunckedTransTask = self.info_queue.get()
+        # 获取任务，并分发给相关卡的处理队列
+        while True:
+            task:NIXLChunckedTransTask = self.info_queue.get()
 
-                device_id = task.src_device_id
-                try:
-                    trans_process: KVTransProcess = self.kv_trans_processes[device_id]
-                    trans_process.task_in_queue.put(task)
-                except BaseException as e:
-                    logger.exception(str(e))
-
-        except (BaseException, RuntimeError) as e:
-            logger.exception(str(e))
-            raise e
+            device_id = task.src_device_id
+            try:
+                trans_process: KVTransProcess = self.kv_trans_processes[device_id]
+                trans_process.task_in_queue.put(task)
+            except BaseException as e:
+                logger.exception(str(e))

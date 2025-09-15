@@ -7,10 +7,10 @@ import torch.multiprocessing as mp
 from typing import List, Dict, Union, Callable, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
-from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from .trans_process_obj import KVTransProcess
+from lightllm.utils.error_utils import log_exception
 
 logger = init_logger(__name__)
 
@@ -36,21 +36,19 @@ class BaseKVMoveManager:
 
         self.kv_trans_processes: List[KVTransProcess] = [None] * self.node_world_size
         for device_id in range(self.node_world_size):
-            self.kv_trans_processes[device_id] = KVTransProcess()
-            assert self.kv_trans_processes[device_id].init_all(device_id=device_id,
-                                                               manager=self,
-                                                               start_func=start_trans_process_func,
-                                                               up_status_in_queue=up_status_in_queue)
-            self.kv_trans_processes[device_id].start_ret_handle_thread(func=self.task_ret_handle_loop)
+            trans_process = KVTransProcess()
+            self.kv_trans_processes[device_id] = trans_process
+            assert trans_process.init_all(device_id=device_id,
+                                        manager=self,
+                                        start_func=start_trans_process_func,
+                                        up_status_in_queue=up_status_in_queue)
+            threading.Thread(target=self.task_ret_handle_loop, args=(trans_process,), daemon=True).start()
 
         # 通过 io buffer 将命令写入到推理进程中
         self.shm_nixl_trans_io_buffer = ShmObjsIOBuffer(tail_str="nixl")
-        self.dispatch_task = threading.Thread(target=self.task_dispatcher_loop, daemon=True)
-        self.dispatch_task.start()
-        self.release_task = threading.Thread(target=self.task_ret_upload_loop, daemon=True)
-        self.release_task.start()
-        self.check_task = threading.Thread(target=self.check_trans_process_loop, daemon=True)
-        self.check_task.start()
+
+        for func in [self.task_dispatcher_loop, self.task_ret_upload_loop, self.check_trans_process_loop]:
+            threading.Thread(target=func, daemon=True).start()
         return
 
     # ==================================================================================
@@ -63,26 +61,23 @@ class BaseKVMoveManager:
     # ==================================================================================
     #  将收集到的传输返回信息，批量写回给推理进程，触发其进行相关管理信息的更新。
     # ==================================================================================
+    @log_exception
     def task_ret_upload_loop(self):
-        try:
+        while True:
+            ret_obj: NIXLChunckedTransTaskRet = self.ret_obj_queue.get()
+            ret_objs: List[NIXLChunckedTransTaskRet] = [ret_obj]
+            ret_objs.extend(self._collect_return_objects())
+            
             while True:
-                ret_obj: NIXLChunckedTransTaskRet = self.ret_obj_queue.get()
-                ret_objs: List[NIXLChunckedTransTaskRet] = [ret_obj]
-                ret_objs.extend(self._collect_return_objects())
-               
-                while True:
-                    if self.shm_nixl_trans_io_buffer.is_empty():
-                        # to do, 这里写入的数量，可能会超过共享管道的大小。
-                        self.shm_nixl_trans_io_buffer.write_obj(ret_objs)
-                        self.shm_nixl_trans_io_buffer.set_ready()
-                        break
-                    else:
-                        time.sleep(0.01)
-                        ret_objs.extend(self._collect_return_objects())
-        
-        except (BaseException, RuntimeError) as e:
-            logger.exception(str(e))
-            raise e
+                if self.shm_nixl_trans_io_buffer.is_empty():
+                    # to do, 这里写入的数量，可能会超过共享管道的大小。
+                    self.shm_nixl_trans_io_buffer.write_obj(ret_objs)
+                    self.shm_nixl_trans_io_buffer.set_ready()
+                    break
+                else:
+                    time.sleep(0.01)
+                    ret_objs.extend(self._collect_return_objects())
+    
         
     def _collect_return_objects(self):
         """ 从队列中收集所有返回对象 """
@@ -98,18 +93,11 @@ class BaseKVMoveManager:
     # ==================================================================================
     # 处理各个传输任务的返回的信息
     # ==================================================================================
-    def task_ret_handle_loop(self, trans_process):
-        trans_process: KVTransProcess = trans_process
-
-        try:
-            while True:
-                ret_obj: NIXLChunckedTransTaskRet = trans_process.task_out_queue.get()
-                self.ret_obj_queue.put(ret_obj)
-
-        except BaseException as e:
-            logger.exception(str(e))
-            raise e
-
+    @log_exception
+    def task_ret_handle_loop(self, trans_process: KVTransProcess):
+        while True:
+            ret_obj: NIXLChunckedTransTaskRet = trans_process.task_out_queue.get()
+            self.ret_obj_queue.put(ret_obj)
 
     # ==================================================================================
     # 定时检测传输进程的健康状态，出现问题拉崩整个系统触发重启
@@ -132,4 +120,3 @@ class BaseKVMoveManager:
             os.kill(os.getppid(), signal.SIGKILL)
             os.kill(os.getpid(), signal.SIGKILL)
             raise e
-
