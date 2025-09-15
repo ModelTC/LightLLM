@@ -24,8 +24,8 @@ class NixlKVTransporter:
         self.node_id = node_id
         self.tp_idx = tp_idx
         self.nixl_agent = NixlWrapper(self.agent_name, None)
-        self.remote_agents: Dict[str, NixlAgentMetadata] = {}
         self._register_kv_move_buffer(kv_move_buffer=kv_move_buffer)
+        self.remote_agents: Dict[str, NixlAgentMetadata] = {}
         return
 
     @property
