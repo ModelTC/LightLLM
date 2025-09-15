@@ -74,7 +74,7 @@ class _DecodeTransModule:
         device_id: int,
         task_in_queue: mp.Queue,
         task_out_queue: mp.Queue,
-        mem_managers: List[mp.Queue],
+        mem_managers: List[MemoryManager],
         up_status_in_queue: Optional[mp.SimpleQueue]):
         self.args = args
         self.device_id = device_id
@@ -82,10 +82,12 @@ class _DecodeTransModule:
         self.task_out_queue = task_out_queue
         self.mem_managers = mem_managers
         self.up_status_in_queue = up_status_in_queue
-        
+        cur_mem_manager: MemoryManager = self.mem_managers[device_id]
+        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(page_num=self.args.nixl_pd_kv_page_num,
+                                                                    page_size=self.args.nixl_pd_kv_page_size)
         self.transporter = NixlKVTransporter(node_id=self.args.pd_node_id,
                                              tp_idx=device_id,
-                                             kv_move_buffer=None)
+                                             kv_move_buffer=kv_move_buffer)
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
         self.read_kv_queue = queue.Queue()
@@ -167,6 +169,7 @@ class _DecodeTransModule:
 
     @log_exception
     def read_kv_loop(self):
+        torch.cuda.set_device(self.device_id)
         while True:
             page_index = self.page_index_queue.get()
             remote_agent_name, local_trans_task = self.read_kv_queue.get()

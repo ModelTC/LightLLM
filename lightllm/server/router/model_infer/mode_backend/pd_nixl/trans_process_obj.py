@@ -40,10 +40,7 @@ class KVTransProcess:
             logger.warning(f"Failed start kv trans process for device {device_id}: {e}")
             logger.exception(str(e))
             return False
-        
-    def start_ret_handle_thread(self, func):
-        self.ret_handle_tread = threading.Thread(target=func, args=(self,), daemon=True)
-        self.ret_handle_tread.start()
+    
 
     def is_trans_process_health(self):
         try:

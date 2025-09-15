@@ -72,7 +72,7 @@ class _PrefillTransModule:
         device_id: int,
         task_in_queue: mp.Queue,
         task_out_queue: mp.Queue,
-        mem_managers: List[mp.Queue],
+        mem_managers: List[MemoryManager],
     ) -> None:
         self.args = args
         self.device_id = device_id
@@ -80,9 +80,12 @@ class _PrefillTransModule:
         self.task_out_queue = task_out_queue
         self.mem_managers = mem_managers
         
+        cur_mem_manager: MemoryManager = self.mem_managers[device_id]
+        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(page_num=self.args.nixl_pd_kv_page_num,
+                                                                    page_size=self.args.nixl_pd_kv_page_size)
         self.transporter = NixlKVTransporter(node_id=self.args.pd_node_id,
                                              tp_idx=device_id,
-                                             kv_move_buffer=None)
+                                             kv_move_buffer=kv_move_buffer)
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
 
