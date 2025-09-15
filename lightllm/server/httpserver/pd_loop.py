@@ -106,7 +106,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     obj = pickle.loads(recv_bytes)
                     if obj[0] == ObjType.REQ:
                         prompt, sampling_params, multimodal_params = obj[1]
-                        group_req_id = sampling_params.group_req_id
+                        group_req_id = sampling_params.group_request_id
                         nixl_pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = nixl_pd_event
                         asyncio.create_task(
