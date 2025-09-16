@@ -4,6 +4,7 @@ import zmq.asyncio
 import asyncio
 import uvloop
 import rpyc
+import socket
 import pickle
 import hashlib
 import datetime
@@ -11,6 +12,7 @@ import inspect
 from fastapi import Request
 from ..tokenizer import get_tokenizer
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
+from lightllm.server.embed_cache.utils import get_shm_name_data, create_shm
 from lightllm.server.core.objs import ShmReqManager
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs import Req, FinishStatus
@@ -63,6 +65,7 @@ class VisualManager:
             self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
             self.send_to_next_module.connect(f"{self.args.zmq_mode}127.0.0.1:{self.next_module_port}")
         self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
+        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     async def wait_to_model_ready(self):
         visual_dp = self.args.visual_dp
@@ -100,7 +103,6 @@ class VisualManager:
                 for vit_tp_rank in range(self.args.visual_tp):
                     task = asyncio.create_task(self.model_rpcs[vit_dp_rank][vit_tp_rank].encode(assigned_images))
                     tasks.append(task)
-
         await asyncio.gather(*tasks)
         return
 
@@ -162,19 +164,34 @@ class VisualManager:
             # ]
             logger.info(f"Receive req {recv_req.group_req_id}, image_count:{len(recv_req.multimodal_params.images)}")
             uuids = [img.uuid for img in recv_req.multimodal_params.images]
-            already_embed = self.cache_client.root.get_items_embed(uuids)
+            already_embed = await asyncio.to_thread(self.cache_client.root.get_items_embed, uuids)
             if all(already_embed):
                 return None
+
+            uuids = []
             token_nums = []
+            datas = []
             for img, embed in zip(recv_req.multimodal_params.images, already_embed):
                 if not embed:
                     uuids.append(img.uuid)
                     token_nums.append(img.token_num)
+                    datas.append(img._preload_data)
+                    img.free()
             while True:
-                records = self.cache_client.root.alloc(uuids, token_nums)
+                records = await asyncio.to_thread(self.cache_client.root.alloc, uuids, token_nums)
                 if records is not None:
                     break
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.01)
+            ready_flags = obtain(self.cache_client.root.get_items_data(uuids))
+            update_data_ids = []
+
+            for uid, ready, data in zip(uuids, ready_flags, datas):
+                if not ready:
+                    create_shm(get_shm_name_data(uid), data)
+                    update_data_ids.append(uid)
+
+            if update_data_ids:
+                await asyncio.to_thread(self.cache_client.root.set_items_data, update_data_ids)
             return recv_req
         else:
             return self.vit_receiver.recv_pyobj(zmq.NOBLOCK)
@@ -193,7 +210,8 @@ class VisualManager:
                         self.waiting_reqs.append(recv_req)
                     else:
                         assert False, f"Error Req Inf {recv_req}"
-                self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
+                    await asyncio.sleep(0)
+                self.visual_recv_max_count = min(int(self.visual_recv_max_count * 1.3), 256)
             except zmq.ZMQError:
                 # 当队列已经开始清空的时候，将一次接受数量下调
                 self.visual_recv_max_count = 64
@@ -217,21 +235,11 @@ class VisualManager:
                         images_need_infer.append(img)
 
                         if len(images_need_infer) == self.infer_batch_size:
-                            _t0 = time.perf_counter()
                             await self.infer_imgs(images_need_infer)
-                            logger.info(
-                                f"[visual] batch infer complete, image_count: {len(images_need_infer)}, "
-                                f"elapsed_time {(time.perf_counter()-_t0) * 1000}ms"
-                            )
                             images_need_infer = []
 
                     if len(images_need_infer) > 0:
-                        _t1 = time.perf_counter()
                         await self.infer_imgs(images_need_infer)
-                        logger.info(
-                            f"[visual] batch infer complete, image_count:{len(images_need_infer)}, "
-                            f"elapsed_time {(time.perf_counter()-_t1) * 1000}ms"
-                        )
                         images_need_infer = []
                     # 在这里release这个image，ref-1
                     logger.info(f"req-id {visual_req.group_req_id} has been release ok")

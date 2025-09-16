@@ -2,6 +2,7 @@ import asyncio
 import numpy as np
 import rpyc
 import torch
+import time
 import inspect
 from datetime import timedelta
 from typing import Dict, List, Tuple
@@ -30,6 +31,11 @@ from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+import pickle
+import socket
+
+logger = init_logger(__name__)
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -48,10 +54,12 @@ class VisualModelRpcServer(rpyc.Service):
         max_batch_size = min(self.args.visual_infer_batch_size // self.args.visual_dp, 1)
         remote_vit = True if self.args.run_mode == "visual" else False
 
+        self.image_embed_dir = self.args.image_embed_dir
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
         kvargs["vit_rank_id"] = self.dp_rank_id * self.args.visual_tp + self.tp_rank_id
         self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
+        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
@@ -109,19 +117,18 @@ class VisualModelRpcServer(rpyc.Service):
     def exposed_encode(self, images: List[ImageItem]):
         images = obtain(images)
         all_img_embeds, uuids, valid_ids = self.forward(images)
-        all_img_embeds = all_img_embeds.to(torch.device("cpu"))
-
+        all_img_embeds = all_img_embeds.to(torch.device("cpu"), non_blocking=True)
         if self.tp_rank_id == 0:
             # ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
             ids_to_set = []
-            for i, img in enumerate(images):
+            for i in range(len(images)):
                 # if ready:
                 #     continue
                 uid = uuids[i]
                 start, end = valid_ids[i]
                 cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
                 if self.args.run_mode == "visual":
-                    create_afs(get_shm_name_embed(uid), cur_embed_bytes, self.args.image_embed_dir)
+                    create_afs(get_shm_name_embed(uid), cur_embed_bytes, self.image_embed_dir)
                 else:
                     create_shm(get_shm_name_embed(uid), cur_embed_bytes)
                 ids_to_set.append(uid)
@@ -131,11 +138,13 @@ class VisualModelRpcServer(rpyc.Service):
 
 
 class VisualModelRpcClient:
-    def __init__(self, model_rpc, vit_tp, rpc_server_process=None):
-        self.model: VisualModelRpcServer = model_rpc
+    def __init__(self, conn, vit_tp, rpc_server_process=None):
+        self.conn = conn
+        self.model: VisualModelRpcServer = conn.root
         self.vit_tp = vit_tp
         self.rpc_server_process = rpc_server_process
         self.use_rpc = True
+        self._bg = rpyc.BgServingThread(self.conn)
         if self.use_rpc:
 
             def async_wrap(f):
@@ -176,7 +185,13 @@ def _init_env(port, device_id):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
-    t = ThreadedServer(VisualModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
+    auth = lambda sock: (sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) or (sock, None))
+    t = ThreadedServer(
+        VisualModelRpcServer(),
+        port=port,
+        protocol_config={"allow_pickle": True},
+        authenticator=auth,
+    )
     t.start()
     return
 
@@ -197,6 +212,7 @@ async def start_model_process(port, vit_tp, device_id):
     while repeat_count < 20:
         try:
             con = rpyc.connect("localhost", port, config={"allow_pickle": True})
+            con._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             break
         except BaseException:
             await asyncio.sleep(1)
@@ -205,4 +221,4 @@ async def start_model_process(port, vit_tp, device_id):
         raise Exception("init rpc env error!")
 
     assert proc.is_alive()
-    return VisualModelRpcClient(con.root, vit_tp, rpc_server_process=proc)
+    return VisualModelRpcClient(con, vit_tp, rpc_server_process=proc)

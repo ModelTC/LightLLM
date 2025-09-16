@@ -81,7 +81,7 @@ class InMemoryCache:
                     # if self.args.run_mode == "visual":
                     #     free_afs(get_shm_name_embed(id), self.args.image_embed_dir)
                     # elif not self.args.enable_remote_vit:
-                    if not self.args.run_mode == "visual":
+                    if not self.args.enable_remote_vit and self.args.run_mode != "visual":
                         free_shm(get_shm_name_embed(id))
                 del self._md5_to_record[record.md5sum]
                 del self._records[id]

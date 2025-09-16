@@ -4,6 +4,7 @@ import zmq.asyncio
 import asyncio
 import uvloop
 import rpyc
+import socket
 import time
 import copy
 import hashlib
@@ -84,6 +85,7 @@ class HttpServerManager:
         self.enable_multimodal = enable_multimodal
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
+            self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             # 初始化VIT连接管理器
             from lightllm.server.visualserver.vit_connect import VITConnectionManager
 
