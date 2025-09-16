@@ -1,5 +1,6 @@
 import enum
 import time
+import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union, Set
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
@@ -314,8 +315,12 @@ class NIXLChunckedTransTask:
     
     def to_str(self):
         if self.mem_indexes is not None:
-            obj : NIXLChunckedTransTask = self.copy()
+            obj : NIXLChunckedTransTask = copy.copy(self)
             obj.mem_indexes = None
+            if obj.decode_agent_metadata is not None:
+                obj.decode_agent_metadata = b"xxx"
+            if obj.prefill_agent_metadata is not None:
+                obj.prefill_agent_metadata = b"xxx"
         else:
             obj = self
         return obj.__str__()

@@ -1,4 +1,5 @@
 import pickle
+import copy
 from dataclasses import dataclass
 from collections import defaultdict
 from typing import Dict, List, Any, Optional, Tuple
@@ -103,7 +104,7 @@ class NixlKVTransporter:
             # 将页面读取任务发送给 decode 节点
             remote_agent: NixlAgentMetadata = self.remote_agents[decode_agent_name]
             assert trans_task.nixl_src_page_index is not None
-            new_trans_task: NIXLChunckedTransTask = trans_task.copy()
+            new_trans_task: NIXLChunckedTransTask = copy.copy(trans_task)
 
             new_trans_task.decode_agent_name = None
             new_trans_task.decode_agent_metadata = None
