@@ -373,18 +373,6 @@ class InferReq:
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
-    
-    def nixl_state_release_ok(self):
-        """
-        判定请求的 nixl pd 分离模式下的状态是否可以释放， 所有任务是否已经处理
-        """
-        return (self.nixl_pd_task_failed_num + self.nixl_pd_task_sunccess_num) == self.nixl_pd_task_num
-    
-    def nixl_state_all_ok(self):
-        """
-        判定请求的 nixl pd 分离模式下所有的任务是否都成功
-        """
-        return self.nixl_pd_task_sunccess_num == self.nixl_pd_task_num 
 
     def get_output_len(self):
         return self.cur_output_len
