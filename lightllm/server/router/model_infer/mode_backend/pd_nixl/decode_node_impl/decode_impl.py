@@ -77,8 +77,37 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                     req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
 
                     req_id = req_obj.shm_req.request_id
-                    logger.error(f"req_id: {req_id} forced to finished, it not in g_success_kv_move_task_cache")
+                    logger.error(f"req_id: {req_id} forced to finished")
         return
+    
+    def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
+        """
+        将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
+        主要用于在 nixl pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
+        传输没有完成的请求。
+        """
+        ans_list : List[InferReq] = []
+        for request_id in req_ids:
+            req_obj: InferReq = g_infer_context.requests_mapping[request_id]
+            if req_obj.nixl_pd_task_num == (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
+                if req_obj.nixl_pd_task_failed_num > 0:
+                    if not req_obj.finish_status.is_finished():
+                        # 强制停止
+                        req_obj.cur_output_len += 1
+                        req_obj.set_next_gen_token_id(0, 0.0, 1)
+                        req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
+
+                        if self.is_master_in_dp:
+                            req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
+                            req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
+                            req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
+                            req_obj.shm_req.finish_status.set_status(FinishStatus.FINISHED_STOP)
+                            req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
+
+                            logger.error(f"req_id: {req_obj.req_id} forced to finished, it exits kv transfer error")
+                else:
+                    ans_list.append(req_obj)
+        return ans_list
     
     def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
         """
@@ -116,6 +145,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             req_obj.nixl_trans_kv_start_index += cur_page_size
             req_obj.nixl_pd_task_num += 1
         
+        req_obj.cur_kv_len += len(mem_indexes)
         if self.is_master_in_dp:
             self.info_queue.put(group)
         return

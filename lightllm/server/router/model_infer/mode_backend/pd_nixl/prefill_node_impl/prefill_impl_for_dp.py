@@ -20,6 +20,10 @@ class NIXLDPChunkedForPrefillNode(DPChunkedPrefillBackend):
     def init_custom(self):
         NIXLChunckedPrefillForPrefillNode.init_custom(self)
         return
+    
+    def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
+        return NIXLChunckedPrefillForPrefillNode._filter_not_ready_reqs(self, req_ids)
+    
 
     def _prefill_chuncked_handle_func(self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int):
         NIXLChunckedPrefillForPrefillNode._prefill_chuncked_handle_func(self, 

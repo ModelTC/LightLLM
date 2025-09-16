@@ -25,6 +25,9 @@ class NIXLDPForDecodeNode(DPChunkedPrefillBackend):
     def _post_init_reqs(self, uninit_reqs: List[InferReq]):
         return NIXLDecodeNode._post_init_reqs(self, uninit_reqs=uninit_reqs)
     
+    def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
+        return NIXLDecodeNode._filter_not_ready_reqs(self, req_ids=req_ids)
+    
     def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
         return NIXLDecodeNode._decode_node_gen_trans_tasks(self, req_obj=req_obj)
     

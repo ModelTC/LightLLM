@@ -5,6 +5,7 @@ from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 
 logger = init_logger(__name__)
@@ -31,6 +32,24 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         for _ in range(self.node_world_size):
             self.mem_queue.put(self.model.mem_manager)
         return
+    
+    def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
+        """
+        将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
+        主要用于在 nixl pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
+        传输没有完成的请求。
+        """
+        ans_list : List[InferReq] = []
+        for request_id in req_ids:
+            req_obj: InferReq = g_infer_context.requests_mapping[request_id]
+            prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
+            if prefill_finished:
+                # 所有传输任务都已经完成。
+                if req_obj.nixl_pd_task_num == (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
+                    ans_list.append(req_obj)
+            else:
+                ans_list.append(req_obj)
+        return ans_list
     
     def _prefill_chuncked_handle_func(self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int):
         """

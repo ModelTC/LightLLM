@@ -396,6 +396,14 @@ class ModeBackend:
         g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
         return req_ids
+    
+    def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
+        """
+        将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
+        主要用于在 nixl pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
+        传输没有完成的请求。
+        """
+        return [g_infer_context.requests_mapping[request_id] for request_id in req_ids]
 
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(
@@ -429,7 +437,8 @@ class ModeBackend:
 
         if len(req_ids) == 0:
             return [], []
-
+        
+        ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
 
         wait_pause_reqs = []
@@ -451,8 +460,7 @@ class ModeBackend:
         g_infer_state_lock.acquire()
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
-        for request_id in req_ids:
-            req_obj: InferReq = g_infer_context.requests_mapping[request_id]
+        for req_obj in ready_reqs:
 
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
