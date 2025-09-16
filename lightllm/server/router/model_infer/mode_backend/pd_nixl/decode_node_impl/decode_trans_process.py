@@ -148,7 +148,6 @@ class _DecodeTransModule:
                 time.sleep(0.005)
                 continue
 
-
             for remote_agent_name, _notify_list in notifies_dict.items():
                 for notify in _notify_list:
                     try:

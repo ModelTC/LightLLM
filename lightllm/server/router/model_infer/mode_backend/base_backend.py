@@ -357,24 +357,13 @@ class ModeBackend:
         cmds: List[NIXLChunckedTransTaskRet] = self.shm_nixl_trans_io_buffer.read_obj()
         self.shm_nixl_trans_io_buffer.sub_state()
         if cmds:
-            if self.is_nixl_decode_mode:
-                for obj in cmds:
-                    if obj.request_id in g_infer_context.requests_mapping:
-                        req: InferReq = g_infer_context.requests_mapping[obj.request_id]
-                        if obj.has_error:
-                            req.nixl_pd_task_failed_num += 1
-                        else:
-                            req.nixl_pd_task_sunccess_num += 1
-                        
-                        req.cur_kv_len += obj.end_kv_index - obj.start_kv_index
-            else:
-                for obj in cmds:
-                    if obj.request_id in g_infer_context.requests_mapping:
-                        req: InferReq = g_infer_context.requests_mapping[obj.request_id]
-                        if obj.has_error:
-                            req.nixl_pd_task_failed_num += 1
-                        else:
-                            req.nixl_pd_task_sunccess_num += 1
+            for obj in cmds:
+                if obj.request_id in g_infer_context.requests_mapping:
+                    req: InferReq = g_infer_context.requests_mapping[obj.request_id]
+                    if obj.has_error:
+                        req.nixl_pd_task_failed_num += 1
+                    else:
+                        req.nixl_pd_task_sunccess_num += 1
         return
     
 

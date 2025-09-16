@@ -419,7 +419,7 @@ class HttpServerManagerForPDMaster:
                                     req_status.event.set()
                             except:
                                 pass
-                    if obj[0] == ObjType.NIXL_UPLOAD_NP_PROMPT_IDS:
+                    elif obj[0] == ObjType.NIXL_UPLOAD_NP_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj
                         try:
                             req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]

@@ -114,7 +114,7 @@ class NixlKVTransporter:
             new_trans_task.prefill_agent_name = self.agent_name
             new_trans_task.prefill_agent_metadata = self.agent_metadata
             new_trans_task.prefill_num_pages = self.num_pages
-            new_trans_task.prefill_page_reg_desc = self.page_reg_desc
+            new_trans_task.prefill_page_reg_desc = self.local_page_mem_desc
 
             # 不需要传输细节的 mem_indexes 信息
             new_trans_task.mem_indexes = None

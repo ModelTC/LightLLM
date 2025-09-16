@@ -321,6 +321,10 @@ class NIXLChunckedTransTask:
                 obj.decode_agent_metadata = b"xxx"
             if obj.prefill_agent_metadata is not None:
                 obj.prefill_agent_metadata = b"xxx"
+            if obj.decode_page_reg_desc is not None:
+                obj.decode_page_reg_desc = b"xxx"
+            if obj.prefill_page_reg_desc is not None:
+                obj.prefill_page_reg_desc = b"xxx"
         else:
             obj = self
         return obj.__str__()
@@ -334,7 +338,6 @@ class NIXLChunckedTransTask:
             has_error=self.error_info is not None,
             error_info=self.error_info,
         )
-        logger.error(f"trans ret: {ret}")
         return ret
     
     def create_prefill_agent_obj(self) -> NixlAgentMetadata:
