@@ -89,25 +89,32 @@ class NixlKVTransporter:
         else:
             logger.warning(f"peer name {peer_name} agent didnot exist")
 
-    def send_readtask_to_decode_node(self, peer_name: str, trans_task: NIXLChunckedTransTask):
+    def send_readtask_to_decode_node(self, trans_task: NIXLChunckedTransTask):
         """
         prefill node call this function to send read task to decode node
         """
-        if peer_name not in self.remote_agents:
-            logger.warning(f"peer_name {peer_name} not exist")
-            _remote_agent = NixlAgentMetadata(
-                agent_name=peer_name,
-                agent_metadata=trans_task.peer_agent_metadata,
-                num_pages=trans_task.peer_num_pages,
-                page_reg_desc=trans_task.peer_page_reg_desc,
-            )
+        decode_agent_name = trans_task.decode_agent_name
+        if decode_agent_name not in self.remote_agents:
+            logger.warning(f"decode_agent_name {decode_agent_name} not exist")
+            _remote_agent = trans_task.create_decode_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-        if peer_name in self.remote_agents:
+        if decode_agent_name in self.remote_agents:
             # 将页面读取任务发送给 decode 节点
-            remote_agent: NixlAgentMetadata = self.remote_agents[peer_name]
+            remote_agent: NixlAgentMetadata = self.remote_agents[decode_agent_name]
             assert trans_task.nixl_src_page_index is not None
             new_trans_task: NIXLChunckedTransTask = trans_task.copy()
+
+            new_trans_task.decode_agent_name = None
+            new_trans_task.decode_agent_metadata = None
+            new_trans_task.decode_num_pages = None
+            new_trans_task.decode_page_reg_desc = None
+
+            new_trans_task.prefill_agent_name = self.agent_name
+            new_trans_task.prefill_agent_metadata = self.agent_metadata
+            new_trans_task.prefill_num_pages = self.num_pages
+            new_trans_task.prefill_page_reg_desc = self.page_reg_desc
+
             # 不需要传输细节的 mem_indexes 信息
             new_trans_task.mem_indexes = None
             self.nixl_agent.send_notif(
@@ -115,25 +122,29 @@ class NixlKVTransporter:
                 pickle.dumps(new_trans_task),
             )
         else:
-            logger.error(f"peer_name {peer_name} not exist")
+            logger.error(f"decode_agent_name {decode_agent_name} not exist")
         return
     
-    def send_notify_to_prefill_node(self, peer_name: str, notify: bytes):
-        self.nixl_agent.send_notif(remote_agent_name=peer_name,
-                                   notif_msg=notify)
+    def send_notify_to_prefill_node(self, prefill_agent_name: str, notify: bytes):
+        self.nixl_agent.send_notif(remote_agent_name=prefill_agent_name, notif_msg=notify)
         return
 
     def read_blocks_paged(
         self,
-        peer_name: str,
         trans_task: NIXLChunckedTransTask,
     ) -> int:
         """
         decode node call this function to read kv blocks from prefill node
         """
-        if peer_name in self.remote_agents:
+        prefill_agent_name = trans_task.prefill_agent_name
+        if prefill_agent_name not in self.remote_agents:
+            logger.warning(f"prefill_agent_name {prefill_agent_name} not exist")
+            _remote_agent = trans_task.create_prefill_agent_obj()
+            self.connect_add_remote_agent(_remote_agent)
+
+        if prefill_agent_name in self.remote_agents:
             assert trans_task.nixl_src_page_index is not None and trans_task.nixl_dst_page_index is not None
-            remote_agent: NixlAgentMetadata = self.remote_agents[peer_name]
+            remote_agent: NixlAgentMetadata = self.remote_agents[prefill_agent_name]
             src_handle = remote_agent.page_xfer_handles
             dst_handle = self.page_local_xfer_handles
             notify_obj = NIXLChunckedTransTaskRet(
@@ -152,22 +163,18 @@ class NixlKVTransporter:
                 pickle.dumps(notify_obj),
             )
             self.nixl_agent.transfer(handle)
+        else:
+            logger.error(f"prefill_agent_name {prefill_agent_name} not exist")
+        
         return handle
 
     def check_task_status(self, trans_task: NIXLChunckedTransTask) -> str:
-        if trans_task.xfer_handle is not None:
-            handle = trans_task.xfer_handle
-            xfer_state = self.nixl_agent.check_xfer_state(handle)
-            if xfer_state == "DONE":
-                self.nixl_agent.release_xfer_handle(handle)
-                trans_task.xfer_handle = None
-                return "DONE"
-            elif xfer_state == "PROC":
-                return "PROC"
-            else:
-                logger.warning(f"Transfer failed with trans task {trans_task} for handle {handle}")
-                self.nixl_agent.release_xfer_handle(handle)
-                return "ERR"
+        assert trans_task.xfer_handle is not None
+        handle = trans_task.xfer_handle
+        xfer_state = self.nixl_agent.check_xfer_state(handle)
+        if xfer_state == "ERR":
+            logger.warning(f"Transfer failed with trans task {trans_task.to_str()} for handle {handle}")
+        return xfer_state
             
     def release_xfer_handle(self, handle):
         self.nixl_agent.release_xfer_handle(handle=handle)

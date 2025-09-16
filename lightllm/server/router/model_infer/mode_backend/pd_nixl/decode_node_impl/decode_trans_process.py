@@ -163,10 +163,16 @@ class _DecodeTransModule:
                     
                     if local_trans_task is None:
                         remote_trans_task.error_info = "peer not find"
-                        self.transporter.send_notify_to_prefill_node(peer_name=remote_agent_name, notify=pickle.dumps(remote_trans_task.createRetObj()))
+                        self.transporter.send_notify_to_prefill_node(prefill_agent_name=remote_agent_name, notify=pickle.dumps(remote_trans_task.createRetObj()))
                     else:
                         local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
-                        self.read_peer_kv_queue.put((remote_agent_name, local_trans_task))
+
+                        local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
+                        local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
+                        local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
+                        local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
+
+                        self.read_peer_kv_queue.put(local_trans_task)
     
 
     @log_exception
@@ -174,7 +180,7 @@ class _DecodeTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             page_index = self.page_index_queue.get()
-            remote_agent_name, local_trans_task = self.read_peer_kv_queue.get()
+            local_trans_task = self.read_peer_kv_queue.get()
             local_trans_task: NIXLChunckedTransTask = local_trans_task
             local_trans_task.nixl_dst_page_index = page_index
 
@@ -184,8 +190,7 @@ class _DecodeTransModule:
                 continue
             
 
-            xfer_handle = self.transporter.read_blocks_paged(peer_name=remote_agent_name, 
-                                                trans_task=local_trans_task)
+            xfer_handle = self.transporter.read_blocks_paged(trans_task=local_trans_task)
             local_trans_task.xfer_handle = xfer_handle
             local_trans_task.start_trans_time = time.time()
             with self.update_status_task_list_lock:

@@ -328,8 +328,22 @@ class NIXLChunckedTransTask:
         )
         logger.error(f"trans ret: {ret}")
         return ret
-
-
+    
+    def create_prefill_agent_obj(self) -> NixlAgentMetadata:
+        return NixlAgentMetadata(
+                agent_name=self.prefill_agent_name,
+                agent_metadata=self.prefill_agent_metadata,
+                num_pages=self.prefill_num_pages,
+                page_reg_desc=self.prefill_page_reg_desc,
+            )
+    
+    def create_decode_agent_obj(self) -> NixlAgentMetadata:
+        return NixlAgentMetadata(
+                agent_name=self.decode_agent_name,
+                agent_metadata=self.decode_agent_metadata,
+                num_pages=self.decode_num_pages,
+                page_reg_desc=self.decode_page_reg_desc,
+            )
 
 @dataclass
 class NIXLChunckedTransTaskRet:

@@ -117,7 +117,6 @@ class _PrefillTransModule:
                 self.failed_queue.put(trans_task)
             else:
                 self.local_copy_kv_queue.put(trans_task)
-                # self.ready_transfer_queue.put(trans_task)
 
     @log_exception
     def local_copy_kv_loop(self):
@@ -151,7 +150,7 @@ class _PrefillTransModule:
             sync_event: torch.cuda.Event = sync_event
 
             sync_event.synchronize()
-            self.transporter.send_readtask_to_decode_node(peer_name=trans_task.peer_agent_name, trans_task=trans_task)
+            self.transporter.send_readtask_to_decode_node(trans_task=trans_task)
 
             with self.waiting_dict_lock:
                 self.waiting_dict[trans_task.get_key()] = trans_task
@@ -210,8 +209,6 @@ class _PrefillTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: NIXLChunckedTransTask = self.success_queue.get()
-            # 将数据写回 mem manger
-
             # 写回后，回收页面
             if trans_task.nixl_src_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_src_page_index)
