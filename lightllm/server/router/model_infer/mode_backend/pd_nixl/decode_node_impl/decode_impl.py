@@ -176,13 +176,14 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                                   src_device_id=None,
                                   dst_device_id=req_obj.nixl_trans_device_id,
                                   mem_indexes=mem_indexes,
-                                  peer_agent_name=None,
-                                  peer_agent_metadata=None,
-                                  peer_num_pages=None,
-                                  peer_page_reg_desc=None,
-                                  peer_page_xfer_handles=None,
-                                  nixl_src_page_index=None,
-                                  nixl_dst_page_index=None
+                                  prefill_agent_name=None,
+                                  prefill_agent_metadata=None,
+                                  prefill_num_pages=None,
+                                  prefill_page_reg_desc=None,
+                                  decode_agent_name=None,
+                                  decode_agent_metadata=None,
+                                  decode_num_pages=None,
+                                  decode_page_reg_desc=None,
                                   )
             if group is not None:
                 group.task_list.append(trans_task)

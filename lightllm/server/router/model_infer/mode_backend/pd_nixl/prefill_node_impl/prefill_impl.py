@@ -106,12 +106,13 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
                                   src_device_id=req_obj.nixl_trans_device_id,
                                   dst_device_id=None,
                                   mem_indexes=mem_indexes,
-                                  peer_agent_name=nixl_decode_node_info.agent_name,
-                                  peer_agent_metadata=nixl_decode_node_info.agent_metadata,
-                                  peer_num_pages=nixl_decode_node_info.num_pages,
-                                  peer_page_reg_desc=nixl_decode_node_info.page_reg_desc,
-                                  peer_page_xfer_handles=None,
-                                  nixl_src_page_index=None,
-                                  nixl_dst_page_index=None
+                                  prefill_agent_name=None,
+                                  prefill_agent_metadata=None,
+                                  prefill_num_pages=None,
+                                  prefill_page_reg_desc=None,
+                                  decode_agent_name=nixl_decode_node_info.agent_name,
+                                  decode_agent_metadata=nixl_decode_node_info.agent_metadata,
+                                  decode_num_pages=nixl_decode_node_info.num_pages,
+                                  decode_page_reg_desc=nixl_decode_node_info.page_reg_desc,
                                   )
             self.info_queue.put(trans_task)

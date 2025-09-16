@@ -253,11 +253,16 @@ class NIXLChunckedTransTask:
 
     mem_indexes: List[int]
 
-    peer_agent_name: Optional[str]
-    peer_agent_metadata: Optional[bytes]
-    peer_num_pages: Optional[int]
-    peer_page_reg_desc: Optional[bytes]
-    peer_page_xfer_handles: Optional[int]
+    prefill_agent_name: Optional[str]
+    prefill_agent_metadata: Optional[bytes]
+    prefill_num_pages: Optional[int]
+    prefill_page_reg_desc: Optional[bytes]
+
+    decode_agent_name: Optional[str]
+    decode_agent_metadata: Optional[bytes]
+    decode_num_pages: Optional[int]
+    decode_page_reg_desc: Optional[bytes]
+
 
     # transfer params
     nixl_src_page_index: Optional[int] = None
