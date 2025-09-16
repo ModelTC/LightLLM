@@ -59,6 +59,7 @@ def _init_env(
         while True: time.sleep(100)
 
     except Exception as e:
+        logger.exception(str(e))
         logger.error(f"Fatal error happened in kv trans process: {e}")
         pass
 

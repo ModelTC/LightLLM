@@ -102,7 +102,7 @@ class MemoryManager:
         self.token_dim_size = self.kv_move_buffer.shape[-2] * self.kv_move_buffer.shape[-1]
         return
 
-    def alloc_paged_kv_move_buffer(self, page_num, page_size):
+    def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         if isinstance(self, MemoryManager) and type(self) != MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
         
@@ -110,7 +110,7 @@ class MemoryManager:
         self.kv_move_buffer = torch.empty(
             (page_num, page_size, self.layer_num, 2 * num_kv_head, self.head_dim), dtype=self.dtype, device="cuda"
         )
-        return
+        return self.kv_move_buffer
     
     def write_mem_to_page_kv_move_buffer(self,
                                         mem_indexes: List[int], 
