@@ -93,6 +93,16 @@ class NixlKVTransporter:
         """
         prefill node call this function to send read task to decode node
         """
+        if peer_name not in self.remote_agents:
+            logger.warning(f"peer_name {peer_name} not exist")
+            _remote_agent = NixlAgentMetadata(
+                agent_name=peer_name,
+                agent_metadata=trans_task.peer_agent_metadata,
+                num_pages=trans_task.peer_num_pages,
+                page_reg_desc=trans_task.peer_page_reg_desc,
+            )
+            self.connect_add_remote_agent(_remote_agent)
+
         if peer_name in self.remote_agents:
             # 将页面读取任务发送给 decode 节点
             remote_agent: NixlAgentMetadata = self.remote_agents[peer_name]
@@ -105,7 +115,7 @@ class NixlKVTransporter:
                 pickle.dumps(new_trans_task),
             )
         else:
-            logger.warning(f"peer_name {peer_name} not exist")
+            logger.error(f"peer_name {peer_name} not exist")
         return
     
     def send_notify_to_prefill_node(self, peer_name: str, notify: bytes):
