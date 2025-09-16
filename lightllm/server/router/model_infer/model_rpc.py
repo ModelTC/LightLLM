@@ -132,9 +132,9 @@ class ModelRpcServer:
                 self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
         elif is_nixl_prefill_node:
             if self.args.dp > 1:
-                self.backend = NIXLDPChunkedForPrefillNode(self.info_queue, self.result_queue, self.mem_queue)
+                self.backend = NIXLDPChunkedForPrefillNode(self.info_queue, self.mem_queue)
             else:
-                self.backend = NIXLChunckedPrefillForPrefillNode(self.info_queue, self.result_queue, self.mem_queue)
+                self.backend = NIXLChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
 
         elif is_decode_node:
             if self.args.dp > 1:
@@ -144,9 +144,9 @@ class ModelRpcServer:
 
         elif is_nixl_decode_node:
             if self.args.dp > 1:
-                self.backend = NIXLDPForDecodeNode(self.info_queue, self.result_queue, self.mem_queue)
+                self.backend = NIXLDPForDecodeNode(self.info_queue, self.mem_queue)
             else:
-                self.backend = NIXLDecodeNode(self.info_queue, self.result_queue, self.mem_queue)
+                self.backend = NIXLDecodeNode(self.info_queue, self.mem_queue)
 
         elif self.args.dp > 1:
             self.backend = DPChunkedPrefillBackend()
