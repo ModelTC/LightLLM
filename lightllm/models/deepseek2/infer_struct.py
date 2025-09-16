@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import torch.distributed as dist
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 class Deepseek2InferStateInfo(LlamaInferStateInfo):
@@ -10,12 +11,12 @@ class Deepseek2InferStateInfo(LlamaInferStateInfo):
         super().__init__()
         self.kv_starts = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
+    def init_some_extra_state(self, model, model_input: ModelInput):
+        super().init_some_extra_state(model, model_input)
         if not self.is_prefill:
             self.kv_starts = self.b1_cu_kv_seq_len
 
         if self.is_prefill:
             self.b1_kv_start_loc = self.b1_cu_kv_seq_len
-            self.max_value_in_b_seq_len = self.b_seq_len.max().item()
+            self.max_value_in_b_seq_len = self.max_kv_seq_len
         return

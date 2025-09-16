@@ -4,6 +4,7 @@ import numpy as np
 import torch.distributed as dist
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
@@ -21,8 +22,9 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
             ]
         return cls._shared_page_table_buffer
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
+    def init_some_extra_state(self, model, model_input: ModelInput):
+        device = model_input.input_ids.device
+        super().init_some_extra_state(model, model_input)
         if self.is_prefill:
             self.cu_seqlens_q = self.b1_cu_q_seq_len
             self.cu_seqlens_k = self.b1_cu_kv_seq_len
@@ -46,9 +48,7 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
                     : self.batch_size * model.graph_max_len_in_batch
                 ].reshape(self.batch_size, model.graph_max_len_in_batch)
             else:
-                self.page_table = torch.empty((self.batch_size, self.max_len_in_batch), dtype=torch.int32).to(
-                    input_ids.device
-                )
+                self.page_table = torch.empty((self.batch_size, self.max_len_in_batch), dtype=torch.int32).to(device)
 
             self.page_table[:, :max_seq_len_k].copy_(
                 model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k]

@@ -189,13 +189,13 @@ def prefill(
         batch_size=batch_size,
         total_token_num=total_token_num,
         max_len_in_batch=max_len_in_batch,
-        input_ids=input_ids,
-        b_req_idx=b_req_idx,
-        b_seq_len=b_seq_len,
-        b_mtp_index=b_mtp_index,
+        input_ids_cpu=input_ids,
+        b_req_idx_cpu=b_req_idx,
+        b_seq_len_cpu=b_seq_len,
+        b_mtp_index_cpu=b_mtp_index,
         mem_indexes_cpu=mem_indexes,
         is_prefill=True,
-        b_ready_cache_len=b_ready_cache_len,  # b_ready_cache_len
+        b_ready_cache_len_cpu=b_ready_cache_len,  # b_ready_cache_len
     )
 
     model_output = model_part.forward(model_input)
@@ -209,10 +209,10 @@ def decode(
         batch_size=batch_size,
         total_token_num=total_token_num,
         max_len_in_batch=max_len_in_batch,
-        input_ids=input_ids,
-        b_req_idx=b_req_idx,
-        b_seq_len=b_seq_len,
-        b_mtp_index=b_mtp_index,
+        input_ids_cpu=input_ids,
+        b_req_idx_cpu=b_req_idx,
+        b_seq_len_cpu=b_seq_len,
+        b_mtp_index_cpu=b_mtp_index,
         mem_indexes_cpu=mem_indexes,
         is_prefill=False,
     )
@@ -230,13 +230,14 @@ def torch_profile(fn, log_dir=None):
     ) as prof:
         fn()
     if get_current_rank_in_dp() == 0:
-        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=1000))
 
 
 def run_forward_once(
     model_kvargs, input_len, output_len, batch_size, model_part, enable_overlap, enable_torch_profile=False
 ):
-    test_data = np.vstack([np.random.randint(0, 50256, input_len) for _ in range(batch_size)])
+    # test_data = np.vstack([np.random.randint(0, 50256, input_len) for _ in range(batch_size)])
+    test_data = np.load("test.npy")
     test_data = test_data.reshape(-1)
     test_data = torch.from_numpy(test_data)
     import torch.distributed as dist
@@ -251,15 +252,15 @@ def run_forward_once(
 
     b_req_idx = torch.tensor(
         [model_part.req_manager.alloc() for _ in range(batch_size)], dtype=torch.int32, device="cpu"
-    )
-    b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
-    b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
+    ).pin_memory()
+    b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cpu").pin_memory()
+    b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cpu").pin_memory()
     for i in range(batch_size):
         b_seq_len[i] = input_len
 
     total_token_num = batch_size * input_len
     mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0])
-    b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
+    b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cpu").pin_memory()
     rank_id = model_kvargs["rank_id"]
 
     if enable_overlap:
@@ -354,9 +355,6 @@ def run_forward_once(
                 print(str(e))
                 raise
 
-        prob_out = torch.softmax(logits, dim=-1)
-        predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
-        _ = predict_ids.detach().cpu().numpy()
         torch.cuda.synchronize()
         if i % 100 == 0 or i == output_len - 1:
             if rank_id == 0:
@@ -364,6 +362,9 @@ def run_forward_once(
                     f"i: {i}, step cost time: {(time.time() - step_start) * 1000} ms, "
                     f"throughput: {dp_size * batch_size / (time.time() - step_start)} tokens/s"
                 )
+        prob_out = torch.softmax(logits, dim=-1)
+        predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
+        _ = predict_ids.detach().cpu().numpy()
 
     model_part.mem_manager.free_all()
     model_part.req_manager.free_all()
