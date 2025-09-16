@@ -306,6 +306,7 @@ async def kv_move_status(websocket: WebSocket):
             # 等待接收消息，设置超时为10秒
             data = await websocket.receive_bytes()
             upkv_status = pickle.loads(data)
+            logger.info(f"recieved upkv_status {upkv_status} from {(client_ip, client_port)}")
             await g_objs.httpserver_manager.update_req_status(upkv_status)
     except (WebSocketDisconnect, Exception, RuntimeError) as e:
         logger.error(f"kv_move_status client {(client_ip, client_port)} has error {str(e)}")
