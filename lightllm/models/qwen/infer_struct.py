@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import InferStateInfo
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 class QwenInferStateInfo(LlamaInferStateInfo):
@@ -11,13 +12,13 @@ class QwenInferStateInfo(LlamaInferStateInfo):
         self.position_sin = None
         self.logn_values = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
+    def init_some_extra_state(self, model, model_input: ModelInput):
         use_dynamic_ntk = model.config.get("use_dynamic_ntk", False)
         if not use_dynamic_ntk:
-            super().init_some_extra_state(model, input_ids)
+            super().init_some_extra_state(model, model_input)
             return
 
-        InferStateInfo.init_some_extra_state(self, model, input_ids)
+        InferStateInfo.init_some_extra_state(self, model, model_input)
         if self.is_prefill:
             position_ids = self.position_ids
             self.position_sin = []

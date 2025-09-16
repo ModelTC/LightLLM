@@ -10,17 +10,22 @@ class ModelInput:
     batch_size: int
     total_token_num: int
     max_len_in_batch: int
-    input_ids: torch.Tensor
-    b_req_idx: torch.Tensor
-    b_mtp_index: torch.Tensor
-    b_seq_len: torch.Tensor
+    input_ids: torch.Tensor = None
+    b_req_idx: torch.Tensor = None
+    b_mtp_index: torch.Tensor = None
+    b_seq_len: torch.Tensor = None
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
     multimodal_params: list = field(default_factory=list)
 
     # cpu 变量
+    input_ids_cpu: torch.Tensor = None
+    b_req_idx_cpu: torch.Tensor = None
+    b_mtp_index_cpu: torch.Tensor = None
     mem_indexes_cpu: torch.Tensor = None
+    b_seq_len_cpu: torch.Tensor = None
+    b_ready_cache_len_cpu: torch.Tensor = None
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
     # 的一些变量
     b_prefill_has_output_cpu: List[bool] = None  # 标记进行prefill的请求是否具有输出
@@ -33,15 +38,20 @@ class ModelInput:
     deepseekv3_mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
     def to_cuda(self):
-        if self.input_ids is not None:
-            self.input_ids = self.input_ids.cuda(non_blocking=True)
+        # input_ids 可能不存在，通过req_to_token_indexs来获取
+        if self.input_ids is None and self.input_ids_cpu is not None:
+            self.input_ids = self.input_ids_cpu.cuda(non_blocking=True)
         if self.mem_indexes is None:
             self.mem_indexes = self.mem_indexes_cpu.cuda(non_blocking=True)
-        self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
-        self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
-        self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
-        if self.b_ready_cache_len is not None:
-            self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
+        if self.b_req_idx is None:
+            self.b_req_idx = self.b_req_idx_cpu.cuda(non_blocking=True)
+        if self.b_seq_len is None:
+            self.b_seq_len = self.b_seq_len_cpu.cuda(non_blocking=True)
+        # b_ready_cache_len 只在 prefill 阶段生效
+        if self.b_ready_cache_len_cpu is not None:
+            self.b_ready_cache_len = self.b_ready_cache_len_cpu.cuda(non_blocking=True)
+        if self.b_mtp_index is None:
+            self.b_mtp_index = self.b_mtp_index_cpu.cuda(non_blocking=True)
 
 
 @dataclass

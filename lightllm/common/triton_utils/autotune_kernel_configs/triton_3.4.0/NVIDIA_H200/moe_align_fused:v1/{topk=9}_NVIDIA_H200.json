@@ -1,0 +1,47 @@
+{
+  "1": {
+    "BLOCK_TOK": 1024,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "100": {
+    "BLOCK_TOK": 1024,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "1024": {
+    "BLOCK_TOK": 1024,
+    "num_stages": 5,
+    "num_warps": 8
+  },
+  "128": {
+    "BLOCK_TOK": 1024,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "16": {
+    "BLOCK_TOK": 1024,
+    "num_stages": 5,
+    "num_warps": 8
+  },
+  "256": {
+    "BLOCK_TOK": 1024,
+    "num_stages": 2,
+    "num_warps": 8
+  },
+  "32": {
+    "BLOCK_TOK": 1024,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "64": {
+    "BLOCK_TOK": 1024,
+    "num_stages": 5,
+    "num_warps": 8
+  },
+  "8": {
+    "BLOCK_TOK": 1024,
+    "num_stages": 2,
+    "num_warps": 8
+  }
+}
