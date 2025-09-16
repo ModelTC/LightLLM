@@ -214,6 +214,9 @@ class NixlUpKVStatus:
             logger.error(error_info)
             raise ValueError(error_info)
         return
+    
+    def __str__(self):
+        return f"group_request_id: {self.group_request_id} pd_master_node_id: {self.pd_master_node_id} nixl_params_len: {len(self.nixl_params)}"
 
 
 @dataclass

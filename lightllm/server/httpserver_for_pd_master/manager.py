@@ -259,6 +259,7 @@ class HttpServerManagerForPDMaster:
             raise ServerBusyError()
         
         prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
+        logger.info(f"group_request_id: {group_request_id} get np up prompt ids len {len(prompt_ids)}")
         
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams()))))
@@ -273,7 +274,7 @@ class HttpServerManagerForPDMaster:
         upkv_status: NixlUpKVStatus = up_status_event.upkv_status
         nixl_params: bytes = upkv_status.nixl_params
         decode_node_info: NIXLDecodeNodeInfo = pickle.loads(nixl_params)
-        p_node.websocket.send_bytes(pickle.dumps((ObjType.NIXL_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info)))
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.NIXL_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info)))
 
         while True:
             await req_status.wait_to_ready()

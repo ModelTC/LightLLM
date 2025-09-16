@@ -54,8 +54,8 @@ class NixlKVTransporter:
         pages_data = []
         for page_id in range(page_num):
             pages_data.append((base_addr + page_id * self.page_len, self.page_len, device_id))
-        descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM", True)
-        return self.nixl_agent.prep_xfer_dlist(agent_name, descs, is_sorted=True)
+        descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM")
+        return self.nixl_agent.prep_xfer_dlist(agent_name, descs, "VRAM")
 
     def connect_add_remote_agent(self, remote_agent: NixlAgentMetadata):
         if remote_agent.agent_name in self.remote_agents:
