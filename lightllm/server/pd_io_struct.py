@@ -281,12 +281,8 @@ class NIXLChunckedTransTask:
     error_info: Optional[str] = None
 
     def __post_init__(self):
-        if self.start_kv_index < 0 or self.end_kv_index <= self.start_kv_index:
+        if self.start_kv_index < 0 or self.end_kv_index < self.start_kv_index:
             error_info = "start_kv_index must >=0 and end_kv_index > start_kv_index"
-            logger.error(error_info)
-            raise ValueError(error_info)
-        if len(self.mem_indexes) == 0:
-            error_info = "mem_indexes must len > 0"
             logger.error(error_info)
             raise ValueError(error_info)
         assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
@@ -329,6 +325,8 @@ class NIXLChunckedTransTask:
             obj = self
         return obj.__str__()
     
+    def transfer_kv_num(self):
+        return self.end_kv_index - self.start_kv_index
 
     def createRetObj(self) -> "NIXLChunckedTransTaskRet":
         ret = NIXLChunckedTransTaskRet(
@@ -371,4 +369,14 @@ class NIXLChunckedTransTaskRet:
 @dataclass
 class NIXLChunckedTransTaskGroup:
     task_list: List[NIXLChunckedTransTask] = field(default_factory=list)
+
+
+    def is_no_real_task(self):
+        if self.task_list is None or len(self.task_list) == 0:
+            return True
+        if len(self.task_list) == 1:
+            task = self.task_list[0]
+            if task.transfer_kv_num() == 0:
+                return True
+        return False
 

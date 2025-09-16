@@ -131,6 +131,9 @@ class _DecodeTransModule:
 
             self.up_status_in_queue.put(up_status)
 
+            if trans_task_group.is_no_real_task():
+                continue
+
             with self.waiting_dict_lock:
                 for task in trans_task_group.task_list:
                     self.waiting_dict[task.get_key()] = task

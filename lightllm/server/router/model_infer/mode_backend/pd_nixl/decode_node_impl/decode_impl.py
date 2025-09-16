@@ -130,35 +130,46 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         req_obj.nixl_trans_kv_start_index = req_obj.cur_kv_len
         
         need_mem_size = input_len - req_obj.cur_kv_len
-        if need_mem_size <= 0:
-            return
-        
-        if self.radix_cache is not None:
-            self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
-        
-        mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
-        self.model.req_manager.req_to_token_indexs[req_obj.req_idx, req_obj.cur_kv_len:(req_obj.cur_kv_len + need_mem_size)] = mem_indexes
-         
         group = NIXLChunckedTransTaskGroup() if self.is_master_in_dp else None
 
-        while req_obj.nixl_trans_kv_start_index < input_len:
-            cur_page_size = min(page_size, input_len - req_obj.nixl_trans_kv_start_index)
-            # 生成页面传输任务， 放入kv move manager 的处理队列中
-            start_index = req_obj.nixl_trans_kv_start_index
-            end_index = req_obj.nixl_trans_kv_start_index + cur_page_size
-            page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
-            self._create_nixl_trans_task(req_obj=req_obj,
-                                         mem_indexes=page_mem_indexes.tolist(),
-                                         kv_start_index=start_index,
-                                         kv_end_index=end_index,
-                                         group=group)
-            # update
-            req_obj.nixl_trans_kv_start_index += cur_page_size
-            req_obj.nixl_pd_task_num += 1
+        if need_mem_size > 0:
+            if self.radix_cache is not None:
+                self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
+            
+            mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
+            self.model.req_manager.req_to_token_indexs[req_obj.req_idx, req_obj.cur_kv_len:(req_obj.cur_kv_len + need_mem_size)] = mem_indexes
+            
         
-        req_obj.cur_kv_len += len(mem_indexes)
+
+            while req_obj.nixl_trans_kv_start_index < input_len:
+                cur_page_size = min(page_size, input_len - req_obj.nixl_trans_kv_start_index)
+                # 生成页面传输任务， 放入kv move manager 的处理队列中
+                start_index = req_obj.nixl_trans_kv_start_index
+                end_index = req_obj.nixl_trans_kv_start_index + cur_page_size
+                page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
+                self._create_nixl_trans_task(req_obj=req_obj,
+                                            mem_indexes=page_mem_indexes.tolist(),
+                                            kv_start_index=start_index,
+                                            kv_end_index=end_index,
+                                            group=group)
+                # update
+                req_obj.nixl_trans_kv_start_index += cur_page_size
+                req_obj.nixl_pd_task_num += 1
+            
+            req_obj.cur_kv_len += len(mem_indexes)
+
         if self.is_master_in_dp:
-            self.info_queue.put(group)
+            if group.task_list:
+                self.info_queue.put(group)
+            else:
+                # 需要上报一个包含 0 长度的trans task，触发 kv move manager 给 pd master 上报
+                # upkv_status 状态，触发流程的完整。
+                self._create_nixl_trans_task(req_obj=req_obj,
+                                             mem_indexes=[],
+                                             kv_start_index=req_obj.cur_kv_len,
+                                             kv_end_index=req_obj.cur_kv_len,
+                                             group=group)
+                self.info_queue.put(group)
         return
     
     def _create_nixl_trans_task(self, req_obj: InferReq, mem_indexes:List[int], kv_start_index: int, kv_end_index: int, group: NIXLChunckedTransTaskGroup):
