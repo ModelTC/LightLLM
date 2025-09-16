@@ -213,7 +213,10 @@ class CpuKvCacheClient(object):
 
     def _attach_shm_cpu_kv_cache(self):
         shm_ptr = attach_shm_kv_cache_ptr()
-        device_ptr = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.kv_cache_tensor_meta.calcu_size())
+        register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.kv_cache_tensor_meta.calcu_size())
+        numpy_array = np.frombuffer(
+            memoryview((ctypes.c_uint8 * self.kv_cache_tensor_meta.calcu_size()).from_address(shm_ptr)), dtype=np.uint8
+        )
         shape = (
             self.kv_cache_tensor_meta.page_num,
             self.kv_cache_tensor_meta.layer_num,
@@ -221,9 +224,7 @@ class CpuKvCacheClient(object):
             self.kv_cache_tensor_meta.num_heads,
             self.kv_cache_tensor_meta.head_dim,
         )
-        self.cpu_kv_cache_tensor = torch.empty(size=shape, dtype=torch.bfloat16, device="meta")
-        # 将指针绑定到 tensor上，方便triton获取真实的地址。
-        self.cpu_kv_cache_tensor.data_ptr = lambda: device_ptr
+        self.cpu_kv_cache_tensor = torch.from_numpy(numpy_array).view(dtype=torch.bfloat16).view(shape)
         return
 
 
