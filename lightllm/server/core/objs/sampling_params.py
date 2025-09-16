@@ -223,7 +223,7 @@ class ExponentialDecayLengthPenalty(ctypes.Structure):
     def to_tuple(self):
         return (self.item0, self.item1)
     
-class NodeUUId:
+class NodeUUId(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
         ("node_id_high", ctypes.c_uint64),
