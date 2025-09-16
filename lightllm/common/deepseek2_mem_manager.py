@@ -57,7 +57,6 @@ class Deepseek2MemoryManager(MemoryManager):
             kv_buffer=dp_mems[0].kv_buffer,
             mode="write",
         )
-        torch.cuda.current_stream().synchronize()
         return
     
     def read_page_kv_move_buffer_to_mem(self,
@@ -76,7 +75,6 @@ class Deepseek2MemoryManager(MemoryManager):
                 kv_buffer=mem.kv_buffer,
                 mode="read",
             )
-        torch.cuda.current_stream().synchronize()
 
 
     def send_to_decode_node(

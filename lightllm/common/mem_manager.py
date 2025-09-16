@@ -129,7 +129,6 @@ class MemoryManager:
                               tp_index=tp_index,
                               tp_world_size=dp_world_size,
                               mode="write")
-        torch.cuda.current_stream().synchronize()
         return
     
     def read_page_kv_move_buffer_to_mem(self,
@@ -147,7 +146,6 @@ class MemoryManager:
                             tp_index=tp_index,
                             tp_world_size=dp_world_size,
                             mode="read")
-        torch.cuda.current_stream().synchronize()
 
 
     def send_to_decode_node(
