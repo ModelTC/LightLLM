@@ -240,14 +240,20 @@ class _DecodeTransModule:
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size
                 )
-            self.success_queue.put(trans_task)
+                sync_event = torch.cuda.Event()
+                sync_event.record()
+
+            self.success_queue.put((sync_event, trans_task))
         return
     
     @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            trans_task: NIXLChunckedTransTask = self.success_queue.get()
+            sync_event, trans_task = self.success_queue.get()
+            trans_task: NIXLChunckedTransTask = trans_task
+            sync_event: torch.cuda.Event = sync_event
+            sync_event.synchronize()
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
             if trans_task.xfer_handle is not None:

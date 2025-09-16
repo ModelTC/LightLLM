@@ -88,8 +88,9 @@ class _PrefillTransModule:
                                              kv_move_buffer=kv_move_buffer)
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
-
-        self.ready_transfer_queue = queue.Queue()
+       
+        self.local_copy_kv_queue = queue.Queue()
+        self.notify_peer_read_kv_queue = queue.Queue()
         self.success_queue = queue.Queue()
         self.failed_queue = queue.Queue()
 
@@ -97,7 +98,7 @@ class _PrefillTransModule:
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
         
-        for func in [self.recv_task_loop, self.transfer_kv_loop, self.update_task_status_loop, self.success_loop, self.fail_loop]:
+        for func in [self.recv_task_loop, self.local_copy_kv_loop, self.notify_peer_to_read_kv_loop, self.update_task_status_loop, self.success_loop, self.fail_loop]:
             threading.Thread(target=func, daemon=True).start()
         return
     
@@ -115,14 +116,14 @@ class _PrefillTransModule:
                 trans_task.error_info = "time out"
                 self.failed_queue.put(trans_task)
             else:
-                self.ready_transfer_queue.put(trans_task)
+                self.local_copy_kv_queue.put(trans_task)
+                # self.ready_transfer_queue.put(trans_task)
 
-    
     @log_exception
-    def transfer_kv_loop(self):
+    def local_copy_kv_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            trans_task: NIXLChunckedTransTask = self.ready_transfer_queue.get()
+            trans_task: NIXLChunckedTransTask = self.local_copy_kv_queue.get()
 
             # to do 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             trans_task.start_trans_time = time.time()
@@ -135,6 +136,21 @@ class _PrefillTransModule:
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
                 )
+                sync_event = torch.cuda.Event()
+                sync_event.record()
+            
+            self.notify_peer_read_kv_queue.put((sync_event, trans_task))
+        return
+    
+    @log_exception
+    def notify_peer_to_read_kv_loop(self):
+        torch.cuda.set_device(self.device_id)
+        while True:
+            sync_event, trans_task = self.notify_peer_read_kv_queue.get()
+            trans_task: NIXLChunckedTransTask = trans_task
+            sync_event: torch.cuda.Event = sync_event
+
+            sync_event.synchronize()
             self.transporter.send_readtask_to_decode_node(peer_name=trans_task.peer_agent_name, trans_task=trans_task)
 
             with self.waiting_dict_lock:
@@ -180,14 +196,13 @@ class _PrefillTransModule:
                 with self.waiting_dict_lock:
                     trans_task = self.waiting_dict.pop(key, None)
                 
-                if trans_task is not None and trans_task.time_out():
-                    trans_task.error_info = "xfer time out"
-                    self.failed_queue.put(trans_task)
-                    continue
-                
                 if trans_task is not None:
-                    with self.waiting_dict_lock:
-                        self.waiting_dict[trans_task.get_key()] = trans_task
+                    if trans_task.time_out():
+                        trans_task.error_info = "xfer time out"
+                        self.failed_queue.put(trans_task)
+                    else:
+                        with self.waiting_dict_lock:
+                            self.waiting_dict[trans_task.get_key()] = trans_task
 
     
     @log_exception
