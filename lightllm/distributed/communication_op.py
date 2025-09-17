@@ -157,15 +157,17 @@ class DistributeGroupManager:
 
     def _set_num_sms_for_deep_gemm(self):
         try:
-            # set num sms for deep_gemm
-            from deep_gemm.jit_kernels.utils import set_num_sms
+            try:
+                from deep_gemm.jit_kernels.utils import set_num_sms
+            except:
+                from deep_gemm import set_num_sms
 
             deepep_sms = int(os.getenv("DEEPEP_SMS", deep_ep.Buffer.num_sms))
             device_sms = get_device_sm_count()
             deep_ep.Buffer.set_num_sms(deepep_sms)
             set_num_sms(device_sms - deepep_sms)
-        except:
-            pass
+        except BaseException as e:
+            logger.warning(f"set num sms for deep_gemm failed: {e}")
 
     def clear_deepep_buffer(self):
         """
