@@ -42,6 +42,11 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         ans_list : List[InferReq] = []
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
+            if req_obj.infer_aborted:
+                if req_obj.nixl_pd_task_num == (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
+                    ans_list.append(req_obj)
+                continue
+
             prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
             if prefill_finished:
                 # 所有传输任务都已经完成。

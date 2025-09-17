@@ -90,6 +90,11 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         ans_list : List[InferReq] = []
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
+            if req_obj.infer_aborted:
+                if req_obj.nixl_pd_task_num == (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
+                    ans_list.append(req_obj)
+                continue
+            
             if req_obj.nixl_pd_task_num == (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
                 if req_obj.nixl_pd_task_failed_num > 0:
                     if not req_obj.finish_status.is_finished():
