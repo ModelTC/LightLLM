@@ -53,5 +53,4 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
             self.page_table[:, :max_seq_len_k].copy_(
                 model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k]
             )
-            self.page_table[:, max_seq_len_k:].fill_(0)
         return

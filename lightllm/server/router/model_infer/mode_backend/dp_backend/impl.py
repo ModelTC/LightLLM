@@ -449,7 +449,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
     def decode_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         model_input, run_reqs, padded_req_num = padded_prepare_decode_inputs(decode_reqs)
-        b_mtp_index_cpu = model_input.b_mtp_index
+        b_mtp_index_cpu = model_input.b_mtp_index_cpu
         req_num = len(run_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
@@ -680,8 +680,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         ) = padded_overlap_prepare_decode_inputs(decode_reqs)
         req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
         all_next_token_ids = []
-        b_mtp_index_cpu0 = micro_input0.b_mtp_index
-        b_mtp_index_cpu1 = micro_input1.b_mtp_index
+        b_mtp_index_cpu0 = micro_input0.b_mtp_index_cpu
+        b_mtp_index_cpu1 = micro_input1.b_mtp_index_cpu
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
 
             model_output0, model_output1 = self.model.microbatch_overlap_decode(micro_input0, micro_input1)
