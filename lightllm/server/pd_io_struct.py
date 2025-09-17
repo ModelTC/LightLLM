@@ -310,19 +310,16 @@ class NIXLChunckedTransTask:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
     
     def to_str(self):
-        if self.mem_indexes is not None:
-            obj : NIXLChunckedTransTask = copy.copy(self)
-            obj.mem_indexes = None
-            if obj.decode_agent_metadata is not None:
-                obj.decode_agent_metadata = b"xxx"
-            if obj.prefill_agent_metadata is not None:
-                obj.prefill_agent_metadata = b"xxx"
-            if obj.decode_page_reg_desc is not None:
-                obj.decode_page_reg_desc = b"xxx"
-            if obj.prefill_page_reg_desc is not None:
-                obj.prefill_page_reg_desc = b"xxx"
-        else:
-            obj = self
+        obj : NIXLChunckedTransTask = copy.copy(self)
+        obj.mem_indexes = None
+        if obj.decode_agent_metadata is not None:
+            obj.decode_agent_metadata = b"xxx"
+        if obj.prefill_agent_metadata is not None:
+            obj.prefill_agent_metadata = b"xxx"
+        if obj.decode_page_reg_desc is not None:
+            obj.decode_page_reg_desc = b"xxx"
+        if obj.prefill_page_reg_desc is not None:
+            obj.prefill_page_reg_desc = b"xxx"
         return obj.__str__()
     
     def transfer_kv_num(self):
