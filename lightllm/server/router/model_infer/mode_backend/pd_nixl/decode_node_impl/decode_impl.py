@@ -130,7 +130,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         req_obj.nixl_trans_kv_start_index = req_obj.cur_kv_len
         
         need_mem_size = input_len - req_obj.cur_kv_len
-        group = NIXLChunckedTransTaskGroup() if self.is_master_in_dp else None
+        group = NIXLChunckedTransTaskGroup()
 
         if need_mem_size > 0:
             if self.radix_cache is not None:
@@ -154,8 +154,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                                             group=group)
                 # update
                 req_obj.nixl_trans_kv_start_index += cur_page_size
-                req_obj.nixl_pd_task_num += 1
-            
+
             req_obj.cur_kv_len += len(mem_indexes)
 
         if self.is_master_in_dp:
@@ -163,7 +162,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                 self.info_queue.put(group)
             else:
                 # 需要上报一个包含 0 长度的trans task，触发 kv move manager 给 pd master 上报
-                # upkv_status 状态，触发流程的完整。
+                # upkv_status 状态，使用推理流程完整。
                 self._create_nixl_trans_task(req_obj=req_obj,
                                              mem_indexes=[],
                                              kv_start_index=req_obj.cur_kv_len,
@@ -173,29 +172,29 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         return
     
     def _create_nixl_trans_task(self, req_obj: InferReq, mem_indexes:List[int], kv_start_index: int, kv_end_index: int, group: NIXLChunckedTransTaskGroup):
-        if self.is_master_in_dp:
-            # 确定传输设备
-            if req_obj.nixl_trans_device_id == -1:
-                req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
-            
-            trans_task = NIXLChunckedTransTask(request_id=req_obj.req_id,
-                                  start_kv_index=kv_start_index,
-                                  end_kv_index=kv_end_index,
-                                  pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
-                                  prefill_dp_index=None,
-                                  decode_dp_index=self.dp_rank_in_node,
-                                  src_device_id=None,
-                                  dst_device_id=req_obj.nixl_trans_device_id,
-                                  mem_indexes=mem_indexes,
-                                  prefill_agent_name=None,
-                                  prefill_agent_metadata=None,
-                                  prefill_num_pages=None,
-                                  prefill_page_reg_desc=None,
-                                  decode_agent_name=None,
-                                  decode_agent_metadata=None,
-                                  decode_num_pages=None,
-                                  decode_page_reg_desc=None,
-                                  )
-            if group is not None:
-                group.task_list.append(trans_task)
-            return
+        # 确定传输设备
+        if req_obj.nixl_trans_device_id == -1:
+            # only self.is_master_in_dp will be used.
+            req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
+        
+        trans_task = NIXLChunckedTransTask(request_id=req_obj.req_id,
+                                start_kv_index=kv_start_index,
+                                end_kv_index=kv_end_index,
+                                pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
+                                prefill_dp_index=None,
+                                decode_dp_index=self.dp_rank_in_node,
+                                src_device_id=None,
+                                dst_device_id=req_obj.nixl_trans_device_id,
+                                mem_indexes=mem_indexes,
+                                prefill_agent_name=None,
+                                prefill_agent_metadata=None,
+                                prefill_num_pages=None,
+                                prefill_page_reg_desc=None,
+                                decode_agent_name=None,
+                                decode_agent_metadata=None,
+                                decode_num_pages=None,
+                                decode_page_reg_desc=None,
+                                )
+        group.task_list.append(trans_task)
+        req_obj.nixl_pd_task_num += 1
+        return

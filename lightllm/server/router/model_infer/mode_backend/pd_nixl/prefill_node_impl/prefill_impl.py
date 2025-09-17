@@ -57,7 +57,6 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         """
         # 传输的 kv 要少一个，不然decode 无法有下一个输入除非推理出下一个token
         input_len = req_obj.shm_req.input_len - 1
-        logger.error("wzj 11111")
         page_size = self.args.nixl_pd_kv_page_size
         if req_obj.cur_kv_len >= input_len:
             # finished prefill

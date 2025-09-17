@@ -131,12 +131,13 @@ class _DecodeTransModule:
 
             self.up_status_in_queue.put(up_status)
 
-            if trans_task_group.is_no_real_task():
-                continue
-
             with self.waiting_dict_lock:
                 for task in trans_task_group.task_list:
-                    self.waiting_dict[task.get_key()] = task
+                    if task.transfer_kv_num() != 0:
+                        self.waiting_dict[task.get_key()] = task
+                    else:
+                        task.start_trans_time = time.time()
+                        self.success_queue.put((None, task))
 
     @log_exception
     def accept_peer_task_loop(
@@ -158,24 +159,25 @@ class _DecodeTransModule:
                     except:
                         notify_obj = None
                 
-                if isinstance(notify_obj, NIXLChunckedTransTask):
-                    remote_trans_task = notify_obj
-                    key = remote_trans_task.get_key()
-                    with self.waiting_dict_lock:
-                        local_trans_task : NIXLChunckedTransTask = self.waiting_dict.pop(key, None)
-                    
-                    if local_trans_task is None:
-                        remote_trans_task.error_info = "peer not find"
-                        self.transporter.send_notify_to_prefill_node(prefill_agent_name=remote_agent_name, notify=pickle.dumps(remote_trans_task.createRetObj()))
-                    else:
-                        local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
+                    if isinstance(notify_obj, NIXLChunckedTransTask):
+                        remote_trans_task = notify_obj
+                        key = remote_trans_task.get_key()
+                        logger.info(f"recv peer trans task {remote_trans_task.to_str()}")
+                        with self.waiting_dict_lock:
+                            local_trans_task : NIXLChunckedTransTask = self.waiting_dict.pop(key, None)
+                        
+                        if local_trans_task is None:
+                            remote_trans_task.error_info = "peer not find"
+                            self.transporter.send_notify_to_prefill_node(prefill_agent_name=remote_agent_name, notify=pickle.dumps(remote_trans_task.createRetObj()))
+                        else:
+                            local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
 
-                        local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
-                        local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
-                        local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
-                        local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
+                            local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
+                            local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
+                            local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
+                            local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
 
-                        self.read_peer_kv_queue.put(local_trans_task)
+                            self.read_peer_kv_queue.put(local_trans_task)
     
 
     @log_exception
@@ -260,14 +262,20 @@ class _DecodeTransModule:
         while True:
             sync_event, trans_task = self.success_queue.get()
             trans_task: NIXLChunckedTransTask = trans_task
-            sync_event: torch.cuda.Event = sync_event
-            sync_event.synchronize()
+            sync_event: Optional[torch.cuda.Event] = sync_event
+            # 兼容传输kv 数量为0的时候， sync_event 为 None的情况。
+            if sync_event is not None:
+                sync_event.synchronize()
+            
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
+            
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
+            
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
+            logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s")
     
     @log_exception
     def fail_loop(self):
@@ -280,4 +288,6 @@ class _DecodeTransModule:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
-            self.task_out_queue.put(trans_task.createRetObj())
+            ret = trans_task.createRetObj()
+            self.task_out_queue.put(ret)
+            logger.info(f"trans task ret fail:{ret}")

@@ -369,14 +369,3 @@ class NIXLChunckedTransTaskRet:
 @dataclass
 class NIXLChunckedTransTaskGroup:
     task_list: List[NIXLChunckedTransTask] = field(default_factory=list)
-
-
-    def is_no_real_task(self):
-        if self.task_list is None or len(self.task_list) == 0:
-            return True
-        if len(self.task_list) == 1:
-            task = self.task_list[0]
-            if task.transfer_kv_num() == 0:
-                return True
-        return False
-

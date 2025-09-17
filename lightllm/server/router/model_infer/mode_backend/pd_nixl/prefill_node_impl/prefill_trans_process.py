@@ -152,6 +152,7 @@ class _PrefillTransModule:
 
             sync_event.synchronize()
             self.transporter.send_readtask_to_decode_node(trans_task=trans_task)
+            logger.info(f"send readtask to decode: {trans_task.to_str()}")
 
             with self.waiting_dict_lock:
                 self.waiting_dict[trans_task.get_key()] = trans_task
@@ -216,6 +217,7 @@ class _PrefillTransModule:
             
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
+            logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
     
     @log_exception
     def fail_loop(self):
@@ -226,5 +228,7 @@ class _PrefillTransModule:
             # 回收页面
             if trans_task.nixl_src_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_src_page_index)
-
-            self.task_out_queue.put(trans_task.createRetObj())  
+            
+            ret = trans_task.createRetObj()
+            self.task_out_queue.put(ret)
+            logger.info(f"trans task ret fail:{ret}")
