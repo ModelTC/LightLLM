@@ -2,7 +2,9 @@ import torch
 
 import triton
 import triton.language as tl
+from lightllm.utils.log_utils import init_logger
 
+logger = init_logger(__name__)
 
 @triton.jit
 def _page_io(
@@ -81,16 +83,19 @@ def page_io(mem_indexes:torch.Tensor, page_tensor: torch.Tensor, kv_buffer: torc
 
     page_k_head_num, page_v_head_num = page_head_num // 2, page_head_num // 2
     k_page_tensor = page_tensor[:, :, 0:page_k_head_num, :]
-    v_page_tensor = page_tensor[:, : -page_v_head_num:, :]
+    v_page_tensor = page_tensor[:, :, -page_v_head_num:, :]
 
     k_head_num, v_head_num = kv_head_num // 2, kv_head_num // 2
     k_buffer = kv_buffer[:, :, 0:k_head_num, :]
-    v_buffer = kv_buffer[:, :, -v_head_num:, :]
+    v_buffer = kv_buffer[:, :, k_head_num:, :]
     
     tp_index = tp_index // repeat_count
     tp_world_size = tp_world_size // repeat_count
 
+    assert page_head_num == tp_world_size * kv_head_num
+
     page_write_head_num = page_k_head_num // tp_world_size
+    assert k_head_num == page_write_head_num
     page_head_start = tp_index * (page_write_head_num)
 
     token_num = len(mem_indexes)
