@@ -199,11 +199,14 @@ class InferenceContext:
             g_infer_state_lock.release()
         return self
 
-    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
+    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
             g_infer_state_lock.acquire()
 
             for req in paused_reqs:
+                prefill_need_token_num = req.get_cur_total_len()
+                if prefill_need_token_num > can_alloc_token_num:
+                    break
                 req._match_radix_cache()
                 assert req.paused is True
                 req.paused = False
