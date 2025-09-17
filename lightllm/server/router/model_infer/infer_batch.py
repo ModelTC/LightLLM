@@ -212,6 +212,7 @@ class InferenceContext:
                 req.paused = False
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
+                can_alloc_token_num -= prefill_need_token_num
 
             g_infer_state_lock.release()
         return
