@@ -480,7 +480,7 @@ class TpPartBaseModel:
             model_input0.max_len_in_batch,
             infer_state0.mem_index,
         )
-        infer_state0.init_some_extra_state(self, input_ids0)
+        infer_state0.init_some_extra_state(self, model_input0)
 
         infer_state1 = self._create_inferstate(model_input1, 1)
         init_req_to_token_indexes(
@@ -491,7 +491,7 @@ class TpPartBaseModel:
             model_input1.max_len_in_batch,
             infer_state1.mem_index,
         )
-        infer_state1.init_some_extra_state(self, input_ids1)
+        infer_state1.init_some_extra_state(self, model_input1)
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(
             input_ids0, infer_state0, input_ids1=input_ids1, infer_state1=infer_state1
@@ -576,7 +576,7 @@ class TpPartBaseModel:
                 infer_state0.b_seq_len,
                 infer_state0.mem_index,
             )
-            infer_state0.init_some_extra_state(self, model_input0.input_ids)
+            infer_state0.init_some_extra_state(self, model_input0)
             infer_state1 = self._create_inferstate(model_input1, 1)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -584,7 +584,7 @@ class TpPartBaseModel:
                 infer_state1.b_seq_len,
                 infer_state1.mem_index,
             )
-            infer_state1.init_some_extra_state(self, model_input1.input_ids)
+            infer_state1.init_some_extra_state(self, model_input1)
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(
                 model_input0.input_ids, infer_state0, input_ids1=model_input1.input_ids, infer_state1=infer_state1
