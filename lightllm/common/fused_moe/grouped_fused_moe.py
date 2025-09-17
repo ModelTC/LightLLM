@@ -273,7 +273,7 @@ def _get_moe_align_fused_configs():
         }
         for ns in [2, 3, 4, 5]
         for nw in [4, 8]
-        for bt in [1024, 2048]
+        for bt in [128, 256, 512, 1024, 2048]
     ]
 
 

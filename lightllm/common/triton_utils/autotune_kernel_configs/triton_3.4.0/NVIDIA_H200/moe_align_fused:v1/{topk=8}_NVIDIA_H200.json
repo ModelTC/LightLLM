@@ -1,0 +1,7 @@
+{
+  "8448": {
+    "BLOCK_TOK": 128,
+    "num_stages": 5,
+    "num_warps": 4
+  }
+}
