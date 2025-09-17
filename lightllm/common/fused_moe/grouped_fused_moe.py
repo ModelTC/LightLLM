@@ -810,9 +810,7 @@ def fused_experts_impl(
 
         expert_to_tokens = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.int32, device="cuda")
         expert_to_weights = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.float32, device="cuda")
-        # moe_align(topk_ids=curr_topk_ids, out=expert_to_tokens)
         expert_to_token_num = torch.zeros((E,), dtype=torch.int32, device="cuda")
-        # moe_align1(expert_to_tokens, curr_topk_weights, expert_to_weights, expert_to_token_num, topk=topk_num)
         moe_align_fused(
             expert_to_tokens, expert_to_weights, expert_to_token_num, curr_topk_ids, curr_topk_weights, topk=topk_num
         )
