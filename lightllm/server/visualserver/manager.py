@@ -123,10 +123,12 @@ class VisualManager:
 
                     multimodal_params = group_req_indexes.multimodal_params
 
-                    img_uuids = [img.uuid for img in multimodal_params.images]
-                    ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
-
-                    for img, ready in zip(multimodal_params.images, ready_image):
+                    img_uuids = list(dict.fromkeys(img.uuid for img in multimodal_params.images))
+                    if multimodal_params.skip_image_cache:
+                        ready_image = [False] * len(img_uuids)
+                    else:
+                        ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
+                    for img, ready in zip(img_uuids, ready_image):
                         if not ready:
                             images_need_infer.append(img)
 
