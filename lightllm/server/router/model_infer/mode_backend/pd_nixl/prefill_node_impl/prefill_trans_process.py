@@ -114,7 +114,7 @@ class _PrefillTransModule:
 
             # 初次校验 time out
             if trans_task.time_out():
-                trans_task.error_info = "time out"
+                trans_task.error_info = "time out in recv_task_loop"
                 self.failed_queue.put(trans_task)
             else:
                 self.local_copy_kv_queue.put(trans_task)
@@ -177,33 +177,38 @@ class _PrefillTransModule:
                         except:
                             notify_obj = None
                     
-                    if isinstance(notify_obj, NIXLChunckedTransTaskRet):
-                        key = notify_obj.get_key()
-                        with self.waiting_dict_lock:
-                            trans_task = self.waiting_dict.pop(key, None)
-                        
-                        if trans_task is not None:
-                            trans_task.error_info = notify_obj.error_info
-                            if trans_task.error_info is not None:
-                                self.failed_queue.put(trans_task)
-                            else:
-                                self.success_queue.put(trans_task)
+                        if isinstance(notify_obj, NIXLChunckedTransTaskRet):
+                            key = notify_obj.get_key()
+                            with self.waiting_dict_lock:
+                                trans_task = self.waiting_dict.pop(key, None)
+                            
+                            if trans_task is not None:
+                                trans_task.error_info = notify_obj.error_info
+                                if trans_task.error_info is not None:
+                                    self.failed_queue.put(trans_task)
+                                else:
+                                    self.success_queue.put(trans_task)
 
             # check time_out update
+            self._check_tasks_time_out()
+
+    def _check_tasks_time_out(self):
+        with self.waiting_dict_lock:
+            keys = list(self.waiting_dict.keys())
+        
+        for key in keys:
             with self.waiting_dict_lock:
-                iter_keys = list(self.waiting_dict.keys())
+                trans_task = self.waiting_dict.pop(key, None)
             
-            for key in iter_keys:
+            if trans_task is not None and trans_task.time_out():
+                trans_task.error_info = "time out in update_task_status_loop"
+                self.failed_queue.put(trans_task)
+                continue
+
+            if trans_task is not None:
                 with self.waiting_dict_lock:
-                    trans_task = self.waiting_dict.pop(key, None)
-                
-                if trans_task is not None:
-                    if trans_task.time_out():
-                        trans_task.error_info = "xfer time out"
-                        self.failed_queue.put(trans_task)
-                    else:
-                        with self.waiting_dict_lock:
-                            self.waiting_dict[trans_task.get_key()] = trans_task
+                    self.waiting_dict[trans_task.get_key()] = trans_task
+        return
 
     
     @log_exception
