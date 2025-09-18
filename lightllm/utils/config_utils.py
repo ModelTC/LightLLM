@@ -47,6 +47,9 @@ def get_vocab_size(model_path: str):
         if "llm_config" in config_json:
             vocab_size = int(config_json["llm_config"]["vocab_size"])
             return vocab_size
+        elif "text_config" in config_json:
+            vocab_size = int(config_json["text_config"]["vocab_size"])
+            return vocab_size
         vocab_size = config_json["vocab_size"]
         if not isinstance(vocab_size, int):
             vocab_size = int(vocab_size)
