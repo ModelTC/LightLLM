@@ -320,6 +320,7 @@ class SamplingParams(ctypes.Structure):
             ctypes.c_bool,
         ),  # whether to add spaces between special tokens when decoding
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
+        ("disable_prompt_cache", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
     ]
 
     _do_sample: bool = False
@@ -350,6 +351,7 @@ class SamplingParams(ctypes.Structure):
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
+        self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
 
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
@@ -494,6 +496,7 @@ class SamplingParams(ctypes.Structure):
             "add_special_tokens": self.add_special_tokens,
             "add_spaces_between_special_tokens": self.add_spaces_between_special_tokens,
             "print_eos_token": self.print_eos_token,
+            "disable_prompt_cache": self.disable_prompt_cache,
         }
 
     def to_origin_dict(self):

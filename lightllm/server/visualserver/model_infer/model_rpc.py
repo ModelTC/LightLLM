@@ -100,8 +100,9 @@ class VisualModelRpcServer(rpyc.Service):
         all_img_embeds = all_img_embeds.to(torch.device("cpu"))
 
         if self.tp_rank_id == 0:
+            ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
             ids_to_set = []
-            for i, ready in uuids:
+            for i, ready in enumerate(ready_flags):
                 if ready:
                     continue
                 uid = uuids[i]

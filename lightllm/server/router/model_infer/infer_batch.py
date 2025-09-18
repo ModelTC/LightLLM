@@ -88,7 +88,7 @@ class InferenceContext:
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq", is_group_finished: bool):
-        if self.radix_cache is None:
+        if self.radix_cache is None or req.sampling_param.disable_prompt_cache:
             if is_group_finished:
                 free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
             else:
@@ -238,6 +238,7 @@ class InferSamplingParams:
         vocab_size: int,
     ) -> None:
         self.shm_param = shm_req.sample_params
+        self.disable_prompt_cache = self.shm_param.disable_prompt_cache
         if self.shm_param.top_k == -1:
             self.shm_param.top_k = vocab_size
 
@@ -326,7 +327,7 @@ class InferReq:
         self.mtp_step: int = get_env_start_args().mtp_step
 
         self._init_all_state()
-        if init_prefix_cache:
+        if init_prefix_cache and not self.sampling_param.disable_prompt_cache:
             self._match_radix_cache()
         return
 
@@ -358,6 +359,11 @@ class InferReq:
         return
 
     def _match_radix_cache(self):
+        if self.sampling_param.disable_prompt_cache:
+            self.shared_kv_node = None
+            self.shm_req.prompt_cache_len = 0
+            self.shm_req.shm_cur_kv_len = self.cur_kv_len
+            return
         if g_infer_context.radix_cache is not None and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
