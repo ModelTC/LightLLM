@@ -82,6 +82,7 @@ class TpPartBaseModel:
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
         self.is_deepseekv3_mtp_mode = self.args.mtp_mode in ["deepseekv3_vanilla", "deepseekv3_eagle"]
+        self.is_deepseekv3_mtp_eagle = self.args.mtp_mode == "deepseekv3_eagle"
 
         self._init_datatype()
         self._init_config()
@@ -368,6 +369,7 @@ class TpPartBaseModel:
                 infer_state.b_req_idx,
                 infer_state.b_seq_len,
                 infer_state.mem_index,
+                skip_copy=self.is_deepseekv3_mtp_eagle,
             )
             infer_state.init_some_extra_state(self, padded_model_input.input_ids)
 
@@ -389,6 +391,7 @@ class TpPartBaseModel:
                 infer_state.b_req_idx,
                 infer_state.b_seq_len,
                 infer_state.mem_index,
+                skip_copy=self.is_deepseekv3_mtp_eagle,
             )
             infer_state.init_some_extra_state(self, model_input.input_ids)
             model_output = self._token_forward(model_input.input_ids, infer_state)
