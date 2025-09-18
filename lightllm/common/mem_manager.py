@@ -129,6 +129,9 @@ class MemoryManager:
                               tp_index=tp_index,
                               tp_world_size=dp_world_size,
                               mode="write")
+        # keep for debug
+        # logger.info(f"src token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
+        # logger.info(f"src page token tensor {cur_page[0, :, 0, 0]}")
         return
     
     def read_page_kv_move_buffer_to_mem(self,
@@ -146,6 +149,9 @@ class MemoryManager:
                             tp_index=tp_index,
                             tp_world_size=dp_world_size,
                             mode="read")
+        # keep for debug
+        # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
+        # logger.info(f"dst page token tensor {cur_page[0, :, 0, 0]}")
 
 
     def send_to_decode_node(

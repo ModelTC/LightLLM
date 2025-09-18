@@ -46,7 +46,8 @@ class NixlKVTransporter:
 
     def _register_kv_move_buffer(self, kv_move_buffer: Tensor):
         self.num_pages, self.page_size, self.num_layers, self.kv_head_num, self.head_dims = kv_move_buffer.shape
-        self.page_len = self.page_size * self.num_layers * self.kv_head_num * self.head_dims
+        self.dtype_byte_size = kv_move_buffer.element_size()
+        self.page_len = self.page_size * self.num_layers * self.kv_head_num * self.head_dims * self.dtype_byte_size
         self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)
         self.page_local_xfer_handles = self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages)
 
