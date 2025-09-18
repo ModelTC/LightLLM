@@ -152,6 +152,7 @@ class _DecodeTransModule:
             # notify update
             notifies_dict = self.transporter.get_new_notifs()
             if not notifies_dict:
+                logger.info("no new notifies sleep 0.005 s")
                 self._check_tasks_time_out()
                 time.sleep(0.005)
                 continue
@@ -182,7 +183,7 @@ class _DecodeTransModule:
                             local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
 
                             self.read_peer_kv_queue.put(local_trans_task)
-                            
+
             self._check_tasks_time_out()
             
 
