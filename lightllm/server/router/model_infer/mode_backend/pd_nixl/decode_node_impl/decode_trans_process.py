@@ -111,7 +111,18 @@ class _DecodeTransModule:
     def recv_task_loop(self):
         while True:
             trans_task_group: NIXLChunckedTransTaskGroup = self.task_in_queue.get()
+
+            with self.waiting_dict_lock:
+                for task in trans_task_group.task_list:
+                    if task.transfer_kv_num() != 0:
+                        self.waiting_dict[task.get_key()] = task
+                    else:
+                        task.start_trans_time = time.time()
+                        self.success_queue.put((None, task))
+            
+            # up status
             task = trans_task_group.task_list[0]
+
             decode_node_info = NIXLDecodeNodeInfo(
                 decode_node_id=self.args.pd_node_id,
                 pd_master_node_id=task.pd_master_node_id,
@@ -130,14 +141,6 @@ class _DecodeTransModule:
             )
 
             self.up_status_in_queue.put(up_status)
-
-            with self.waiting_dict_lock:
-                for task in trans_task_group.task_list:
-                    if task.transfer_kv_num() != 0:
-                        self.waiting_dict[task.get_key()] = task
-                    else:
-                        task.start_trans_time = time.time()
-                        self.success_queue.put((None, task))
 
     @log_exception
     def accept_peer_task_loop(
@@ -178,6 +181,28 @@ class _DecodeTransModule:
                             local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
 
                             self.read_peer_kv_queue.put(local_trans_task)
+            
+            self._check_tasks_time_out()
+            
+
+    def _check_tasks_time_out(self):
+        # check time_out update
+        with self.waiting_dict_lock:
+            keys = list(self.waiting_dict.keys())
+        
+        for key in keys:
+            with self.waiting_dict_lock:
+                trans_task = self.waiting_dict.pop(key, None)
+            
+            if trans_task is not None and trans_task.time_out():
+                trans_task.error_info = "time out in accept_peer_task_loop"
+                self.failed_queue.put(trans_task)
+                continue
+
+            if trans_task is not None:
+                with self.waiting_dict_lock:
+                    self.waiting_dict[trans_task.get_key()] = trans_task
+        return
     
 
     @log_exception
@@ -190,7 +215,7 @@ class _DecodeTransModule:
             local_trans_task.nixl_dst_page_index = page_index
 
             if local_trans_task.time_out():
-                local_trans_task.error_info = "time out"
+                local_trans_task.error_info = "time out in read_peer_kv_loop"
                 self.failed_queue.put(local_trans_task)
                 continue
             
