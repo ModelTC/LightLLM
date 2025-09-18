@@ -227,15 +227,13 @@ def moe_align_fused_kernel(
     expert_to_weight_ptr,  # [expert_num, token_num * topk]
     expert_token_num_ptr,  # [expert_num]
     token_num,
-    topk: tl.constexpr,
-    BLOCK_TOK: tl.constexpr,
+    topk_num: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
     token_block = tl.program_id(0)
-    offs = token_block * BLOCK_TOK + tl.arange(0, BLOCK_TOK)
-    mask = offs < token_num * topk
+    offs = token_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < token_num * topk_num
 
-    # 遍历 topk
-    # for k in range(topk):
     expert_ids = tl.load(topk_ids_ptr + offs, mask=mask, other=0)
     weights = tl.load(topk_weights_ptr + offs, mask=mask, other=0.0)
 
@@ -244,12 +242,12 @@ def moe_align_fused_kernel(
 
     # 按 token 顺序写 index 和 weight
     tl.store(
-        expert_to_index_ptr + expert_ids * (token_num * topk) + write_pos,
+        expert_to_index_ptr + expert_ids * (token_num * topk_num) + write_pos,
         offs,
         mask=mask,
     )
     tl.store(
-        expert_to_weight_ptr + expert_ids * (token_num * topk) + write_pos,
+        expert_to_weight_ptr + expert_ids * (token_num * topk_num) + write_pos,
         weights,
         mask=mask,
     )
@@ -258,20 +256,18 @@ def moe_align_fused_kernel(
 def _get_moe_align_fused_static_key(
     topk_weights: torch.Tensor,
 ) -> dict:
-    topk = topk_weights.shape[1]
+    topk_num = topk_weights.shape[1]
     return {
-        "topk": topk,
+        "topk_num": topk_num,
     }
 
 
 def _get_moe_align_fused_configs():
     return [
         {
-            "BLOCK_TOK": bt,
+            "BLOCK_SIZE": bt,
             "num_warps": nw,
-            "num_stages": ns,
         }
-        for ns in [2, 3, 4, 5]
         for nw in [4, 8]
         for bt in [128, 256, 512, 1024, 2048]
     ]
@@ -285,16 +281,15 @@ def _get_moe_align_fused_configs():
     mutates_args=["expert_to_index", "expert_to_weight", "expert_token_num"],
 )
 def moe_align_fused(
-    expert_to_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, topk, run_config: Optional[dict] = None
+    expert_to_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config: Optional[dict] = None
 ):
-    token_num, topk = topk_ids.shape
+    token_num, topk_num = topk_ids.shape
     if run_config is None:
         run_config = {}
-    BLOCK_TOK = run_config.get("BLOCK_TOK", 256)
+    BLOCK_SIZE = run_config.get("BLOCK_SIZE", 256)
     num_warps = run_config.get("num_warps", 4)
-    num_stages = run_config.get("num_stages", 3)
 
-    grid = (triton.cdiv(token_num * topk, BLOCK_TOK),)
+    grid = (triton.cdiv(token_num * topk_num, BLOCK_SIZE),)
     moe_align_fused_kernel[grid](
         topk_ids,
         topk_weights,
@@ -302,10 +297,9 @@ def moe_align_fused(
         expert_to_weight,
         expert_token_num,
         token_num,
-        topk,
-        BLOCK_TOK=BLOCK_TOK,
+        topk_num,
+        BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
-        num_stages=num_stages,
     )
     return expert_to_index, expert_to_weight, expert_token_num
 
@@ -811,9 +805,7 @@ def fused_experts_impl(
         expert_to_tokens = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.int32, device="cuda")
         expert_to_weights = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.float32, device="cuda")
         expert_to_token_num = torch.zeros((E,), dtype=torch.int32, device="cuda")
-        moe_align_fused(
-            expert_to_tokens, expert_to_weights, expert_to_token_num, curr_topk_ids, curr_topk_weights, topk=topk_num
-        )
+        moe_align_fused(expert_to_tokens, expert_to_weights, expert_to_token_num, curr_topk_ids, curr_topk_weights)
 
         reused_mblock_infos = grouped_matmul(
             curr_topk_ids.numel(),
