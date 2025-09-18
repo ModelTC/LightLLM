@@ -112,20 +112,32 @@ def normal_or_p_d_start(args):
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
     if "offline_calibration_fp8kv" in args.mode:
-        assert args.enable_fa3 is True or (
+        assert args.disable_fa3 is False or (
             args.enable_flashinfer_prefill is True and args.enable_flashinfer_decode is True
         ), (
-            "offline_calibration_fp8kv mode need enable fa3 or flashinfer, add --enable_fa3 or "
+            "offline_calibration_fp8kv mode need enable fa3 or flashinfer, add --disable_fa3 False or "
             "--enable_flashinfer_prefill and --enable_flashinfer_decode"
         )
     if "export_fp8kv_calibration" in args.mode:
-        assert args.enable_fa3 is True or (
+        assert args.disable_fa3 is False or (
             args.enable_flashinfer_prefill is True and args.enable_flashinfer_decode is True
         ), (
-            "export_fp8kv_calibration mode need enable fa3 or flashinfer, add --enable_fa3 or "
+            "export_fp8kv_calibration mode need enable fa3 or flashinfer, add --disable_fa3 False or "
             "--enable_flashinfer_prefill and --enable_flashinfer_decode"
         )
         assert args.disable_cudagraph is True, "export_fp8kv_calibration mode need disable cudagraph"
+
+    # Validate FA3 support when enabled (when disable_fa3 is False)
+    if not args.disable_fa3:
+        from lightllm.utils.device_utils import is_fa3_supported
+
+        if not is_fa3_supported():
+            logger.warning(
+                "FA3 is enabled but not supported on this hardware/software environment. "
+                "FA3 requires Hopper architecture (H100, H200, H800) or newer, and sgl_kernel package. "
+                "Disabling FA3 and falling back to other attention kernels."
+            )
+            args.disable_fa3 = True
 
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:

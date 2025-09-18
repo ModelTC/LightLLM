@@ -40,8 +40,8 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self.num_attention_heads = self.network_config_["num_attention_heads"]
         self.kv_lora_rank = self.network_config_["kv_lora_rank"]
         self.num_fused_shared_experts = 0
-        if get_env_start_args().enable_fused_shared_experts and self.is_moe:
-            # MOE_MODE 处于 TP 模式下才能使能 enable_fused_shared_experts
+        if not get_env_start_args().disable_fused_shared_experts and self.is_moe:
+            # MOE_MODE 处于 TP 模式下才能使能 fused_shared_experts
             moe_mode = os.getenv("MOE_MODE", "TP")
             assert moe_mode == "TP"
             self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
