@@ -223,7 +223,7 @@ def moe_align1(
 def moe_align_fused_kernel(
     topk_ids_ptr,  # [token_num, topk]
     topk_weights_ptr,  # [token_num, topk]
-    expert_to_index_ptr,  # [expert_num, token_num * topk]
+    expert_to_token_index_ptr,  # [expert_num, token_num * topk]
     expert_to_weight_ptr,  # [expert_num, token_num * topk]
     expert_token_num_ptr,  # [expert_num]
     token_num,
@@ -242,7 +242,7 @@ def moe_align_fused_kernel(
 
     # 按 token 顺序写 index 和 weight
     tl.store(
-        expert_to_index_ptr + expert_ids * (token_num * topk_num) + write_pos,
+        expert_to_token_index_ptr + expert_ids * (token_num * topk_num) + write_pos,
         offs,
         mask=mask,
     )
@@ -268,7 +268,7 @@ def _get_moe_align_fused_configs():
             "BLOCK_SIZE": bt,
             "num_warps": nw,
         }
-        for nw in [4, 8]
+        for nw in [1, 2, 4, 8]
         for bt in [128, 256, 512, 1024, 2048]
     ]
 
@@ -278,10 +278,10 @@ def _get_moe_align_fused_configs():
     configs_gen_func=_get_moe_align_fused_configs,
     static_key_func=_get_moe_align_fused_static_key,
     run_key_func=lambda topk_ids: topk_ids.shape[0],
-    mutates_args=["expert_to_index", "expert_to_weight", "expert_token_num"],
+    mutates_args=["expert_to_token_index", "expert_to_weight", "expert_token_num"],
 )
 def moe_align_fused(
-    expert_to_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config: Optional[dict] = None
+    expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config: Optional[dict] = None
 ):
     token_num, topk_num = topk_ids.shape
     if run_config is None:
@@ -293,7 +293,7 @@ def moe_align_fused(
     moe_align_fused_kernel[grid](
         topk_ids,
         topk_weights,
-        expert_to_index,
+        expert_to_token_index,
         expert_to_weight,
         expert_token_num,
         token_num,
@@ -301,7 +301,7 @@ def moe_align_fused(
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
     )
-    return expert_to_index, expert_to_weight, expert_token_num
+    return expert_to_token_index, expert_to_weight, expert_token_num
 
 
 @triton.jit
@@ -805,7 +805,13 @@ def fused_experts_impl(
         expert_to_tokens = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.int32, device="cuda")
         expert_to_weights = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.float32, device="cuda")
         expert_to_token_num = torch.zeros((E,), dtype=torch.int32, device="cuda")
-        moe_align_fused(expert_to_tokens, expert_to_weights, expert_to_token_num, curr_topk_ids, curr_topk_weights)
+        moe_align_fused(
+            expert_to_token_index=expert_to_tokens,
+            expert_to_weight=expert_to_weights,
+            expert_token_num=expert_to_token_num,
+            topk_ids=curr_topk_ids,
+            topk_weights=curr_topk_weights,
+        )
 
         reused_mblock_infos = grouped_matmul(
             curr_topk_ids.numel(),
