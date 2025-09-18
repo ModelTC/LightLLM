@@ -220,7 +220,8 @@ class ModeBackend:
         self.draft_models: List[Deepseek3MTPModel] = []
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
-        for i in range(self.mtp_step):
+        num_mtp_modules = self.args.mtp_step if self.args.mtp_mode == "deepseekv3_vanilla" else 1
+        for i in range(num_mtp_modules):
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
             mtp_model_kvargs = {
                 "weight_dir": self.args.mtp_draft_model_dir,
