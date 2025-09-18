@@ -32,7 +32,8 @@ def create_shm(name, data):
         mem_view = shared_memory.buf
         mem_view[:data_size] = data
     except FileExistsError:
-        print("Warning create shm {} failed because of FileExistsError!".format(name))
+        pass
+        # print("Warning create shm {} failed because of FileExistsError!".format(name))
 
 
 def read_shm(name):
