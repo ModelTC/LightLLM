@@ -148,40 +148,40 @@ class _DecodeTransModule:
     ):
         torch.cuda.set_device(self.device_id)
         while True:
-            
+            if len(self.waiting_dict) == 0:
+                time.sleep(0.003)
+                continue
+    
             # notify update
             notifies_dict = self.transporter.get_new_notifs()
-            if not notifies_dict:
-                self._check_tasks_time_out()
-                time.sleep(0.005)
-                continue
 
-            for remote_agent_name, _notify_list in notifies_dict.items():
-                for notify in _notify_list:
-                    try:
-                        notify_obj = pickle.loads(notify)
-                    except:
-                        notify_obj = None
-                
-                    if isinstance(notify_obj, NIXLChunckedTransTask):
-                        remote_trans_task = notify_obj
-                        key = remote_trans_task.get_key()
-                        logger.info(f"recv peer trans task {remote_trans_task.to_str()}")
-                        with self.waiting_dict_lock:
-                            local_trans_task : NIXLChunckedTransTask = self.waiting_dict.pop(key, None)
-                        
-                        if local_trans_task is None:
-                            remote_trans_task.error_info = "peer not find"
-                            self.transporter.send_notify_to_prefill_node(prefill_agent_name=remote_agent_name, notify=pickle.dumps(remote_trans_task.createRetObj()))
-                        else:
-                            local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
+            if notifies_dict:
+                for remote_agent_name, _notify_list in notifies_dict.items():
+                    for notify in _notify_list:
+                        try:
+                            notify_obj = pickle.loads(notify)
+                        except:
+                            notify_obj = None
+                    
+                        if isinstance(notify_obj, NIXLChunckedTransTask):
+                            remote_trans_task = notify_obj
+                            key = remote_trans_task.get_key()
+                            logger.info(f"recv peer trans task {remote_trans_task.to_str()}")
+                            with self.waiting_dict_lock:
+                                local_trans_task : NIXLChunckedTransTask = self.waiting_dict.pop(key, None)
+                            
+                            if local_trans_task is None:
+                                remote_trans_task.error_info = "peer not find"
+                                self.transporter.send_notify_to_prefill_node(prefill_agent_name=remote_agent_name, notify=pickle.dumps(remote_trans_task.createRetObj()))
+                            else:
+                                local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
 
-                            local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
-                            local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
-                            local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
-                            local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
+                                local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
+                                local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
+                                local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
+                                local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
 
-                            self.read_peer_kv_queue.put(local_trans_task)
+                                self.read_peer_kv_queue.put(local_trans_task)
 
             self._check_tasks_time_out()
             
