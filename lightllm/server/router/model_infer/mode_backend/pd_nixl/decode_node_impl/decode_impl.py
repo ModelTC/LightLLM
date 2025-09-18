@@ -90,38 +90,37 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         ans_list : List[InferReq] = []
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
-            if req_obj.infer_aborted:
-                if req_obj.nixl_pd_task_num == (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
-                    ans_list.append(req_obj)
+            if req_obj.nixl_pd_task_num != (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
                 continue
-            
-            if req_obj.nixl_pd_task_num == (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
-                if req_obj.nixl_pd_task_failed_num > 0:
-                    if not req_obj.finish_status.is_finished():
-                        # 强制停止
-                        req_obj.cur_output_len += 1
-                        req_obj.set_next_gen_token_id(0, 0.0, 1)
-                        req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
 
-                        if self.is_master_in_dp:
-                            req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
-                            req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                            req_obj.shm_req.finish_status.set_status(FinishStatus.FINISHED_STOP)
-                            req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
+            if req_obj.nixl_pd_task_failed_num > 0:
+                # 强制停止
+                if not req_obj.finish_status.is_finished():
+                    req_obj.cur_output_len += 1
+                    req_obj.set_next_gen_token_id(0, 0.0, 1)
+                    req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
 
-                            logger.error(f"req_id: {req_obj.req_id} forced to finished, it exits kv transfer error")
-                                         
-                    # 提前释放有问题的 mem_index
-                    old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
-                    error_mem_len = req_obj.cur_kv_len - old_prefix_len
+                    if self.is_master_in_dp:
+                        req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
+                        req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
+                        req_obj.shm_req.finish_status.set_status(FinishStatus.FINISHED_STOP)
+                        req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
+
+                        logger.error(f"req_id: {req_obj.req_id} forced to finished, it exits kv transfer error")
+                                        
+                # 提前释放有问题的 mem_index
+                old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
+                error_mem_len = req_obj.cur_kv_len - old_prefix_len
+                if error_mem_len > 0:
                     req_obj.cur_kv_len -= error_mem_len
 
                     mem_indexes = self.model.req_manager.req_to_token_indexs[req_obj.req_idx, req_obj.cur_kv_len:(req_obj.cur_kv_len + error_mem_len)].detach().cpu()
                     self.model.mem_manager.free(mem_indexes)
                     if self.is_master_in_dp:
                         req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
-                else:
-                    ans_list.append(req_obj)
+                
+            ans_list.append(req_obj)
+
         g_infer_state_lock.release()
         return ans_list
     
