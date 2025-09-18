@@ -128,7 +128,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         """
         decode node 生成所有的传输任务对象。
         """
-        # 传输的 kv 要少一个，不然decode 无法有下一个输入除非推理出下一个token
+        # 传输的 kv 要少一个，不然decode 无法有下一个输入推理出下一个token
         input_len = req_obj.shm_req.input_len - 1
         page_size = self.args.nixl_pd_kv_page_size
         req_obj.nixl_trans_kv_start_index = req_obj.cur_kv_len
