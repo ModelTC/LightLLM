@@ -194,8 +194,9 @@ class RouterManager:
 
         if self.args.run_mode == "nixl_prefill":
             from lightllm.server.router.model_infer.mode_backend.pd_nixl.prefill_node_impl import (
-                start_prefill_kv_move_manager_process
+                start_prefill_kv_move_manager_process,
             )
+
             start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
         if self.args.run_mode == "decode":
@@ -210,8 +211,9 @@ class RouterManager:
             from lightllm.server.router.model_infer.mode_backend.pd_nixl.decode_node_impl import (
                 start_decode_kv_move_manager_process,
             )
+
             start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
-        
+
         return
 
     def _get_schedule_time_interval(self):

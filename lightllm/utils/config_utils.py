@@ -32,6 +32,7 @@ def get_hidden_size(model_path: str) -> Optional[int]:
     logger.error("cannot get hidden size from config.json, return None instead")
     return None
 
+
 @lru_cache(maxsize=None)
 def get_num_key_value_heads(model_path: str) -> int:
     config_json = get_config_json(model_path)

@@ -84,7 +84,7 @@ class ModeBackend:
         self.disable_cudagraph = self.args.disable_cudagraph
         self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
         self.is_nixl_pd_mode = self.run_mode in ["nixl_prefill", "nixl_decode"]
-        self.is_nixl_decode_mode = (self.run_mode == "nixl_decode")
+        self.is_nixl_decode_mode = self.run_mode == "nixl_decode"
 
         self.logger = init_logger(__name__)
 
@@ -295,7 +295,7 @@ class ModeBackend:
         new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
-        
+
         # nixl pd mode 从 shm_nixl_trans_io_buffer 读取分块传输的完成进度。
         if self.is_nixl_pd_mode:
             if self.is_master_in_node:
@@ -351,7 +351,6 @@ class ModeBackend:
             if init_reqs:
                 self._init_reqs(reqs=init_reqs)
         return
-    
 
     def _read_nixl_trans_io_buffer_and_update_req_status(self):
         cmds: List[NIXLChunckedTransTaskRet] = self.shm_nixl_trans_io_buffer.read_obj()
@@ -365,7 +364,6 @@ class ModeBackend:
                     else:
                         req.nixl_pd_task_sunccess_num += 1
         return
-    
 
     # 一些可以复用的通用功能函数
     def _init_reqs(self, reqs: List[Tuple]):
@@ -385,7 +383,7 @@ class ModeBackend:
         g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
         return req_ids
-    
+
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
         """
         将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
@@ -426,7 +424,7 @@ class ModeBackend:
 
         if len(req_ids) == 0:
             return [], []
-        
+
         ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
 

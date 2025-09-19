@@ -222,7 +222,8 @@ class ExponentialDecayLengthPenalty(ctypes.Structure):
 
     def to_tuple(self):
         return (self.item0, self.item1)
-    
+
+
 class NodeUUId(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -236,7 +237,7 @@ class NodeUUId(ctypes.Structure):
         return
 
     def get(self) -> int:
-        return ((self.node_id_high << 64) | self.node_id_low)
+        return (self.node_id_high << 64) | self.node_id_low
 
 
 class DecodeNode(ctypes.Structure):
@@ -308,7 +309,7 @@ class SamplingParams(ctypes.Structure):
         ("group_request_id", ctypes.c_int64),  # p d mode used params
         ("suggested_dp_index", ctypes.c_int),  # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         ("move_kv_to_decode_node", DecodeNode),  # move kv to deocde node, only used in pd mode
-         # in pd split mode, use to keep the id of pd master
+        # in pd split mode, use to keep the id of pd master
         ("pd_master_node_id", NodeUUId),
         # nixl params object, only used in nixl pd mode, used to build nixl connection in p and d
         ("nixl_params", NIXLParamObj),

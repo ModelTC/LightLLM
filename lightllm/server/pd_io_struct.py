@@ -26,10 +26,10 @@ class NodeRole(enum.Enum):
 
     def is_P(self):
         return self == NodeRole.P or self == NodeRole.NP
-    
+
     def is_NP(self):
         return self == NodeRole.NP
-    
+
     def is_ND(self):
         return self == NodeRole.ND
 
@@ -50,8 +50,8 @@ class ObjType(enum.Enum):
     ABORT = 1
     REQ = 2
     TOKEN_PACKS = 3
-    NIXL_UPLOAD_NP_PROMPT_IDS = 4 # nixl p 节点上报生成的 prompt ids 信息。
-    NIXL_REQ_DECODE_NODE_INFO = 5 # nixl pd master 节点下发给 nixl p 节点的对应请求对应的 d 节点的信息。
+    NIXL_UPLOAD_NP_PROMPT_IDS = 4  # nixl p 节点上报生成的 prompt ids 信息。
+    NIXL_REQ_DECODE_NODE_INFO = 5  # nixl pd master 节点下发给 nixl p 节点的对应请求对应的 d 节点的信息。
 
 
 @dataclass
@@ -215,9 +215,11 @@ class NixlUpKVStatus:
             logger.error(error_info)
             raise ValueError(error_info)
         return
-    
+
     def __str__(self):
-        return f"group_request_id: {self.group_request_id} pd_master_node_id: {self.pd_master_node_id} nixl_params_len: {len(self.nixl_params)}"
+        req_id = self.group_request_id
+        pd_m_id = self.pd_master_node_id
+        return f"group_request_id: {req_id} pd_master_node_id: {pd_m_id} nixl_params_len: {len(self.nixl_params)}"
 
 
 @dataclass
@@ -229,7 +231,7 @@ class NIXLDecodeNodeInfo:
     agent_metadata: bytes
     num_pages: int
     page_reg_desc: bytes
-    
+
     request_id: int
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
 
@@ -249,7 +251,7 @@ class NIXLChunckedTransTask:
     start_kv_index: int
     end_kv_index: int
 
-    pd_master_node_id : int
+    pd_master_node_id: int
     prefill_dp_index: Optional[int]
     decode_dp_index: Optional[int]
     src_device_id: Optional[int]  # 传输设备 id
@@ -266,7 +268,6 @@ class NIXLChunckedTransTask:
     decode_agent_metadata: Optional[bytes]
     decode_num_pages: Optional[int]
     decode_page_reg_desc: Optional[bytes]
-
 
     # transfer params
     nixl_src_page_index: Optional[int] = None
@@ -299,18 +300,18 @@ class NIXLChunckedTransTask:
                 return True
             else:
                 return False
-            
+
     def waiting_time(self):
         return time.time() - self.create_time
-    
+
     def transfer_time(self):
         return time.time() - self.start_trans_time
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
-    
+
     def to_str(self):
-        obj : NIXLChunckedTransTask = copy.copy(self)
+        obj: NIXLChunckedTransTask = copy.copy(self)
         obj.mem_indexes = None
         if obj.decode_agent_metadata is not None:
             obj.decode_agent_metadata = b"xxx"
@@ -321,7 +322,7 @@ class NIXLChunckedTransTask:
         if obj.prefill_page_reg_desc is not None:
             obj.prefill_page_reg_desc = b"xxx"
         return obj.__str__()
-    
+
     def transfer_kv_num(self):
         return self.end_kv_index - self.start_kv_index
 
@@ -334,22 +335,23 @@ class NIXLChunckedTransTask:
             error_info=self.error_info,
         )
         return ret
-    
+
     def create_prefill_agent_obj(self) -> NixlAgentMetadata:
         return NixlAgentMetadata(
-                agent_name=self.prefill_agent_name,
-                agent_metadata=self.prefill_agent_metadata,
-                num_pages=self.prefill_num_pages,
-                page_reg_desc=self.prefill_page_reg_desc,
-            )
-    
+            agent_name=self.prefill_agent_name,
+            agent_metadata=self.prefill_agent_metadata,
+            num_pages=self.prefill_num_pages,
+            page_reg_desc=self.prefill_page_reg_desc,
+        )
+
     def create_decode_agent_obj(self) -> NixlAgentMetadata:
         return NixlAgentMetadata(
-                agent_name=self.decode_agent_name,
-                agent_metadata=self.decode_agent_metadata,
-                num_pages=self.decode_num_pages,
-                page_reg_desc=self.decode_page_reg_desc,
-            )
+            agent_name=self.decode_agent_name,
+            agent_metadata=self.decode_agent_metadata,
+            num_pages=self.decode_num_pages,
+            page_reg_desc=self.decode_page_reg_desc,
+        )
+
 
 @dataclass
 class NIXLChunckedTransTaskRet:
@@ -361,7 +363,7 @@ class NIXLChunckedTransTaskRet:
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
-    
+
 
 @dataclass
 class NIXLChunckedTransTaskGroup:

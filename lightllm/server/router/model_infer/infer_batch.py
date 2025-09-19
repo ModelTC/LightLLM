@@ -271,9 +271,9 @@ class InferSamplingParams:
 
         # nixl decode node information
         if self.shm_param.nixl_params.data_len > 0:
-            self.nixl_decode_node : NIXLDecodeNodeInfo = pickle.loads(self.shm_param.nixl_params.get())
+            self.nixl_decode_node: NIXLDecodeNodeInfo = pickle.loads(self.shm_param.nixl_params.get())
         else:
-            self.nixl_decode_node : NIXLDecodeNodeInfo = None
+            self.nixl_decode_node: NIXLDecodeNodeInfo = None
 
         # only pd mode used.
         self.pd_master_node_id: int = self.shm_param.pd_master_node_id.get()
@@ -315,11 +315,11 @@ class InferReq:
         self.out_token_id_count: Dict[int, int] = None
 
         # nixl pd 分离模式使用的变量, 普通模式下这些变量没有具体用途
-        self.nixl_trans_kv_start_index : int = 0 
-        self.nixl_pd_task_num : int = 0
-        self.nixl_pd_task_sunccess_num : int = 0
-        self.nixl_pd_task_failed_num : int = 0
-        self.nixl_trans_device_id : int = -1 
+        self.nixl_trans_kv_start_index: int = 0
+        self.nixl_pd_task_num: int = 0
+        self.nixl_pd_task_sunccess_num: int = 0
+        self.nixl_pd_task_failed_num: int = 0
+        self.nixl_trans_device_id: int = -1
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
@@ -513,7 +513,7 @@ class InferReqUpdatePack:
         # 分块 prefill 后，形成对应的pd 分块传输处理。
         if nixl_prefill_chuncked_handle_func is not None:
             nixl_prefill_chuncked_handle_func(self.req_obj, next_token_id, next_token_logprob, self.output_len)
-        
+
         if self.output_len <= 0:
             return
 

@@ -254,7 +254,7 @@ class Req(ctypes.Structure):
         metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
         self._cache_prompt_metadata = metadata
         return metadata
-    
+
     def is_infer_decode(self) -> bool:
         """
         judge the req is in decode stage

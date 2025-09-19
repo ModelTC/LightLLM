@@ -106,7 +106,6 @@ class NixlKVTransporter:
             _remote_agent = trans_task.create_decode_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-
         # 将页面读取任务发送给 decode 节点
         remote_agent: NixlAgentMetadata = self.remote_agents[decode_agent_name]
         assert trans_task.nixl_src_page_index is not None
@@ -129,7 +128,7 @@ class NixlKVTransporter:
             pickle.dumps(new_trans_task),
         )
         return
-    
+
     def send_notify_to_prefill_node(self, prefill_agent_name: str, notify: bytes):
         self.nixl_agent.send_notif(remote_agent_name=prefill_agent_name, notif_msg=notify)
         return
@@ -168,9 +167,9 @@ class NixlKVTransporter:
         )
         if not handle:
             raise RuntimeError(f"make_prepped_xfer failed for task: {trans_task.to_str()}")
-                                                                                       
+
         self.nixl_agent.transfer(handle)
-        
+
         return handle
 
     def check_task_status(self, trans_task: NIXLChunckedTransTask) -> str:
@@ -180,7 +179,7 @@ class NixlKVTransporter:
         if xfer_state == "ERR":
             logger.warning(f"Transfer failed with trans task {trans_task.to_str()} for handle {handle}")
         return xfer_state
-            
+
     def release_xfer_handle(self, handle):
         self.nixl_agent.release_xfer_handle(handle=handle)
         return

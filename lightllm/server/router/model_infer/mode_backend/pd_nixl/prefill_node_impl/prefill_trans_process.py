@@ -26,7 +26,7 @@ def start_prefill_trans_process(
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
     mem_queues: List[mp.Queue],
-    up_status_in_queue: Optional[mp.SimpleQueue] = None
+    up_status_in_queue: Optional[mp.SimpleQueue] = None,
 ):
     proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, mem_queues))
     proc.start()
@@ -51,12 +51,17 @@ def _init_env(
         mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
         task_out_queue.put("get_mem_managers_ok")
 
-        manager = _PrefillTransModule(args=args,
-                                      device_id=device_id,
-                                      task_in_queue=task_in_queue,
-                                      task_out_queue=task_out_queue,
-                                      mem_managers=mem_managers)
-        while True: time.sleep(100)
+        manager = _PrefillTransModule(
+            args=args,
+            device_id=device_id,
+            task_in_queue=task_in_queue,
+            task_out_queue=task_out_queue,
+            mem_managers=mem_managers,
+        )
+        assert manager is not None
+
+        while True:
+            time.sleep(100)
 
     except Exception as e:
         logger.exception(str(e))
@@ -79,17 +84,18 @@ class _PrefillTransModule:
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
         self.mem_managers = mem_managers
-        
+
         cur_mem_manager: MemoryManager = self.mem_managers[device_id]
-        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(page_num=self.args.nixl_pd_kv_page_num,
-                                                                    page_size=self.args.nixl_pd_kv_page_size)
+        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
+            page_num=self.args.nixl_pd_kv_page_num, page_size=self.args.nixl_pd_kv_page_size
+        )
         self.copy_cuda_stream = torch.cuda.Stream()
-        self.transporter = NixlKVTransporter(node_id=self.args.pd_node_id,
-                                             tp_idx=device_id,
-                                             kv_move_buffer=kv_move_buffer)
+        self.transporter = NixlKVTransporter(
+            node_id=self.args.pd_node_id, tp_idx=device_id, kv_move_buffer=kv_move_buffer
+        )
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
-       
+
         self.local_copy_kv_queue = queue.Queue()
         self.notify_peer_read_kv_queue = queue.Queue()
         self.success_queue = queue.Queue()
@@ -98,11 +104,18 @@ class _PrefillTransModule:
         self.page_index_queue = queue.Queue()
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
-        
-        for func in [self.recv_task_loop, self.local_copy_kv_loop, self.notify_peer_to_read_kv_loop, self.update_task_status_loop, self.success_loop, self.fail_loop]:
+
+        for func in [
+            self.recv_task_loop,
+            self.local_copy_kv_loop,
+            self.notify_peer_to_read_kv_loop,
+            self.update_task_status_loop,
+            self.success_loop,
+            self.fail_loop,
+        ]:
             threading.Thread(target=func, daemon=True).start()
         return
-    
+
     @log_exception
     def recv_task_loop(self):
         torch.cuda.set_device(self.device_id)
@@ -138,10 +151,10 @@ class _PrefillTransModule:
                 )
                 sync_event = torch.cuda.Event()
                 sync_event.record()
-            
+
             self.notify_peer_read_kv_queue.put((sync_event, trans_task))
         return
-    
+
     @log_exception
     def notify_peer_to_read_kv_loop(self):
         torch.cuda.set_device(self.device_id)
@@ -167,7 +180,7 @@ class _PrefillTransModule:
             with self.waiting_dict_lock:
                 self.waiting_dict[trans_task.get_key()] = trans_task
         return
-    
+
     @log_exception
     def update_task_status_loop(
         self,
@@ -176,7 +189,7 @@ class _PrefillTransModule:
             if len(self.waiting_dict) == 0:
                 time.sleep(0.003)
                 continue
-            
+
             # notify update
             try:
                 notifies_dict = self.transporter.get_new_notifs()
@@ -192,12 +205,12 @@ class _PrefillTransModule:
                             notify_obj = pickle.loads(notify)
                         except:
                             notify_obj = None
-                    
+
                         if isinstance(notify_obj, NIXLChunckedTransTaskRet):
                             key = notify_obj.get_key()
                             with self.waiting_dict_lock:
                                 trans_task = self.waiting_dict.pop(key, None)
-                            
+
                             if trans_task is not None:
                                 trans_task.error_info = notify_obj.error_info
                                 if trans_task.error_info is not None:
@@ -211,11 +224,11 @@ class _PrefillTransModule:
     def _check_tasks_time_out(self):
         with self.waiting_dict_lock:
             keys = list(self.waiting_dict.keys())
-        
+
         for key in keys:
             with self.waiting_dict_lock:
                 trans_task = self.waiting_dict.pop(key, None)
-            
+
             if trans_task is not None and trans_task.time_out():
                 trans_task.error_info = "time out in update_task_status_loop"
                 self.failed_queue.put(trans_task)
@@ -226,7 +239,6 @@ class _PrefillTransModule:
                     self.waiting_dict[trans_task.get_key()] = trans_task
         return
 
-    
     @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
@@ -235,11 +247,11 @@ class _PrefillTransModule:
             # 写回后，回收页面
             if trans_task.nixl_src_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_src_page_index)
-            
+
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
             logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
-    
+
     @log_exception
     def fail_loop(self):
         torch.cuda.set_device(self.device_id)
@@ -249,7 +261,7 @@ class _PrefillTransModule:
             # 回收页面
             if trans_task.nixl_src_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_src_page_index)
-            
+
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
             logger.info(f"trans task ret fail:{ret}")

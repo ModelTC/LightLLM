@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 class HttpServerManagerForPDMaster:
     def __init__(
         self,
-        args : StartArgs,
+        args: StartArgs,
         metric_port: int,
     ):
         self.args = args
@@ -217,7 +217,9 @@ class HttpServerManagerForPDMaster:
         upkv_status: UpKVStatus = up_status_event.upkv_status
         sampling_params.suggested_dp_index = upkv_status.dp_index
 
-        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams()))))
+        await d_node.websocket.send_bytes(
+            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+        )
 
         while True:
             await req_status.wait_to_ready()
@@ -247,34 +249,38 @@ class HttpServerManagerForPDMaster:
 
         up_status_event = req_status.up_status_event
         nixl_np_up_prompt_ids_event = req_status.nixl_np_up_prompt_ids_event
-        
+
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
         await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
-        
+
         try:
             await asyncio.wait_for(nixl_np_up_prompt_ids_event.wait(), timeout=60)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} wait np up prompt ids time out")
             raise ServerBusyError()
-        
+
         prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
         logger.info(f"group_request_id: {group_request_id} get np up prompt ids len {len(prompt_ids)}")
-        
+
         sampling_params.max_new_tokens = old_max_new_tokens
-        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams()))))
+        await d_node.websocket.send_bytes(
+            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+        )
 
         try:
             await asyncio.wait_for(up_status_event.wait(), timeout=60)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
-        
+
         # 将 decode 节点上报的当前请求使用的decode节点的信息下发给 p 节点，这样 p 节点才知道将 kv 传输给那个 d 节点。
         upkv_status: NixlUpKVStatus = up_status_event.upkv_status
         nixl_params: bytes = upkv_status.nixl_params
         decode_node_info: NIXLDecodeNodeInfo = pickle.loads(nixl_params)
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.NIXL_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info)))
+        await p_node.websocket.send_bytes(
+            pickle.dumps((ObjType.NIXL_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
+        )
 
         while True:
             await req_status.wait_to_ready()
@@ -427,7 +433,9 @@ class HttpServerManagerForPDMaster:
                                 req_status.nixl_np_up_prompt_ids_event.prompt_ids = prompt_ids
                                 req_status.nixl_np_up_prompt_ids_event.set()
                         except:
-                            logger.error(f"NIXL_UPLOAD_NP_PROMPT_IDS fail find req status for group_req_id: {group_req_id}")
+                            logger.error(
+                                f"NIXL_UPLOAD_NP_PROMPT_IDS fail find req status for group_req_id: {group_req_id}"
+                            )
                     else:
                         logger.error(f"recevie error obj {obj}")
             except BaseException as e:
@@ -469,8 +477,8 @@ class ReqStatus:
 
 
 class PDManager:
-    def __init__(self, args : StartArgs):
-        self.args : StartArgs = args
+    def __init__(self, args: StartArgs):
+        self.args: StartArgs = args
         self.prefill_nodes: List[PD_Client_Obj] = []
         self.decode_nodes: List[PD_Client_Obj] = []
         self.url_to_pd_nodes: Dict[str, PD_Client_Obj] = {}

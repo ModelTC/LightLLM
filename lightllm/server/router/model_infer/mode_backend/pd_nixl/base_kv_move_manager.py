@@ -16,12 +16,14 @@ logger = init_logger(__name__)
 
 
 class BaseKVMoveManager:
-    def __init__(self, 
-                 args: StartArgs, 
-                 info_queue: mp.Queue, 
-                 mem_queues: List[mp.Queue],
-                 start_trans_process_func:Callable,
-                 up_status_in_queue: Optional[mp.SimpleQueue]=None):
+    def __init__(
+        self,
+        args: StartArgs,
+        info_queue: mp.Queue,
+        mem_queues: List[mp.Queue],
+        start_trans_process_func: Callable,
+        up_status_in_queue: Optional[mp.SimpleQueue] = None,
+    ):
         self.args = args
         # args.dp // args.nnodes 在跨机tp的场景下，可能为0
         self.dp_size_in_node = max(1, args.dp // args.nnodes)
@@ -38,10 +40,12 @@ class BaseKVMoveManager:
         for device_id in range(self.node_world_size):
             trans_process = KVTransProcess()
             self.kv_trans_processes[device_id] = trans_process
-            assert trans_process.init_all(device_id=device_id,
-                                        manager=self,
-                                        start_func=start_trans_process_func,
-                                        up_status_in_queue=up_status_in_queue)
+            assert trans_process.init_all(
+                device_id=device_id,
+                manager=self,
+                start_func=start_trans_process_func,
+                up_status_in_queue=up_status_in_queue,
+            )
             threading.Thread(target=self.task_ret_handle_loop, args=(trans_process,), daemon=True).start()
 
         # 通过 io buffer 将命令写入到推理进程中
@@ -57,7 +61,7 @@ class BaseKVMoveManager:
 
     def task_dispatcher_loop(self):
         raise NotImplementedError()
-        
+
     # ==================================================================================
     #  将收集到的传输返回信息，批量写回给推理进程，触发其进行相关管理信息的更新。
     # ==================================================================================
@@ -67,7 +71,7 @@ class BaseKVMoveManager:
             ret_obj: NIXLChunckedTransTaskRet = self.ret_obj_queue.get()
             ret_objs: List[NIXLChunckedTransTaskRet] = [ret_obj]
             ret_objs.extend(self._collect_return_objects())
-            
+
             while True:
                 if self.shm_nixl_trans_io_buffer.is_empty():
                     # to do, 这里写入的数量，可能会超过共享管道的大小。
@@ -77,10 +81,9 @@ class BaseKVMoveManager:
                 else:
                     time.sleep(0.01)
                     ret_objs.extend(self._collect_return_objects())
-    
-        
+
     def _collect_return_objects(self):
-        """ 从队列中收集所有返回对象 """
+        """从队列中收集所有返回对象"""
         ret_objs = []
         try:
             while True:

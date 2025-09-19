@@ -98,7 +98,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 转发任务
                 if manager.pd_mode != NodeRole.NP:  # nixl prefill don't need up token to master
                     forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
-                
+
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
                 while True:
@@ -110,13 +110,15 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         nixl_pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = nixl_pd_event
                         asyncio.create_task(
-                            _pd_process_generate(manager=manager,
-                                                 prompt=prompt,
-                                                 sampling_params=sampling_params,
-                                                 multimodal_params=multimodal_params,
-                                                 forwarding_queue=forwarding_queue,
-                                                 nixl_pd_upload_websocket=websocket,
-                                                 nixl_pd_event=nixl_pd_event)
+                            _pd_process_generate(
+                                manager=manager,
+                                prompt=prompt,
+                                sampling_params=sampling_params,
+                                multimodal_params=multimodal_params,
+                                forwarding_queue=forwarding_queue,
+                                nixl_pd_upload_websocket=websocket,
+                                nixl_pd_event=nixl_pd_event,
+                            )
                         )
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
@@ -186,8 +188,8 @@ async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_O
 async def _pd_process_generate(
     manager: HttpServerManager,
     prompt: Union[str, List[int]],
-    sampling_params: SamplingParams, 
-    multimodal_params: Dict, 
+    sampling_params: SamplingParams,
+    multimodal_params: Dict,
     forwarding_queue: AsyncQueue,
     nixl_pd_upload_websocket: ClientConnection,
     nixl_pd_event: asyncio.Event,

@@ -19,7 +19,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         self.classed_req_strict_prefill = False
 
     def init_custom(self):
-        
+
         assert kv_trans_use_p2p()
         if kv_trans_use_p2p():
             from ..p2p_fix import reduce_tensor
@@ -79,7 +79,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                     req_id = req_obj.shm_req.request_id
                     logger.error(f"req_id: {req_id} forced to finished")
         return
-    
+
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
         """
         将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
@@ -87,7 +87,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         传输没有完成的请求。
         """
         g_infer_state_lock.acquire()
-        ans_list : List[InferReq] = []
+        ans_list: List[InferReq] = []
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
             if req_obj.nixl_pd_task_num != (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
@@ -107,23 +107,29 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                         req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
 
                         logger.error(f"req_id: {req_obj.req_id} forced to finished, it exits kv transfer error")
-                                        
+
                 # 提前释放有问题的 mem_index
                 old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
                 error_mem_len = req_obj.cur_kv_len - old_prefix_len
                 if error_mem_len > 0:
                     req_obj.cur_kv_len -= error_mem_len
 
-                    mem_indexes = self.model.req_manager.req_to_token_indexs[req_obj.req_idx, req_obj.cur_kv_len:(req_obj.cur_kv_len + error_mem_len)].detach().cpu()
+                    mem_indexes = (
+                        self.model.req_manager.req_to_token_indexs[
+                            req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + error_mem_len)
+                        ]
+                        .detach()
+                        .cpu()
+                    )
                     self.model.mem_manager.free(mem_indexes)
                     if self.is_master_in_dp:
                         req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
-                
+
             ans_list.append(req_obj)
 
         g_infer_state_lock.release()
         return ans_list
-    
+
     def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
         """
         decode node 生成所有的传输任务对象。
@@ -132,18 +138,18 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         input_len = req_obj.shm_req.input_len - 1
         page_size = self.args.nixl_pd_kv_page_size
         req_obj.nixl_trans_kv_start_index = req_obj.cur_kv_len
-        
+
         need_mem_size = input_len - req_obj.cur_kv_len
         group = NIXLChunckedTransTaskGroup()
 
         if need_mem_size > 0:
             if self.radix_cache is not None:
                 self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
-            
+
             mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
-            self.model.req_manager.req_to_token_indexs[req_obj.req_idx, req_obj.cur_kv_len:(req_obj.cur_kv_len + need_mem_size)] = mem_indexes
-            
-        
+            self.model.req_manager.req_to_token_indexs[
+                req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + need_mem_size)
+            ] = mem_indexes
 
             while req_obj.nixl_trans_kv_start_index < input_len:
                 cur_page_size = min(page_size, input_len - req_obj.nixl_trans_kv_start_index)
@@ -151,11 +157,13 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                 start_index = req_obj.nixl_trans_kv_start_index
                 end_index = req_obj.nixl_trans_kv_start_index + cur_page_size
                 page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
-                self._create_nixl_trans_task(req_obj=req_obj,
-                                            mem_indexes=page_mem_indexes.tolist(),
-                                            kv_start_index=start_index,
-                                            kv_end_index=end_index,
-                                            group=group)
+                self._create_nixl_trans_task(
+                    req_obj=req_obj,
+                    mem_indexes=page_mem_indexes.tolist(),
+                    kv_start_index=start_index,
+                    kv_end_index=end_index,
+                    group=group,
+                )
                 # update
                 req_obj.nixl_trans_kv_start_index += cur_page_size
 
@@ -167,38 +175,48 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             else:
                 # 需要上报一个包含 0 长度的trans task，触发 kv move manager 给 pd master 上报
                 # upkv_status 状态，使用推理流程完整。
-                self._create_nixl_trans_task(req_obj=req_obj,
-                                             mem_indexes=[],
-                                             kv_start_index=req_obj.cur_kv_len,
-                                             kv_end_index=req_obj.cur_kv_len,
-                                             group=group)
+                self._create_nixl_trans_task(
+                    req_obj=req_obj,
+                    mem_indexes=[],
+                    kv_start_index=req_obj.cur_kv_len,
+                    kv_end_index=req_obj.cur_kv_len,
+                    group=group,
+                )
                 self.info_queue.put(group)
         return
-    
-    def _create_nixl_trans_task(self, req_obj: InferReq, mem_indexes:List[int], kv_start_index: int, kv_end_index: int, group: NIXLChunckedTransTaskGroup):
+
+    def _create_nixl_trans_task(
+        self,
+        req_obj: InferReq,
+        mem_indexes: List[int],
+        kv_start_index: int,
+        kv_end_index: int,
+        group: NIXLChunckedTransTaskGroup,
+    ):
         # 确定传输设备
         if req_obj.nixl_trans_device_id == -1:
             # only self.is_master_in_dp will be used.
             req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
-        
-        trans_task = NIXLChunckedTransTask(request_id=req_obj.req_id,
-                                start_kv_index=kv_start_index,
-                                end_kv_index=kv_end_index,
-                                pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
-                                prefill_dp_index=None,
-                                decode_dp_index=self.dp_rank_in_node,
-                                src_device_id=None,
-                                dst_device_id=req_obj.nixl_trans_device_id,
-                                mem_indexes=mem_indexes,
-                                prefill_agent_name=None,
-                                prefill_agent_metadata=None,
-                                prefill_num_pages=None,
-                                prefill_page_reg_desc=None,
-                                decode_agent_name=None,
-                                decode_agent_metadata=None,
-                                decode_num_pages=None,
-                                decode_page_reg_desc=None,
-                                )
+
+        trans_task = NIXLChunckedTransTask(
+            request_id=req_obj.req_id,
+            start_kv_index=kv_start_index,
+            end_kv_index=kv_end_index,
+            pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
+            prefill_dp_index=None,
+            decode_dp_index=self.dp_rank_in_node,
+            src_device_id=None,
+            dst_device_id=req_obj.nixl_trans_device_id,
+            mem_indexes=mem_indexes,
+            prefill_agent_name=None,
+            prefill_agent_metadata=None,
+            prefill_num_pages=None,
+            prefill_page_reg_desc=None,
+            decode_agent_name=None,
+            decode_agent_metadata=None,
+            decode_num_pages=None,
+            decode_page_reg_desc=None,
+        )
         group.task_list.append(trans_task)
         req_obj.nixl_pd_task_num += 1
         return

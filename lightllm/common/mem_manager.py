@@ -105,54 +105,61 @@ class MemoryManager:
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         if isinstance(self, MemoryManager) and type(self) != MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
-        
+
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
         self.kv_move_buffer = torch.empty(
             (page_num, page_size, self.layer_num, 2 * num_kv_head, self.head_dim), dtype=self.dtype, device="cuda"
         )
         return self.kv_move_buffer
-    
-    def write_mem_to_page_kv_move_buffer(self,
-                                        mem_indexes: List[int], 
-                                        page_index: int,
-                                        dp_index: int,
-                                        mem_managers: List["MemoryManager"],
-                                        dp_world_size:int):
+
+    def write_mem_to_page_kv_move_buffer(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+    ):
         cur_page = self.kv_move_buffer[page_index]
         repeat_count = dp_world_size * self.kv_buffer.shape[2] // self.kv_move_buffer.shape[3]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for tp_index in range(dp_world_size):
             if tp_index % repeat_count == 0:
-                page_io(torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
-                              page_tensor=cur_page,
-                              kv_buffer=dp_mems[tp_index].kv_buffer,
-                              tp_index=tp_index,
-                              tp_world_size=dp_world_size,
-                              mode="write")
+                page_io(
+                    torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
+                    page_tensor=cur_page,
+                    kv_buffer=dp_mems[tp_index].kv_buffer,
+                    tp_index=tp_index,
+                    tp_world_size=dp_world_size,
+                    mode="write",
+                )
         # keep for debug
         # logger.info(f"src token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
         # logger.info(f"src page token tensor {cur_page[0, :, 0, 0]}")
         return
-    
-    def read_page_kv_move_buffer_to_mem(self,
-                                        mem_indexes: List[int], 
-                                        page_index: int,
-                                        dp_index: int,
-                                        mem_managers: List["MemoryManager"],
-                                        dp_world_size:int):
+
+    def read_page_kv_move_buffer_to_mem(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+    ):
         cur_page = self.kv_move_buffer[page_index]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for tp_index in range(dp_world_size):
-            page_io(torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
-                            page_tensor=cur_page,
-                            kv_buffer=dp_mems[tp_index].kv_buffer,
-                            tp_index=tp_index,
-                            tp_world_size=dp_world_size,
-                            mode="read")
+            page_io(
+                torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
+                page_tensor=cur_page,
+                kv_buffer=dp_mems[tp_index].kv_buffer,
+                tp_index=tp_index,
+                tp_world_size=dp_world_size,
+                mode="read",
+            )
         # keep for debug
         # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
         # logger.info(f"dst page token tensor {cur_page[0, :, 0, 0]}")
-
 
     def send_to_decode_node(
         self,

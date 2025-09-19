@@ -42,13 +42,15 @@ class Deepseek2MemoryManager(MemoryManager):
             (page_num, page_size, self.layer_num, self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
         )
         return self.kv_move_buffer
-    
-    def write_mem_to_page_kv_move_buffer(self,
-                                        mem_indexes: List[int], 
-                                        page_index: int,
-                                        dp_index: int,
-                                        mem_managers: List["MemoryManager"],
-                                        dp_world_size:int):
+
+    def write_mem_to_page_kv_move_buffer(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+    ):
         cur_page = self.kv_move_buffer[page_index]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         mla_page_io(
@@ -58,13 +60,15 @@ class Deepseek2MemoryManager(MemoryManager):
             mode="write",
         )
         return
-    
-    def read_page_kv_move_buffer_to_mem(self,
-                                        mem_indexes: List[int], 
-                                        page_index: int,
-                                        dp_index: int,
-                                        mem_managers: List["MemoryManager"],
-                                        dp_world_size:int):
+
+    def read_page_kv_move_buffer_to_mem(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+    ):
         cur_page = self.kv_move_buffer[page_index]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         mem_indexes = torch.tensor(mem_indexes, dtype=torch.int64, device="cuda")
@@ -75,7 +79,6 @@ class Deepseek2MemoryManager(MemoryManager):
                 kv_buffer=mem.kv_buffer,
                 mode="read",
             )
-
 
     def send_to_decode_node(
         self,
