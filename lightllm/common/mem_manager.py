@@ -123,10 +123,13 @@ class MemoryManager:
         cur_page = self.kv_move_buffer[page_index]
         repeat_count = dp_world_size * self.kv_buffer.shape[2] // self.kv_move_buffer.shape[3]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
+            non_blocking=True
+        )
         for tp_index in range(dp_world_size):
             if tp_index % repeat_count == 0:
                 page_io(
-                    torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
+                    mem_indexes_gpu,
                     page_tensor=cur_page,
                     kv_buffer=dp_mems[tp_index].kv_buffer,
                     tp_index=tp_index,
@@ -148,9 +151,12 @@ class MemoryManager:
     ):
         cur_page = self.kv_move_buffer[page_index]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
+            non_blocking=True
+        )
         for tp_index in range(dp_world_size):
             page_io(
-                torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
+                mem_indexes_gpu,
                 page_tensor=cur_page,
                 kv_buffer=dp_mems[tp_index].kv_buffer,
                 tp_index=tp_index,

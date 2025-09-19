@@ -53,8 +53,11 @@ class Deepseek2MemoryManager(MemoryManager):
     ):
         cur_page = self.kv_move_buffer[page_index]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
+            non_blocking=True
+        )
         mla_page_io(
-            mem_indexes=torch.tensor(mem_indexes, dtype=torch.int64, device="cuda"),
+            mem_indexes=mem_indexes_gpu,
             page_tensor=cur_page,
             kv_buffer=dp_mems[0].kv_buffer,
             mode="write",
@@ -71,10 +74,12 @@ class Deepseek2MemoryManager(MemoryManager):
     ):
         cur_page = self.kv_move_buffer[page_index]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
-        mem_indexes = torch.tensor(mem_indexes, dtype=torch.int64, device="cuda")
+        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
+            non_blocking=True
+        )
         for mem in dp_mems:
             mla_page_io(
-                mem_indexes=mem_indexes,
+                mem_indexes=mem_indexes_gpu,
                 page_tensor=cur_page,
                 kv_buffer=mem.kv_buffer,
                 mode="read",
