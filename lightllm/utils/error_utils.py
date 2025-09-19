@@ -23,6 +23,23 @@ class ServerBusyError(Exception):
         return f"{self.message} (Status code: {self.status_code})"
 
 
+class NixlPrefillNodeStopGenToken(Exception):
+    def __init__(self, group_request_id, message="Nixl prefill node stop gen token"):
+        """
+        Initialize the NixlPrefillNodeStopGenToken
+
+        Args:
+            message (str): Error message to display
+        """
+        super().__init__(message)
+        self.message = message
+        self.group_request_id = group_request_id
+
+    def __str__(self):
+        """String representation of the error"""
+        return f"group_request_id: {self.group_request_id}, {self.message}"
+
+
 def log_exception(func):
     def wrapper(*args, **kwargs):
         try:

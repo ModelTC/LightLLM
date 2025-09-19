@@ -33,6 +33,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -280,9 +281,16 @@ class HttpServerManager:
 
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
-            # 监控
-
+            # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+
+            prompt_tokens = len(prompt_ids)
+            # 监控
+            if group_request_id > 0:
+                self.metric_client.counter_inc("lightllm_request_count")
+                self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
+                self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
+            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
 
             if nixl_pd_upload_websocket is not None and not is_health_req and self.pd_mode.is_NP():
                 # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
@@ -302,13 +310,10 @@ class HttpServerManager:
                 decode_node_info: NIXLDecodeNodeInfo = nixl_pd_event.decode_node_info
                 sampling_params.nixl_params.set(pickle.dumps(decode_node_info))
 
-            prompt_tokens = len(prompt_ids)
-            # 监控
-            if group_request_id > 0:
-                self.metric_client.counter_inc("lightllm_request_count")
-                self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
-                self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
-            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
+                if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
+                    # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
+                    # 直接 raise NixlPrefillNodeStopGenToken
+                    raise NixlPrefillNodeStopGenToken(group_request_id=group_request_id)
 
             # 申请资源并存储
             alloced_req_indexes = []

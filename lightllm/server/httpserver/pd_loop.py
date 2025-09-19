@@ -17,6 +17,7 @@ from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
+from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
 
 logger = init_logger(__name__)
 
@@ -207,7 +208,8 @@ async def _pd_process_generate(
             is_health_check_req = sub_req_id < 0
             if not is_health_check_req:
                 await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
-
+    except NixlPrefillNodeStopGenToken as e:
+        logger.info(f"nixl prefill node stop gen token for group_request_id {e.group_request_id}")
     except BaseException as e:
         logger.error(str(e))
 
