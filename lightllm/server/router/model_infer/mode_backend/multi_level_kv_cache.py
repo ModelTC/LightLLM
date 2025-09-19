@@ -64,6 +64,7 @@ class MultiLevelKvCacheModule(object):
             # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
             # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
             true_finished_reqs = []
+            cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
             for req in finished_reqs:
                 # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
                 # 这个限制是为了兼容 diverse 模式下的请求处理。
@@ -87,11 +88,13 @@ class MultiLevelKvCacheModule(object):
                     # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
                     # if self.backend.is_master_in_dp:
                     #     mark_start("blueswhen offload_kv_to_cpu")
-                    torch.cuda.synchronize()
+                    if g_infer_context.overlap_stream is not None:
+                        cpu_stream.wait_stream(g_infer_context.overlap_stream)
+                    else:
+                        cpu_stream.wait_stream(torch.cuda.current_stream())
                     trans_task = self._start_kv_cache_offload_task(
-                        req=req, cpu_kv_cache_stream=g_infer_context.get_cpu_kv_cache_stream()
+                        req=req, cpu_kv_cache_stream=cpu_stream
                     )
-                    torch.cuda.synchronize()
                     # if self.backend.is_master_in_dp:
                     #     mark_end("blueswhen offload_kv_to_cpu")
 
@@ -100,6 +103,7 @@ class MultiLevelKvCacheModule(object):
                     else:
                         true_finished_reqs.append(req)
 
+            cpu_stream.synchronize()
             return true_finished_reqs
         else:
             return finished_reqs
@@ -217,7 +221,7 @@ class MultiLevelKvCacheModule(object):
 
             need_token_num = match_tokens - req.cur_kv_len
             # 多匹配了一定数量的token 才进行复制操作，不然操作效率不高
-            if need_token_num > 128:
+            if need_token_num >= 64:
                 if need_token_num <= idle_token_num:
                     if self.backend.radix_cache is not None:
                         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
