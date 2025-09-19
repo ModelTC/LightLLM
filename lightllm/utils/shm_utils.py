@@ -5,7 +5,7 @@ import fcntl
 
 logger = logging.getLogger(__name__)
 
-LIGHTLLM_SHM_LOCK_FILE = "/tmp/lightllm_shm_creation.lock"
+LIGHTLLM_SHM_LOCK_FILE = f"/tmp/lightllm_shm_creation_{os.getuid()}.lock"
 
 
 def acquire_lock():
