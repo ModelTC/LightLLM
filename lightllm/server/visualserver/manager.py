@@ -8,7 +8,7 @@ import inspect
 import setproctitle
 from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
-from lightllm.server.core.objs import ShmReqManager
+from lightllm.server.core.objs import ShmReqManager, StartArgs
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
@@ -26,20 +26,26 @@ logger = init_logger(__name__)
 class VisualManager:
     def __init__(
         self,
-        args,
-        next_module_port,
-        visual_port,
-        cache_port,
+        args: StartArgs,
         visual_model_rpc_ports,
     ):
         context = zmq.Context(2)
-        self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
-        self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
 
-        self.recv_from_httpserver = context.socket(zmq.PULL)
-        self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
-        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
-        self.cache_port = cache_port
+        if args.enable_multimodal_audio:
+            self.send_to_next_module = context.socket(zmq.PUSH)
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+        else:
+            if args.enable_cpu_cache:
+                self.send_to_next_module = context.socket(zmq.PUSH)
+                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+            else:
+                self.send_to_next_module = context.socket(zmq.PUSH)
+                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+
+        self.zmq_recv_socket = context.socket(zmq.PULL)
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+        self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+        self.cache_port = args.cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
@@ -158,7 +164,7 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+                    recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
                         self.waiting_reqs.append(recv_req)
                     else:
@@ -177,13 +183,13 @@ class VisualManager:
         return
 
 
-def start_visual_process(args, next_module_port, visual_port, cache_port, model_rpc_ports, pipe_writer):
+def start_visual_process(args, model_rpc_ports, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
     start_parent_check_thread()
     try:
-        visualserver = VisualManager(args, next_module_port, visual_port, cache_port, model_rpc_ports)
+        visualserver = VisualManager(args=args, visual_model_rpc_ports=model_rpc_ports)
         asyncio.run(visualserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))

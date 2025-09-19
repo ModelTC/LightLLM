@@ -15,7 +15,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
 from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType
-from lightllm.server.core.objs import SamplingParams
+from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
 from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
@@ -33,11 +33,10 @@ logger = init_logger(__name__)
 class HttpServerManagerForPDMaster:
     def __init__(
         self,
-        args,
-        metric_port,
+        args: StartArgs,
     ):
         self.args = args
-        self.metric_client = MetricClient(metric_port)
+        self.metric_client = MetricClient(args.metric_port)
         self.id_gen = ReqIDGenerator()
 
         self.pd_manager = PDManager(args)
