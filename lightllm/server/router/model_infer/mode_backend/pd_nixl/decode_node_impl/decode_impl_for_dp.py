@@ -3,7 +3,7 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context, Infe
 from lightllm.utils.log_utils import init_logger
 from typing import List, Tuple
 from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
-from .decode_impl import NIXLDecodeNode
+from .decode_impl import NIXLDecodeNode, NIXLChunckedTransTaskGroup
 
 logger = init_logger(__name__)
 
@@ -32,13 +32,18 @@ class NIXLDPForDecodeNode(DPChunkedPrefillBackend):
         return NIXLDecodeNode._decode_node_gen_trans_tasks(self, req_obj=req_obj)
 
     def _create_nixl_trans_task(
-        self, req_obj: InferReq, mem_indexes: List[int], kv_start_index: int, kv_end_index: int, is_first_task: bool
+        self,
+        req_obj: InferReq,
+        mem_indexes: List[int],
+        kv_start_index: int,
+        kv_end_index: int,
+        group: NIXLChunckedTransTaskGroup,
     ):
-        return NIXLDecodeNode._decode_node_gen_trans_tasks(
+        return NIXLDecodeNode._create_nixl_trans_task(
             self,
             req_obj=req_obj,
             mem_indexes=mem_indexes,
             kv_start_index=kv_start_index,
             kv_end_index=kv_end_index,
-            is_first_task=is_first_task,
+            group=group,
         )

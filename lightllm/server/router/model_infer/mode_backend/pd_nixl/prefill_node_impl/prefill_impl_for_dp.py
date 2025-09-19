@@ -27,12 +27,11 @@ class NIXLDPChunkedForPrefillNode(DPChunkedPrefillBackend):
     def _prefill_chuncked_handle_func(
         self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
     ):
-        NIXLChunckedPrefillForPrefillNode._prefill_chuncked_handle_func(
+        return NIXLChunckedPrefillForPrefillNode._prefill_chuncked_handle_func(
             self, req_obj=req_obj, next_token_id=next_token_id, next_token_prob=next_token_prob, output_len=output_len
         )
-        return
 
     def _create_nixl_trans_task(self, req_obj: InferReq, kv_start_index: int, kv_end_index: int):
-        NIXLChunckedPrefillForPrefillNode._create_nixl_trans_task(
+        return NIXLChunckedPrefillForPrefillNode._create_nixl_trans_task(
             self, req_obj=req_obj, kv_start_index=kv_start_index, kv_end_index=kv_end_index
         )
