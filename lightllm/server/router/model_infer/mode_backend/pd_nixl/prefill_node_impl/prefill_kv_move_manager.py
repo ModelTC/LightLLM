@@ -28,23 +28,26 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
-    
+
     from .prefill_trans_process import start_prefill_trans_process
-    manager = PrefillKVMoveManager(args=args, 
-                                   info_queue=info_queue,
-                                   mem_queues=mem_queues,
-                                   start_trans_process_func=start_prefill_trans_process)
+
+    manager = PrefillKVMoveManager(
+        args=args, info_queue=info_queue, mem_queues=mem_queues, start_trans_process_func=start_prefill_trans_process
+    )
+    assert manager is not None
     event.set()
-    while True: time.sleep(100)
+    while True:
+        time.sleep(100)
     return
 
 
 class PrefillKVMoveManager(BaseKVMoveManager):
-    def __init__(self, args: StartArgs, info_queue: mp.Queue, mem_queues: List[mp.Queue], start_trans_process_func:Callable):
-        super().__init__(args=args,
-                         info_queue=info_queue,
-                         mem_queues=mem_queues,
-                         start_trans_process_func=start_trans_process_func)
+    def __init__(
+        self, args: StartArgs, info_queue: mp.Queue, mem_queues: List[mp.Queue], start_trans_process_func: Callable
+    ):
+        super().__init__(
+            args=args, info_queue=info_queue, mem_queues=mem_queues, start_trans_process_func=start_trans_process_func
+        )
         return
 
     # ==================================================================================
@@ -54,7 +57,7 @@ class PrefillKVMoveManager(BaseKVMoveManager):
     def task_dispatcher_loop(self):
         # 获取任务，并分发给相关卡的处理队列
         while True:
-            task:NIXLChunckedTransTask = self.info_queue.get()
+            task: NIXLChunckedTransTask = self.info_queue.get()
 
             device_id = task.src_device_id
             try:

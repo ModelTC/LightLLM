@@ -15,7 +15,13 @@ class KVTransProcess:
     task_out_queue: mp.Queue = None
     device_id: int = None
 
-    def init_all(self, device_id: int, manager: "BaseKVMoveManager", start_func: Callable, up_status_in_queue: Optional[mp.SimpleQueue]):
+    def init_all(
+        self,
+        device_id: int,
+        manager,
+        start_func: Callable,
+        up_status_in_queue: Optional[mp.SimpleQueue],
+    ):
         from .base_kv_move_manager import BaseKVMoveManager
 
         manager: BaseKVMoveManager = manager
@@ -34,14 +40,13 @@ class KVTransProcess:
             )
             assert self.task_out_queue.get(timeout=30) == "proc_start"
             assert self.task_out_queue.get(timeout=60) == "get_mem_managers_ok"
-            
+
             return True
 
         except Exception as e:
             logger.warning(f"Failed start kv trans process for device {device_id}: {e}")
             logger.exception(str(e))
             return False
-    
 
     def is_trans_process_health(self):
         try:

@@ -9,7 +9,12 @@ import pickle
 from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskGroup, NIXLChunckedTransTaskRet, NixlUpKVStatus
+from lightllm.server.pd_io_struct import (
+    NIXLChunckedTransTask,
+    NIXLChunckedTransTaskGroup,
+    NIXLChunckedTransTaskRet,
+    NixlUpKVStatus,
+)
 from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
@@ -28,7 +33,9 @@ def start_decode_trans_process(
     mem_queues: List[mp.Queue],
     up_status_in_queue: Optional[mp.SimpleQueue],
 ):
-    proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, mem_queues, up_status_in_queue))
+    proc = mp.Process(
+        target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, mem_queues, up_status_in_queue)
+    )
     proc.start()
     assert proc.is_alive()
     logger.info(f"prefill trans kv process for device: {device_id} started!")
@@ -53,13 +60,18 @@ def _init_env(
         mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
         task_out_queue.put("get_mem_managers_ok")
 
-        manager = _DecodeTransModule(args=args, 
-                                     device_id=device_id,
-                                    task_in_queue=task_in_queue,
-                                    task_out_queue=task_out_queue,
-                                    mem_managers=mem_managers,
-                                    up_status_in_queue=up_status_in_queue)
-        while True: time.sleep(100)
+        manager = _DecodeTransModule(
+            args=args,
+            device_id=device_id,
+            task_in_queue=task_in_queue,
+            task_out_queue=task_out_queue,
+            mem_managers=mem_managers,
+            up_status_in_queue=up_status_in_queue,
+        )
+        assert manager is not None
+
+        while True:
+            time.sleep(100)
 
     except Exception as e:
         logger.exception(str(e))
@@ -75,7 +87,8 @@ class _DecodeTransModule:
         task_in_queue: mp.Queue,
         task_out_queue: mp.Queue,
         mem_managers: List[MemoryManager],
-        up_status_in_queue: Optional[mp.SimpleQueue]):
+        up_status_in_queue: Optional[mp.SimpleQueue],
+    ):
         self.args = args
         self.dp_world_size = self.args.tp // self.args.dp
         self.device_id = device_id
@@ -84,12 +97,13 @@ class _DecodeTransModule:
         self.mem_managers = mem_managers
         self.up_status_in_queue = up_status_in_queue
         cur_mem_manager: MemoryManager = self.mem_managers[device_id]
-        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(page_num=self.args.nixl_pd_kv_page_num,
-                                                                    page_size=self.args.nixl_pd_kv_page_size)
+        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
+            page_num=self.args.nixl_pd_kv_page_num, page_size=self.args.nixl_pd_kv_page_size
+        )
         self.copy_cuda_stream = torch.cuda.Stream()
-        self.transporter = NixlKVTransporter(node_id=self.args.pd_node_id,
-                                             tp_idx=device_id,
-                                             kv_move_buffer=kv_move_buffer)
+        self.transporter = NixlKVTransporter(
+            node_id=self.args.pd_node_id, tp_idx=device_id, kv_move_buffer=kv_move_buffer
+        )
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
         self.read_peer_kv_queue = queue.Queue()
@@ -102,11 +116,19 @@ class _DecodeTransModule:
         self.page_index_queue = queue.Queue()
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
- 
-        for func in [self.recv_task_loop, self.accept_peer_task_loop, self.read_peer_kv_loop, self.update_task_status_loop, self.read_page_to_mems_loop, self.success_loop, self.fail_loop]:
+
+        for func in [
+            self.recv_task_loop,
+            self.accept_peer_task_loop,
+            self.read_peer_kv_loop,
+            self.update_task_status_loop,
+            self.read_page_to_mems_loop,
+            self.success_loop,
+            self.fail_loop,
+        ]:
             threading.Thread(target=func, daemon=True).start()
         return
-    
+
     @log_exception
     def recv_task_loop(self):
         while True:
@@ -119,7 +141,7 @@ class _DecodeTransModule:
                     else:
                         task.start_trans_time = time.time()
                         self.success_queue.put((None, task))
-            
+
             # up status
             task = trans_task_group.task_list[0]
 
@@ -137,7 +159,7 @@ class _DecodeTransModule:
             up_status = NixlUpKVStatus(
                 group_request_id=task.request_id,
                 pd_master_node_id=task.pd_master_node_id,
-                nixl_params=pickle.dumps(decode_node_info)
+                nixl_params=pickle.dumps(decode_node_info),
             )
 
             self.up_status_in_queue.put(up_status)
@@ -151,7 +173,7 @@ class _DecodeTransModule:
             if len(self.waiting_dict) == 0:
                 time.sleep(0.003)
                 continue
-    
+
             # notify update
             try:
                 notifies_dict = self.transporter.get_new_notifs()
@@ -167,17 +189,20 @@ class _DecodeTransModule:
                             notify_obj = pickle.loads(notify)
                         except:
                             notify_obj = None
-                    
+
                         if isinstance(notify_obj, NIXLChunckedTransTask):
                             remote_trans_task = notify_obj
                             key = remote_trans_task.get_key()
                             logger.info(f"recv peer trans task {remote_trans_task.to_str()}")
                             with self.waiting_dict_lock:
-                                local_trans_task : NIXLChunckedTransTask = self.waiting_dict.pop(key, None)
-                            
+                                local_trans_task: NIXLChunckedTransTask = self.waiting_dict.pop(key, None)
+
                             if local_trans_task is None:
                                 remote_trans_task.error_info = "peer not find"
-                                self.transporter.send_notify_to_prefill_node(prefill_agent_name=remote_agent_name, notify=pickle.dumps(remote_trans_task.createRetObj()))
+                                self.transporter.send_notify_to_prefill_node(
+                                    prefill_agent_name=remote_agent_name,
+                                    notify=pickle.dumps(remote_trans_task.createRetObj()),
+                                )
                             else:
                                 local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
 
@@ -189,17 +214,16 @@ class _DecodeTransModule:
                                 self.read_peer_kv_queue.put(local_trans_task)
 
             self._check_tasks_time_out()
-            
 
     def _check_tasks_time_out(self):
         # check time_out update
         with self.waiting_dict_lock:
             keys = list(self.waiting_dict.keys())
-        
+
         for key in keys:
             with self.waiting_dict_lock:
                 trans_task = self.waiting_dict.pop(key, None)
-            
+
             if trans_task is not None and trans_task.time_out():
                 trans_task.error_info = "time out in accept_peer_task_loop"
                 self.failed_queue.put(trans_task)
@@ -209,7 +233,6 @@ class _DecodeTransModule:
                 with self.waiting_dict_lock:
                     self.waiting_dict[trans_task.get_key()] = trans_task
         return
-    
 
     @log_exception
     def read_peer_kv_loop(self):
@@ -224,7 +247,7 @@ class _DecodeTransModule:
                 local_trans_task.error_info = "time out in read_peer_kv_loop"
                 self.failed_queue.put(local_trans_task)
                 continue
-            
+
             try:
                 xfer_handle = self.transporter.read_blocks_paged(trans_task=local_trans_task)
                 local_trans_task.xfer_handle = xfer_handle
@@ -239,7 +262,6 @@ class _DecodeTransModule:
                 self.failed_queue.put(local_trans_task)
                 continue
 
-
     @log_exception
     def update_task_status_loop(
         self,
@@ -253,7 +275,7 @@ class _DecodeTransModule:
             with self.update_status_task_list_lock:
                 trans_taskes = self.update_status_task_list.copy()
                 self.update_status_task_list.clear()
-            
+
             for trans_task in trans_taskes:
                 ret = self.transporter.check_task_status(trans_task=trans_task)
                 if ret == "DONE":
@@ -263,7 +285,7 @@ class _DecodeTransModule:
                     trans_task.error_info = "xfer error"
                     self.failed_queue.put(trans_task)
                     continue
-                
+
                 if trans_task.time_out():
                     trans_task.error_info = "time out"
                     self.failed_queue.put(trans_task)
@@ -272,7 +294,6 @@ class _DecodeTransModule:
                 with self.update_status_task_list_lock:
                     self.update_status_task_list.append(trans_task)
 
-    
     @log_exception
     def read_page_to_mems_loop(self):
         torch.cuda.set_device(self.device_id)
@@ -286,14 +307,14 @@ class _DecodeTransModule:
                     page_index=trans_task.nixl_dst_page_index,
                     dp_index=trans_task.decode_dp_index,
                     mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size
+                    dp_world_size=self.dp_world_size,
                 )
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
             self.success_queue.put((sync_event, trans_task))
         return
-    
+
     @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
@@ -304,17 +325,17 @@ class _DecodeTransModule:
             # 兼容传输kv 数量为0的时候， sync_event 为 None的情况。
             if sync_event is not None:
                 sync_event.synchronize()
-            
+
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
-            
+
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
-            
+
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
             logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s")
-    
+
     @log_exception
     def fail_loop(self):
         torch.cuda.set_device(self.device_id)

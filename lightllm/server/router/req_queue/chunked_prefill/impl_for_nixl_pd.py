@@ -23,20 +23,21 @@ class NIXLPDQueue(BaseQueue):
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
-        estimated_peak_token_num += (req.input_len + req.sample_params.max_new_tokens)
-        ok_token_num = (estimated_peak_token_num < self.max_total_tokens)
+        estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
+        ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
 
         if ok_token_num and ok_req_num:
             self.router.shared_token_load.set_estimated_peak_token_count(estimated_peak_token_num, self.dp_index)
-            self.router.shared_token_load.set_dynamic_max_load(estimated_peak_token_num / self.max_total_tokens,
+            self.router.shared_token_load.set_dynamic_max_load(
+                estimated_peak_token_num / self.max_total_tokens,
                 self.dp_index,
             )
             return True, estimated_peak_token_num, batch_req_num
         else:
             return False, None, None
-            
+
     def _caclu_batch_estimated_peak_token_num(self, batch: Batch):
         is_busy = self.is_busy()
         estimated_peak_token_num = 0
@@ -47,7 +48,7 @@ class NIXLPDQueue(BaseQueue):
                     if req.is_infer_decode():
                         decoding_req_list.append(req.get_tuple_tokens(is_busy, self.router_max_new_token_len))
                     else:
-                        estimated_peak_token_num += (req.input_len + req.sample_params.max_new_tokens)
+                        estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
 
         if decoding_req_list:
             decoding_req_list.sort(key=lambda x: -x[1])
@@ -56,7 +57,7 @@ class NIXLPDQueue(BaseQueue):
             cum_run_len_array = np.cumsum(has_run_len_array)
             size_array = np.arange(1, len(decoding_req_list) + 1, 1)
             estimated_peak_token_num += (left_out_len_array * size_array + cum_run_len_array).max()
-        
+
         return estimated_peak_token_num
 
     # @calculate_time(show=True, min_cost_ms=10)
@@ -87,9 +88,7 @@ class NIXLPDQueue(BaseQueue):
                 abort_req_list.append(req)
                 continue
             ok_insert, estimated_peak_token_num, batch_req_num = self._can_add_new_req(
-                req=req, 
-                estimated_peak_token_num=estimated_peak_token_num, 
-                batch_req_num=batch_req_num
+                req=req, estimated_peak_token_num=estimated_peak_token_num, batch_req_num=batch_req_num
             )
             if ok_insert:
                 can_run_list.append(req)

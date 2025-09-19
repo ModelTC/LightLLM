@@ -13,6 +13,7 @@ from lightllm.utils.error_utils import log_exception
 
 logger = init_logger(__name__)
 
+
 def start_decode_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
     event = mp.Event()
     proc = mp.Process(target=_init_env, args=(args, info_queue, mem_queues, event))
@@ -22,35 +23,50 @@ def start_decode_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues:
     logger.info("decode kv move manager process started")
     return
 
+
 def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.Event):
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
-    
+
     from .up_status import start_up_kv_status_process
 
     up_status_in_queue = mp.SimpleQueue()
     start_up_kv_status_process(args, up_status_in_queue)
 
     from .decode_trans_process import start_decode_trans_process
-    manager = DecodeKVMoveManager(args=args, 
-                                   info_queue=info_queue,
-                                   mem_queues=mem_queues,
-                                   start_trans_process_func=start_decode_trans_process,
-                                   up_status_in_queue=up_status_in_queue)
+
+    manager = DecodeKVMoveManager(
+        args=args,
+        info_queue=info_queue,
+        mem_queues=mem_queues,
+        start_trans_process_func=start_decode_trans_process,
+        up_status_in_queue=up_status_in_queue,
+    )
+    assert manager is not None
     event.set()
-    while True: time.sleep(100)
+    while True:
+        time.sleep(100)
     return
 
 
 class DecodeKVMoveManager(BaseKVMoveManager):
-    def __init__(self, args: StartArgs, info_queue: mp.Queue, mem_queues: List[mp.Queue], start_trans_process_func: Callable, up_status_in_queue: mp.SimpleQueue):
-        super().__init__(args=args,
-                         info_queue=info_queue,
-                         mem_queues=mem_queues,
-                         start_trans_process_func=start_trans_process_func,
-                         up_status_in_queue=up_status_in_queue)
+    def __init__(
+        self,
+        args: StartArgs,
+        info_queue: mp.Queue,
+        mem_queues: List[mp.Queue],
+        start_trans_process_func: Callable,
+        up_status_in_queue: mp.SimpleQueue,
+    ):
+        super().__init__(
+            args=args,
+            info_queue=info_queue,
+            mem_queues=mem_queues,
+            start_trans_process_func=start_trans_process_func,
+            up_status_in_queue=up_status_in_queue,
+        )
         return
 
     # ==================================================================================
@@ -60,12 +76,14 @@ class DecodeKVMoveManager(BaseKVMoveManager):
     def task_dispatcher_loop(self):
         # 获取任务，并分发给相关卡的处理队列
         while True:
-            task_group:NIXLChunckedTransTaskGroup = self.info_queue.get()
+            task_group: NIXLChunckedTransTaskGroup = self.info_queue.get()
             device_id = task_group.task_list[0].dst_device_id
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task_group)
-                logger.info(f"kv move manager dispatch task group {task_group.task_list[0].to_str()} to device {device_id}")
+                logger.info(
+                    f"kv move manager dispatch task group {task_group.task_list[0].to_str()} to device {device_id}"
+                )
 
             except BaseException as e:
                 logger.exception(str(e))
