@@ -199,10 +199,15 @@ class _DecodeTransModule:
 
                             if local_trans_task is None:
                                 remote_trans_task.error_info = "peer not find"
-                                self.transporter.send_notify_to_prefill_node(
-                                    prefill_agent_name=remote_agent_name,
-                                    notify=pickle.dumps(remote_trans_task.createRetObj()),
-                                )
+                                try:
+                                    self.transporter.send_notify_to_prefill_node(
+                                        prefill_agent_name=remote_agent_name,
+                                        notify=pickle.dumps(remote_trans_task.createRetObj()),
+                                    )
+                                except BaseException as e:
+                                    logger.error(f"send notify to prefill node failed: {str(e)}")
+                                    logger.exception(str(e))
+                                    self.transporter.remove_remote_agent(peer_name=remote_agent_name)
                             else:
                                 local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
 
@@ -257,7 +262,7 @@ class _DecodeTransModule:
             except BaseException as e:
                 logger.error(f"read_blocks_paged node failed: {local_trans_task.to_str()}")
                 logger.exception(str(e))
-                self.transporter.remove_remote_agent(peer_name=local_trans_task.decode_agent_name)
+                self.transporter.remove_remote_agent(peer_name=local_trans_task.prefill_agent_name)
                 local_trans_task.error_info = f"read_blocks_paged failed: {str(e)}"
                 self.failed_queue.put(local_trans_task)
                 continue
