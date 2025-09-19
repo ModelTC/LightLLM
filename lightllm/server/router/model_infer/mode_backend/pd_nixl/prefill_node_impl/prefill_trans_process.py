@@ -151,7 +151,17 @@ class _PrefillTransModule:
             sync_event: torch.cuda.Event = sync_event
 
             sync_event.synchronize()
-            self.transporter.send_readtask_to_decode_node(trans_task=trans_task)
+
+            try:
+                self.transporter.send_readtask_to_decode_node(trans_task=trans_task)
+            except BaseException as e:
+                logger.error(f"send readtask to decode node failed: {trans_task.to_str()}")
+                logger.exception(str(e))
+                self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
+                trans_task.error_info = f"send readtask to decode node failed: {str(e)}"
+                self.failed_queue.put(trans_task)
+                continue
+
             logger.info(f"send readtask to decode: {trans_task.to_str()}")
 
             with self.waiting_dict_lock:
@@ -168,7 +178,13 @@ class _PrefillTransModule:
                 continue
             
             # notify update
-            notifies_dict = self.transporter.get_new_notifs()
+            try:
+                notifies_dict = self.transporter.get_new_notifs()
+            except BaseException as e:
+                logger.error(f"get new notifies failed: {str(e)}")
+                logger.exception(str(e))
+                notifies_dict = {}
+
             if notifies_dict:
                 for _, _notify_list in notifies_dict.items():
                     for notify in _notify_list:

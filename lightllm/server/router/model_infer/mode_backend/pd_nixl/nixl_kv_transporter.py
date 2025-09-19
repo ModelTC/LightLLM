@@ -84,12 +84,17 @@ class NixlKVTransporter:
 
     def remove_remote_agent(self, peer_name: str):
         if peer_name in self.remote_agents:
-            self.nixl_agent.remove_remote_agent(peer_name)
-            remote_agent: NixlAgentMetadata = self.remote_agents.pop(peer_name, None)
-            if remote_agent.page_xfer_handles is not None:
-                self.nixl_agent.release_dlist_handle(remote_agent.page_xfer_handles)
+            try:
+                remote_agent: NixlAgentMetadata = self.remote_agents.pop(peer_name, None)
+                assert remote_agent.agent_name == peer_name
+                self.nixl_agent.remove_remote_agent(remote_agent.agent_name)
+                if remote_agent.page_xfer_handles is not None:
+                    self.nixl_agent.release_dlist_handle(remote_agent.page_xfer_handles)
+            except BaseException as e:
+                logger.error(f"remove remote agent {peer_name} failed")
+                logger.exception(str(e))
         else:
-            logger.warning(f"peer name {peer_name} agent didnot exist")
+            logger.warning(f"try to remove remote agent, but peer name {peer_name} agent did not exist")
 
     def send_readtask_to_decode_node(self, trans_task: NIXLChunckedTransTask):
         """
@@ -101,30 +106,28 @@ class NixlKVTransporter:
             _remote_agent = trans_task.create_decode_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-        if decode_agent_name in self.remote_agents:
-            # 将页面读取任务发送给 decode 节点
-            remote_agent: NixlAgentMetadata = self.remote_agents[decode_agent_name]
-            assert trans_task.nixl_src_page_index is not None
-            new_trans_task: NIXLChunckedTransTask = copy.copy(trans_task)
 
-            new_trans_task.decode_agent_name = None
-            new_trans_task.decode_agent_metadata = None
-            new_trans_task.decode_num_pages = None
-            new_trans_task.decode_page_reg_desc = None
+        # 将页面读取任务发送给 decode 节点
+        remote_agent: NixlAgentMetadata = self.remote_agents[decode_agent_name]
+        assert trans_task.nixl_src_page_index is not None
+        new_trans_task: NIXLChunckedTransTask = copy.copy(trans_task)
 
-            new_trans_task.prefill_agent_name = self.agent_name
-            new_trans_task.prefill_agent_metadata = self.agent_metadata
-            new_trans_task.prefill_num_pages = self.num_pages
-            new_trans_task.prefill_page_reg_desc = self.local_page_mem_desc
+        new_trans_task.decode_agent_name = None
+        new_trans_task.decode_agent_metadata = None
+        new_trans_task.decode_num_pages = None
+        new_trans_task.decode_page_reg_desc = None
 
-            # 不需要传输细节的 mem_indexes 信息
-            new_trans_task.mem_indexes = None
-            self.nixl_agent.send_notif(
-                remote_agent.agent_name,
-                pickle.dumps(new_trans_task),
-            )
-        else:
-            logger.error(f"decode_agent_name {decode_agent_name} not exist")
+        new_trans_task.prefill_agent_name = self.agent_name
+        new_trans_task.prefill_agent_metadata = self.agent_metadata
+        new_trans_task.prefill_num_pages = self.num_pages
+        new_trans_task.prefill_page_reg_desc = self.local_page_mem_desc
+
+        # 不需要传输细节的 mem_indexes 信息
+        new_trans_task.mem_indexes = None
+        self.nixl_agent.send_notif(
+            remote_agent.agent_name,
+            pickle.dumps(new_trans_task),
+        )
         return
     
     def send_notify_to_prefill_node(self, prefill_agent_name: str, notify: bytes):
@@ -144,29 +147,29 @@ class NixlKVTransporter:
             _remote_agent = trans_task.create_prefill_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-        if prefill_agent_name in self.remote_agents:
-            assert trans_task.nixl_src_page_index is not None and trans_task.nixl_dst_page_index is not None
-            remote_agent: NixlAgentMetadata = self.remote_agents[prefill_agent_name]
-            src_handle = remote_agent.page_xfer_handles
-            dst_handle = self.page_local_xfer_handles
-            notify_obj = NIXLChunckedTransTaskRet(
-                request_id=trans_task.request_id,
-                start_kv_index=trans_task.start_kv_index,
-                end_kv_index=trans_task.end_kv_index,
-                has_error=False,
-                error_info=None,
-            )
-            handle = self.nixl_agent.make_prepped_xfer(
-                "READ",
-                dst_handle,
-                [trans_task.nixl_dst_page_index],
-                src_handle,
-                [trans_task.nixl_src_page_index],
-                pickle.dumps(notify_obj),
-            )
-            self.nixl_agent.transfer(handle)
-        else:
-            logger.error(f"prefill_agent_name {prefill_agent_name} not exist")
+        assert trans_task.nixl_src_page_index is not None and trans_task.nixl_dst_page_index is not None
+        remote_agent: NixlAgentMetadata = self.remote_agents[prefill_agent_name]
+        src_handle = remote_agent.page_xfer_handles
+        dst_handle = self.page_local_xfer_handles
+        notify_obj = NIXLChunckedTransTaskRet(
+            request_id=trans_task.request_id,
+            start_kv_index=trans_task.start_kv_index,
+            end_kv_index=trans_task.end_kv_index,
+            has_error=False,
+            error_info=None,
+        )
+        handle = self.nixl_agent.make_prepped_xfer(
+            "READ",
+            dst_handle,
+            [trans_task.nixl_dst_page_index],
+            src_handle,
+            [trans_task.nixl_src_page_index],
+            pickle.dumps(notify_obj),
+        )
+        if not handle:
+            raise RuntimeError(f"make_prepped_xfer failed for task: {trans_task.to_str()}")
+                                                                                       
+        self.nixl_agent.transfer(handle)
         
         return handle
 
@@ -185,8 +188,7 @@ class NixlKVTransporter:
     def shutdown(self):
         self.nixl_agent.deregister_memory(self.page_reg_desc)
         self.nixl_agent.release_dlist_handle(self.page_local_xfer_handles)
-        for agent_name, remote_agent in self.remote_agents.items():
-            self.nixl_agent.remove_remote_agent(remote_agent.agent_name)
-            if remote_agent.page_xfer_handles is not None:
-                self.nixl_agent.release_dlist_handle(remote_agent.page_xfer_handles)
+        agent_names = list(self.remote_agents.keys())
+        for agent_name in agent_names:
+            self.remove_remote_agent(agent_name)
         return

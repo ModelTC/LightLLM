@@ -153,7 +153,12 @@ class _DecodeTransModule:
                 continue
     
             # notify update
-            notifies_dict = self.transporter.get_new_notifs()
+            try:
+                notifies_dict = self.transporter.get_new_notifs()
+            except BaseException as e:
+                logger.error(f"get new notifies failed: {str(e)}")
+                logger.exception(str(e))
+                notifies_dict = {}
 
             if notifies_dict:
                 for remote_agent_name, _notify_list in notifies_dict.items():
@@ -220,12 +225,19 @@ class _DecodeTransModule:
                 self.failed_queue.put(local_trans_task)
                 continue
             
-
-            xfer_handle = self.transporter.read_blocks_paged(trans_task=local_trans_task)
-            local_trans_task.xfer_handle = xfer_handle
-            local_trans_task.start_trans_time = time.time()
-            with self.update_status_task_list_lock:
-                self.update_status_task_list.append(local_trans_task)
+            try:
+                xfer_handle = self.transporter.read_blocks_paged(trans_task=local_trans_task)
+                local_trans_task.xfer_handle = xfer_handle
+                local_trans_task.start_trans_time = time.time()
+                with self.update_status_task_list_lock:
+                    self.update_status_task_list.append(local_trans_task)
+            except BaseException as e:
+                logger.error(f"read_blocks_paged node failed: {local_trans_task.to_str()}")
+                logger.exception(str(e))
+                self.transporter.remove_remote_agent(peer_name=local_trans_task.decode_agent_name)
+                local_trans_task.error_info = f"read_blocks_paged failed: {str(e)}"
+                self.failed_queue.put(local_trans_task)
+                continue
 
 
     @log_exception
