@@ -144,5 +144,5 @@ class InMemoryCache:
         for id_ in ids:
             self._records[id_].embed = True
 
-    def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
+    def get_items_embed(self, ids: list[int], embeding_only: bool = False) -> list[Optional[bool]]:
         return [self._records.get(id_).embed if id_ in self._records else False for id_ in ids]

@@ -118,7 +118,7 @@ class EmbedRefCountRedis:
         self,
         redis_url: str = "redis://localhost:6379/0",
         capacity: int = 50000,
-        evict_fraction: float = 0.2,
+        evict_fraction: float = 0.1,
         key_prefix: str = "md5:",
         image_embed_dir: str = None,
         path_ext: str = "-embed",
@@ -128,7 +128,7 @@ class EmbedRefCountRedis:
         - capacity: max count of md5 entries allowed in Redis
         - evict_fraction: fraction to evict when inserting a NEW md5 and at capacity
         - image_embed_dir: base directory for image embed files (e.g., "/afs/embeds")
-        - path_ext: file extension for embed files (default: ".embed")
+        - path_ext: file extension for embed files (default: "-embed")
         """
         if not (0.0 <= evict_fraction <= 1.0):
             raise ValueError("evict_fraction must be 0..1")
@@ -152,7 +152,7 @@ class EmbedRefCountRedis:
         self._evict_and_insert_script = self.r.register_script(self._EVICT_AND_INSERT_LUA)
 
     def insert(self, md5: str) -> Tuple[bool, List[str]]:
-        """Insert a new md5 with default ref_count=0. May trigger LRU eviction."""
+        """Insert a new md5 with default ref_count=1. May trigger LRU eviction."""
         # 等待任何正在进行的逐出操作
         self._wait_if_eviction()
 
@@ -176,16 +176,20 @@ class EmbedRefCountRedis:
                     success = bool(evict_res[0])
                     victims = evict_res[1:] if len(evict_res) > 1 else []
 
-                    # 删除被逐出md5对应的AFS文件
-                    if victims and self.image_embed_dir:
-                        self._delete_afs_files(victims)
-
-                    return success, victims
+                    if success:
+                        # 删除被逐出md5对应的AFS文件
+                        if victims and self.image_embed_dir:
+                            self._delete_afs_files(victims)
+                        return True, victims
+                    else:
+                        # 逐出失败，短暂退避后重试
+                        time.sleep(0.01)
+                        return self.insert(md5)
                 finally:
                     self._release_lock()
             else:
                 # 等待锁释放后重试
-                time.sleep(0.1)
+                time.sleep(0.01)
                 return self.insert(md5)
         except Exception as e:
             self._release_lock()
@@ -199,7 +203,6 @@ class EmbedRefCountRedis:
     def query_and_incre(self, md5: str) -> bool:
         """Query if md5 exists and increment ref_count if found."""
         self._wait_if_eviction()
-
         res = self._query_incre_script(
             keys=[self.zset_key, self.ref_prefix],
             args=[md5],
@@ -227,6 +230,11 @@ class EmbedRefCountRedis:
             "capacity": self.capacity,
             "evict_fraction": self.evict_fraction,
         }
+
+    def get_ref(self, md5: str) -> int | None:
+        self._wait_if_eviction()
+        val = self.r.get(self.ref_prefix + md5)
+        return int(val) if val is not None else None
 
     def _wait_if_eviction(self) -> None:
         max_wait = 30
@@ -284,8 +292,8 @@ end
 
 local size = redis.call('ZCARD', zset)
 if size < capacity then
-  -- Insert with ref_count=0
-  redis.call('SET', ref_key, 0)
+  -- Insert with ref_count=1
+  redis.call('SET', ref_key, 1)
   local now = redis.call('TIME')[1] * 1000
   redis.call('ZADD', zset, now, md5)
   return {0}  -- Success, no eviction
@@ -332,17 +340,16 @@ end
 
 --ref 递减到 0 时保留键，只更新计数与 LRU
 local rc = tonumber(val) - 1
-if rc < 0 then
-  rc = 0
-end
-
+if rc < 0 then rc = 0 end
 redis.call('SET', ref_key, rc)
 
--- 更新 LRU 时间戳（最近释放的条目更不容易被立即逐出）
-local now = redis.call('TIME')[1] * 1000
-redis.call('ZADD', zset, now, md5)
+if rc > 0 then
+  -- 只有仍被引用时才更新 LRU
+  local now = redis.call('TIME')[1] * 1000
+  redis.call('ZADD', zset, now, md5)
+end
 
-return {rc, 0}  -- 未删除
+return {rc, 0}
 """
 
     _EVICT_AND_INSERT_LUA = r"""
@@ -354,43 +361,64 @@ local new_md5 = ARGV[1]
 local capacity = tonumber(ARGV[2])
 local evict_fraction = tonumber(ARGV[3])
 
--- 计算需要逐出的数量
-local need = math.max(1, math.floor(capacity * evict_fraction + 0.5))
-local victims = {}
+local unpack = unpack or table.unpack
 
--- 获取所有键并按LRU排序
-local all_keys = redis.call('ZRANGE', zset, 0, -1, 'WITHSCORES')
-local i = 1
-
--- 查找引用计数为0的键作为逐出候选
-while #victims < need and i <= #all_keys do
-    local md5 = all_keys[i]
-    local ref_key = ref_prefix .. md5
-    local rc = redis.call('GET', ref_key)
-    
-    if rc and tonumber(rc) <= 0 then
-        table.insert(victims, md5)
-    end
-    i = i + 2  -- 跳过分数
+-- helper: now millis
+local function now_ms()
+  local t = redis.call('TIME')
+  return t[1] * 1000 + math.floor(t[2] / 1000)
 end
 
--- 如果找到足够的候选，执行逐出
-if #victims >= need then
-    -- 删除受害者
-    for _, v in ipairs(victims) do
-        local ref_key = ref_prefix .. v
-        redis.call('DEL', ref_key)
-        redis.call('ZREM', zset, v)
-    end
-    
-    -- 插入新的md5
-    local ref_key = ref_prefix .. new_md5
-    redis.call('SET', ref_key, 0)
-    local now = redis.call('TIME')[1] * 1000
-    redis.call('ZADD', zset, now, new_md5)
-    
-    return {1, unpack(victims)}  -- success + victims
+local new_ref_key = ref_prefix .. new_md5
+
+-- If already exists, treat as a hit: bump ref_count and refresh LRU
+local cur = redis.call('GET', new_ref_key)
+if cur then
+  local rc = tonumber(cur) + 1
+  redis.call('SET', new_ref_key, rc)
+  redis.call('ZADD', zset, now_ms(), new_md5)
+  return {1}  -- success, no victims
+end
+
+-- If not at capacity, just insert
+local size = redis.call('ZCARD', zset)
+if size < capacity then
+  redis.call('SET', new_ref_key, 1)
+  redis.call('ZADD', zset, now_ms(), new_md5)
+  return {1}  -- success, no victims
+end
+
+-- At capacity: try to evict up to max_try items with rc==0, but success if at least 1 is freed
+local max_try = math.max(1, math.floor(size * evict_fraction + 0.5))
+local victims = {}
+local freed = 0
+
+-- Scan from LRU (smallest score) to MRU
+local all_keys = redis.call('ZRANGE', zset, 0, -1, 'WITHSCORES')
+local i = 1
+while freed < 1 and i <= #all_keys and #victims < max_try do
+  local md5 = all_keys[i]
+  local ref_key = ref_prefix .. md5
+  local v = redis.call('GET', ref_key)
+  if v and tonumber(v) <= 0 then
+    table.insert(victims, md5)
+    freed = freed + 1
+  end
+  i = i + 2  -- skip score
+end
+
+if freed >= 1 then
+  -- delete victims
+  for _, v in ipairs(victims) do
+    redis.call('DEL', ref_prefix .. v)
+    redis.call('ZREM', zset, v)
+  end
+  -- insert new
+  redis.call('SET', new_ref_key, 1)
+  redis.call('ZADD', zset, now_ms(), new_md5)
+  return {1, unpack(victims)}
 else
-    return {0}  -- 逐出失败，没有足够的候选
+  -- no zero-ref items found
+  return {0}
 end
 """

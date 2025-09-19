@@ -32,10 +32,10 @@ class MemoryCacheWithRedis(InMemoryCache):
     # llm 负责release
     def release(self, ids: list[int]) -> None:
         with self.lock:
-            for id_ in ids:
-                self._records[id_].ref -= 1
-                if self.redis_cache.query(str(id_)):
-                    self.redis_cache.decr(str(id_))
+            for id in ids:
+                self._records[id].ref -= 1
+                if self.redis_cache.query(str(id)):
+                    self.redis_cache.decr(str(id))
                     # print(self.redis_cache.stats(), flush=True)
 
     # vit 负责set
@@ -44,27 +44,31 @@ class MemoryCacheWithRedis(InMemoryCache):
             for id in ids:
                 self.redis_cache.insert(str(id))
                 self._records[id].embed = True
-                self._records[id].ref -= 1  # vit端alloc之后ref+1 vit完成后ref-1
+                self._records[id].ref -= 1
+                self.redis_cache.decr(str(id))  # vit端alloc之后ref+1 vit完成后ref-1
 
-    def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
+    def get_items_embed(self, ids: list[int], embeding_only: bool = False) -> list[Optional[bool]]:
         ret = []
         for id in ids:
-            exist = self.redis_cache.query(str(id))
+            if embeding_only:
+                exist = self.redis_cache.query(str(id))
+            else:
+                exist = self.redis_cache.query_and_incre(str(id))
             ret.append(exist)
             if exist:
                 self._records[id].embed = True
         return ret
 
-    def get_items_embed_and_incre(self, ids: list[int]) -> list[Optional[bool]]:
-        ret = []
-        for id in ids:
-            # if self.redis_cache.query(str(id)):
-            #     ret.append(True)
-            #     continue
-            # 避免重复的引用计数增加
-            if self._records[id].embed:
-                ret.append(True)
-                continue
-            self._records[id].embed = self.redis_cache.query_and_incre(str(id))
-            ret.append(self._records[id].embed)
-        return ret
+    # def get_items_embed_and_incre(self, ids: list[int]) -> list[Optional[bool]]:
+    #     ret = []
+    #     for id in ids:
+    #         # if self.redis_cache.query(str(id)):
+    #         #     ret.append(True)
+    #         #     continue
+    #         # 避免重复的引用计数增加
+    #         if self._records[id].embed:
+    #             ret.append(True)
+    #             continue
+    #         self._records[id].embed = self.redis_cache.query_and_incre(str(id))
+    #         ret.append(self._records[id].embed)
+    #     return ret

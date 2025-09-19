@@ -49,9 +49,9 @@ class CacheServer(rpyc.Service):
         ids = obtain(ids)
         return self._impl.set_items_embed(ids)
 
-    def exposed_get_items_embed(self, ids: list[int]) -> list[bool]:
+    def exposed_get_items_embed(self, ids: list[int], embeding_only: bool = False) -> list[bool]:
         ids = obtain(ids)
-        return self._impl.get_items_embed(ids)
+        return self._impl.get_items_embed(ids, embeding_only)
 
 
 def get_cache_manager(args):

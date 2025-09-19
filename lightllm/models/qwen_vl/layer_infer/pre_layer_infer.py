@@ -1,3 +1,5 @@
+import rpyc
+import socket
 import torch
 import torch.distributed as dist
 
@@ -31,6 +33,8 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
     def __init__(self, network_config, mode):
         super().__init__(network_config, mode)
         self.args = get_env_start_args()
+        self.cache_client = rpyc.connect("localhost", self.args.cache_port, config={"allow_pickle": True})
+        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
@@ -57,6 +61,7 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
                     embed = read_afs(get_shm_name_embed(img["uuid"]), self.args.image_embed_dir)
                 else:
                     embed = read_shm(get_shm_name_embed(img["uuid"]))
+                self.cache_client.root.release([img["uuid"]])
                 img_weight.append(bytes2tensor(embed).cuda().reshape(img["token_num"], -1))
                 img_start_token_ids.append(img["token_id"])
                 img_token_lens.append(img["token_num"])

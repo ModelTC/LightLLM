@@ -122,12 +122,6 @@ class HttpServerManager:
     async def _alloc_resource(self, items, uuids, token_nums, datas):
 
         while True:
-            # 检查这个图片在redis总是否已经存在
-            # embed_exists = obtain(self.cache_client.root.get_items_embed(uuids))
-            # for exist in embed_exists:
-            #     if exist:
-            #         continue
-            # else:
             records = obtain(self.cache_client.root.alloc(uuids, token_nums))
 
             if records is None:
@@ -212,8 +206,8 @@ class HttpServerManager:
                         audio.uuid = None
                         audio.token_id = None
                         audio.token_num = None
-                if ids_to_release:
-                    self.cache_client.root.release(ids_to_release)
+                # if ids_to_release:
+                #     self.cache_client.root.release(ids_to_release)
         return
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
@@ -370,7 +364,7 @@ class HttpServerManager:
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
             # 进行回收。
-            if group_request_id not in self.req_id_to_out_inf and self.args.run_mode != "llm_only":
+            if group_request_id not in self.req_id_to_out_inf:
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
@@ -410,7 +404,7 @@ class HttpServerManager:
             visual_req_status = GroupReqObjs(group_request_id, multimodal_params, None, start_time)
 
             await self.transfer_to_next_module_or_node(
-                None, sampling_params, original_multimodal_params, visual_req_status
+                None, sampling_params, original_multimodal_params, visual_req_status, embeding_only=True
             )
 
         except Exception as e:
@@ -513,6 +507,7 @@ class HttpServerManager:
         sampling_params: SamplingParams,
         original_multimodal_params: MultimodalParams,
         group_req_objs: Optional[GroupReqObjs] = None,
+        embeding_only: Optional[bool] = False,
     ):
         # 多节点纯tp 运行模式下，master 节点需要将请求转发给slave节点.
         if self.is_multinode_tp_master:
@@ -522,12 +517,13 @@ class HttpServerManager:
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
 
-        await self.transfer_to_next_module(group_req_objs)
+        await self.transfer_to_next_module(group_req_objs, embeding_only)
         return
 
     async def transfer_to_next_module(
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
+        embeding_only: Optional[bool] = False,
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
@@ -535,6 +531,7 @@ class HttpServerManager:
                 await self.vit_manager.send_to_vit(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
+                    embeding_only=embeding_only,
                 )
 
             if not self.enable_multimodal or self.args.enable_remote_vit:
