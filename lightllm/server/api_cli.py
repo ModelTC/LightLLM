@@ -362,6 +362,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
 
     parser.add_argument(
+        "--max_graph_pool_size",
+        type=int,
+        default=16,
+        help="""Maximum cuda graph pool size for decoding stage.""",
+    )
+
+    parser.add_argument(
         "--graph_max_batch_size",
         type=int,
         default=256,
