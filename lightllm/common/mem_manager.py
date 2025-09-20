@@ -110,6 +110,7 @@ class MemoryManager:
         self.kv_move_buffer = torch.empty(
             (page_num, page_size, self.layer_num, 2 * num_kv_head, self.head_dim), dtype=self.dtype, device="cuda"
         )
+        self._buffer_mem_indexes_tensors = [torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num) ] 
         return self.kv_move_buffer
 
     def write_mem_to_page_kv_move_buffer(
@@ -121,15 +122,17 @@ class MemoryManager:
         dp_world_size: int,
     ):
         cur_page = self.kv_move_buffer[page_index]
-        repeat_count = dp_world_size * self.kv_buffer.shape[2] // self.kv_move_buffer.shape[3]
-        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
-        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0:len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(
             non_blocking=True
         )
+        repeat_count = dp_world_size * self.kv_buffer.shape[2] // self.kv_move_buffer.shape[3]
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for tp_index in range(dp_world_size):
             if tp_index % repeat_count == 0:
                 page_io(
-                    mem_indexes_gpu,
+                    mem_indexes=mem_indexes_gpu,
                     page_tensor=cur_page,
                     kv_buffer=dp_mems[tp_index].kv_buffer,
                     tp_index=tp_index,
@@ -150,13 +153,18 @@ class MemoryManager:
         dp_world_size: int,
     ):
         cur_page = self.kv_move_buffer[page_index]
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0:len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(
+            non_blocking=True
+        )
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
             non_blocking=True
         )
         for tp_index in range(dp_world_size):
             page_io(
-                mem_indexes_gpu,
+                mem_indexes=mem_indexes_gpu,
                 page_tensor=cur_page,
                 kv_buffer=dp_mems[tp_index].kv_buffer,
                 tp_index=tp_index,
