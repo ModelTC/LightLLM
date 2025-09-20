@@ -30,6 +30,7 @@ from ..models.qwen_vl.model import QWenVLTokenizer
 from ..models.qwen2_vl.model import QWen2VLTokenizer
 from ..models.internvl.model import InternvlTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
+from ..models.mineru2_qwen.model import Mineru2QwenTokenizer
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
@@ -85,6 +86,8 @@ def get_tokenizer(
         tokenizer = LlavaTokenizer(tokenizer, model_cfg)
     elif model_type == "qwen" and "visual" in model_cfg:
         tokenizer = QWenVLTokenizer(tokenizer, model_cfg)
+    elif model_type == "mineru2_qwen":
+        tokenizer = Mineru2QwenTokenizer(tokenizer, model_cfg)
     elif model_type in ["qwen2_vl", "qwen2_5_vl"] and "vision_config" in model_cfg:
         from transformers import AutoProcessor
 
