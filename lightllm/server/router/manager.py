@@ -22,6 +22,7 @@ from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from .shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
+from lightllm.server.router.req_queue.chunked_prefill.impl_past_future import PastFutureQueue
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.common.mem_manager import ReadOnlyStaticsMemoryManager
@@ -319,6 +320,8 @@ class RouterManager:
 
     def _filter_reqs_from_running_batch(self):
         if self.running_batch is not None:
+            if isinstance(self.req_queue, PastFutureQueue):
+                self.req_queue.record_finished_len_from_batch(self.running_batch)
             self.running_batch.filter_out_finished_req(self.shm_req_manager)
             if self.running_batch.is_clear():
                 self.running_batch = None
