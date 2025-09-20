@@ -187,7 +187,7 @@ class _PrefillTransModule:
     ):
         while True:
             if len(self.waiting_dict) == 0:
-                time.sleep(0.003)
+                time.sleep(0.001)
                 continue
 
             # notify update

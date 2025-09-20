@@ -107,8 +107,7 @@ class _DecodeTransModule:
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
         self.read_peer_kv_queue = queue.Queue()
-        self.update_status_task_list_lock = threading.Lock()
-        self.update_status_task_list: List[NIXLChunckedTransTask] = []
+        self.update_status_task_queue = queue.Queue()
         self.ready_page_task_queue = queue.Queue()
         self.success_queue = queue.Queue()
         self.failed_queue = queue.Queue()
@@ -171,7 +170,7 @@ class _DecodeTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             if len(self.waiting_dict) == 0:
-                time.sleep(0.003)
+                time.sleep(0.001)
                 continue
 
             # notify update
@@ -257,8 +256,7 @@ class _DecodeTransModule:
                 xfer_handle = self.transporter.read_blocks_paged(trans_task=local_trans_task)
                 local_trans_task.xfer_handle = xfer_handle
                 local_trans_task.start_trans_time = time.time()
-                with self.update_status_task_list_lock:
-                    self.update_status_task_list.append(local_trans_task)
+                self.update_status_task_queue.put(local_trans_task)
             except BaseException as e:
                 logger.error(f"read_blocks_paged node failed: {local_trans_task.to_str()}")
                 logger.exception(str(e))
@@ -272,32 +270,23 @@ class _DecodeTransModule:
         self,
     ):
         while True:
-            if len(self.update_status_task_list) == 0:
-                time.sleep(0.003)
-                continue
+            trans_task: NIXLChunckedTransTask = self.update_status_task_queue.get()
 
-            # check xfer state
-            with self.update_status_task_list_lock:
-                trans_taskes = self.update_status_task_list.copy()
-                self.update_status_task_list.clear()
-
-            for trans_task in trans_taskes:
+            while True:
                 ret = self.transporter.check_task_status(trans_task=trans_task)
                 if ret == "DONE":
                     self.ready_page_task_queue.put(trans_task)
-                    continue
+                    break
                 elif ret == "ERR":
                     trans_task.error_info = "xfer error"
                     self.failed_queue.put(trans_task)
-                    continue
-
-                if trans_task.time_out():
-                    trans_task.error_info = "time out"
+                    break
+                elif trans_task.time_out():
+                    trans_task.error_info = "time out in update_task_status_loop"
                     self.failed_queue.put(trans_task)
-                    continue
+                    break
 
-                with self.update_status_task_list_lock:
-                    self.update_status_task_list.append(trans_task)
+                time.sleep(0.001)
 
     @log_exception
     def read_page_to_mems_loop(self):
