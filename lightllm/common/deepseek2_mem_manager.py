@@ -41,7 +41,9 @@ class Deepseek2MemoryManager(MemoryManager):
         self.kv_move_buffer = torch.empty(
             (page_num, page_size, self.layer_num, self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
         )
-        self._buffer_mem_indexes_tensors = [torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num) ] 
+        self._buffer_mem_indexes_tensors = [
+            torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
+        ]
         return self.kv_move_buffer
 
     def write_mem_to_page_kv_move_buffer(
@@ -53,11 +55,9 @@ class Deepseek2MemoryManager(MemoryManager):
         dp_world_size: int,
     ):
         cur_page = self.kv_move_buffer[page_index]
-        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0:len(mem_indexes)]
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(
-            non_blocking=True
-        )
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         mla_page_io(
             mem_indexes=mem_indexes_gpu,
@@ -76,11 +76,9 @@ class Deepseek2MemoryManager(MemoryManager):
         dp_world_size: int,
     ):
         cur_page = self.kv_move_buffer[page_index]
-        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0:len(mem_indexes)]
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(
-            non_blocking=True
-        )
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for mem in dp_mems:
             mla_page_io(
