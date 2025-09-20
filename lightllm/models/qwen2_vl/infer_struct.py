@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 class Qwen2VLInferStateInfo(LlamaInferStateInfo):
@@ -10,8 +11,8 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         self.position_cos = None
         self.position_sin = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        InferStateInfo.init_some_extra_state(self, model, input_ids)
+    def init_some_extra_state(self, model, model_input: ModelInput):
+        InferStateInfo.init_some_extra_state(self, model, model_input)
         if self.is_prefill:
             position_ids = self.position_ids
             self.position_sin = model._sin_cached[:, position_ids, :].unsqueeze(1)

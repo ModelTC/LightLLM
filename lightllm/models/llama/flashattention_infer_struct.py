@@ -24,7 +24,8 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
             ]
         return cls._shared_page_table_buffer
 
-    def _init_flash_attention_state(self, model, input_ids: torch.Tensor):
+    def _init_flash_attention_state(self, model, model_input: ModelInput):
+        input_ids = model_input.input_ids
         if self.is_prefill:
             self.cu_seqlens_q = self.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
@@ -93,7 +94,7 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
             )
         return
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
-        self._init_flash_attention_state(model, input_ids)
+    def init_some_extra_state(self, model, model_input: ModelInput):
+        super().init_some_extra_state(model, model_input)
+        self._init_flash_attention_state(model, model_input)
         return

@@ -5,6 +5,7 @@ import torch.distributed as dist
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 class LlamaFlashInferStateInfo(LlamaInferStateInfo):
@@ -14,17 +15,16 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
         self.decode_wrapper = None
         self.flashinfer_extra_state = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
+    def init_some_extra_state(self, model, model_input: ModelInput):
+        super().init_some_extra_state(model, model_input)
         self.flashinfer_extra_state = model.flashinfer_extra_state
+        device = model_input.input_ids.device
 
         import flashinfer
 
         if not self.is_prefill:
             if get_env_start_args().enable_flashinfer_decode:
-                self.kv_last_page_len_buffer = torch.full(
-                    (self.batch_size,), 1, dtype=torch.int32, device=input_ids.device
-                )
+                self.kv_last_page_len_buffer = torch.full((self.batch_size,), 1, dtype=torch.int32, device=device)
                 if self.batch_size <= model.graph_max_batch_size:
                     self.kv_indices = self.flashinfer_extra_state.kv_indices_buffer[self.microbatch_index][
                         : self.batch_size * self.flashinfer_extra_state.max_seq_length
@@ -33,7 +33,7 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
                     self.kv_indices = torch.empty(
                         self.batch_size * self.flashinfer_extra_state.max_seq_length,
                         dtype=torch.int32,
-                        device=input_ids.device,
+                        device=device,
                     )
 
                 repack_kv_index(
@@ -71,11 +71,11 @@ class LlamaFlashInferStateInfo(LlamaInferStateInfo):
             if get_env_start_args().enable_flashinfer_prefill:
                 q_starts = self.b1_cu_q_seq_len.int()
                 kv_starts = self.b1_cu_kv_seq_len.int()
-                kv_last_page_len = torch.full((self.batch_size,), 1, dtype=torch.int32, device=input_ids.device)
+                kv_last_page_len = torch.full((self.batch_size,), 1, dtype=torch.int32, device=device)
                 kv_indices = torch.empty(
                     self.batch_size * self.flashinfer_extra_state.max_seq_length,
                     dtype=torch.int32,
-                    device=input_ids.device,
+                    device=device,
                 )
                 repack_kv_index(
                     self.req_manager.req_to_token_indexs,

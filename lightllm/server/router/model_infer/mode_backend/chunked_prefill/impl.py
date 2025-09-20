@@ -265,7 +265,7 @@ class ChunkedPrefillBackend(ModeBackend):
         decode_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-        b_mtp_index_cpu = model_input.b_mtp_index
+        b_mtp_index_cpu = model_input.b_mtp_index_cpu
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             all_next_token_ids = []
