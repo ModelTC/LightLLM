@@ -11,11 +11,11 @@ LIGHTLLM_REQS_BUFFER_BYTE_SIZE = int(os.getenv("LIGHTLLM_REQS_BUFFER_BYTE_SIZE",
 logger = init_logger(__name__)
 
 
-class ShmReqsIOBuffer:
-    def __init__(self):
+class ShmObjsIOBuffer:
+    def __init__(self, tail_str=""):
         self.args = get_env_start_args()
-        self.name = f"{get_unique_server_name()}_ShmReqsBufferParams"
-        self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_ShmReqsBufferParams_atomlock")
+        self.name = f"{get_unique_server_name()}_ShmReqsBufferParams_{tail_str}"
+        self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_ShmReqsBufferParams_atomlock_{tail_str}")
         self._create_or_link_shm()
         self.node_world_size = self.args.tp // self.args.nnodes
 

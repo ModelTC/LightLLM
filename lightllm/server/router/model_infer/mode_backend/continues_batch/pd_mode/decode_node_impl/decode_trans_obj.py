@@ -163,7 +163,7 @@ class KVTransConnectObj:
                         UpKVStatus(
                             group_request_id=task.group_request_id,
                             dp_index=task.decode_dp_index,
-                            pd_master_node_id=task.decode_node.pd_master_node_id,
+                            pd_master_node_id=task.pd_master_node_id,
                         )
                     )
                     logger.info(f"{func_name} up kv status req_id: {task.id()} finished")

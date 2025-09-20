@@ -49,6 +49,7 @@ from lightllm.utils.error_utils import ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
+from lightllm.server.core.objs.start_args_type import StartArgs
 
 from .api_openai import chat_completions_impl, completions_impl
 from .api_models import (
@@ -66,7 +67,7 @@ logger = init_logger(__name__)
 class G_Objs:
     app: FastAPI = None
     metric_client: MetricClient = None
-    args: object = None
+    args: StartArgs = None
     g_generate_func: Callable = None
     g_generate_stream_func: Callable = None
     httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster] = None
@@ -303,11 +304,9 @@ async def kv_move_status(websocket: WebSocket):
     try:
         while True:
             # 等待接收消息，设置超时为10秒
-            data = await websocket.receive_text()
-            json_data = json.loads(data)
-            from .pd_io_struct import UpKVStatus
-
-            upkv_status = UpKVStatus(**json_data)
+            data = await websocket.receive_bytes()
+            upkv_status = pickle.loads(data)
+            logger.info(f"recieved upkv_status {upkv_status} from {(client_ip, client_port)}")
             await g_objs.httpserver_manager.update_req_status(upkv_status)
     except (WebSocketDisconnect, Exception, RuntimeError) as e:
         logger.error(f"kv_move_status client {(client_ip, client_port)} has error {str(e)}")

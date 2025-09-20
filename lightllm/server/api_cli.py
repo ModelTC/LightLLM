@@ -7,7 +7,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run_mode",
         type=str,
-        choices=["normal", "prefill", "decode", "pd_master", "config_server"],
+        choices=["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server"],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
@@ -61,6 +61,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="The port number for the config server in config_server mode.",
     )
+    parser.add_argument(
+        "--nixl_pd_kv_page_num",
+        type=int,
+        default=16,
+        help="nixl pd mode, kv move page_num",
+    )
+
+    parser.add_argument(
+        "--nixl_pd_kv_page_size",
+        type=int,
+        default=1024,
+        help="nixl pd mode, kv page size.",
+    )
+
     parser.add_argument(
         "--model_name",
         type=str,

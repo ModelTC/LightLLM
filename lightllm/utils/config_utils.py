@@ -33,6 +33,17 @@ def get_hidden_size(model_path: str) -> Optional[int]:
     return None
 
 
+@lru_cache(maxsize=None)
+def get_num_key_value_heads(model_path: str) -> int:
+    config_json = get_config_json(model_path)
+    try:
+        num_key_value_heads = config_json["num_key_value_heads"]
+    except:
+        # for some multimodal model
+        num_key_value_heads = config_json["llm_config"]["num_key_value_heads"]
+    return num_key_value_heads
+
+
 def get_eos_token_ids(model_path: str):
     config_json = get_config_json(model_path)
     try:

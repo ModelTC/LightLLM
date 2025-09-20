@@ -255,6 +255,15 @@ class Req(ctypes.Structure):
         self._cache_prompt_metadata = metadata
         return metadata
 
+    def is_infer_decode(self) -> bool:
+        """
+        judge the req is in decode stage
+        """
+        if self.shm_cur_kv_len >= self.input_len:
+            return True
+        else:
+            return False
+
 
 # 由于目前加入了很多异步调度的方法，为了缓解异步调度带来的很多
 # 估计不准确的问题，通过加长输出的长度，进行偏向保守一些的调度
