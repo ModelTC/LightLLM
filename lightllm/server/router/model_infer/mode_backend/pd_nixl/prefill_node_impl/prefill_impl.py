@@ -85,7 +85,6 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
                 )
                 # update
                 req_obj.nixl_trans_kv_start_index += cur_page_size
-                req_obj.nixl_pd_task_num += 1
             return
 
         wait_trans_kv_len = req_obj.cur_kv_len - req_obj.nixl_trans_kv_start_index
@@ -104,39 +103,40 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
 
             # update
             req_obj.nixl_trans_kv_start_index += cur_page_size
-            req_obj.nixl_pd_task_num += 1
         return
 
     def _create_nixl_trans_task(self, req_obj: InferReq, kv_start_index: int, kv_end_index: int):
-        if self.is_master_in_dp:
-            # 确定传输设备
-            if req_obj.nixl_trans_device_id == -1:
-                req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
+        # 确定传输设备
+        if req_obj.nixl_trans_device_id == -1:
+            req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
 
-            nixl_decode_node_info = req_obj.sampling_param.nixl_decode_node
-            mem_indexes = (
-                self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
-                .detach()
-                .cpu()
-                .tolist()
-            )
-            trans_task = NIXLChunckedTransTask(
-                request_id=req_obj.req_id,
-                start_kv_index=kv_start_index,
-                end_kv_index=kv_end_index,
-                pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
-                prefill_dp_index=self.dp_rank_in_node,
-                decode_dp_index=None,
-                src_device_id=req_obj.nixl_trans_device_id,
-                dst_device_id=None,
-                mem_indexes=mem_indexes,
-                prefill_agent_name=None,
-                prefill_agent_metadata=None,
-                prefill_num_pages=None,
-                prefill_page_reg_desc=None,
-                decode_agent_name=nixl_decode_node_info.agent_name,
-                decode_agent_metadata=nixl_decode_node_info.agent_metadata,
-                decode_num_pages=nixl_decode_node_info.num_pages,
-                decode_page_reg_desc=nixl_decode_node_info.page_reg_desc,
-            )
+        nixl_decode_node_info = req_obj.sampling_param.nixl_decode_node
+        mem_indexes = (
+            self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
+            .detach()
+            .cpu()
+            .tolist()
+        )
+        trans_task = NIXLChunckedTransTask(
+            request_id=req_obj.req_id,
+            start_kv_index=kv_start_index,
+            end_kv_index=kv_end_index,
+            pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
+            prefill_dp_index=self.dp_rank_in_node,
+            decode_dp_index=None,
+            src_device_id=req_obj.nixl_trans_device_id,
+            dst_device_id=None,
+            mem_indexes=mem_indexes,
+            prefill_agent_name=None,
+            prefill_agent_metadata=None,
+            prefill_num_pages=None,
+            prefill_page_reg_desc=None,
+            decode_agent_name=nixl_decode_node_info.agent_name,
+            decode_agent_metadata=nixl_decode_node_info.agent_metadata,
+            decode_num_pages=nixl_decode_node_info.num_pages,
+            decode_page_reg_desc=nixl_decode_node_info.page_reg_desc,
+        )
+        req_obj.nixl_pd_task_num += 1
+
+        if self.is_master_in_dp:
             self.info_queue.put(trans_task)

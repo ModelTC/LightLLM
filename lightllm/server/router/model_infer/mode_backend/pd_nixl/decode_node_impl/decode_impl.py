@@ -169,20 +169,19 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
 
             req_obj.cur_kv_len += len(mem_indexes)
 
+        if not group.task_list:
+            # 需要上报一个包含 0 长度的trans task，触发 kv move manager 给 pd master 上报
+            # upkv_status 状态，使推理流程完整。
+            self._create_nixl_trans_task(
+                req_obj=req_obj,
+                mem_indexes=[],
+                kv_start_index=req_obj.cur_kv_len,
+                kv_end_index=req_obj.cur_kv_len,
+                group=group,
+            )
+
         if self.is_master_in_dp:
-            if group.task_list:
-                self.info_queue.put(group)
-            else:
-                # 需要上报一个包含 0 长度的trans task，触发 kv move manager 给 pd master 上报
-                # upkv_status 状态，使用推理流程完整。
-                self._create_nixl_trans_task(
-                    req_obj=req_obj,
-                    mem_indexes=[],
-                    kv_start_index=req_obj.cur_kv_len,
-                    kv_end_index=req_obj.cur_kv_len,
-                    group=group,
-                )
-                self.info_queue.put(group)
+            self.info_queue.put(group)
         return
 
     def _create_nixl_trans_task(
