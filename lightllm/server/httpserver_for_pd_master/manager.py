@@ -123,7 +123,10 @@ class HttpServerManagerForPDMaster:
 
         except BaseException as e:
             logger.error(f"has exception {str(e)}")
-            await self.abort(group_request_id)
+            try:
+                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
+            except:
+                await self.abort(group_request_id)
             raise e
 
         finally:
@@ -359,22 +362,26 @@ class HttpServerManagerForPDMaster:
         self.metric_client.counter_inc("lightllm_request_success")
         return
 
-    async def abort(self, group_request_id):
+    async def abort(
+        self, group_request_id, p_node: Optional[PD_Client_Obj] = None, d_node: Optional[PD_Client_Obj] = None
+    ):
         logger.warning(f"aborted group_request_id {group_request_id}")
 
         try:
             req_status = self.req_id_to_out_inf[group_request_id]
             del self.req_id_to_out_inf[group_request_id]
+            p_node = req_status.p_node
+            d_node = req_status.d_node
         except:
             pass
 
         try:
-            await req_status.p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+            await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 
         try:
-            await req_status.d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+            await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 
