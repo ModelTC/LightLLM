@@ -123,6 +123,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         )
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
+                        logger.warning(f"recv cmd aborted req id {group_req_id}")
                         await manager.abort(group_req_id)
                     elif obj[0] == ObjType.NIXL_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj

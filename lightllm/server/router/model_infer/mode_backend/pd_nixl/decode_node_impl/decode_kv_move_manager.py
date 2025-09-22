@@ -88,9 +88,10 @@ class DecodeKVMoveManager(BaseKVMoveManager):
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task_group)
-                logger.info(
-                    f"kv move manager dispatch task group {task_group.task_list[0].to_str()} to device {device_id}"
-                )
+                if isinstance(task_group, NIXLChunckedTransTaskGroup):
+                    logger.info(
+                        f"kv move manager dispatch task group {task_group.task_list[0].to_str()} to device {device_id}"
+                    )
 
             except BaseException as e:
                 logger.exception(str(e))
