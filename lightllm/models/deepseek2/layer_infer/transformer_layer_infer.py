@@ -196,16 +196,18 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             input = gather_input[0 : len(infer_state.position_cos), :]
 
         input = input.view(-1, self.embed_dim_)
-
         if self.q_lora_rank is None:
             q = layer_weight.q_weight_.mm(input)
+            layer_weight.kv_a_proj_with_mqa_.mm(input, out=cache_kv.view(-1, self.kv_lora_rank + self.qk_rope_head_dim))
         else:
-            q = layer_weight.q_a_proj_.mm(input)
-            rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_, out=q)
+            q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
+            )
+            q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_)
             q = layer_weight.q_b_proj_.mm(q)
+            cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
         q = q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim)
         q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        layer_weight.kv_a_proj_with_mqa_.mm(input, out=cache_kv.view(-1, self.kv_lora_rank + self.qk_rope_head_dim))
         rmsnorm_forward(
             cache_kv[:, :, : self.kv_lora_rank],
             weight=layer_weight.kv_a_layernorm_.weight,
