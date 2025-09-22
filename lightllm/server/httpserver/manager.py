@@ -621,17 +621,17 @@ class HttpServerManager:
                 req_status.out_token_info_list.clear()
         return
 
-    async def abort(self, group_req_id: int) -> bool:
+    async def abort(self, group_req_id: int):
         req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, None)
         if req_status is None:
             logger.warning(f"aborted group_request_id {group_req_id} not exist")
-            return False
+            return
 
         group_req_objs: GroupReqObjs = req_status.group_req_objs
         for req in group_req_objs.shm_req_objs:
             req.is_aborted = True
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
-        return True
+        return
 
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()
