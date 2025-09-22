@@ -101,7 +101,6 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
-                group_req_id_to_task: Dict[int, asyncio.Task] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
                 while True:
                     recv_bytes = await websocket.recv()
@@ -111,7 +110,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         group_req_id = sampling_params.group_request_id
                         nixl_pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = nixl_pd_event
-                        group_req_id_to_task[group_req_id] = asyncio.create_task(
+                        asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
                                 prompt=prompt,
@@ -125,10 +124,15 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
-                        _gen_task = group_req_id_to_task.pop(group_req_id, None)
-                        if _gen_task is not None:
-                            _gen_task.cancel()
-                        await manager.abort(group_req_id)
+                        if not (await manager.abort(group_req_id)):
+
+                            async def delayed_abort_task(group_req_id, retry_count):
+                                for _ in range(retry_count):
+                                    await asyncio.sleep(5.0)
+                                    if await manager.abort(group_req_id):
+                                        break
+
+                            asyncio.create_task(delayed_abort_task(group_req_id=group_req_id, retry_count=4))
 
                     elif obj[0] == ObjType.NIXL_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
