@@ -201,6 +201,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
+            time_out_secs=80,
             pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
             prefill_dp_index=None,
             decode_dp_index=self.dp_rank_in_node,

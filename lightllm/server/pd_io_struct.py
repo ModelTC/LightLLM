@@ -250,6 +250,7 @@ class NIXLChunckedTransTask:
     request_id: int
     start_kv_index: int
     end_kv_index: int
+    time_out_secs: int
 
     pd_master_node_id: int
     prefill_dp_index: Optional[int]
@@ -292,11 +293,11 @@ class NIXLChunckedTransTask:
 
     def time_out(self) -> bool:
         if self.start_trans_time is None:
-            if time.time() - self.create_time > 80:
+            if time.time() - self.create_time > self.time_out_secs:
                 return True
             return False
         else:
-            if time.time() - self.start_trans_time > 60:
+            if time.time() - self.start_trans_time > self.time_out_secs + 88:
                 return True
             else:
                 return False

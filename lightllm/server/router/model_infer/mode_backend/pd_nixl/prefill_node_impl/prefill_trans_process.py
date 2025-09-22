@@ -138,8 +138,7 @@ class _PrefillTransModule:
         while True:
             trans_task: NIXLChunckedTransTask = self.local_copy_kv_queue.get()
 
-            # to do 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
-            trans_task.start_trans_time = time.time()
+            # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.write_mem_to_page_kv_move_buffer(
@@ -165,20 +164,26 @@ class _PrefillTransModule:
 
             sync_event.synchronize()
 
+            trans_task.start_trans_time = time.time()
+            with self.waiting_dict_lock:
+                self.waiting_dict[trans_task.get_key()] = trans_task
+
             try:
                 self.transporter.send_readtask_to_decode_node(trans_task=trans_task)
             except BaseException as e:
                 logger.error(f"send readtask to decode node failed: {trans_task.to_str()}")
                 logger.exception(str(e))
                 self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
-                trans_task.error_info = f"send readtask to decode node failed: {str(e)}"
-                self.failed_queue.put(trans_task)
+
+                with self.waiting_dict_lock:
+                    trans_task = self.waiting_dict.pop(trans_task.get_key(), None)
+
+                if trans_task is not None:
+                    trans_task.error_info = f"send readtask to decode node failed: {str(e)}"
+                    self.failed_queue.put(trans_task)
                 continue
 
             logger.info(f"send readtask to decode: {trans_task.to_str()}")
-
-            with self.waiting_dict_lock:
-                self.waiting_dict[trans_task.get_key()] = trans_task
         return
 
     @log_exception
@@ -217,6 +222,8 @@ class _PrefillTransModule:
                                     self.failed_queue.put(trans_task)
                                 else:
                                     self.success_queue.put(trans_task)
+                            else:
+                                logger.warning(f"can not find trans task for ret: {notify_obj}")
 
             # check time_out update
             self._check_tasks_time_out()
