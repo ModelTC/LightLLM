@@ -10,7 +10,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 # 定义泛型类型变量，用于保持输入和输出类型的一致性
-T = TypeVar("T", bound=Type)
+T = TypeVar("T")
 
 
 @dataclass
