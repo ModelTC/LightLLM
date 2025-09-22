@@ -15,7 +15,7 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
-from lightllm.common.basemodel.triton_kernel.mtp_verify import mtp_verify
+from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -250,8 +250,15 @@ class ModeBackend:
             assert mtp_model_cfg["model_type"] == "deepseek_v3"
             assert mtp_model_cfg["architectures"][0] == "DeepseekV3ForCausalLMNextN"
             self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
-
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
+
+        # 开启 eagle 模式时，需要初始化 req_sampling_params_manager 的 dsv3_hidden_state
+        # 因为eagle模式是先draft再verify的流程，这么管理更为简单，且容易让draft 跟main 共享mem_index
+        if self.args.mtp_mode == "deepseekv3_eagle":
+            self.model.req_manager.req_sampling_params_manager.init_deepseekv3_hidden_state(
+                hidden_size=self.model.config["hidden_size"],
+                data_type=self.model.data_type,
+            )
         return
 
     def _async_copy_next_token_infos_to_pin_mem(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):

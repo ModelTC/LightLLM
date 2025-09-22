@@ -105,6 +105,7 @@ class ReqSamplingParamsManager:
         # mode ["cpu_counter", "pin_mem_counter", "gpu_counter"]
         self.penalty_counter_mode = get_env_start_args().penalty_counter_mode
         self.vocab_size = get_vocab_size(get_env_start_args().model_dir)
+        self.max_request_num = max_request_num
         self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
@@ -162,6 +163,13 @@ class ReqSamplingParamsManager:
                 torch.cuda.current_stream().synchronize()
 
         return
+
+    def init_deepseekv3_hidden_state(self, hidden_size: int, data_type: torch.dtype):
+        self.req_to_deepseekv3_hidden_state = torch.zeros(
+            (self.max_request_num + 1, hidden_size),
+            dtype=data_type,
+            device="cuda",
+        )
 
     def update_reqs_out_token_counter_gpu(
         self, b_req_idx: torch.Tensor, next_token_ids: torch.Tensor, mask: torch.Tensor = None
