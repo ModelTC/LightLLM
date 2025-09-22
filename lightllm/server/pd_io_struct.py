@@ -369,3 +369,8 @@ class NIXLChunckedTransTaskRet:
 @dataclass
 class NIXLChunckedTransTaskGroup:
     task_list: List[NIXLChunckedTransTask] = field(default_factory=list)
+
+
+@dataclass
+class NIXLAbortReq:
+    request_id: int

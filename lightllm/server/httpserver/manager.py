@@ -302,7 +302,7 @@ class HttpServerManager:
                     pickle.dumps((ObjType.NIXL_UPLOAD_NP_PROMPT_IDS, group_request_id, prompt_ids))
                 )
                 try:
-                    await asyncio.wait_for(nixl_pd_event.wait(), timeout=36)
+                    await asyncio.wait_for(nixl_pd_event.wait(), timeout=80)
                 except asyncio.TimeoutError:
                     logger.error(f"nixl np node wait nixl_pd_event 36s time out, group_req_id {group_request_id}")
                     raise Exception(f"group_req_id {group_request_id} wait nixl_pd_event time out")

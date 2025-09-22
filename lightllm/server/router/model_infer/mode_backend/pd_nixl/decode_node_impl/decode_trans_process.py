@@ -14,6 +14,7 @@ from lightllm.server.pd_io_struct import (
     NIXLChunckedTransTaskGroup,
     NIXLChunckedTransTaskRet,
     NixlUpKVStatus,
+    NIXLAbortReq,
 )
 from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
 from lightllm.utils.device_utils import kv_trans_use_p2p
@@ -104,6 +105,7 @@ class _DecodeTransModule:
         self.transporter = NixlKVTransporter(
             node_id=self.args.pd_node_id, tp_idx=device_id, kv_move_buffer=kv_move_buffer
         )
+        self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
         self.read_peer_kv_queue = queue.Queue()
@@ -118,6 +120,7 @@ class _DecodeTransModule:
 
         for func in [
             self.recv_task_loop,
+            self.dispatch_task_loop,
             self.accept_peer_task_loop,
             self.read_peer_kv_loop,
             self.update_task_status_loop,
@@ -131,7 +134,37 @@ class _DecodeTransModule:
     @log_exception
     def recv_task_loop(self):
         while True:
-            trans_task_group: NIXLChunckedTransTaskGroup = self.task_in_queue.get()
+            obj: NIXLChunckedTransTaskGroup = self.task_in_queue.get()
+            if isinstance(obj, NIXLChunckedTransTaskGroup):
+                self.recv_task_group_queue.put(obj)
+            elif isinstance(obj, NIXLAbortReq):
+                self._abort(cmd=obj)
+            else:
+                assert False, f"recv error obj {obj}"
+
+    def _abort(self, cmd: NIXLAbortReq):
+        # check time_out update
+        with self.waiting_dict_lock:
+            keys = list(self.waiting_dict.keys())
+
+        for key in keys:
+            with self.waiting_dict_lock:
+                trans_task = self.waiting_dict.pop(key, None)
+
+            if trans_task is not None and trans_task.request_id == cmd.request_id:
+                trans_task.error_info = "aborted req"
+                self.failed_queue.put(trans_task)
+                continue
+
+            if trans_task is not None:
+                with self.waiting_dict_lock:
+                    self.waiting_dict[trans_task.get_key()] = trans_task
+        return
+
+    @log_exception
+    def dispatch_task_loop(self):
+        while True:
+            trans_task_group: NIXLChunckedTransTaskGroup = self.recv_task_group_queue.get()
 
             with self.waiting_dict_lock:
                 for task in trans_task_group.task_list:

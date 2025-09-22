@@ -263,6 +263,9 @@ class HttpServerManagerForPDMaster:
             logger.warning(f"group_request_id: {group_request_id} wait np up prompt ids time out")
             raise ServerBusyError()
 
+        if await request.is_disconnected():
+            raise Exception(f"req_id {group_request_id} disconnected")
+
         prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
         logger.info(f"group_request_id: {group_request_id} get np up prompt ids len {len(prompt_ids)}")
 
