@@ -374,3 +374,4 @@ class NIXLChunckedTransTaskGroup:
 @dataclass
 class NIXLAbortReq:
     request_id: int
+    device_id: int

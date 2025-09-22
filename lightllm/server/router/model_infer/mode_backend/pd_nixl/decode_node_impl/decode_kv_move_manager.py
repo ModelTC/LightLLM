@@ -4,7 +4,7 @@ import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Optional, Tuple, Union, Callable
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import NIXLChunckedTransTaskGroup
+from lightllm.server.pd_io_struct import NIXLChunckedTransTaskGroup, NIXLAbortReq
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.graceful_utils import graceful_registry
 from ..trans_process_obj import KVTransProcess
@@ -76,8 +76,15 @@ class DecodeKVMoveManager(BaseKVMoveManager):
     def task_dispatcher_loop(self):
         # 获取任务，并分发给相关卡的处理队列
         while True:
-            task_group: NIXLChunckedTransTaskGroup = self.info_queue.get()
-            device_id = task_group.task_list[0].dst_device_id
+            task_group: Union[NIXLChunckedTransTaskGroup, NIXLAbortReq] = self.info_queue.get()
+
+            if isinstance(task_group, NIXLChunckedTransTaskGroup):
+                device_id = task_group.task_list[0].dst_device_id
+            elif isinstance(task_group, NIXLAbortReq):
+                device_id = task_group.device_id
+            else:
+                assert False, f"error obj {task_group}"
+
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task_group)
