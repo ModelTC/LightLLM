@@ -34,7 +34,9 @@ def _fwd_kernel_mtp_verify(
     cur_new_next_token_id = tl.load(new_next_token_ids + req_offset, mask=offset + 1 < req_mtp_num, other=-2)
 
     match_mask = cur_next_token_id == cur_new_next_token_id
-    accept_len = tl.sum(tl.where(match_mask, 1, 0)) + 1
+    mismatch_positions = tl.where(match_mask, BLOCK_SIZE, offset)
+    first_mismatch_pos = tl.min(mismatch_positions)
+    accept_len = first_mismatch_pos + 1
     tl.store(mtp_accept_len + cur_index, accept_len)
     accpeted_index = tl.where((offset < accept_len), 1, 0)
     tl.store(accepted_index + req_offset, accpeted_index, mask=offset < req_mtp_num)
@@ -275,7 +277,7 @@ def test_mtp_verify():
     )
     b_req_idx = torch.tensor([0, 0, 2, 2, 2], dtype=torch.int32, device="cuda")
     b_req_mtp_start_loc = torch.tensor([0, 2], dtype=torch.int32, device="cuda")
-    new_next_token_ids = torch.tensor([1, 4, 3, 4, 13], dtype=torch.int32, device="cuda")
+    new_next_token_ids = torch.tensor([1, 4, 2, 4, 13], dtype=torch.int32, device="cuda")
     all_next_token_ids = torch.tensor(
         [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int32, device="cuda"
     )
@@ -325,6 +327,6 @@ def test_scatter_deepseekv3_hidden_state():
 
 
 if __name__ == "__main__":
-    # test_mtp_verify()
-    test_scatter_deepseekv3_hidden_state()
+    test_mtp_verify()
+    # test_scatter_deepseekv3_hidden_state()
     # test_gen_b_req_mtp_start_loc()

@@ -384,7 +384,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
             )
             draft_model_output = self.draft_models[0].forward(draft_model_input)
-            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
 
             sync_event = torch.cuda.Event()
             sync_event.record()
@@ -479,6 +478,7 @@ class ChunkedPrefillBackend(ModeBackend):
             self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids[
                 draft_model_input.b_req_idx, : self.mtp_step + 1
             ] = all_next_token_ids
+
             g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
                 b_req_idx=model_input.b_req_idx,
                 next_token_ids=next_token_ids,
