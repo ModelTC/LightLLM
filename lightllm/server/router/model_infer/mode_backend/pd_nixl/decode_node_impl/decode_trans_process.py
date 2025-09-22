@@ -134,7 +134,7 @@ class _DecodeTransModule:
     @log_exception
     def recv_task_loop(self):
         while True:
-            obj: NIXLChunckedTransTaskGroup = self.task_in_queue.get()
+            obj: Union[NIXLChunckedTransTaskGroup, NIXLAbortReq] = self.task_in_queue.get()
             if isinstance(obj, NIXLChunckedTransTaskGroup):
                 self.recv_task_group_queue.put(obj)
             elif isinstance(obj, NIXLAbortReq):
