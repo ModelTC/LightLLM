@@ -40,8 +40,12 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
-            self.prefill = self.prefill_mtp_eagle
-            self.decode = self.decode_mtp_eagle
+            if get_env_start_args().mtp_mode == "deepseekv3_eagle":
+                self.prefill = self.prefill_mtp_eagle
+                self.decode = self.decode_mtp_eagle
+            else:
+                self.prefill = self.prefill_mtp_vanilla
+                self.decode = self.decode_mtp_vanilla
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
