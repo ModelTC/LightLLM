@@ -39,12 +39,10 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
-            if get_env_start_args().mtp_mode == "deepseekv3_eagle":
-                self.prefill = self.prefill_mtp_eagle
-                self.decode = self.decode_mtp_eagle
-            else:
-                self.prefill = self.prefill_mtp_vanilla
-                self.decode = self.decode_mtp_vanilla
+            self.prefill = self.prefill_mtp
+            self.decode = self.decode_mtp
+            self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
+            self.prefill_mtp_step = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
@@ -93,39 +91,6 @@ class ChunkedPrefillBackend(ModeBackend):
         except BaseException as e:
             self.logger.exception(str(e))
             raise e
-
-    def _main_model_forward(
-        self, model_input: ModelInput, run_reqs: List[InferReq], mask_func: Optional[Callable] = None
-    ):
-        model_output = self.model.forward(model_input)
-        logits = model_output.logits
-
-        if self.prefill_mask_func is not None:
-            self.prefill_mask_func(run_reqs, logits)
-
-        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
-        b_has_out = None
-        if model_input.is_prefill:
-            b_has_out = g_pin_mem_manager.gen_from_list(
-                key="b_has_out", data=model_input.b_prefill_has_output_cpu, dtype=torch.bool
-            ).cuda(non_blocking=True)
-
-        scatter_token(
-            next_token_ids=next_token_ids,
-            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-            b_req_idx=model_input.b_req_idx,
-            b_mtp_index=model_input.b_mtp_index,
-            b_has_out=b_has_out,
-        )
-        g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
-            b_req_idx=model_input.b_req_idx,
-            next_token_ids=next_token_ids,
-            mask=b_has_out,
-        )
-        next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
-            next_token_ids, next_token_logprobs
-        )
-        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, model_output
 
     def prefill_normal(
         self,
@@ -193,24 +158,7 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_pre_post_handle()
         return
 
-    def _draft_prefill(
-        self, model_input: ModelInput, model_output: ModelOutput, mtp_step: int, next_token_ids: torch.Tensor
-    ):
-        # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
-        draft_model_input = model_input
-        draft_model_output = model_output
-        draft_next_token_ids_gpu = next_token_ids
-        for draft_model_idx in range(mtp_step):
-            draft_model_input = prepare_mtp_prefill_inputs(
-                model_input=draft_model_input,
-                b_next_token_ids=draft_next_token_ids_gpu,
-                deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
-            )
-            draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
-            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
-        return
-
-    def prefill_mtp_vanilla(
+    def prefill_mtp(
         self,
         event_pack: OverlapEventPack,
         prefill_reqs: List[InferReq],
@@ -223,7 +171,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 model_input, run_reqs, self.prefill_mask_func
             )
             # mtp kv fill
-            self._draft_prefill(model_input, model_output, self.mtp_step, next_token_ids)
+            self._draft_prefill_forward(model_input, model_output, self.prefill_mtp_step, next_token_ids)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -242,6 +190,141 @@ class ChunkedPrefillBackend(ModeBackend):
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
+
+        # 第四阶段
+        event_pack.notify_pre_post_handle()
+        return
+
+    def decode_mtp(
+        self,
+        event_pack: OverlapEventPack,
+        decode_reqs: List[InferReq],
+    ):
+        if self.is_mtp_eagle:
+            draft_model_input, _, eagle_mem_indexes_cpu = prepare_eagle_decode_inputs(decode_reqs, self.mtp_step)
+            self._decode_mtp_common(
+                event_pack=event_pack,
+                decode_reqs=decode_reqs,
+                draft_decode_func=self._draft_decode_eagle,
+                additional_mem_indexes_cpu=eagle_mem_indexes_cpu,
+                draft_model_input=draft_model_input,
+                eagle_mem_indexes_cpu=eagle_mem_indexes_cpu,
+            )
+        else:
+            self._decode_mtp_common(
+                event_pack=event_pack,
+                decode_reqs=decode_reqs,
+                draft_decode_func=self._draft_decode_vanilla,
+            )
+        return
+
+    def _main_model_forward(
+        self, model_input: ModelInput, run_reqs: List[InferReq], mask_func: Optional[Callable] = None
+    ):
+        model_output = self.model.forward(model_input)
+        logits = model_output.logits
+
+        if mask_func is not None:
+            mask_func(run_reqs, logits)
+
+        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+        b_has_out = None
+        if model_input.is_prefill:
+            b_has_out = g_pin_mem_manager.gen_from_list(
+                key="b_has_out", data=model_input.b_prefill_has_output_cpu, dtype=torch.bool
+            ).cuda(non_blocking=True)
+
+        scatter_token(
+            next_token_ids=next_token_ids,
+            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            b_req_idx=model_input.b_req_idx,
+            b_mtp_index=model_input.b_mtp_index,
+            b_has_out=b_has_out,
+        )
+        g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+            b_req_idx=model_input.b_req_idx,
+            next_token_ids=next_token_ids,
+            mask=b_has_out,
+        )
+        next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
+            next_token_ids, next_token_logprobs
+        )
+        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, model_output
+
+    def _draft_prefill_forward(
+        self, model_input: ModelInput, model_output: ModelOutput, mtp_step: int, next_token_ids: torch.Tensor
+    ):
+        # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
+        draft_model_input = model_input
+        draft_model_output = model_output
+        draft_next_token_ids_gpu = next_token_ids
+        for draft_model_idx in range(mtp_step):
+            draft_model_input = prepare_mtp_prefill_inputs(
+                model_input=draft_model_input,
+                b_next_token_ids=draft_next_token_ids_gpu,
+                deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
+            )
+            draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
+            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
+        return
+
+    def _decode_mtp_common(
+        self,
+        event_pack: OverlapEventPack,
+        decode_reqs: List[InferReq],
+        draft_decode_func: Callable,
+        additional_mem_indexes_cpu: Optional[torch.Tensor] = None,
+        **draft_kwargs
+    ):
+        """
+        MTP解码的通用流程，整合eagle和vanilla的共同逻辑
+        """
+        model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            # draft verify with main model
+            verify_info = self._draft_verify(model_input, run_reqs)
+
+            # 调用具体的draft decode函数
+            draft_decode_func(main_model_input=model_input, verify_info=verify_info, **draft_kwargs)
+
+            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                b_req_idx=model_input.b_req_idx,
+                next_token_ids=verify_info["next_token_ids"],
+                mask=verify_info["accepted_index"] == 1,
+            )
+            sync_event = torch.cuda.Event()
+            sync_event.record()
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+        verify_info["verify_event"].synchronize()
+        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if verify_info["accepted_index_cpu"][i] == 1]
+        update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
+
+        # 第三阶段
+        event_pack.notify_forward_and_wait_post_handle()
+        sync_event.synchronize()
+
+        # 处理需要释放的内存索引
+        need_free_mem_indexes = model_input.mem_indexes_cpu[verify_info["accepted_index_cpu"] == 0]
+        if additional_mem_indexes_cpu is not None:
+            need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
+
+        self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=verify_info["mtp_accept_len_cpu"])
+        select_mask = torch.tensor(verify_info["accepted_index_cpu"], dtype=torch.bool, device="cpu")
+        self._post_handle(
+            run_reqs=verify_ok_reqs,
+            next_token_ids=verify_info["next_token_ids_cpu"][select_mask],
+            next_token_logprobs=verify_info["next_token_logprobs_cpu"][select_mask],
+            run_reqs_update_packs=update_packs,
+            extra_post_req_handle_func=self.extra_post_req_handle_func,
+        )
+
+        if len(need_free_mem_indexes) > 0:
+            g_infer_state_lock.acquire()
+            g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
+            g_infer_state_lock.release()
 
         # 第四阶段
         event_pack.notify_pre_post_handle()
@@ -296,69 +379,16 @@ class ChunkedPrefillBackend(ModeBackend):
             "next_token_logprobs_cpu": next_token_logprobs_cpu,
         }
 
-    def decode_mtp_vanilla(
-        self,
-        event_pack: OverlapEventPack,
-        decode_reqs: List[InferReq],
-    ):
-        model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            # draft verify with main model
-            verify_info = self._draft_verify(model_input, run_reqs)
-            # draft decode
-            self._draft_decode_vanilla(
-                main_model_input=model_input,
-                main_model_output=verify_info["main_model_output"],
-                next_token_ids=verify_info["next_token_ids"],
-                b_req_mtp_start_loc=verify_info["b_req_mtp_start_loc"],
-                mtp_accept_len=verify_info["mtp_accept_len"],
-            )
-
-            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
-                b_req_idx=model_input.b_req_idx,
-                next_token_ids=verify_info["next_token_ids"],
-                mask=verify_info["accepted_index"] == 1,
-            )
-            sync_event = torch.cuda.Event()
-            sync_event.record()
-
-        # 第二阶段
-        event_pack.notify_post_handle_and_wait_pre_post_handle()
-        verify_info["verify_event"].synchronize()
-        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if verify_info["accepted_index_cpu"][i] == 1]
-        update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
-
-        # 第三阶段
-        event_pack.notify_forward_and_wait_post_handle()
-        sync_event.synchronize()
-        need_free_mem_indexes = model_input.mem_indexes_cpu[verify_info["accepted_index_cpu"] == 0]
-
-        self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=verify_info["mtp_accept_len_cpu"])
-        select_mask = torch.tensor(verify_info["accepted_index_cpu"], dtype=torch.bool, device="cpu")
-        self._post_handle(
-            run_reqs=verify_ok_reqs,
-            next_token_ids=verify_info["next_token_ids_cpu"][select_mask],
-            next_token_logprobs=verify_info["next_token_logprobs_cpu"][select_mask],
-            run_reqs_update_packs=update_packs,
-            extra_post_req_handle_func=self.extra_post_req_handle_func,
-        )
-        if len(need_free_mem_indexes) > 0:
-            g_infer_state_lock.acquire()
-            g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
-            g_infer_state_lock.release()
-
-        # 第四阶段
-        event_pack.notify_pre_post_handle()
-        return
-
     def _draft_decode_vanilla(
         self,
         main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
+        verify_info: Dict[str, Any],
     ):
+        main_model_output = verify_info["main_model_output"]
+        next_token_ids = verify_info["next_token_ids"]
+        mtp_accept_len = verify_info["mtp_accept_len"]
+        b_req_mtp_start_loc = verify_info["b_req_mtp_start_loc"]
+
         # share some inference info with the main model
         draft_model_input = main_model_input
         draft_model_output = main_model_output
@@ -386,118 +416,25 @@ class ChunkedPrefillBackend(ModeBackend):
         )
         return
 
-    def prefill_mtp_eagle(
-        self,
-        event_pack: OverlapEventPack,
-        prefill_reqs: List[InferReq],
-    ):
-        model_input, run_reqs = prepare_prefill_inputs(
-            prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
-        )
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, model_output = self._main_model_forward(
-                model_input, run_reqs, self.prefill_mask_func
-            )
-            # ealge 模式，只有一个draft model
-            self._draft_prefill(model_input, model_output, 1, next_token_ids)
-
-            sync_event = torch.cuda.Event()
-            sync_event.record()
-
-        # 第二阶段
-        event_pack.notify_post_handle_and_wait_pre_post_handle()
-        update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
-
-        # 第三阶段
-        event_pack.notify_forward_and_wait_post_handle()
-        sync_event.synchronize()
-
-        self._post_handle(
-            run_reqs=run_reqs,
-            next_token_ids=next_token_ids_cpu,
-            next_token_logprobs=next_token_logprobs_cpu,
-            run_reqs_update_packs=update_packs,
-            extra_post_req_handle_func=self.extra_post_req_handle_func,
-        )
-
-        # 第四阶段
-        event_pack.notify_pre_post_handle()
-        return
-
-    def decode_mtp_eagle(
-        self,
-        event_pack: OverlapEventPack,
-        decode_reqs: List[InferReq],
-    ):
-        model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-        draft_model_input, _, eagle_mem_indexes_cpu = prepare_eagle_decode_inputs(decode_reqs, self.mtp_step)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            verify_info = self._draft_verify(model_input, run_reqs)
-
-            # draft decode
-            self._draft_decode_eagle(
-                model_input=model_input,
-                draft_model_input=draft_model_input,
-                main_model_output=verify_info["main_model_output"],
-                eagle_mem_indexes_cpu=eagle_mem_indexes_cpu,
-                next_token_ids=verify_info["next_token_ids"],
-                mtp_accept_len=verify_info["mtp_accept_len"],
-            )
-            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
-                b_req_idx=model_input.b_req_idx,
-                next_token_ids=verify_info["next_token_ids"],
-                mask=verify_info["accepted_index"] == 1,
-            )
-
-            sync_event = torch.cuda.Event()
-            sync_event.record()
-
-        # 第二阶段
-        event_pack.notify_post_handle_and_wait_pre_post_handle()
-        verify_info["verify_event"].synchronize()
-        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if verify_info["accepted_index_cpu"][i] == 1]
-        update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
-
-        # 第三阶段
-        event_pack.notify_forward_and_wait_post_handle()
-        sync_event.synchronize()
-        need_free_mem_indexes = torch.cat(
-            [model_input.mem_indexes_cpu[verify_info["accepted_index_cpu"] == 0], eagle_mem_indexes_cpu], dim=0
-        )
-        self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=verify_info["mtp_accept_len_cpu"])
-        select_mask = torch.tensor(verify_info["accepted_index_cpu"], dtype=torch.bool, device="cpu")
-        self._post_handle(
-            run_reqs=verify_ok_reqs,
-            next_token_ids=verify_info["next_token_ids_cpu"][select_mask],
-            next_token_logprobs=verify_info["next_token_logprobs_cpu"][select_mask],
-            run_reqs_update_packs=update_packs,
-            extra_post_req_handle_func=self.extra_post_req_handle_func,
-        )
-        if len(need_free_mem_indexes) > 0:
-            g_infer_state_lock.acquire()
-            g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
-            g_infer_state_lock.release()
-
-        # 第四阶段
-        event_pack.notify_pre_post_handle()
-        return
-
     def _draft_decode_eagle(
         self,
-        model_input: ModelInput,
-        draft_model_input: ModelInput,
-        main_model_output: ModelOutput,
+        main_model_input: ModelInput,
+        verify_info: Dict[str, Any],
         eagle_mem_indexes_cpu: torch.Tensor,
-        next_token_ids: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
+        draft_model_input: ModelInput,
     ):
+
+        main_model_output = verify_info["main_model_output"]
+        next_token_ids = verify_info["next_token_ids"]
+        mtp_accept_len = verify_info["mtp_accept_len"]
+
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids[mtp_accept_len - 1])
 
         # 第一步draft，填充接受的token的kv。
-        model_input.input_ids = next_token_ids
-        model_input.deepseekv3_mtp_draft_input_hiddens = main_model_output.deepseekv3_mtp_main_output_hiddens
-        draft_model_output = self.draft_models[0].forward(model_input)
+        main_model_input.input_ids = next_token_ids
+        main_model_input.deepseekv3_mtp_draft_input_hiddens = main_model_output.deepseekv3_mtp_main_output_hiddens
+        draft_model_output = self.draft_models[0].forward(main_model_input)
         draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
         all_next_token_ids.append(draft_next_token_ids[mtp_accept_len - 1])
 
@@ -505,7 +442,7 @@ class ChunkedPrefillBackend(ModeBackend):
         draft_model_input.input_ids = draft_next_token_ids[mtp_accept_len - 1]
         draft_model_input.b_seq_len = draft_model_input.b_seq_len.cuda(non_blocking=True)
         draft_model_input.b_seq_len += mtp_accept_len
-        draft_model_input.max_len_in_batch += self.mtp_step
+        draft_model_input.max_len_in_batch += self.mtp_step * 2
         draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens[
             mtp_accept_len - 1
         ]
