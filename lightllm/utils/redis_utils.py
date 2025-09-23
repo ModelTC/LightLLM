@@ -9,21 +9,35 @@ def start_redis_service(args):
     if not hasattr(args, "start_redis") or not args.start_redis:
         return None
 
+    config_server_host = args.config_server_host
+    redis_port = args.redis_port
     try:
-        redis_port = args.redis_port
+        subprocess.run(
+            ["redis-cli", "-h", config_server_host, "-p", str(redis_port), "FLUSHALL", "ASYNC"], check=False, timeout=2
+        )
+        subprocess.run(
+            ["redis-cli", "-h", config_server_host, "-p", str(redis_port), "SHUTDOWN", "NOSAVE"], check=False, timeout=2
+        )
+    except Exception:
+        pass
 
+    try:
         redis_command = [
             "redis-server",
             "--port",
             str(redis_port),
             "--bind",
-            f"{args.config_server_host}",
+            f"{config_server_host}",
             "--daemonize",
             "no",
             "--logfile",
             "-",
             "--loglevel",
             "notice",
+            "--save",
+            '""',  # 不触发 RDB 快照
+            "--appendonly",
+            "no",  # 关闭 AOF
         ]
 
         logger.info(f"Starting Redis service on port {redis_port}")
