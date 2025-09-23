@@ -270,6 +270,9 @@ class NIXLChunckedTransTask:
     decode_num_pages: Optional[int]
     decode_page_reg_desc: Optional[bytes]
 
+    first_gen_token_id: Optional[int]
+    first_gen_token_logprob: Optional[float]
+
     # transfer params
     nixl_src_page_index: Optional[int] = None
     nixl_dst_page_index: Optional[int] = None
@@ -334,6 +337,8 @@ class NIXLChunckedTransTask:
             end_kv_index=self.end_kv_index,
             has_error=self.error_info is not None,
             error_info=self.error_info,
+            first_gen_token_id=self.first_gen_token_id,
+            first_gen_token_logprob=self.first_gen_token_logprob,
         )
         return ret
 
@@ -361,6 +366,8 @@ class NIXLChunckedTransTaskRet:
     end_kv_index: int
     has_error: bool
     error_info: str = None
+    first_gen_token_id: Optional[int] = None
+    first_gen_token_logprob: Optional[float] = None
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"

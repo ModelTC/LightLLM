@@ -248,6 +248,9 @@ class _DecodeTransModule:
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
 
+                                local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
+                                local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
+
                                 self.read_peer_kv_queue.put(local_trans_task)
 
             self._check_tasks_time_out()

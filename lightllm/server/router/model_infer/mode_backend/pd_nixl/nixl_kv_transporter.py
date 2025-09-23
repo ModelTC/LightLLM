@@ -156,6 +156,8 @@ class NixlKVTransporter:
             end_kv_index=trans_task.end_kv_index,
             has_error=False,
             error_info=None,
+            first_gen_token_id=None,
+            first_gen_token_logprob=None,
         )
         handle = self.nixl_agent.make_prepped_xfer(
             "READ",

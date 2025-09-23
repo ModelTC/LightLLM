@@ -363,6 +363,26 @@ class ModeBackend:
                         req.nixl_pd_task_failed_num += 1
                     else:
                         req.nixl_pd_task_sunccess_num += 1
+                        # nixl decode 节点需要预填充 prefill 节点发送过来的产生的首token信息，以使
+                        # 推理过程可以继续。
+                        if self.is_nixl_decode_mode:
+                            if obj.first_gen_token_id is not None:
+                                assert req.cur_output_len == 0
+                                req.cur_output_len += 1
+                                req_to_next_token_ids = (
+                                    self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
+                                )
+                                # to do 这个地方是否需要加流同步
+                                req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
+                                torch.cuda.current_stream().synchronize()
+                                InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
+                                    next_token_id=obj.first_gen_token_id,
+                                    next_token_logprob=obj.first_gen_token_logprob,
+                                    eos_ids=self.eos_id,
+                                    extra_post_req_handle_func=None,
+                                    is_master_in_dp=self.is_master_in_dp,
+                                    nixl_prefill_chuncked_handle_func=None,
+                                )
         return
 
     # 一些可以复用的通用功能函数

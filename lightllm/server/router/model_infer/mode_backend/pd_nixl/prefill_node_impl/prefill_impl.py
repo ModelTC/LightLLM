@@ -1,6 +1,6 @@
 import torch.multiprocessing as mp
 import random
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask
 from lightllm.utils.log_utils import init_logger
@@ -69,43 +69,37 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         if req_obj.req_id < 0:
             return
 
-        # 传输的 kv 要少一个，不然decode 无法有下一个输入推理出下一个token
-        input_len = req_obj.shm_req.input_len - 1
+        assert req_obj.cur_kv_len <= req_obj.shm_req.input_len
+        input_len = req_obj.shm_req.input_len
         page_size = self.args.nixl_pd_kv_page_size
-        if req_obj.cur_kv_len >= input_len:
-            # finished prefill
-            cur_kv_len = input_len
-            while req_obj.nixl_trans_kv_start_index < cur_kv_len:
-                cur_page_size = min(page_size, cur_kv_len - req_obj.nixl_trans_kv_start_index)
-                # 生成页面传输任务， 放入kv move manager 的处理队列中
-                self._create_nixl_trans_task(
+        prefill_finished = req_obj.cur_kv_len == input_len
+        trans_task_list: List[NIXLChunckedTransTask] = []
+        while req_obj.nixl_trans_kv_start_index < req_obj.cur_kv_len:
+            cur_page_size = min(page_size, req_obj.cur_kv_len - req_obj.nixl_trans_kv_start_index)
+            # 生成页面传输任务， 放入kv move manager 的处理队列中
+            if cur_page_size == page_size or prefill_finished:
+                trans_task = self._create_nixl_trans_task(
                     req_obj=req_obj,
                     kv_start_index=req_obj.nixl_trans_kv_start_index,
                     kv_end_index=req_obj.nixl_trans_kv_start_index + cur_page_size,
                 )
-                # update
                 req_obj.nixl_trans_kv_start_index += cur_page_size
-            return
+                trans_task_list.append(trans_task)
+            else:
+                break
 
-        wait_trans_kv_len = req_obj.cur_kv_len - req_obj.nixl_trans_kv_start_index
-        if wait_trans_kv_len < page_size:
-            return
+        if prefill_finished and len(trans_task_list) != 0 and output_len == 1:
+            trans_task_list[-1].first_gen_token_id = next_token_id
+            trans_task_list[-1].first_gen_token_logprob = next_token_prob
 
-        cur_kv_len = req_obj.cur_kv_len
-        while req_obj.nixl_trans_kv_start_index + page_size <= cur_kv_len:
-            cur_page_size = page_size
-            # 生成页面传输任务， 放入kv move manager 的处理队列中
-            self._create_nixl_trans_task(
-                req_obj=req_obj,
-                kv_start_index=req_obj.nixl_trans_kv_start_index,
-                kv_end_index=req_obj.nixl_trans_kv_start_index + cur_page_size,
-            )
-
-            # update
-            req_obj.nixl_trans_kv_start_index += cur_page_size
+        if self.is_master_in_dp:
+            for trans_task in trans_task_list:
+                self.info_queue.put(trans_task)
         return
 
-    def _create_nixl_trans_task(self, req_obj: InferReq, kv_start_index: int, kv_end_index: int):
+    def _create_nixl_trans_task(
+        self, req_obj: InferReq, kv_start_index: int, kv_end_index: int
+    ) -> NIXLChunckedTransTask:
         # 确定传输设备
         if req_obj.nixl_trans_device_id == -1:
             req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
@@ -136,8 +130,8 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
             decode_agent_metadata=nixl_decode_node_info.agent_metadata,
             decode_num_pages=nixl_decode_node_info.num_pages,
             decode_page_reg_desc=nixl_decode_node_info.page_reg_desc,
+            first_gen_token_id=None,
+            first_gen_token_logprob=None,
         )
         req_obj.nixl_pd_task_num += 1
-
-        if self.is_master_in_dp:
-            self.info_queue.put(trans_task)
+        return trans_task

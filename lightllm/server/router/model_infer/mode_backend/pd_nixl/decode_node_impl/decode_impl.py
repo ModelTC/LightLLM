@@ -101,7 +101,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                 # 强制停止
                 if not req_obj.finish_status.is_finished():
                     req_obj.cur_output_len += 1
-                    req_obj.set_next_gen_token_id(0, 0.0, 1)
+                    req_obj.set_next_gen_token_id(next_token_id=0, logprob=0.0, output_len=req_obj.cur_output_len)
                     req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)
 
                     if self.is_master_in_dp:
@@ -138,40 +138,42 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         """
         decode node 生成所有的传输任务对象。
         """
-        # 传输的 kv 要少一个，不然decode 无法有下一个输入推理出下一个token
-        input_len = req_obj.shm_req.input_len - 1
-        page_size = self.args.nixl_pd_kv_page_size
-        req_obj.nixl_trans_kv_start_index = req_obj.cur_kv_len
-
-        need_mem_size = input_len - req_obj.cur_kv_len
         group = NIXLChunckedTransTaskGroup()
+        input_len = req_obj.shm_req.input_len
+        # 当 decode 节点不能匹配足够的kv的时候，才进行真实的 kv 传输。
+        if input_len - req_obj.cur_kv_len > 1:
+            page_size = self.args.nixl_pd_kv_page_size
+            req_obj.nixl_trans_kv_start_index = req_obj.cur_kv_len
+            need_mem_size = input_len - req_obj.cur_kv_len
 
-        if need_mem_size > 0:
-            if self.radix_cache is not None:
-                self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
+            if need_mem_size > 0:
+                if self.radix_cache is not None:
+                    self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
 
-            mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
-            self.model.req_manager.req_to_token_indexs[
-                req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + need_mem_size)
-            ] = mem_indexes
+                mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
+                self.model.req_manager.req_to_token_indexs[
+                    req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + need_mem_size)
+                ] = mem_indexes
 
-            while req_obj.nixl_trans_kv_start_index < input_len:
-                cur_page_size = min(page_size, input_len - req_obj.nixl_trans_kv_start_index)
-                # 生成页面传输任务， 放入kv move manager 的处理队列中
-                start_index = req_obj.nixl_trans_kv_start_index
-                end_index = req_obj.nixl_trans_kv_start_index + cur_page_size
-                page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
-                self._create_nixl_trans_task(
-                    req_obj=req_obj,
-                    mem_indexes=page_mem_indexes.tolist(),
-                    kv_start_index=start_index,
-                    kv_end_index=end_index,
-                    group=group,
-                )
-                # update
-                req_obj.nixl_trans_kv_start_index += cur_page_size
+                while req_obj.nixl_trans_kv_start_index < input_len:
+                    cur_page_size = min(page_size, input_len - req_obj.nixl_trans_kv_start_index)
+                    # 生成页面传输任务， 放入kv move manager 的处理队列中
+                    start_index = req_obj.nixl_trans_kv_start_index
+                    end_index = req_obj.nixl_trans_kv_start_index + cur_page_size
+                    page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
+                    self._create_nixl_trans_task(
+                        req_obj=req_obj,
+                        mem_indexes=page_mem_indexes.tolist(),
+                        kv_start_index=start_index,
+                        kv_end_index=end_index,
+                        group=group,
+                    )
+                    # update
+                    req_obj.nixl_trans_kv_start_index += cur_page_size
 
-            req_obj.cur_kv_len += len(mem_indexes)
+                req_obj.cur_kv_len += len(mem_indexes)
+        else:
+            assert req_obj.cur_kv_len == input_len - 1
 
         if not group.task_list:
             # 需要上报一个包含 0 长度的trans task，触发 kv move manager 给 pd master 上报
@@ -220,6 +222,8 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             decode_agent_metadata=None,
             decode_num_pages=None,
             decode_page_reg_desc=None,
+            first_gen_token_id=None,
+            first_gen_token_logprob=None,
         )
         group.task_list.append(trans_task)
         req_obj.nixl_pd_task_num += 1

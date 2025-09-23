@@ -97,8 +97,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 logger.info(f"Sent registration JSON: {regist_json}")
 
                 # 转发任务
-                if manager.pd_mode != NodeRole.NP:  # nixl prefill don't need up token to master
-                    forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
+                forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
@@ -217,6 +216,7 @@ async def _pd_process_generate(
             # p d 模式下，将 token 数据放入到转发队列中, 请求id 小于0的请求是health探测请求，不用转发。
             is_health_check_req = sub_req_id < 0
             if not is_health_check_req:
+                metadata["node_mode"] = manager.args.run_mode
                 await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except NixlPrefillNodeStopGenToken as e:
         logger.info(f"nixl prefill node stop gen token for group_request_id {e.group_request_id}")

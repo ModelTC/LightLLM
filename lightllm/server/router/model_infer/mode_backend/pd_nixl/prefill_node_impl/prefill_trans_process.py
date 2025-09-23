@@ -256,6 +256,8 @@ class _PrefillTransModule:
                 self.page_index_queue.put(trans_task.nixl_src_page_index)
 
             ret = trans_task.createRetObj()
+            ret.first_gen_token_id = None
+            ret.first_gen_token_logprob = None
             self.task_out_queue.put(ret)
             logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
 
