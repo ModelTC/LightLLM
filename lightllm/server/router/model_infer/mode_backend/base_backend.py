@@ -28,9 +28,10 @@ from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in
 from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
-from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
+from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 
 
 class ModeBackend:
@@ -54,6 +55,9 @@ class ModeBackend:
         # 控制 _get_classed_reqs 分类的参数变量，不同的 backend 具有可能需要不同的分类运行条件。
         self.classed_req_no_decode = False
         self.classed_req_strict_prefill = True
+
+        # nixl pd mode callback func
+        self.nixl_prefill_chuncked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None
         pass
 
     def init_model(self, kvargs):
@@ -79,6 +83,8 @@ class ModeBackend:
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
         self.disable_cudagraph = self.args.disable_cudagraph
         self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
+        self.is_nixl_pd_mode = self.run_mode in ["nixl_prefill", "nixl_decode"]
+        self.is_nixl_decode_mode = self.run_mode == "nixl_decode"
 
         self.logger = init_logger(__name__)
 
@@ -170,11 +176,11 @@ class ModeBackend:
                 [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
             )
 
-        # 用于协同读取 ShmReqsIOBuffer 中的请求信息的通信tensor和通信组对象。
+        # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
-        # 用于在多节点tp模式下协同读取 ShmReqsIOBuffer 中的请求信息的通信tensor和通信组对象。
+        # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         if self.is_multinode_tp:
             self.multinode_tp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda")
             self.multinode_tp_all_gather_tensor = torch.tensor(
@@ -185,7 +191,9 @@ class ModeBackend:
             )
 
         self.init_custom()
-        self.shm_reqs_io_buffer = ShmReqsIOBuffer()
+        self.shm_reqs_io_buffer = ShmObjsIOBuffer()
+        # 只会在 nixl pd 模式下才会使用，用于上传分块传输任务是否成功。
+        self.shm_nixl_trans_io_buffer = ShmObjsIOBuffer(tail_str="nixl")
 
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
@@ -287,6 +295,20 @@ class ModeBackend:
         new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
+
+        # nixl pd mode 从 shm_nixl_trans_io_buffer 读取分块传输的完成进度。
+        if self.is_nixl_pd_mode:
+            if self.is_master_in_node:
+                if self.shm_nixl_trans_io_buffer.is_ready():
+                    self.node_broadcast_tensor.fill_(1)
+                else:
+                    self.node_broadcast_tensor.fill_(0)
+
+            src_rank_id = self.args.node_rank * self.node_world_size
+            dist.broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
+            new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+            if new_buffer_is_ready:
+                self._read_nixl_trans_io_buffer_and_update_req_status()
         return
 
     def _try_read_new_reqs_multinode_tp(self):
@@ -308,26 +330,59 @@ class ModeBackend:
 
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
+
+        assert self.is_nixl_pd_mode is False
         return
 
     def _read_reqs_buffer_and_init_reqs(self):
         cmds: List = self.shm_reqs_io_buffer.read_obj()
         self.shm_reqs_io_buffer.sub_state()
         if cmds:
-            if isinstance(cmds[0], AbortedReqCmd):
-                for obj in cmds:
-                    obj: AbortedReqCmd = obj
+            init_reqs = []
+            for obj in cmds:
+                if isinstance(obj, tuple):
+                    init_reqs.append(obj)
+                elif isinstance(obj, (AbortedReqCmd, StopStrMatchedReqCmd)):
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
-            elif isinstance(cmds[0], StopStrMatchedReqCmd):
-                for obj in cmds:
-                    obj: StopStrMatchedReqCmd = obj
-                    if obj.req_id in g_infer_context.requests_mapping:
-                        req: InferReq = g_infer_context.requests_mapping[obj.req_id]
-                        req.infer_aborted = True
-            else:
-                self._init_reqs(reqs=cmds)
+                else:
+                    assert False, f"error type {type(obj)}"
+            if init_reqs:
+                self._init_reqs(reqs=init_reqs)
+        return
+
+    def _read_nixl_trans_io_buffer_and_update_req_status(self):
+        cmds: List[NIXLChunckedTransTaskRet] = self.shm_nixl_trans_io_buffer.read_obj()
+        self.shm_nixl_trans_io_buffer.sub_state()
+        if cmds:
+            for obj in cmds:
+                if obj.request_id in g_infer_context.requests_mapping:
+                    req: InferReq = g_infer_context.requests_mapping[obj.request_id]
+                    if obj.has_error:
+                        req.nixl_pd_task_failed_num += 1
+                    else:
+                        req.nixl_pd_task_sunccess_num += 1
+                        # nixl decode 节点需要预填充 prefill 节点发送过来的产生的首token信息，以使
+                        # 推理过程可以继续。
+                        if self.is_nixl_decode_mode:
+                            if obj.first_gen_token_id is not None:
+                                assert req.cur_output_len == 0
+                                req.cur_output_len += 1
+                                req_to_next_token_ids = (
+                                    self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
+                                )
+                                # to do 这个地方是否需要加流同步
+                                req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
+                                torch.cuda.current_stream().synchronize()
+                                InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
+                                    next_token_id=obj.first_gen_token_id,
+                                    next_token_logprob=obj.first_gen_token_logprob,
+                                    eos_ids=self.eos_id,
+                                    extra_post_req_handle_func=None,
+                                    is_master_in_dp=self.is_master_in_dp,
+                                    nixl_prefill_chuncked_handle_func=None,
+                                )
         return
 
     # 一些可以复用的通用功能函数
@@ -348,6 +403,14 @@ class ModeBackend:
         g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
         return req_ids
+
+    def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
+        """
+        将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
+        主要用于在 nixl pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
+        传输没有完成的请求。
+        """
+        return [g_infer_context.requests_mapping[request_id] for request_id in req_ids]
 
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(
@@ -382,6 +445,7 @@ class ModeBackend:
         if len(req_ids) == 0:
             return [], []
 
+        ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
 
         wait_pause_reqs = []
@@ -403,8 +467,7 @@ class ModeBackend:
         g_infer_state_lock.acquire()
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
-        for request_id in req_ids:
-            req_obj: InferReq = g_infer_context.requests_mapping[request_id]
+        for req_obj in ready_reqs:
 
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
@@ -512,6 +575,7 @@ class ModeBackend:
         next_token_logprobs: List[float],
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
+        nixl_prefill_chuncked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
     ):
         """
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
@@ -528,6 +592,7 @@ class ModeBackend:
                 eos_ids=self.eos_id,
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 is_master_in_dp=self.is_master_in_dp,
+                nixl_prefill_chuncked_handle_func=nixl_prefill_chuncked_handle_func,
             )
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(

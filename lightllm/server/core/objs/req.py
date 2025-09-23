@@ -35,6 +35,9 @@ class FinishStatus(ctypes.Structure):
     def is_stopped(self):
         return self.status == self.FINISHED_STOP
 
+    def is_finished_length(self):
+        return self.status == self.FINISHED_LENGTH
+
     def get_finish_reason(self):
         if self.status == self.FINISHED_STOP:
             return "stop"
@@ -254,6 +257,15 @@ class Req(ctypes.Structure):
         metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
         self._cache_prompt_metadata = metadata
         return metadata
+
+    def is_infer_decode(self) -> bool:
+        """
+        judge the req is in decode stage
+        """
+        if self.shm_cur_kv_len >= self.input_len:
+            return True
+        else:
+            return False
 
 
 # 由于目前加入了很多异步调度的方法，为了缓解异步调度带来的很多
