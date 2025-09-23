@@ -10,17 +10,6 @@ class NIXLPDQueue(BaseQueue):
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
 
-    def _init_cache_list(self, current_batch: Batch, is_busy):
-        if current_batch is not None:
-            self.cache_len_list = [
-                req.get_tuple_tokens(is_busy, self.router_max_new_token_len)
-                for req in current_batch.reqs
-                if req.sample_params.suggested_dp_index == self.dp_index
-            ]
-        else:
-            self.cache_len_list = []
-        return
-
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
         estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
