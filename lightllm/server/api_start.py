@@ -71,7 +71,7 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
         return
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]

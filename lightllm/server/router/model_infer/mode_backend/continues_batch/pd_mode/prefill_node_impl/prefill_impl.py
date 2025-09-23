@@ -107,6 +107,7 @@ class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
                         move_kv_len=None,
                         prefill_dp_index=self.dp_rank_in_node,
                         decode_dp_index=None,
+                        pd_master_node_id=req.shm_req.sample_params.pd_master_node_id.get(),
                         mark_start_time=time.time(),
                     )
                     g_kv_move_task_cache[task.group_request_id] = (task, share_node)

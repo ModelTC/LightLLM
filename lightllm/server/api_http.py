@@ -49,6 +49,7 @@ from lightllm.utils.error_utils import ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
+from lightllm.server.core.objs.start_args_type import StartArgs
 
 from .api_openai import chat_completions_impl, completions_impl
 from .api_models import (
@@ -66,7 +67,7 @@ logger = init_logger(__name__)
 class G_Objs:
     app: FastAPI = None
     metric_client: MetricClient = None
-    args: object = None
+    args: StartArgs = None
     g_generate_func: Callable = None
     g_generate_stream_func: Callable = None
     httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster] = None
@@ -182,6 +183,11 @@ async def token_load(request: Request):
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+
     try:
         return await g_objs.g_generate_func(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
@@ -194,6 +200,11 @@ async def generate(request: Request) -> Response:
 
 @app.post("/generate_stream")
 async def generate_stream(request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+
     try:
         return await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
@@ -206,6 +217,11 @@ async def generate_stream(request: Request) -> Response:
 
 @app.post("/get_score")
 async def get_score(request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+
     try:
         return await lightllm_get_score(request, g_objs.httpserver_manager)
     except Exception as e:
@@ -214,6 +230,11 @@ async def get_score(request: Request) -> Response:
 
 @app.post("/")
 async def compat_generate(request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+
     request_dict = await request.json()
     stream = request_dict.pop("stream", False)
     if stream:
@@ -224,12 +245,22 @@ async def compat_generate(request: Request) -> Response:
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+
     resp = await chat_completions_impl(request, raw_request)
     return resp
 
 
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def completions(request: CompletionRequest, raw_request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+
     resp = await completions_impl(request, raw_request)
     return resp
 
@@ -303,11 +334,9 @@ async def kv_move_status(websocket: WebSocket):
     try:
         while True:
             # 等待接收消息，设置超时为10秒
-            data = await websocket.receive_text()
-            json_data = json.loads(data)
-            from .pd_io_struct import UpKVStatus
-
-            upkv_status = UpKVStatus(**json_data)
+            data = await websocket.receive_bytes()
+            upkv_status = pickle.loads(data)
+            logger.info(f"recieved upkv_status {upkv_status} from {(client_ip, client_port)}")
             await g_objs.httpserver_manager.update_req_status(upkv_status)
     except (WebSocketDisconnect, Exception, RuntimeError) as e:
         logger.error(f"kv_move_status client {(client_ip, client_port)} has error {str(e)}")
