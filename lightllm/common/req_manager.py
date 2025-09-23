@@ -105,7 +105,6 @@ class ReqSamplingParamsManager:
         # mode ["cpu_counter", "pin_mem_counter", "gpu_counter"]
         self.penalty_counter_mode = get_env_start_args().penalty_counter_mode
         self.vocab_size = get_vocab_size(get_env_start_args().model_dir)
-        self.max_request_num = max_request_num
         self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
