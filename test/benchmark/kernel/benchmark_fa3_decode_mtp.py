@@ -184,7 +184,7 @@ if __name__ == "__main__":
     max_seqlen = cache_seqlens.max().item()
     max_seqlen_pad = math.ceil(max_seqlen / 256) * 256  # ?为什么对齐256
 
-    total_flops = s_q * (total_seqlens * 2 - batch_mtp) * h_q * (d + dv) * 2
+    total_flops = s_q * total_seqlens * h_q * (d + dv) * 2 * mtp_size
 
     q = torch.randn(b, s_q, h_q, d, dtype=dtype, device=device)
     block_table = torch.arange(batch_mtp * max_seqlen_pad, dtype=torch.int32, device=device).view(
