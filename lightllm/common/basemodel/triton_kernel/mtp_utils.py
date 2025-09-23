@@ -195,82 +195,6 @@ def gather_deepseekv3_hidden_state(
     return req_to_deepseekv3_hidden_state[b_req_idx]
 
 
-@triton.jit
-def _fwd_kernel_scatter_deepseekv3_hidden_state_and_next_token_ids(
-    req_to_deepseekv3_hidden_state,
-    req_to_deepseekv3_hidden_state_stride,
-    req_to_next_token_ids,
-    req_to_next_token_ids_stride,
-    next_token_ids,
-    deepseekv3_hidden_state,
-    deepseekv3_hidden_state_stride,
-    b_req_idx,
-    b_accept_len,
-    b_req_mtp_start_loc,
-    hidden_size: tl.constexpr,
-    NEED_MASK: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    cur_req = tl.program_id(0)
-    cur_req_idx = tl.load(b_req_idx + cur_req)
-    cur_accept_len = tl.load(b_accept_len + cur_req)
-    cur_req_mtp_start_loc = tl.load(b_req_mtp_start_loc + cur_req)
-    offset = tl.arange(0, BLOCK_SIZE)
-    if NEED_MASK:
-        mask = offset < hidden_size
-        other = 0
-    else:
-        mask = None
-        other = None
-    cur_deepseekv3_hidden_state = tl.load(
-        deepseekv3_hidden_state
-        + (cur_req_mtp_start_loc + cur_accept_len - 1) * deepseekv3_hidden_state_stride
-        + offset,
-        mask=mask,
-        other=other,
-    )
-    tl.store(
-        req_to_deepseekv3_hidden_state + cur_req_idx * req_to_deepseekv3_hidden_state_stride + offset,
-        cur_deepseekv3_hidden_state,
-        mask=mask,
-    )
-    cur_next_token_ids = tl.load(next_token_ids + (cur_req_mtp_start_loc + cur_accept_len - 1))
-    tl.store(req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride, cur_next_token_ids)
-    return
-
-
-def scatter_deepseekv3_hidden_state_and_next_token_ids(
-    req_to_deepseekv3_hidden_state: torch.Tensor,
-    req_to_next_token_ids: torch.Tensor,
-    next_token_ids: torch.Tensor,
-    deepseekv3_hidden_state: torch.Tensor,
-    b_req_idx: torch.Tensor,
-    b_accept_len: torch.Tensor,
-    b_req_mtp_start_loc: torch.Tensor,
-):
-    hidden_size = deepseekv3_hidden_state.shape[1]
-    BLOCK_SIZE = triton.next_power_of_2(hidden_size)
-    NEED_MASK = hidden_size != BLOCK_SIZE
-    batch_size = b_accept_len.shape[0]
-    grid = (batch_size,)
-    _fwd_kernel_scatter_deepseekv3_hidden_state_and_next_token_ids[grid](
-        req_to_deepseekv3_hidden_state=req_to_deepseekv3_hidden_state,
-        req_to_deepseekv3_hidden_state_stride=req_to_deepseekv3_hidden_state.stride(0),
-        req_to_next_token_ids=req_to_next_token_ids,
-        req_to_next_token_ids_stride=req_to_next_token_ids.stride(0),
-        next_token_ids=next_token_ids,
-        deepseekv3_hidden_state=deepseekv3_hidden_state,
-        deepseekv3_hidden_state_stride=deepseekv3_hidden_state.stride(0),
-        b_req_idx=b_req_idx,
-        b_accept_len=b_accept_len,
-        b_req_mtp_start_loc=b_req_mtp_start_loc,
-        hidden_size=hidden_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        NEED_MASK=NEED_MASK,
-    )
-    return
-
-
 def test_mtp_verify():
     req_to_next_token_ids = torch.tensor(
         [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int32, device="cuda"
@@ -299,34 +223,6 @@ def test_gen_b_req_mtp_start_loc():
     print(b_req_mtp_start_loc, gt_output)
 
 
-def test_scatter_deepseekv3_hidden_state():
-    req_to_deepseekv3_hidden_state = torch.tensor(
-        [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int32, device="cuda"
-    )
-    req_to_next_token_ids = torch.tensor(
-        [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int32, device="cuda"
-    )
-    next_token_ids = torch.tensor([7, 8, 9, 10, 11], dtype=torch.int32, device="cuda")
-    b_req_idx = torch.tensor([0, 1, 2], dtype=torch.int32, device="cuda")
-    deepseekv3_hidden_state = torch.tensor(
-        [[1, 3, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int32, device="cuda"
-    )
-    b_accept_len = torch.tensor([1, 2, 2], dtype=torch.int32, device="cuda")
-    b_req_mtp_start_loc = torch.tensor([0, 1, 3], dtype=torch.int32, device="cuda")
-    scatter_deepseekv3_hidden_state_and_next_token_ids(
-        req_to_deepseekv3_hidden_state,
-        req_to_next_token_ids,
-        next_token_ids,
-        deepseekv3_hidden_state,
-        b_req_idx,
-        b_accept_len,
-        b_req_mtp_start_loc,
-    )
-    print(req_to_deepseekv3_hidden_state)
-    print(req_to_next_token_ids)
-
-
 if __name__ == "__main__":
     test_mtp_verify()
-    # test_scatter_deepseekv3_hidden_state()
     # test_gen_b_req_mtp_start_loc()
