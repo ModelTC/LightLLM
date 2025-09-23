@@ -95,9 +95,4 @@ class NIXLPDQueue(BaseQueue):
 
         estimated_peak_token_num = self._caclu_batch_estimated_peak_token_num(current_batch)
 
-        with g_router_lock.obj:
-            return (
-                estimated_peak_token_num,
-                (estimated_peak_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
-                / self.max_total_tokens,
-            )
+        return (estimated_peak_token_num, estimated_peak_token_num / self.max_total_tokens)
