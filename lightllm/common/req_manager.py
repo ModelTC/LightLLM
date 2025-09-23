@@ -164,13 +164,6 @@ class ReqSamplingParamsManager:
 
         return
 
-    def init_deepseekv3_hidden_state(self, hidden_size: int, data_type: torch.dtype):
-        self.req_to_deepseekv3_hidden_state = torch.zeros(
-            (self.max_request_num + 1, hidden_size),
-            dtype=data_type,
-            device="cuda",
-        )
-
     def update_reqs_out_token_counter_gpu(
         self, b_req_idx: torch.Tensor, next_token_ids: torch.Tensor, mask: torch.Tensor = None
     ):
