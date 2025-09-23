@@ -180,21 +180,6 @@ def gen_b_req_mtp_start_loc(b_mtp_index: torch.Tensor, num_reqs: int):
     return b_req_mtp_start_loc
 
 
-def gather_deepseekv3_hidden_state(
-    req_to_deepseekv3_hidden_state: torch.Tensor,
-    b_req_idx: torch.Tensor,
-):
-    """
-    This function is used to gather the deepseekv3 hidden state.
-    Args:
-        req_to_deepseekv3_hidden_state: (max_req_num, hidden_size)
-        b_req_idx: (batch_size,)
-    Returns:
-        deepseekv3_hidden_state: (batch_size, hidden_size)
-    """
-    return req_to_deepseekv3_hidden_state[b_req_idx]
-
-
 def test_mtp_verify():
     req_to_next_token_ids = torch.tensor(
         [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int32, device="cuda"
