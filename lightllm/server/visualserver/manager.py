@@ -113,6 +113,7 @@ class VisualManager:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
                     is_aborted = shm_req.is_aborted
+                    disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
                     self.shm_req_manager.put_back_req_obj(shm_req)
                     if is_aborted:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
@@ -124,7 +125,11 @@ class VisualManager:
                     multimodal_params = group_req_indexes.multimodal_params
 
                     img_uuids = [img.uuid for img in multimodal_params.images]
-                    ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
+                    # disable prompt cache通常用来测试，需要也去掉image cache的影响
+                    if disable_prompt_cache:
+                        ready_image = [False] * len(img_uuids)
+                    else:
+                        ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
 
                     for img, ready in zip(multimodal_params.images, ready_image):
                         if not ready:

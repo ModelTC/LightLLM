@@ -117,6 +117,8 @@ def _get_recommended_shm_size_gb(args, max_image_resolution=(3940, 2160), dtype_
         )
         fake_image_item.image_w = fake_image_item._data[0]
         fake_image_item.image_h = fake_image_item._data[1]
+        # for internvl model shm check
+        fake_image_item.extra_params["image_patch_max_num"] = 12
         max_image_tokens = tokenizer.get_image_token_length(fake_image_item)
 
         # 估算图片 token 所需的资源
