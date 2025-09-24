@@ -28,7 +28,7 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
         input: torch.Tensor,
         infer_state: LlamaInferStateInfo,
         layer_weight: Qwen3TransformerLayerWeight,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
         cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
