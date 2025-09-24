@@ -17,11 +17,11 @@ class ShmArray:
         self.dtype = dtype
 
     def create_shm(self):
-        self.shm = create_or_link_shm(self.name, self.dest_size)
+        self.shm = create_or_link_shm(self.name, self.dest_size, force_mode="create")
         self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
 
     def link_shm(self):
-        self.shm = create_or_link_shm(self.name, self.dest_size)
+        self.shm = create_or_link_shm(self.name, self.dest_size, force_mode="link")
         assert self.shm.size == self.dest_size
         self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
         return
