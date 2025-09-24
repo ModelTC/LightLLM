@@ -27,6 +27,7 @@ from lightllm.models.internvl.model import (
     InternVLDeepSeek2TpPartModel,
 )
 from lightllm.models.internvl.model import InternVLInternlm2TpPartModel
+from lightllm.models.interns1.model import InternS1Qwen3MOETpPartModel
 from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel
 from lightllm.models.qwen2_reward.model import Qwen2RewardTpPartModel
 from lightllm.models.gemma3.model import Gemma3TpPartModel
