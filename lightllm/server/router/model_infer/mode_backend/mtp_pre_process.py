@@ -64,4 +64,4 @@ def prepare_eagle_decode_inputs(req_objs: List[InferReq], mtp_step: int) -> Tupl
         is_prefill=False,
     )
     # eagle 第 1 - mtp_step 的 decode 使用的mem_indexes，draft 完以后，立刻释放
-    return model_input, run_reqs, mem_indexes
+    return model_input, mem_indexes

@@ -31,6 +31,8 @@ from lightllm.distributed import dist_group_manager
 from lightllm.server.router.shm_reqs_io_buffer import ShmReqsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 
 
 class ModeBackend:
@@ -573,6 +575,44 @@ class ModeBackend:
         probs = torch.softmax(logits, dim=-1)
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
         return draft_next_token_ids_gpu
+
+    def _sample_and_scatter_token(
+        self,
+        logits: torch.Tensor,
+        b_req_idx: torch.Tensor,
+        b_mtp_index: torch.Tensor,
+        run_reqs: List[InferReq],
+        is_prefill: bool,
+        b_prefill_has_output_cpu: torch.Tensor = None,
+        mask_func: Optional[Callable] = None,
+    ):
+
+        if mask_func is not None:
+            mask_func(run_reqs, logits)
+
+        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+        b_has_out = None
+        if is_prefill:
+            b_has_out = g_pin_mem_manager.gen_from_list(
+                key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
+            ).cuda(non_blocking=True)
+
+        scatter_token(
+            next_token_ids=next_token_ids,
+            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
+            b_has_out=b_has_out,
+        )
+        g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+            b_req_idx=b_req_idx,
+            next_token_ids=next_token_ids,
+            mask=b_has_out,
+        )
+        next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
+            next_token_ids, next_token_logprobs
+        )
+        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
