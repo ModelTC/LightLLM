@@ -6,7 +6,10 @@ from typing import List, Optional, Tuple
 
 @dataclass
 class StartArgs:
-    run_mode: str = field(default="normal", metadata={"choices": ["normal", "prefill", "decode", "pd_master"]})
+    run_mode: str = field(
+        default="normal",
+        metadata={"choices": ["normal", "prefill", "decode", "pd_master", "nixl_prefill", "nixl_decode"]},
+    )
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
     zmq_mode: str = field(
@@ -18,6 +21,7 @@ class StartArgs:
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
     pd_decode_rpyc_port: int = field(default=42000)
+    select_p_d_node_strategy: str = field(default=None)
     model_name: str = field(default="default_model_name")
     model_dir: Optional[str] = field(default=None)
     tokenizer_mode: str = field(default="slow")
@@ -53,6 +57,7 @@ class StartArgs:
     output_constraint_mode: str = field(default="none", metadata={"choices": ["none", "simple", "xgrammar"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
+    enable_multimodal_audio: bool = field(default=False)
     enable_tpsp_mix_mode: bool = field(default=False)
     enable_decode_microbatch_overlap: bool = field(default=False)
     enable_prefill_microbatch_overlap: bool = field(default=False)
@@ -96,3 +101,6 @@ class StartArgs:
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
+    nixl_pd_kv_page_num: int = field(default=16)
+    nixl_pd_kv_page_size: int = field(default=1024)
+    pd_node_id: int = field(default=-1)
