@@ -40,13 +40,11 @@ def _force_create_shm(name, expected_size):
         existing_shm = shared_memory.SharedMemory(name=name)
         existing_shm.close()
         existing_shm.unlink()
-        logger.info(f"Removed existing shared memory and force create: {name} size: {expected_size}")
-    except Exception as e:
-        logger.info(f"_force_create_shm err {str(e)}")
+    except:
+        pass
 
     # 创建新的共享内存
     shm = shared_memory.SharedMemory(name=name, create=True, size=expected_size)
-    logger.info(f"Force created new shared memory: {name} (size={expected_size})")
     return shm
 
 
@@ -69,7 +67,7 @@ def _smart_create_or_link_shm(name, expected_size):
     try:
         shm = _force_link_shm(name=name, expected_size=expected_size)
         return shm
-    except BaseException as e:
-        logger.info(f"link fail name: {name} expected_size: {expected_size}, err:{str(e)} try to create")
+    except:
+        pass
 
     return _force_create_shm(name=name, expected_size=expected_size)
