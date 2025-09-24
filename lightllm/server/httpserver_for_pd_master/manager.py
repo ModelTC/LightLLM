@@ -144,16 +144,6 @@ class HttpServerManagerForPDMaster:
         )
         return
 
-    async def _to_req_info(
-        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ):
-        req = {
-            "inputs": prompt,
-            "parameters": sampling_params.to_origin_dict(),
-            "multimodal_params": multimodal_params.to_origin_dict(),
-        }
-        return req
-
     async def fetch_stream(
         self,
         p_node: PD_Client_Obj,
