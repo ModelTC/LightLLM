@@ -30,7 +30,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _ffn_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
-    def _pre_cache_kv(self, infer_state: InferStateInfo, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _pre_cache_kv(self, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         cache_kv = self.alloc_tensor(
             shape=infer_state.kv_buffer_shapedtype[0],
             dtype=infer_state.kv_buffer_shapedtype[1],
@@ -40,14 +40,10 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         )
         return cache_kv
 
-    def _get_qkv(
-        self, input, infer_state: InferStateInfo, layer_weight
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _get_qkv(self, input, infer_state: InferStateInfo, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
         raise Exception("need to impl")
 
-    def _tpsp_get_qkv(
-        self, input, infer_state: InferStateInfo, layer_weight
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _tpsp_get_qkv(self, input, infer_state: InferStateInfo, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
         raise Exception("need to impl")
 
     def _post_cache_kv(self, cache_kv, infer_state: InferStateInfo, layer_weight):
