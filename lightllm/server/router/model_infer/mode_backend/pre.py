@@ -5,3 +5,4 @@ from .generic_padded_pre_process import padded_prepare_decode_inputs
 from .generic_padded_pre_process import padded_overlap_prepare_prefill_inputs
 from .generic_padded_pre_process import padded_overlap_prepare_decode_inputs
 from .generic_padded_pre_process import padded_prepare_eagle_decode_inputs
+from .generic_padded_pre_process import padded_overlap_prepare_eagle_decode_inputs

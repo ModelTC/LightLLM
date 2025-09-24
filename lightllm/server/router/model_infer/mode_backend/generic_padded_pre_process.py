@@ -280,3 +280,25 @@ def padded_prepare_eagle_decode_inputs(
         is_prefill=False,
     )
     return model_input, mem_indexes
+
+
+def padded_overlap_prepare_eagle_decode_inputs(
+    req_objs: List[InferReq],
+    padded_req_num0: int = 0,
+    padded_req_num1: int = 0,
+    mtp_step: int = 0,
+) -> Tuple[ModelInput, List[InferReq], int, ModelInput, List[InferReq], int]:
+    split_req_bound = triton.cdiv(len(req_objs), 2)
+    req_objs_0 = req_objs[0:split_req_bound]
+    req_objs_1 = req_objs[split_req_bound:]
+    if padded_req_num0 > 0:
+        padded_req_num0 = max(padded_req_num0 // (mtp_step + 1), 1)
+    if padded_req_num1 > 0:
+        padded_req_num1 = max(padded_req_num1 // (mtp_step + 1), 1)
+    model_input, mem_indexes0 = padded_prepare_eagle_decode_inputs(
+        req_objs=req_objs_0, padded_req_num=padded_req_num0, mtp_step=mtp_step
+    )
+    model_input1, mem_indexes1 = padded_prepare_eagle_decode_inputs(
+        req_objs=req_objs_1, padded_req_num=padded_req_num1, mtp_step=mtp_step
+    )
+    return model_input, mem_indexes0, model_input1, mem_indexes1
