@@ -1,11 +1,8 @@
 from multiprocessing import shared_memory
-import logging
-import os
 from filelock import FileLock
+from lightllm.utils.log_utils import init_logger
 
-logger = logging.getLogger(__name__)
-
-LIGHTLLM_SHM_LOCK_FILE = f"/tmp/lightllm_shm_creation_{os.getuid()}.lock"
+logger = init_logger(__name__)
 
 
 def create_or_link_shm(name, expected_size, force_mode=None):
@@ -25,74 +22,54 @@ def create_or_link_shm(name, expected_size, force_mode=None):
         FileNotFoundError: when force_mode='link' but shared memory not exists
         ValueError: when force_mode='link' but size mismatch
     """
-    lock = FileLock(LIGHTLLM_SHM_LOCK_FILE)
-    safe_name = f"lightllm_{name}_{expected_size}"
+    lock_name = f"/tmp/{name}.lock"
 
-    with lock:
-        if force_mode == "create":
-            return _force_create_shm(safe_name, name, expected_size)
-        elif force_mode == "link":
-            return _force_link_shm(safe_name, name, expected_size)
-        else:
-            return _smart_create_or_link_shm(safe_name, name, expected_size)
+    if force_mode == "create":
+        with FileLock(lock_name):
+            return _force_create_shm(name, expected_size)
+    elif force_mode == "link":
+        return _force_link_shm(name, expected_size)
+    else:
+        with FileLock(lock_name):
+            return _smart_create_or_link_shm(name, expected_size)
 
 
-def _force_create_shm(safe_name, name, expected_size):
+def _force_create_shm(name, expected_size):
     """强制创建新的共享内存"""
     try:
-        existing_shm = shared_memory.SharedMemory(name=safe_name)
+        existing_shm = shared_memory.SharedMemory(name=name)
         existing_shm.close()
         existing_shm.unlink()
-        logger.info(f"Removed existing shared memory and force create: {safe_name}")
-    except FileNotFoundError:
-        pass  #
+        logger.info(f"Removed existing shared memory and force create: {name} size: {expected_size}")
+    except Exception as e:
+        logger.info(f"_force_create_shm err {str(e)}")
 
     # 创建新的共享内存
-    shm = shared_memory.SharedMemory(name=safe_name, create=True, size=expected_size)
+    shm = shared_memory.SharedMemory(name=name, create=True, size=expected_size)
     logger.info(f"Force created new shared memory: {name} (size={expected_size})")
     return shm
 
 
-def _force_link_shm(safe_name, name, expected_size):
+def _force_link_shm(name, expected_size):
     """强制连接到已存在的共享内存"""
     try:
-        shm = shared_memory.SharedMemory(name=safe_name)
+        shm = shared_memory.SharedMemory(name=name)
         # 验证大小
         if shm.size != expected_size:
             shm.close()
             raise ValueError(f"Shared memory {name} size mismatch: expected {expected_size}, got {shm.size}")
         # logger.info(f"Force linked to existing shared memory: {name} (size={expected_size})")
         return shm
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Shared memory {name} not found for force link")
+    except Exception as e:
+        raise e
 
 
-def _smart_create_or_link_shm(safe_name, name, expected_size):
+def _smart_create_or_link_shm(name, expected_size):
     """优先连接，不存在则创建"""
     try:
-        shm = shared_memory.SharedMemory(name=safe_name, create=True, size=expected_size)
-        logger.info(f"Created new shared memory: {name} (size={expected_size})")
+        shm = _force_link_shm(name=name, expected_size=expected_size)
         return shm
-    except FileExistsError:
-        try:
-            shm = shared_memory.SharedMemory(name=safe_name)
-            # 验证共享内存大小是否匹配
-            if shm.size != expected_size:
-                logger.error(f"Shared memory {name} size mismatch: expected {expected_size}, got {shm.size}")
-                shm.close()
-                try:
-                    shm.unlink()
-                    logger.info(f"Removed mismatched shared memory: {safe_name}")
-                except FileNotFoundError:
-                    pass  # 已经被其他进程删除了
-                shm = shared_memory.SharedMemory(name=safe_name, create=True, size=expected_size)
-                logger.info(f"Recreated shared memory: {name} (size={expected_size})")
-            return shm
-        except FileNotFoundError:
-            logger.warning(f"Shared memory {name} disappeared, retrying...")
-            shm = shared_memory.SharedMemory(name=safe_name, create=True, size=expected_size)
-            logger.info(f"Created new shared memory after disappearance: {name} (size={expected_size})")
-            return shm
-        except Exception as e:
-            logger.error(f"Unexpected error attaching to shared memory {name}: {e}")
-            raise
+    except BaseException as e:
+        logger.info(f"link fail name: {name} expected_size: {expected_size}, err:{str(e)} try to create")
+
+    return _force_create_shm(name=name, expected_size=expected_size)
