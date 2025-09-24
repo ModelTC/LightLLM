@@ -87,8 +87,6 @@ def _smart_create_or_link_shm(safe_name, name, expected_size):
                     pass  # 已经被其他进程删除了
                 shm = shared_memory.SharedMemory(name=safe_name, create=True, size=expected_size)
                 logger.info(f"Recreated shared memory: {name} (size={expected_size})")
-            else:
-                logger.info(f"Linked to existing shared memory: {name} (size={expected_size})")
             return shm
         except FileNotFoundError:
             logger.warning(f"Shared memory {name} disappeared, retrying...")
