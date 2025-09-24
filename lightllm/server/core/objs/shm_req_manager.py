@@ -56,7 +56,7 @@ class ShmReqManager:
         return
 
     def init_to_req_objs(self):
-        self.reqs: list[Req] = (self.req_class * self.max_req_num).from_buffer(self.reqs_shm.buf)
+        self.reqs: List[Req] = (self.req_class * self.max_req_num).from_buffer(self.reqs_shm.buf)
         for i in range(self.max_req_num):
             self.reqs[i].ref_count = 0
             self.reqs[i].index_in_shm_mem = i
