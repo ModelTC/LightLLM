@@ -137,11 +137,9 @@ class MultimodalParams:
         self,
         images: List[dict] = [],
         audios: List[dict] = [],
-        skip_image_cache: bool = False,
     ) -> None:
         self.images = [ImageItem(**i) for i in images]
         self.audios = [AudioItem(**a) for a in audios]
-        self.skip_image_cache = skip_image_cache
         return
 
     async def verify_and_preload(self, request: Request):

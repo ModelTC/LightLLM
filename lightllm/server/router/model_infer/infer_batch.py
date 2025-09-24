@@ -327,7 +327,7 @@ class InferReq:
         self.mtp_step: int = get_env_start_args().mtp_step
 
         self._init_all_state()
-        if init_prefix_cache and not self.sampling_param.disable_prompt_cache:
+        if init_prefix_cache:
             self._match_radix_cache()
         return
 
@@ -360,9 +360,6 @@ class InferReq:
 
     def _match_radix_cache(self):
         if self.sampling_param.disable_prompt_cache:
-            self.shared_kv_node = None
-            self.shm_req.prompt_cache_len = 0
-            self.shm_req.shm_cur_kv_len = self.cur_kv_len
             return
         if g_infer_context.radix_cache is not None and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]

@@ -156,6 +156,9 @@ class HttpServerManagerForPDMaster:
         group_request_id = sampling_params.group_request_id
         sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
 
+        # PD分离模式下，use prompt cache必须为True
+        sampling_params.disable_prompt_cache = False
+
         req_status = ReqStatus(group_request_id, p_node, d_node)
         self.req_id_to_out_inf[group_request_id] = req_status
 

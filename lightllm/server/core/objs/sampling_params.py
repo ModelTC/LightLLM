@@ -320,7 +320,7 @@ class SamplingParams(ctypes.Structure):
             ctypes.c_bool,
         ),  # whether to add spaces between special tokens when decoding
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
-        ("disable_prompt_cache", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
+        ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
     ]
 
     _do_sample: bool = False
