@@ -88,7 +88,7 @@ class InferenceContext:
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq", is_group_finished: bool):
-        if self.radix_cache is None or req.sampling_param.disable_prompt_cache:
+        if self.radix_cache is None:
             if is_group_finished:
                 free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
             else:
