@@ -5,6 +5,7 @@ from multiprocessing import shared_memory
 from typing import List
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
 
 logger = init_logger(__name__)
 
@@ -18,23 +19,8 @@ class RpcShmParams:
         self.name = f"{get_unique_server_name()}_RpcShmParams"
 
     def create_or_link_shm(self):
-        try:
-            shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_RPC_BYTE_SIZE)
-        except:
-            shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_RPC_BYTE_SIZE)
+        self.shm = create_or_link_shm(self.name, LIGHTLLM_RPC_BYTE_SIZE)
 
-        if shm.size != LIGHTLLM_RPC_BYTE_SIZE:
-            logger.warning(f"size not same, unlink shm {self.name} and create again")
-            shm.close()
-            shm.unlink()
-            try:
-                shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_RPC_BYTE_SIZE)
-                logger.info(f"create shm {self.name}")
-            except:
-                shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_RPC_BYTE_SIZE)
-                logger.info(f"link shm {self.name}")
-
-        self.shm = shm
         return
 
     def write_func_params(self, func_name, args):
@@ -55,23 +41,7 @@ class RpcShmResults:
         self.name = f"{get_unique_server_name()}_RpcShmResults"
 
     def create_or_link_shm(self):
-        try:
-            shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
-        except:
-            shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
-
-        if shm.size != LIGHTLLM_RPC_RESULT_BYTE_SIZE:
-            logger.warning(f"size not same, unlink shm {self.name} and create again")
-            shm.close()
-            shm.unlink()
-            try:
-                shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
-                logger.info(f"create shm {self.name}")
-            except:
-                shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
-                logger.info(f"link shm {self.name}")
-
-        self.shm = shm
+        self.shm = create_or_link_shm(self.name, LIGHTLLM_RPC_RESULT_BYTE_SIZE)
         return
 
     def write_func_result(self, func_name, ret):
@@ -97,23 +67,8 @@ class ShmSyncStatusArray:
         self.world_size = world_size
 
     def create_or_link_shm(self):
-        try:
-            shm = shared_memory.SharedMemory(name=self.name, create=True, size=self.dest_size)
-        except:
-            shm = shared_memory.SharedMemory(name=self.name, create=False, size=self.dest_size)
+        self.shm = create_or_link_shm(self.name, self.dest_size)
 
-        if shm.size != self.dest_size:
-            logger.warning(f"size not same, unlink shm {self.name} and create again")
-            shm.close()
-            shm.unlink()
-            try:
-                shm = shared_memory.SharedMemory(name=self.name, create=True, size=self.dest_size)
-                logger.info(f"create shm {self.name}")
-            except:
-                shm = shared_memory.SharedMemory(name=self.name, create=False, size=self.dest_size)
-                logger.info(f"link shm {self.name}")
-
-        self.shm = shm
         self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
         self.arr[:] = 0
         self.arr0 = self.arr[0 : self.world_size]

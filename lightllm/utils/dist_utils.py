@@ -70,6 +70,7 @@ def init_vision_distributed_env(kvargs):
         init_method=f'tcp://127.0.0.1:{kvargs["visual_nccl_port"]}',
         rank=kvargs["tp_rank_id"],
         world_size=tp_world_size,
+        device_id=torch.device(f"cuda:{device_id}"),
     )
     # warmup nccl communicator
     _a = torch.zeros([1]).to(f"cuda:{device_id}")
@@ -103,6 +104,7 @@ def init_distributed_env(kvargs):
         init_method=f'tcp://{kvargs["nccl_host"]}:{kvargs["nccl_port"]}',
         rank=kvargs["rank_id"],
         world_size=kvargs["world_size"],
+        device_id=torch.device(f"cuda:{device_id}"),
     )
     # warmup nccl communicator
     _a = torch.zeros([1]).to(f"cuda:{device_id}")

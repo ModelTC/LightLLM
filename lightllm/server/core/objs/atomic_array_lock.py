@@ -2,6 +2,7 @@ import asyncio
 import atomics
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
 
 logger = init_logger(__name__)
 
@@ -11,26 +12,10 @@ class AtomicShmArrayLock:
         self.lock_name = lock_name
         self.dest_size = 4 * lock_num
         self.lock_num = lock_num
-        self._init_shm()
+        self.shm = create_or_link_shm(self.lock_name, self.dest_size)
 
-        if self.shm.size != self.dest_size:
-            logger.info(f"size not same, unlink lock shm {lock_name} and create again")
-            self.shm.close()
-            self.shm.unlink()
-            self.shm = None
-            self._init_shm()
         for index in range(self.lock_num):
             self.shm.buf.cast("i")[index] = 0
-        return
-
-    def _init_shm(self):
-        try:
-            shm = shared_memory.SharedMemory(name=self.lock_name, create=True, size=self.dest_size)
-            logger.info(f"create lock shm {self.lock_name}")
-        except:
-            shm = shared_memory.SharedMemory(name=self.lock_name, create=False, size=self.dest_size)
-            logger.info(f"link lock shm {self.lock_name}")
-        self.shm = shm
         return
 
     def get_lock_context(self, lock_index: int) -> "AtomicLockItem":
