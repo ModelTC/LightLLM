@@ -17,8 +17,9 @@ class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
             axis_map += [i % 3] * n
         self.axis_map = torch.tensor(axis_map, dtype=torch.int32, device="cuda")
 
-    def _get_qkv(self, input, cache_kv, infer_state, layer_weight):
+    def _get_qkv(self, input, infer_state, layer_weight):
         q = layer_weight.q_proj.mm(input)
+        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
         cache_kv = layer_weight.kv_proj.mm(
             input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
         ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)

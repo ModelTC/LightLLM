@@ -1,7 +1,7 @@
 import torch
 import torch.distributed as dist
 
-
+from typing import Tuple
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
@@ -88,7 +88,9 @@ class ViTTransformerLayerInfer:
         k_norm = self.tp_norm(k, layer_weight.k_norm_weight_.weight)
         return q_norm, k_norm
 
-    def _get_qkv(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:
+    def _get_qkv(
+        self, input, layer_weight: ViTTransformerLayerWeight
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = input.shape[0]
         seq_len = input.shape[1]
         qkv = layer_weight.qkv_proj.mm(input.view(-1, self.embed_dim_), use_custom_tensor_mananger=True)
