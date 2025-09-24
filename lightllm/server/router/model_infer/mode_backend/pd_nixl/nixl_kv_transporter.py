@@ -51,7 +51,7 @@ class NixlKVTransporter:
         self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)
         self.page_local_xfer_handles = self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages)
 
-    def _create_paged_xfer_handles(self, reg_desc: nixlBind.nixlRegDList, page_num: int, agent_name: str = ""):
+    def _create_paged_xfer_handles(self, reg_desc: "nixlBind.nixlRegDList", page_num: int, agent_name: str = ""):
         base_addr, _, device_id, _ = reg_desc[0]
         pages_data = []
         for page_id in range(page_num):
