@@ -88,7 +88,6 @@ class RouterManager:
                 init_method=f"tcp://{args.nccl_host}:{args.multinode_router_gloo_port}",
                 world_size=args.nnodes,
                 rank=args.node_rank,
-                # TODO: add device_id = torch.device(f"cuda:{args.node_rank}")
             )
 
         self.metric_client = MetricClient(metric_port)
