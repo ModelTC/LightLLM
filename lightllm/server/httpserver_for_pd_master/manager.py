@@ -313,7 +313,9 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
-        assert sampling_params.disable_prompt_cache is False, "pd mode dont support set disable_prompt_cache to True"
+        if sampling_params.disable_prompt_cache:
+            assert False, "pd mode dont support set disable_prompt_cache to True"
+
         out_token_counter = 0
         first_token_cost_ms = float("inf")
         group_request_id = sampling_params.group_request_id
