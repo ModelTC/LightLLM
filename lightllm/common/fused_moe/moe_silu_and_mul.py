@@ -20,6 +20,9 @@ def _silu_and_mul_kernel_fast(
     BLOCK_N: tl.constexpr,
     NUM_STAGES: tl.constexpr,
     NEED_MASK: tl.constexpr,
+    layout: tl.constexpr = "blocked",  # "blocked" or "interleaved"
+    limit=None,
+    alpha=None,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
     stride_output_m = tl.cast(stride_output_m, dtype=tl.int64)
@@ -38,8 +41,15 @@ def _silu_and_mul_kernel_fast(
         other = None
 
     for m_index in tl.range(m_start_index, m_end_index, num_stages=NUM_STAGES):
-        gate_offsets = m_index * stride_input_m + n_offsets[None, :]
-        up_offsets = m_index * stride_input_m + (n_offsets[None, :] + size_n)
+        if layout == "interleaved":
+            # [gate0, up0, gate1, up1, ...]
+            base_offsets = m_index * stride_input_m + n_offsets[None, :] * 2
+            gate_offsets = base_offsets
+            up_offsets = base_offsets + 1
+        elif layout == "blocked":
+            # [gate0, gate1, ..., up0, up1, ...]
+            gate_offsets = m_index * stride_input_m + n_offsets[None, :]
+            up_offsets = m_index * stride_input_m + (n_offsets[None, :] + size_n)
         out_offsets = m_index * stride_output_m + n_offsets[None, :]
 
         up = tl.load(
@@ -53,14 +63,29 @@ def _silu_and_mul_kernel_fast(
             other=other,
         ).to(tl.float32)
 
-        gate = gate / (1 + tl.exp(-gate))
-        gate = gate.to(input_ptr.dtype.element_ty)
+        if limit is None and alpha is None:
+            gate = gate / (1 + tl.exp(-gate))
+            gate = gate.to(input_ptr.dtype.element_ty)
 
-        tl.store(
-            output_ptr + out_offsets,
-            up * gate,
-            mask=mask,
-        )
+            tl.store(
+                output_ptr + out_offsets,
+                up * gate,
+                mask=mask,
+            )
+        else:
+            # clamp up and gate
+            if limit is not None:
+                gate = tl.minimum(gate, limit)
+                up = tl.minimum(tl.maximum(up, -limit), limit)
+            if alpha is None:
+                alpha = 1.0
+            gate = 1 / (1 + tl.exp(-gate * alpha)) * gate
+            gate = gate.to(input_ptr.dtype.element_ty)
+            tl.store(
+                output_ptr + out_offsets,
+                (up + 1) * gate,
+                mask=mask,
+            )
 
 
 def _get_silu_and_mul_configs():
@@ -84,7 +109,9 @@ def _get_silu_and_mul_static_key(input: torch.Tensor, output: torch.Tensor):
     run_key_func=lambda input: input.shape[0],
     mutates_args=["output"],
 )
-def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None):
+def silu_and_mul_fwd(
+    input: torch.Tensor, output: torch.Tensor, layout="blocked", limit=None, alpha=None, run_config=None
+):
     assert input.is_contiguous()
     assert output.is_contiguous()
 
@@ -125,5 +152,8 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None)
         NUM_STAGES=NUM_STAGES,
         NEED_MASK=NEED_MASK,
         num_warps=num_warps,
+        layout=layout,
+        limit=limit,
+        alpha=alpha,
     )
     return
