@@ -1010,7 +1010,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             selected_index1 = torch.zeros((padded_req_num1), dtype=torch.int32, device="cpu").cuda(non_blocking=True)
         else:
             selected_index1 = F.pad(
-                selected_index[real_req_num0:],
+                selected_index[real_req_num0 : real_req_num0 + real_req_num1] - req_num0,
                 (0, padded_req_num1),
                 value=0,
             )
@@ -1083,7 +1083,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         if req_num0 + req_num1 > 0:
             all_next_token_ids = torch.stack(all_next_token_ids, dim=1)
             b_req_idx = torch.cat(
-                (draft_model_input0.b_req_idx[0:req_num0], draft_model_input1.b_req_idx[0:req_num1]), dim=0
+                (draft_model_input0.b_req_idx[0:real_req_num0], draft_model_input1.b_req_idx[0:real_req_num1]), dim=0
             )
             self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids[
                 b_req_idx, : self.mtp_step + 1
