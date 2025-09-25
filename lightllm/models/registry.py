@@ -4,10 +4,13 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 from dataclasses import dataclass
-from typing import Type, Dict, Optional, Callable, List, Union
+from typing import Type, Dict, Optional, Callable, List, Union, TypeVar
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+# 定义泛型类型变量，用于保持输入和输出类型的一致性
+T = TypeVar("T")
 
 
 @dataclass
@@ -26,12 +29,12 @@ class _ModelRegistries:
         model_type: Union[str, List[str]],
         is_multimodal: bool = False,
         condition: Optional[Callable[[dict], bool]] = None,
-    ):
+    ) -> Callable[[T], T]:
         """Decorator to register a model (now more concise)."""
 
         def decorator(
-            model_class: Type,
-        ):
+            model_class: T,
+        ) -> T:
             model_types = [model_type] if isinstance(model_type, str) else model_type
             for mt in model_types:
                 self._registry[mt].append(
