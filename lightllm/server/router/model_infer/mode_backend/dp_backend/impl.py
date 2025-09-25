@@ -832,6 +832,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                 (model_input0.mem_indexes_cpu[0:req_num0], model_input1.mem_indexes_cpu[0:req_num1]), dim=0
             )
             need_free_mem_indexes = mem_indexes_cpu[accepted_index_cpu == 0]
+
+            if self.is_mtp_eagle:
+                eagle_mem_indexes_cpu = torch.cat((eagle_mem_indexes0_cpu, eagle_mem_indexes1_cpu), dim=0)
+                need_free_mem_indexes = torch.cat((need_free_mem_indexes, eagle_mem_indexes_cpu), dim=0)
             self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
             select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
             self._post_handle(

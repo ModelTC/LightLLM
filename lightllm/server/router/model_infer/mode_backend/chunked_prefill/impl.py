@@ -428,7 +428,7 @@ class ChunkedPrefillBackend(ModeBackend):
         all_next_token_ids.append(draft_next_token_ids[mtp_accept_len - 1])
 
         # 剩余的draft step。
-        draft_model_input.input_ids = draft_next_token_ids[mtp_accept_len - 1]
+        draft_model_input.input_ids = draft_next_token_ids[mtp_accept_len - 1].contiguous()
         draft_model_input.b_seq_len = draft_model_input.b_seq_len.cuda(non_blocking=True)
         draft_model_input.b_seq_len += mtp_accept_len
         draft_model_input.max_len_in_batch += self.mtp_step * 2
