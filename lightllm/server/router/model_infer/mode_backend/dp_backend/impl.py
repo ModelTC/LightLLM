@@ -446,6 +446,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     model_input=model_input,
                     model_output=model_output,
                     next_token_ids=next_token_ids,
+                    b_req_mtp_start_loc=b_req_mtp_start_loc,
                     mtp_accept_len=mtp_accept_len,
                     eagle_mem_indexes_cpu=eagle_mem_indexes_cpu,
                     draft_model_input=draft_model_input,
@@ -553,6 +554,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         model_input: ModelInput,
         model_output: ModelOutput,
         next_token_ids: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
         mtp_accept_len: torch.Tensor,
         eagle_mem_indexes_cpu: torch.Tensor,
         draft_model_input: ModelInput,
@@ -564,7 +566,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         real_req_num = req_num // (self.mtp_step + 1)
         draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
         if req_num > 0:
-            all_next_token_ids.append(next_token_ids[mtp_accept_len - 1])
+            selected_index = b_req_mtp_start_loc + mtp_accept_len - 1
+            all_next_token_ids.append(next_token_ids[selected_index])
             draft_next_token_ids_gpu[:req_num].copy_(next_token_ids, non_blocking=True)
 
         # 第一步draft，填充接受token的kv.
@@ -572,26 +575,26 @@ class DPChunkedPrefillBackend(ModeBackend):
         model_input.deepseekv3_mtp_draft_input_hiddens = model_output.deepseekv3_mtp_main_output_hiddens
         draft_model_output: ModelOutput = self.draft_models[0].forward(model_input)
         draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
-        if req_num > 0:
-            all_next_token_ids.append(draft_next_token_ids_gpu[mtp_accept_len - 1])
 
         # 剩余的draft step
-        if mtp_accept_len is None:
-            mtp_accept_len = torch.zeros((real_req_num + padded_req_num,), dtype=torch.int32, device="cpu").cuda(
-                non_blocking=True
-            )
-        else:
-            mtp_accept_len = F.pad(
-                mtp_accept_len,
+        if req_num > 0:
+            all_next_token_ids.append(draft_next_token_ids_gpu[selected_index])
+            selected_index = F.pad(
+                selected_index,
                 (0, padded_req_num),
                 value=0,
             )
-        draft_model_input.input_ids = draft_next_token_ids_gpu[mtp_accept_len - 1]
+        else:
+            selected_index = torch.zeros((real_req_num + padded_req_num,), dtype=torch.int32, device="cpu").cuda(
+                non_blocking=True
+            )
+
+        draft_model_input.input_ids = draft_next_token_ids_gpu[selected_index]
         draft_model_input.b_seq_len = draft_model_input.b_seq_len.cuda(non_blocking=True)
-        draft_model_input.b_seq_len += mtp_accept_len
+        draft_model_input.b_seq_len[:real_req_num] += mtp_accept_len if real_req_num > 0 else 0
         draft_model_input.max_len_in_batch += self.mtp_step * 2
         draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens[
-            mtp_accept_len - 1
+            selected_index
         ]
 
         for _step in range(1, self.mtp_step):
@@ -787,9 +790,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                     model_output1=model_output1,
                     draft_model_input0=draft_model_input0,
                     draft_model_input1=draft_model_input1,
-                    b_req_idx=b_req_idx,
                     next_token_ids=next_token_ids,
                     mtp_accept_len=mtp_accept_len,
+                    b_req_mtp_start_loc=b_req_mtp_start_loc,
                     eagle_mem_indexes_cpu0=eagle_mem_indexes0_cpu,
                     eagle_mem_indexes_cpu1=eagle_mem_indexes1_cpu,
                     req_num0=req_num0,
@@ -942,9 +945,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         model_output1: ModelOutput,
         draft_model_input0: ModelInput,
         draft_model_input1: ModelInput,
-        b_req_idx: torch.Tensor,
         next_token_ids: torch.Tensor = None,
         mtp_accept_len: torch.Tensor = None,
+        b_req_mtp_start_loc: torch.Tensor = None,
         eagle_mem_indexes_cpu0: torch.Tensor = None,
         eagle_mem_indexes_cpu1: torch.Tensor = None,
         req_num0: int = 0,
@@ -973,7 +976,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
 
         if req_num0 + req_num1 > 0:
-            all_next_token_ids.append(next_token_ids[mtp_accept_len - 1])
+            selected_index = b_req_mtp_start_loc + mtp_accept_len - 1
+            all_next_token_ids.append(next_token_ids[selected_index])
 
         # 第一步draft，填充接受token的kv.
         model_input0.input_ids = draft_next_token_ids_gpu0
@@ -991,39 +995,41 @@ class DPChunkedPrefillBackend(ModeBackend):
             (draft_next_token_ids_gpu0[0:req_num0], draft_next_token_ids_gpu1[0:req_num1]), dim=0
         )
         if req_num0 + req_num1 > 0:
-            all_next_token_ids.append(draft_next_token_ids[mtp_accept_len - 1])
+            all_next_token_ids.append(draft_next_token_ids[selected_index])
 
         # 剩余的draft step
         if real_req_num0 == 0:
-            mtp_accept_len0 = torch.zeros((padded_req_num0), dtype=torch.int32, device="cpu").cuda(non_blocking=True)
+            selected_index0 = torch.zeros((padded_req_num0), dtype=torch.int32, device="cpu").cuda(non_blocking=True)
         else:
-            mtp_accept_len0 = F.pad(
-                mtp_accept_len[0:real_req_num0],
+            selected_index0 = F.pad(
+                selected_index[0:real_req_num0],
                 (0, padded_req_num0),
                 value=0,
             )
         if real_req_num1 == 0:
-            mtp_accept_len1 = torch.zeros((padded_req_num1), dtype=torch.int32, device="cpu").cuda(non_blocking=True)
+            selected_index1 = torch.zeros((padded_req_num1), dtype=torch.int32, device="cpu").cuda(non_blocking=True)
         else:
-            mtp_accept_len1 = F.pad(
-                mtp_accept_len[real_req_num0:],
+            selected_index1 = F.pad(
+                selected_index[real_req_num0:],
                 (0, padded_req_num1),
                 value=0,
             )
-        draft_model_input0.input_ids = draft_next_token_ids_gpu0[mtp_accept_len0 - 1]
+        draft_model_input0.input_ids = draft_next_token_ids_gpu0[selected_index0]
         draft_model_input0.b_seq_len = draft_model_input0.b_seq_len.cuda(non_blocking=True)
-        draft_model_input0.b_seq_len += mtp_accept_len0
+        draft_model_input0.b_seq_len[:real_req_num0] += mtp_accept_len[:real_req_num0] if real_req_num0 > 0 else 0
         draft_model_input0.max_len_in_batch += self.mtp_step * 2
         draft_model_input0.deepseekv3_mtp_draft_input_hiddens = draft_model_output0.deepseekv3_mtp_main_output_hiddens[
-            mtp_accept_len0 - 1
+            selected_index0
         ]
 
-        draft_model_input1.input_ids = draft_next_token_ids_gpu1[mtp_accept_len1 - 1]
+        draft_model_input1.input_ids = draft_next_token_ids_gpu1[selected_index1]
         draft_model_input1.b_seq_len = draft_model_input1.b_seq_len.cuda(non_blocking=True)
-        draft_model_input1.b_seq_len += mtp_accept_len1
+        draft_model_input1.b_seq_len[:real_req_num1] += (
+            mtp_accept_len[real_req_num0 : real_req_num0 + real_req_num1] if real_req_num1 > 0 else 0
+        )
         draft_model_input1.max_len_in_batch += self.mtp_step * 2
         draft_model_input1.deepseekv3_mtp_draft_input_hiddens = draft_model_output1.deepseekv3_mtp_main_output_hiddens[
-            mtp_accept_len1 - 1
+            selected_index1
         ]
 
         for _step in range(1, self.mtp_step):
@@ -1076,6 +1082,9 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         if req_num0 + req_num1 > 0:
             all_next_token_ids = torch.stack(all_next_token_ids, dim=1)
+            b_req_idx = torch.cat(
+                (draft_model_input0.b_req_idx[0:req_num0], draft_model_input1.b_req_idx[0:req_num1]), dim=0
+            )
             self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids[
                 b_req_idx, : self.mtp_step + 1
             ] = all_next_token_ids

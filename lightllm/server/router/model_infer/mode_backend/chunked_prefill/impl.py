@@ -325,9 +325,7 @@ class ChunkedPrefillBackend(ModeBackend):
         """
         b_mtp_index_cpu = model_input.b_mtp_index
         model_output = self.model.forward(model_input)
-        all_next_token_ids = []
         next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
-        all_next_token_ids.append(next_token_ids)
         # verify the next_token_ids
         b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]
         b_req_mtp_start_loc = g_pin_mem_manager.gen_from_list(
@@ -416,24 +414,29 @@ class ChunkedPrefillBackend(ModeBackend):
         main_model_output = verify_info["main_model_output"]
         next_token_ids = verify_info["next_token_ids"]
         mtp_accept_len = verify_info["mtp_accept_len"]
+        b_req_mtp_start_loc = verify_info["b_req_mtp_start_loc"]
+
+        selected_index = b_req_mtp_start_loc + mtp_accept_len - 1
 
         all_next_token_ids = []
-        all_next_token_ids.append(next_token_ids[mtp_accept_len - 1])
+        all_next_token_ids.append(next_token_ids[selected_index])
 
         # 第一步draft，填充接受的token的kv。
         main_model_input.input_ids = next_token_ids
         main_model_input.deepseekv3_mtp_draft_input_hiddens = main_model_output.deepseekv3_mtp_main_output_hiddens
         draft_model_output = self.draft_models[0].forward(main_model_input)
         draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
-        all_next_token_ids.append(draft_next_token_ids[mtp_accept_len - 1])
+
+        draft_input_ids = draft_next_token_ids[selected_index]
+        all_next_token_ids.append(draft_input_ids)
 
         # 剩余的draft step。
-        draft_model_input.input_ids = draft_next_token_ids[mtp_accept_len - 1].contiguous()
+        draft_model_input.input_ids = draft_input_ids.contiguous()
         draft_model_input.b_seq_len = draft_model_input.b_seq_len.cuda(non_blocking=True)
         draft_model_input.b_seq_len += mtp_accept_len
         draft_model_input.max_len_in_batch += self.mtp_step * 2
         draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens[
-            mtp_accept_len - 1
+            selected_index
         ]
         for _step in range(1, self.mtp_step):
             draft_batch_size = draft_model_input.batch_size
