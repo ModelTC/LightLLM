@@ -31,6 +31,15 @@ class MultiLevelKVCacheManager:
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
         logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
+
+        # 自动注册共享内存清理
+        try:
+            from lightllm.utils.auto_shm_cleanup import auto_register_cpu_cache
+
+            auto_register_cpu_cache()
+        except Exception as e:
+            logger.warning(f"Failed to register auto shm cleanup: {e}")
+
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
         # 控制同时进行cpu cache 匹配操作的数量。

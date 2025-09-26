@@ -61,6 +61,8 @@ class TpPartBaseModel:
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
+        # 一个可选的钩子函数，会在模型 warmup 之前被调用，用于做外部初始化等待（如 CPU KV Cache 注册完成）
+        self._pre_warmup_hook = kvargs.get("pre_warmup_hook", None)
         # is_token_healing 和 return_all_prompt_logics 是有排斥关系的两个模式，只能单独有一个生效
         # 主要是在prefill阶段返回多少个token的用于后续处理相关。
         self.is_token_healing = kvargs.get("is_token_healing", False)
@@ -106,6 +108,13 @@ class TpPartBaseModel:
         self._init_inferstate_cls()
         self._autotune_warmup()
         self._init_padded_req()
+        # 在进入 autotune warmup 之前执行可选的预热钩子（例如等待 CPU KV Cache 注册完成）
+        if callable(self._pre_warmup_hook):
+            try:
+                self._pre_warmup_hook()
+            except Exception as e:
+                logger.exception(f"pre_warmup_hook failed: {e}")
+                raise
         self._init_cudagraph()
         self._check_max_len_infer()
         torch.cuda.empty_cache()

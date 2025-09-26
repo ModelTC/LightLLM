@@ -11,6 +11,7 @@ from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.infer_utils import mark_start, mark_end
 
 logger = init_logger(__name__)
 
@@ -32,6 +33,49 @@ class MultiLevelKvCacheModule(object):
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)
+        self._pin_reg_handle = self.cpu_cache_client.pin_reg_handle
+
+    def wait_init(self):
+        """等待 CPU KV Cache 的 pinned 注册完成。
+
+        注意：真实的 register_shm_ptr_to_pin 调用发生在 CpuKvCacheClient._attach_shm_cpu_kv_cache，
+        这里仅对其返回的 handle 执行 wait()，并在此处打印 tqdm 进度。
+        """
+        if hasattr(self, "_pin_reg_handle") and self._pin_reg_handle is not None:
+            try:
+                dev_ptr = self._pin_reg_handle.wait()
+                logger.info(f"CPU KV cache pinned registered. device_ptr=0x{dev_ptr:x}")
+            finally:
+                # 释放句柄引用
+                self._pin_reg_handle = None
+        # 同步 mark_end 放在这里，保证时间统计贴近实际等待点
+        try:
+            from lightllm.utils.infer_utils import mark_end
+
+            mark_end("blueswhen1")
+        except Exception:
+            pass
+
+    def _compute_full_sequence_hash(self, req: InferReq):
+        """
+        计算基于完整序列（输入+输出）的hash值，而不是只基于输入
+        """
+        from lightllm.utils.kv_cache_utils import compute_token_list_hash
+
+        # 获取完整的token序列：输入 + 已生成的输出
+        input_tokens = req.shm_req.get_prompt_ids()
+
+        # 获取已生成的输出token
+        total_len = req.shm_req.input_len + req.shm_req.shm_cur_output_len
+        if total_len > req.shm_req.input_len:
+            # 从共享内存中获取完整序列
+            full_sequence = req.shm_req.shm_prompt_ids.arr[:total_len].tolist()
+        else:
+            full_sequence = input_tokens
+
+        # 基于完整序列计算hash
+        hash_values = compute_token_list_hash(full_sequence, self.args.cpu_cache_token_page_size)
+        return hash_values
 
     def handle_finished_reqs(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """
@@ -42,6 +86,7 @@ class MultiLevelKvCacheModule(object):
             # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
             # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
             true_finished_reqs = []
+            cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
             for req in finished_reqs:
                 # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
                 # 这个限制是为了兼容 diverse 模式下的请求处理。
@@ -63,15 +108,24 @@ class MultiLevelKvCacheModule(object):
                 else:
                     assert req.cpu_cache_task_status.is_not_started()
                     # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
+                    # if self.backend.is_master_in_dp:
+                    #     mark_start("blueswhen offload_kv_to_cpu")
+                    if g_infer_context.overlap_stream is not None:
+                        cpu_stream.wait_stream(g_infer_context.overlap_stream)
+                    else:
+                        cpu_stream.wait_stream(torch.cuda.current_stream())
                     trans_task = self._start_kv_cache_offload_task(
-                        req=req, cpu_kv_cache_stream=g_infer_context.get_cpu_kv_cache_stream()
+                        req=req, cpu_kv_cache_stream=cpu_stream
                     )
+                    # if self.backend.is_master_in_dp:
+                    #     mark_end("blueswhen offload_kv_to_cpu")
 
                     if trans_task is not None:
                         self.cpu_cache_handle_queue.append(trans_task)
                     else:
                         true_finished_reqs.append(req)
 
+            cpu_stream.synchronize()
             return true_finished_reqs
         else:
             return finished_reqs
@@ -80,41 +134,50 @@ class MultiLevelKvCacheModule(object):
         self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
     ) -> Optional["TransTask"]:
         with torch.cuda.stream(cpu_kv_cache_stream):
-            all_token_hash_list = req.shm_req.token_hash_list.get_all()
-            block_size = req.cur_kv_len // self.args.cpu_cache_token_page_size
-            move_block_size = min(block_size, len(all_token_hash_list))
-            if move_block_size == 0:
-                req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
-                return None
             if self.backend.is_master_in_dp:
-                self.cpu_cache_client.lock.acquire_sleep1ms()
-                page_list, ready_list = self.cpu_cache_client.allocate_pages(
-                    all_token_hash_list[:move_block_size],
-                    disk_offload_enable=self.args.enable_disk_cache,
-                )
-                self.cpu_cache_client.lock.release()
-                item_size = len(page_list)
-                dist.broadcast_object_list([item_size], group=self.gloo_group, group_src=0)
-                if item_size == 0:
+                all_token_hash_list = self._compute_full_sequence_hash(req)
+                block_size = req.cur_kv_len // self.args.cpu_cache_token_page_size
+                move_block_size = min(block_size, len(all_token_hash_list))
+
+                if move_block_size == 0:
+                    dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
                     req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
-                dist.broadcast_object_list(page_list, group=self.gloo_group, group_src=0)
-                dist.broadcast_object_list(ready_list, group=self.gloo_group, group_src=0)
+
+                try:
+                    self.cpu_cache_client.lock.acquire_sleep1ms()
+                    page_list, ready_list = self.cpu_cache_client.allocate_pages(
+                        all_token_hash_list[:move_block_size],
+                        disk_offload_enable=self.args.enable_disk_cache,
+                    )
+                finally:
+                    self.cpu_cache_client.lock.release()
+
+                item_size = len(page_list)
+                if item_size == 0:
+                    dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
+                    req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
+                    return None
+
+                broadcast_data = {
+                    'item_size': item_size,
+                    'page_list': page_list,
+                    'ready_list': ready_list
+                }
+                dist.broadcast_object_list([broadcast_data], group=self.gloo_group, group_src=0)
             else:
                 recv_list = [None]
                 dist.broadcast_object_list(recv_list, group=self.gloo_group, group_src=0)
-                item_size = recv_list[0]
-                if item_size == 0:
+                if isinstance(recv_list[0], int) and recv_list[0] == 0:
                     req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
-                page_list = [None] * item_size
-                ready_list = [None] * item_size
-                dist.broadcast_object_list(page_list, group=self.gloo_group, group_src=0)
-                dist.broadcast_object_list(ready_list, group=self.gloo_group, group_src=0)
+                broadcast_data = recv_list[0]
+                item_size = broadcast_data['item_size']
+                page_list = broadcast_data['page_list']
+                ready_list = broadcast_data['ready_list']
 
             page_indexes = torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
             page_readies = torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
-
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0 : req.cur_kv_len]
             offload_gpu_kv_to_cpu(
                 token_indexes=token_indexes,
@@ -124,8 +187,7 @@ class MultiLevelKvCacheModule(object):
                 page_readies=page_readies,
             )
 
-            # 用一个allreduce 操作和 sync_event 来确保所有gpu worker都完成对cpu kv cache的写入。
-            dist.all_reduce(tensor=self.sync_tensor, group=self.sync_group, async_op=False)
+            # dist.all_reduce(tensor=self.sync_tensor, group=self.sync_group, async_op=False)
             sync_event = torch.cuda.Event()
             sync_event.record()
             req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
@@ -181,28 +243,33 @@ class MultiLevelKvCacheModule(object):
 
             need_token_num = match_tokens - req.cur_kv_len
             # 多匹配了一定数量的token 才进行复制操作，不然操作效率不高
-            if need_token_num > 256:
+            if need_token_num >= 64:
                 if need_token_num <= idle_token_num:
                     if self.backend.radix_cache is not None:
                         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
 
-                mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
+                    # 计算需要加载的页面（只加载未匹配的部分）
+                    cur_kv_pages = req.cur_kv_len // token_page_size
+                    need_pages = page_list[cur_kv_pages:]  # 只取需要的页面
+                    actual_need_tokens = len(need_pages) * token_page_size
 
-                # 将 cpu page 的内容拷贝到 gpu 页面中
-                load_cpu_kv_to_gpu(
-                    mem_indexes=mem_indexes,
-                    gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
-                    cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
-                    page_indexes=torch.tensor(page_list, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
-                )
+                    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=actual_need_tokens)
+
+                    # 将 cpu page 的内容拷贝到 gpu 页面中
+                    load_cpu_kv_to_gpu(
+                        mem_indexes=mem_indexes,
+                        gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
+                        cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
+                        page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
+                    )
 
                 torch.cuda.current_stream().synchronize()
 
-                idle_token_num -= need_token_num
+                idle_token_num -= actual_need_tokens
                 g_infer_context.req_manager.req_to_token_indexs[
-                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
+                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + actual_need_tokens)
                 ] = mem_indexes
-                req.cur_kv_len = req.cur_kv_len + need_token_num
+                req.cur_kv_len = req.cur_kv_len + actual_need_tokens
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
 

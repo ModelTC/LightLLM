@@ -12,6 +12,7 @@ from lightllm.utils.kv_cache_utils import (
     attach_shm_kv_cache_ptr,
     register_shm_ptr_to_pin,
 )
+from lightllm.utils.infer_utils import mark_start, mark_end
 
 logger = init_logger(__name__)
 
@@ -30,8 +31,9 @@ class CpuKvCacheClient(object):
         self._create_cpu_status_list(init_shm_data)
         if init_shm_data:
             self._create_shm_cpu_kv_cache()
+            self.pin_reg_handle = None
         else:
-            self._attach_shm_cpu_kv_cache()
+            self.pin_reg_handle = self._attach_shm_cpu_kv_cache()
         return
 
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
@@ -213,7 +215,11 @@ class CpuKvCacheClient(object):
 
     def _attach_shm_cpu_kv_cache(self):
         shm_ptr = attach_shm_kv_cache_ptr()
-        device_ptr = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.kv_cache_tensor_meta.calcu_size())
+        mark_start("blueswhen1")
+        handle = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.kv_cache_tensor_meta.calcu_size())
+        numpy_array = np.frombuffer(
+            memoryview((ctypes.c_uint8 * self.kv_cache_tensor_meta.calcu_size()).from_address(shm_ptr)), dtype=np.uint8
+        )
         shape = (
             self.kv_cache_tensor_meta.page_num,
             self.kv_cache_tensor_meta.layer_num,
@@ -221,10 +227,8 @@ class CpuKvCacheClient(object):
             self.kv_cache_tensor_meta.num_heads,
             self.kv_cache_tensor_meta.head_dim,
         )
-        self.cpu_kv_cache_tensor = torch.empty(size=shape, dtype=torch.bfloat16, device="meta")
-        # 将指针绑定到 tensor上，方便triton获取真实的地址。
-        self.cpu_kv_cache_tensor.data_ptr = lambda: device_ptr
-        return
+        self.cpu_kv_cache_tensor = torch.from_numpy(numpy_array).view(dtype=torch.bfloat16).view(shape)
+        return handle
 
 
 class _CpuPageStatus(_LinkedListItem):
