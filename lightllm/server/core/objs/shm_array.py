@@ -1,5 +1,6 @@
 import numpy as np
 from multiprocessing import shared_memory
+from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -18,6 +19,7 @@ class ShmArray:
     def create_shm(self):
         try:
             shm = shared_memory.SharedMemory(name=self.name, create=True, size=self.dest_size)
+            register_posix_shm_for_cleanup(self.name)
         except:
             shm = shared_memory.SharedMemory(name=self.name, create=False, size=self.dest_size)
 
@@ -28,6 +30,7 @@ class ShmArray:
             try:
                 shm = shared_memory.SharedMemory(name=self.name, create=True, size=self.dest_size)
                 logger.info(f"create shm {self.name}")
+                register_posix_shm_for_cleanup(self.name)
             except:
                 shm = shared_memory.SharedMemory(name=self.name, create=False, size=self.dest_size)
                 logger.info(f"link shm {self.name}")

@@ -5,6 +5,7 @@ from multiprocessing import shared_memory
 from typing import List
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
 
 logger = init_logger(__name__)
 
@@ -20,6 +21,7 @@ class RpcShmParams:
     def create_or_link_shm(self):
         try:
             shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_RPC_BYTE_SIZE)
+            register_posix_shm_for_cleanup(self.name)
         except:
             shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_RPC_BYTE_SIZE)
 
@@ -57,6 +59,7 @@ class RpcShmResults:
     def create_or_link_shm(self):
         try:
             shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
+            register_posix_shm_for_cleanup(self.name)
         except:
             shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
 
@@ -99,6 +102,7 @@ class ShmSyncStatusArray:
     def create_or_link_shm(self):
         try:
             shm = shared_memory.SharedMemory(name=self.name, create=True, size=self.dest_size)
+            register_posix_shm_for_cleanup(self.name)
         except:
             shm = shared_memory.SharedMemory(name=self.name, create=False, size=self.dest_size)
 

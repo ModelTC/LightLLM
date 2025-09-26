@@ -4,6 +4,7 @@
 import numpy as np
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
 
 logger = init_logger(__name__)
 
@@ -15,6 +16,7 @@ class SharedArray:
         try:
             shm = shared_memory.SharedMemory(name=name, create=True, size=dest_size)
             logger.info(f"create shm {name}")
+            register_posix_shm_for_cleanup(name)
         except:
             shm = shared_memory.SharedMemory(name=name, create=False, size=dest_size)
             logger.info(f"link shm {name}")
@@ -26,6 +28,7 @@ class SharedArray:
             try:
                 shm = shared_memory.SharedMemory(name=name, create=True, size=dest_size)
                 logger.info(f"create shm {name}")
+                register_posix_shm_for_cleanup(name)
             except Exception as e:
                 shm = shared_memory.SharedMemory(name=name, create=False, size=dest_size)
                 logger.info(f"error {str(e)} to link shm {name}")

@@ -5,6 +5,7 @@ from lightllm.server.core.objs.atomic_lock import AtomicShmLock
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
 
 LIGHTLLM_REQS_BUFFER_BYTE_SIZE = int(os.getenv("LIGHTLLM_REQS_BUFFER_BYTE_SIZE", 64 * 1024 * 1024))  # 默认64M buf
 
@@ -54,8 +55,11 @@ class ShmReqsIOBuffer:
     def _create_or_link_shm(self):
         try:
             shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
+            logger.info(f"create shm {self.name}")
+            register_posix_shm_for_cleanup(self.name)
         except:
             shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
+            logger.info(f"link shm {self.name}")
 
         if shm.size != LIGHTLLM_REQS_BUFFER_BYTE_SIZE:
             logger.warning(f"size not same, unlink shm {self.name} and create again")
@@ -64,6 +68,7 @@ class ShmReqsIOBuffer:
             try:
                 shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
                 logger.info(f"create shm {self.name}")
+                register_posix_shm_for_cleanup(self.name)
             except:
                 shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_REQS_BUFFER_BYTE_SIZE)
                 logger.info(f"link shm {self.name}")
