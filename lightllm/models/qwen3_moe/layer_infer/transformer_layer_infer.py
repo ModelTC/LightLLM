@@ -88,7 +88,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         input: torch.Tensor,
         infer_state: LlamaInferStateInfo,
         layer_weight: Qwen3MOETransformerLayerWeight,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.tp_world_size_ > 1:
             sp_token_num, hidden_dim = input.shape
             gather_input = self.alloc_tensor(
