@@ -11,7 +11,7 @@ from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.infer_utils import mark_start, mark_end
+from lightllm.utils.kv_cache_utils import compute_token_list_hash
 
 logger = init_logger(__name__)
 
@@ -27,55 +27,22 @@ class MultiLevelKvCacheModule(object):
         self.init_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.init_sync_group)
 
-        self.sync_group = create_new_group_for_current_dp("nccl")
-        dist.barrier(group=self.sync_group)
-        self.sync_tensor = torch.zeros((1,), dtype=torch.int64, device="cuda")
-
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)
-        self._pin_reg_handle = self.cpu_cache_client.pin_reg_handle
 
-    def wait_init(self):
-        """等待 CPU KV Cache 的 pinned 注册完成。
-
-        注意：真实的 register_shm_ptr_to_pin 调用发生在 CpuKvCacheClient._attach_shm_cpu_kv_cache，
-        这里仅对其返回的 handle 执行 wait()，并在此处打印 tqdm 进度。
-        """
-        if hasattr(self, "_pin_reg_handle") and self._pin_reg_handle is not None:
-            try:
-                dev_ptr = self._pin_reg_handle.wait()
-                logger.info(f"CPU KV cache pinned registered. device_ptr=0x{dev_ptr:x}")
-            finally:
-                # 释放句柄引用
-                self._pin_reg_handle = None
-        # 同步 mark_end 放在这里，保证时间统计贴近实际等待点
-        try:
-            from lightllm.utils.infer_utils import mark_end
-
-            mark_end("blueswhen1")
-        except Exception:
-            pass
+    def wait_for_init(self):
+        attach_shm_handle = self.cpu_cache_client.attach_shm_handle
+        if attach_shm_handle is not None:
+            attach_shm_handle.wait()
 
     def _compute_full_sequence_hash(self, req: InferReq):
-        """
-        计算基于完整序列（输入+输出）的hash值，而不是只基于输入
-        """
-        from lightllm.utils.kv_cache_utils import compute_token_list_hash
-
-        # 获取完整的token序列：输入 + 已生成的输出
         input_tokens = req.shm_req.get_prompt_ids()
-
-        # 获取已生成的输出token
         total_len = req.shm_req.input_len + req.shm_req.shm_cur_output_len
         if total_len > req.shm_req.input_len:
-            # 从共享内存中获取完整序列
             full_sequence = req.shm_req.shm_prompt_ids.arr[:total_len].tolist()
         else:
             full_sequence = input_tokens
-
-        # 基于完整序列计算hash
-        hash_values = compute_token_list_hash(full_sequence, self.args.cpu_cache_token_page_size)
-        return hash_values
+        return compute_token_list_hash(full_sequence, self.args.cpu_cache_token_page_size)
 
     def handle_finished_reqs(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """
@@ -107,24 +74,22 @@ class MultiLevelKvCacheModule(object):
                     continue
                 else:
                     assert req.cpu_cache_task_status.is_not_started()
-                    # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
-                    # if self.backend.is_master_in_dp:
-                    #     mark_start("blueswhen offload_kv_to_cpu")
+                    # 必须等待 overlap stream 上的计算任务完成，不然会崩溃
                     if g_infer_context.overlap_stream is not None:
                         cpu_stream.wait_stream(g_infer_context.overlap_stream)
                     else:
                         cpu_stream.wait_stream(torch.cuda.current_stream())
+
+                    # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
                     trans_task = self._start_kv_cache_offload_task(
                         req=req, cpu_kv_cache_stream=cpu_stream
                     )
-                    # if self.backend.is_master_in_dp:
-                    #     mark_end("blueswhen offload_kv_to_cpu")
-
                     if trans_task is not None:
                         self.cpu_cache_handle_queue.append(trans_task)
                     else:
                         true_finished_reqs.append(req)
 
+            # 必须在这里同步，不然会崩溃
             cpu_stream.synchronize()
             return true_finished_reqs
         else:
@@ -187,7 +152,6 @@ class MultiLevelKvCacheModule(object):
                 page_readies=page_readies,
             )
 
-            # dist.all_reduce(tensor=self.sync_tensor, group=self.sync_group, async_op=False)
             sync_event = torch.cuda.Event()
             sync_event.record()
             req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
@@ -209,7 +173,6 @@ class MultiLevelKvCacheModule(object):
                     break
             item_size = len(trans_ok_tasks)
             dist.broadcast_object_list([item_size], group=self.filter_group, group_src=0)
-
         else:
             recv_list = [None]
             dist.broadcast_object_list(recv_list, group=self.filter_group, group_src=0)

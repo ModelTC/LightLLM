@@ -12,7 +12,6 @@ from lightllm.utils.kv_cache_utils import (
     attach_shm_kv_cache_ptr,
     register_shm_ptr_to_pin,
 )
-from lightllm.utils.infer_utils import mark_start, mark_end
 
 logger = init_logger(__name__)
 
@@ -31,9 +30,9 @@ class CpuKvCacheClient(object):
         self._create_cpu_status_list(init_shm_data)
         if init_shm_data:
             self._create_shm_cpu_kv_cache()
-            self.pin_reg_handle = None
+            self.attach_shm_handle = None
         else:
-            self.pin_reg_handle = self._attach_shm_cpu_kv_cache()
+            self.attach_shm_handle = self._attach_shm_cpu_kv_cache()
         return
 
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
@@ -215,7 +214,6 @@ class CpuKvCacheClient(object):
 
     def _attach_shm_cpu_kv_cache(self):
         shm_ptr = attach_shm_kv_cache_ptr()
-        mark_start("blueswhen1")
         handle = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.kv_cache_tensor_meta.calcu_size())
         numpy_array = np.frombuffer(
             memoryview((ctypes.c_uint8 * self.kv_cache_tensor_meta.calcu_size()).from_address(shm_ptr)), dtype=np.uint8

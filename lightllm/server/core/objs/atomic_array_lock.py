@@ -2,6 +2,7 @@ import asyncio
 import atomics
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
 
 logger = init_logger(__name__)
 
@@ -26,6 +27,7 @@ class AtomicShmArrayLock:
     def _init_shm(self):
         try:
             shm = shared_memory.SharedMemory(name=self.lock_name, create=True, size=self.dest_size)
+            register_posix_shm_for_cleanup(self.lock_name)
             logger.info(f"create lock shm {self.lock_name}")
         except:
             shm = shared_memory.SharedMemory(name=self.lock_name, create=False, size=self.dest_size)
