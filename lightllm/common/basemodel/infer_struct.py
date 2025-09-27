@@ -64,7 +64,7 @@ class InferStateInfo:
         # 的输入会用到，其他模型和场景都不会用到
         self.deepseekv3_mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
+    def init_some_extra_state(self, model, model_input: ModelInput):
         if self.is_prefill:
             (
                 self.b_q_seq_len,
@@ -75,9 +75,7 @@ class InferStateInfo:
                 self.max_q_seq_len,
                 self.max_kv_seq_len,
             ) = gen_prefill_params(
-                input_token_num=input_ids.shape[0],
-                b_ready_cache_len=self.b_ready_cache_len,
-                b_seq_len=self.b_seq_len,
+                model_input,
             )
             self.b_start_loc = self.b1_cu_q_seq_len[0:-1]
         else:

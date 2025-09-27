@@ -3,6 +3,8 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.basemodel.batch_objs import ModelInput
+
 
 @triton.jit
 def _gen_cumsum_pad0_kernel(
@@ -80,7 +82,14 @@ def _gen_prefill_position(
 
 
 @torch.no_grad()
-def gen_prefill_params(input_token_num: int, b_ready_cache_len: torch.Tensor, b_seq_len: torch.Tensor):
+def gen_prefill_params(model_input: ModelInput):
+    # input_token_num: int, b_ready_cache_len: torch.Tensor, b_seq_len: torch.Tensor):
+    input_token_num = model_input.input_ids.shape[0]
+    b_seq_len = model_input.b_seq_len
+    b_ready_cache_len = model_input.b_ready_cache_len
+    b_seq_len_cpu = model_input.b_seq_len_cpu
+    b_ready_cache_len_cpu = model_input.b_ready_cache_len_cpu
+
     batch_size = b_ready_cache_len.shape[0]
     position_ids = torch.empty((input_token_num,), dtype=torch.int32, device="cuda")
     assert b_ready_cache_len.shape[0] == b_seq_len.shape[0]
@@ -99,6 +108,6 @@ def gen_prefill_params(input_token_num: int, b_ready_cache_len: torch.Tensor, b_
         num_stages=1,
     )
     b_kv_seq_len = b_seq_len
-    max_q_seq_len = b_q_seq_len.max().item()
-    max_kv_seq_len = b_kv_seq_len.max().item()
+    max_q_seq_len = (b_seq_len_cpu - b_ready_cache_len_cpu).max()
+    max_kv_seq_len = b_seq_len_cpu.max()
     return b_q_seq_len, b1_cu_q_seq_len, b_kv_seq_len, b1_cu_kv_seq_len, position_ids, max_q_seq_len, max_kv_seq_len

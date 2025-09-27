@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from lightllm.common.basemodel import InferStateInfo
 from lightllm.common.req_manager import ReqManager
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 class LlamaInferStateInfo(InferStateInfo):
@@ -10,7 +11,7 @@ class LlamaInferStateInfo(InferStateInfo):
         self.position_cos = None
         self.position_sin = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
+    def init_some_extra_state(self, model, model_input: ModelInput):
         if self.is_prefill:
             b_seq_len_numpy = self.b_seq_len.cpu().numpy()
             b_ready_cache_len_numpy = self.b_ready_cache_len.cpu().numpy()

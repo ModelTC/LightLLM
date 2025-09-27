@@ -11,8 +11,8 @@ from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 class Qwen2VLFlashAttentionStateInfo(FlashAttentionStateInfo):
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        InferStateInfo.init_some_extra_state(self, model, input_ids)
+    def init_some_extra_state(self, model, model_input: ModelInput):
+        InferStateInfo.init_some_extra_state(self, model, model_input)
         if self.is_prefill:
             self.max_seq_len = self.max_kv_seq_len
             self.q_max_seq_len = self.max_q_seq_len
@@ -26,5 +26,5 @@ class Qwen2VLFlashAttentionStateInfo(FlashAttentionStateInfo):
             self.position_cos = model._cos_cached[:, position_ids, :].unsqueeze(1)
 
         # init flash attention state
-        self._init_flash_attention_state(model, input_ids)
+        self._init_flash_attention_state(model, model_input)
         return
