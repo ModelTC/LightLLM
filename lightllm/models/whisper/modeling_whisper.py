@@ -26,6 +26,7 @@ from transformers.activations import ACT2FN
 from transformers.configuration_utils import PretrainedConfig
 
 from transformers.modeling_outputs import BaseModelOutput
+from lightllm.utils.envs_utils import use_whisper_sdpa_attention
 
 
 def sinusoids(length: int, channels: int, max_timescale: float = 10000) -> torch.Tensor:
@@ -404,7 +405,8 @@ class WhisperEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.d_model
 
-        self.self_attn = WhisperSdpaAttention(
+        att_class = WhisperSdpaAttention if use_whisper_sdpa_attention() else WhisperAttention
+        self.self_attn = att_class(
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
