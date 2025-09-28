@@ -40,6 +40,9 @@ class CudaGraph:
         batch_sizes.append(max_batch_size)
         batch_sizes.sort()
 
+        step_size = self.args.mtp_step + 1
+        batch_sizes = [b for b in batch_sizes if b % step_size == 0]
+
         self.cuda_graph_batch_sizes = batch_sizes
         assert batch_sizes[-1] == self.max_batch_size
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
