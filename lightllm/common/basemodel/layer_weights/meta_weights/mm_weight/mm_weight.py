@@ -1,7 +1,7 @@
 import os
 import torch
 from abc import abstractmethod
-from typing import Optional, Tuple, List, Dict, Union
+from typing import Optional, Tuple, List, Dict, Union, Type
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
@@ -88,9 +88,9 @@ class MMWeightTpl(BaseWeightTpl):
 class MultiMMWeightTpl(MMWeightTpl):
     def __init__(
         self,
-        weight_names: str,
+        weight_names: List[str],
         data_type: torch.dtype,
-        bias_names: Optional[str] = None,
+        bias_names: Optional[List[str]] = None,
         quant_method: QuantizationMethod = None,
         tp_rank: int = None,
         tp_world_size: int = None,
@@ -183,6 +183,6 @@ class MMWeight:
 
     @classmethod
     def _get_mmcls(
-        cls, quant_method: QuantizationMethod
-    ) -> Optional[Union[MMWeightTpl, MultiMMWeightTpl, BMMWeightTpl]]:
-        return None
+        cls, quant_method: QuantizationMethod, quantized_weight: bool
+    ) -> Type[Union[MMWeightTpl, MultiMMWeightTpl, BMMWeightTpl]]:
+        raise NotImplementedError("Subclasses must implement _get_mmcls method")
