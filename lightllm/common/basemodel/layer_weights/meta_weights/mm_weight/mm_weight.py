@@ -88,9 +88,9 @@ class MMWeightTpl(BaseWeightTpl):
 class MultiMMWeightTpl(MMWeightTpl):
     def __init__(
         self,
-        weight_names: list[str],
+        weight_names: List[str],
         data_type: torch.dtype,
-        bias_names: Optional[list[str]] = None,
+        bias_names: Optional[List[str]] = None,
         quant_method: QuantizationMethod = None,
         tp_rank: int = None,
         tp_world_size: int = None,
