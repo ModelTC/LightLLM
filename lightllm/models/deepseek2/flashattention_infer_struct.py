@@ -26,13 +26,13 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
         if self.is_prefill:
             self.cu_seqlens_q = self.b1_cu_q_seq_len
             self.cu_seqlens_k = self.b1_cu_kv_seq_len
-            self.has_prefix_kv = self.b_ready_cache_len_numpy.any()
+            self.has_prefix_kv = self.max_cache_len > 0
             if self.has_prefix_kv:
                 self.cu_seqlens_prefix_k = torch.nn.functional.pad(
                     torch.cumsum(self.b_ready_cache_len, dim=0, dtype=torch.int32), (1, 0)
                 )
-                self.prefix_k_max_len = self.b_ready_cache_len_numpy.max()
-                self.prefix_total_token_num = self.b_ready_cache_len_numpy.sum()
+                self.prefix_k_max_len = self.max_cache_len
+                self.prefix_total_token_num = self.prefix_total_token_num
         else:
             # Meta information of flashattention for decoding
             self.cu_seqlens_q = self.b1_cu_q_seq_len

@@ -576,7 +576,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             cache_seqlens=infer_state.b_seq_len[2::3].contiguous(),
             cu_seqlens_q=infer_state.cu_seqlens_q,
             cu_seqlens_k_new=infer_state.cu_seqlens_k,
-            max_seqlen_q=3,
+            max_seqlen_q=infer_state.max_q_seq_len,
             softmax_scale=self.softmax_scale,
             causal=True,
             window_size=(-1, -1),

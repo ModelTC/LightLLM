@@ -67,7 +67,8 @@ class TpPartBaseModel:
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.data_type = kvargs.get("data_type", "float16")
-        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
+        mtp_step = get_env_start_args().mtp_step
+        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16) * (mtp_step + 1)
         self.graph_max_batch_size = (
             self.graph_max_batch_size // 2
             if get_env_start_args().enable_decode_microbatch_overlap
@@ -258,6 +259,10 @@ class TpPartBaseModel:
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_len_in_batch = model_input.max_len_in_batch
+        infer_state.max_q_seq_len = model_input.max_q_seq_len
+        infer_state.max_kv_seq_len = model_input.max_kv_seq_len
+        infer_state.max_cache_len = model_input.max_cache_len
+        infer_state.prefix_total_token_num = model_input.prefix_total_token_num
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
@@ -696,6 +701,10 @@ class TpPartBaseModel:
                 batch_size=1,
                 total_token_num=total_token_num,
                 max_len_in_batch=self.batch_max_tokens,
+                max_q_seq_len=self.batch_max_tokens,
+                max_kv_seq_len=self.batch_max_tokens,
+                max_cache_len=0,
+                prefix_total_token_num=0,
                 input_ids=dummy_input_ids,
                 mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
@@ -766,6 +775,10 @@ class TpPartBaseModel:
                     batch_size=1,
                     total_token_num=total_token_num,
                     max_len_in_batch=input_len,
+                    max_q_seq_len=input_len,
+                    max_kv_seq_len=input_len,
+                    max_cache_len=0,
+                    prefix_total_token_num=0,
                     input_ids=dummy_input_ids,
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
@@ -822,6 +835,10 @@ class TpPartBaseModel:
             batch_size=batch_size,
             total_token_num=total_token_num,
             max_len_in_batch=prefill_input_len,
+            max_q_seq_len=prefill_input_len,
+            max_kv_seq_len=prefill_input_len,
+            max_cache_len=0,
+            prefix_total_token_num=0,
             input_ids=dummy_input_ids,
             mem_indexes=mem_indexes,
             b_req_idx=b_req_idx,

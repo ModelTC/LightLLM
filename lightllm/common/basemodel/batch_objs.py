@@ -10,10 +10,14 @@ class ModelInput:
     batch_size: int
     total_token_num: int
     max_len_in_batch: int
-    input_ids: torch.Tensor
-    b_req_idx: torch.Tensor
-    b_mtp_index: torch.Tensor
-    b_seq_len: torch.Tensor
+    max_q_seq_len: int
+    max_kv_seq_len: int
+    max_cache_len: int = 0
+    prefix_total_token_num: int = 0
+    input_ids: torch.Tensor = None
+    b_req_idx: torch.Tensor = None
+    b_mtp_index: torch.Tensor = None
+    b_seq_len: torch.Tensor = None
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None

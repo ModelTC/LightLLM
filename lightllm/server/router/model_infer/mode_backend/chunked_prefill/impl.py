@@ -42,7 +42,7 @@ class ChunkedPrefillBackend(ModeBackend):
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
             self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
-            self.prefill_mtp_step = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
+            self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
@@ -192,7 +192,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 mask_func=self.prefill_mask_func,
             )
             # mtp kv fill
-            self._draft_prefill_forward(model_input, model_output, self.prefill_mtp_step, next_token_ids)
+            self._draft_prefill_forward(model_input, model_output, self.num_mtp_models, next_token_ids)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -222,49 +222,6 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack: OverlapEventPack,
         decode_reqs: List[InferReq],
     ):
-        if self.is_mtp_eagle:
-            draft_model_input, eagle_mem_indexes_cpu = prepare_eagle_decode_inputs(decode_reqs, self.mtp_step)
-            self._decode_mtp_common(
-                event_pack=event_pack,
-                decode_reqs=decode_reqs,
-                draft_decode_func=self._draft_decode_eagle,
-                additional_mem_indexes_cpu=eagle_mem_indexes_cpu,
-                draft_model_input=draft_model_input,
-                eagle_mem_indexes_cpu=eagle_mem_indexes_cpu,
-            )
-        else:
-            self._decode_mtp_common(
-                event_pack=event_pack,
-                decode_reqs=decode_reqs,
-                draft_decode_func=self._draft_decode_vanilla,
-            )
-        return
-
-    def _draft_prefill_forward(
-        self, model_input: ModelInput, model_output: ModelOutput, mtp_step: int, next_token_ids: torch.Tensor
-    ):
-        # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
-        draft_model_input = model_input
-        draft_model_output = model_output
-        draft_next_token_ids_gpu = next_token_ids
-        for draft_model_idx in range(mtp_step):
-            draft_model_input = prepare_mtp_prefill_inputs(
-                model_input=draft_model_input,
-                b_next_token_ids=draft_next_token_ids_gpu,
-                deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
-            )
-            draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
-            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
-        return
-
-    def _decode_mtp_common(
-        self,
-        event_pack: OverlapEventPack,
-        decode_reqs: List[InferReq],
-        draft_decode_func: Callable,
-        additional_mem_indexes_cpu: Optional[torch.Tensor] = None,
-        **draft_kwargs
-    ):
         """
         MTP解码的通用流程，整合eagle和vanilla的共同逻辑
         """
@@ -275,7 +232,7 @@ class ChunkedPrefillBackend(ModeBackend):
             verify_info = self._draft_verify(model_input, run_reqs)
 
             # 调用具体的draft decode函数
-            draft_decode_func(main_model_input=model_input, verify_info=verify_info, **draft_kwargs)
+            additional_mem_indexes_cpu = self._draft_decode(main_model_input=model_input, verify_info=verify_info)
 
             g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
                 b_req_idx=model_input.b_req_idx,
@@ -297,8 +254,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 处理需要释放的内存索引
         need_free_mem_indexes = model_input.mem_indexes_cpu[verify_info["accepted_index_cpu"] == 0]
-        if additional_mem_indexes_cpu is not None:
-            need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
+        need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
 
         self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=verify_info["mtp_accept_len_cpu"])
         select_mask = torch.tensor(verify_info["accepted_index_cpu"], dtype=torch.bool, device="cpu")
@@ -317,6 +273,23 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 第四阶段
         event_pack.notify_pre_post_handle()
+        return
+
+    def _draft_prefill_forward(
+        self, model_input: ModelInput, model_output: ModelOutput, mtp_step: int, next_token_ids: torch.Tensor
+    ):
+        # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
+        draft_model_input = model_input
+        draft_model_output = model_output
+        draft_next_token_ids_gpu = next_token_ids
+        for draft_model_idx in range(mtp_step):
+            draft_model_input = prepare_mtp_prefill_inputs(
+                model_input=draft_model_input,
+                b_next_token_ids=draft_next_token_ids_gpu,
+                deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
+            )
+            draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
+            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
         return
 
     def _draft_verify(self, model_input: ModelInput, run_reqs: List[InferReq]):
@@ -366,7 +339,7 @@ class ChunkedPrefillBackend(ModeBackend):
             "next_token_logprobs_cpu": next_token_logprobs_cpu,
         }
 
-    def _draft_decode_vanilla(
+    def _draft_decode(
         self,
         main_model_input: ModelInput,
         verify_info: Dict[str, Any],
@@ -375,6 +348,16 @@ class ChunkedPrefillBackend(ModeBackend):
         next_token_ids = verify_info["next_token_ids"]
         mtp_accept_len = verify_info["mtp_accept_len"]
         b_req_mtp_start_loc = verify_info["b_req_mtp_start_loc"]
+        batch_size = main_model_input.batch_size
+        num_reqs = batch_size // (self.mtp_step + 1)
+        eagle_mem_indexes_cpu = None
+        if self.is_mtp_eagle:
+            g_infer_state_lock.acquire()
+            if g_infer_context.radix_cache is not None:
+                g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(num_reqs * self.mtp_step)
+            eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(num_reqs * self.mtp_step)
+            g_infer_state_lock.release()
+            eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
         # share some inference info with the main model
         draft_model_input = main_model_input
@@ -383,13 +366,22 @@ class ChunkedPrefillBackend(ModeBackend):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
         # process the draft model output
-        for draft_model_idx in range(self.mtp_step):
+        for _step in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids
             draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
             # spec decode: MTP
+            draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
+            draft_model_input.b_seq_len += 1
+            draft_model_input.max_len_in_batch += 1
+            if self.is_mtp_eagle:
+                eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
+                draft_model_input.mem_indexes = torch.cat(
+                    [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
+                    dim=1,
+                ).view(-1)
             all_next_token_ids.append(draft_next_token_ids)
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
@@ -401,58 +393,4 @@ class ChunkedPrefillBackend(ModeBackend):
             b_req_idx=main_model_input.b_req_idx,
             mtp_accept_len=mtp_accept_len,
         )
-        return
-
-    def _draft_decode_eagle(
-        self,
-        main_model_input: ModelInput,
-        verify_info: Dict[str, Any],
-        eagle_mem_indexes_cpu: torch.Tensor,
-        draft_model_input: ModelInput,
-    ):
-
-        main_model_output = verify_info["main_model_output"]
-        next_token_ids = verify_info["next_token_ids"]
-        mtp_accept_len = verify_info["mtp_accept_len"]
-        b_req_mtp_start_loc = verify_info["b_req_mtp_start_loc"]
-
-        selected_index = b_req_mtp_start_loc + mtp_accept_len - 1
-
-        all_next_token_ids = []
-        all_next_token_ids.append(next_token_ids[selected_index])
-
-        # 第一步draft，填充接受的token的kv。
-        main_model_input.input_ids = next_token_ids
-        main_model_input.deepseekv3_mtp_draft_input_hiddens = main_model_output.deepseekv3_mtp_main_output_hiddens
-        draft_model_output = self.draft_models[0].forward(main_model_input)
-        draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
-
-        draft_input_ids = draft_next_token_ids[selected_index]
-        all_next_token_ids.append(draft_input_ids)
-
-        # 剩余的draft step。
-        draft_model_input.input_ids = draft_input_ids.contiguous()
-        draft_model_input.b_seq_len = draft_model_input.b_seq_len.cuda(non_blocking=True)
-        draft_model_input.b_seq_len += mtp_accept_len
-        draft_model_input.max_len_in_batch += self.mtp_step * 2
-        draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens[
-            selected_index
-        ]
-        for _step in range(1, self.mtp_step):
-            draft_batch_size = draft_model_input.batch_size
-            draft_model_input.mem_indexes = None
-            draft_model_input.mem_indexes_cpu = eagle_mem_indexes_cpu[
-                (_step - 1) * draft_batch_size : (_step * draft_batch_size)
-            ]
-            draft_model_output = self.draft_models[0].forward(draft_model_input)
-            draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
-            draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.b_seq_len += 1
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
-            all_next_token_ids.append(draft_next_token_ids)
-
-        all_next_token_ids = torch.stack(all_next_token_ids, dim=-1)  # [batch_size, mtp_step + 1]
-        self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids[
-            draft_model_input.b_req_idx, : self.mtp_step + 1
-        ] = all_next_token_ids
-        return
+        return eagle_mem_indexes_cpu

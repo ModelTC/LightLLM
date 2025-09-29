@@ -27,6 +27,10 @@ def padded_prepare_prefill_inputs(
     run_reqs = []
     total_token_num = 0
     max_len_in_batch = 0
+    max_q_seq_len = 0
+    max_kv_seq_len = 0
+    max_cache_len = 0
+    prefix_total_token_num = 0
     padded_req_num = dest_batch_size - len(req_objs)
     input_ids = []
     b_req_idx = []
@@ -52,6 +56,10 @@ def padded_prepare_prefill_inputs(
         input_ids.append(input_id)
         total_token_num += seq_len
         max_len_in_batch = max(max_len_in_batch, input_token_len)
+        max_q_seq_len = max(max_q_seq_len, input_token_len)
+        max_kv_seq_len = max(max_kv_seq_len, seq_len)
+        max_cache_len = max(max_cache_len, req.cur_kv_len)
+        prefix_total_token_num += req.cur_kv_len
         b_ready_cache_len.append(req.cur_kv_len)
         b_mtp_index.append(0)
 
@@ -65,6 +73,10 @@ def padded_prepare_prefill_inputs(
         b_ready_cache_len.append(0)
         total_token_num += 1
         max_len_in_batch = max(max_len_in_batch, 1)
+        max_q_seq_len = max(max_q_seq_len, 1)
+        max_kv_seq_len = max(max_kv_seq_len, 1)
+        max_cache_len = max(max_cache_len, 0)
+        prefix_total_token_num += 0
 
     input_ids = np.concatenate(input_ids, dtype=np.int64)
 
@@ -93,6 +105,10 @@ def padded_prepare_prefill_inputs(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
         max_len_in_batch=max_len_in_batch,
+        max_q_seq_len=max_q_seq_len,
+        max_kv_seq_len=max_kv_seq_len,
+        max_cache_len=max_cache_len,
+        prefix_total_token_num=prefix_total_token_num,
         input_ids=input_ids,
         mem_indexes_cpu=mem_indexes,
         b_req_idx=b_req_idx,

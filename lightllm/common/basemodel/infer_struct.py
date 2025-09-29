@@ -72,8 +72,6 @@ class InferStateInfo:
                 self.b_kv_seq_len,
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
-                self.max_q_seq_len,
-                self.max_kv_seq_len,
             ) = gen_prefill_params(
                 input_token_num=input_ids.shape[0],
                 b_ready_cache_len=self.b_ready_cache_len,
@@ -88,7 +86,6 @@ class InferStateInfo:
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
             ) = gen_decode_params(self.b_seq_len)
-            self.max_q_seq_len = 1
             # TODO: check the correctness
             self.max_kv_seq_len = self.max_len_in_batch
             self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
