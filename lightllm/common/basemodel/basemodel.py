@@ -340,16 +340,16 @@ class TpPartBaseModel:
         model_input: ModelInput,
     ):
         infer_state = self._create_inferstate(model_input)
-        init_req_to_token_indexes(
-            self.req_manager.req_to_token_indexs,
-            model_input.b_req_idx,
-            model_input.b_seq_len,
-            infer_state.b_ready_cache_len,
-            model_input.max_len_in_batch,
-            infer_state.mem_index,
-        )
-
         infer_state.init_some_extra_state(self, model_input.input_ids)
+        init_req_to_token_indexes(
+            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_seq_len=infer_state.b_seq_len,
+            b_ready_cache_len=infer_state.b_ready_cache_len,
+            b_start_loc=infer_state.b_start_loc,
+            alloc_mem_index=infer_state.mem_index,
+            max_q_seq_len=infer_state.max_q_seq_len,
+        )
         return self._context_forward(model_input.input_ids, infer_state)
 
     def _decode(
