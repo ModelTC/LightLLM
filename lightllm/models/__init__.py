@@ -35,4 +35,5 @@ from lightllm.models.tarsier2.model import (
     Tarsier2Qwen2VLTpPartModel,
     Tarsier2LlamaTpPartModel,
 )
+from lightllm.models.gpt_oss.model import GptOssTpPartModel
 from .registry import get_model
