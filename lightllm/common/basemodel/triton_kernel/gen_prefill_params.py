@@ -11,6 +11,7 @@ def _gen_cumsum_pad0_kernel(
     b_kv_seq_len,
     b1_cu_kv_seq_len,
     size,
+    b_kv_seq_len_stride_0,
     BLOCK: tl.constexpr,  # num_warps
 ):
     offs = tl.arange(0, BLOCK)
@@ -29,7 +30,7 @@ def _gen_cumsum_pad0_kernel(
     start_value = tl.cast(0, tl.int64)
     for start_index in range(0, size, BLOCK):
         current_offs = start_index + offs
-        in_data = tl.load(b_kv_seq_len + offs, mask=current_offs < size, other=0)
+        in_data = tl.load(b_kv_seq_len + offs * b_kv_seq_len_stride_0, mask=current_offs < size, other=0)
         in_data = tl.cumsum(in_data) + start_value
         start_value = tl.max(in_data, 0)
         tl.store(b1_cu_kv_seq_len + current_offs + 1, in_data, mask=current_offs < size)
@@ -51,6 +52,7 @@ def gen_cumsum_pad0_tensor(b_q_seq_len: torch.Tensor, b_kv_seq_len: torch.Tensor
         b_kv_seq_len,
         b1_cu_kv_seq_len,
         b_q_seq_len.shape[0],
+        b_kv_seq_len.stride(0),
         BLOCK=1024,
         num_warps=4,
     )
@@ -99,6 +101,66 @@ def gen_prefill_params(input_token_num: int, b_ready_cache_len: torch.Tensor, b_
         num_stages=1,
     )
     b_kv_seq_len = b_seq_len
-    max_q_seq_len = b_q_seq_len.max().item()
-    max_kv_seq_len = b_kv_seq_len.max().item()
-    return b_q_seq_len, b1_cu_q_seq_len, b_kv_seq_len, b1_cu_kv_seq_len, position_ids, max_q_seq_len, max_kv_seq_len
+    return b_q_seq_len, b1_cu_q_seq_len, b_kv_seq_len, b1_cu_kv_seq_len, position_ids
+
+
+@triton.jit
+def fill_req_to_token_indexes_kernel(
+    req_to_token_indexs_ptr,  # [num_req, max_len]
+    b_req_idx_ptr,  # [B]
+    b_seq_len_ptr,  # [B]
+    b_ready_cache_len_ptr,  # [B]
+    b_start_loc_ptr,  # [B]
+    alloc_mem_index_ptr,  # [total_new_tokens]
+    req_to_token_indexs_stride0,
+    req_to_token_indexs_stride1,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)  # batch id
+    req_idx = tl.load(b_req_idx_ptr + pid)
+    cur_seq_len = tl.load(b_seq_len_ptr + pid)
+    cur_ready_cache_len = tl.load(b_ready_cache_len_ptr + pid)
+    start_loc = tl.load(b_start_loc_ptr + pid)
+
+    copy_len = cur_seq_len - cur_ready_cache_len
+    if copy_len <= 0:
+        return
+
+    # 一次 BLOCK 个线程
+    offs = tl.arange(0, BLOCK)
+    for base in range(0, copy_len, BLOCK):
+        idx = base + offs
+        mask = idx < copy_len
+        vals = tl.load(alloc_mem_index_ptr + start_loc + idx, mask=mask, other=0)
+
+        out_ptrs = (
+            req_to_token_indexs_ptr
+            + req_idx * req_to_token_indexs_stride0
+            + (cur_ready_cache_len + idx) * req_to_token_indexs_stride1
+        )
+        tl.store(out_ptrs, vals, mask=mask)
+
+
+def init_req_to_token_indexes_triton(
+    req_to_token_indexs: torch.Tensor,  # [num_req, max_len]
+    b_req_idx: torch.Tensor,  # [B]
+    b_seq_len: torch.Tensor,  # [B]
+    b_ready_cache_len: torch.Tensor,  # [B]
+    b_start_loc: torch.Tensor,  # [B], alloc_mem_index 的 prefix sum 起点
+    alloc_mem_index: torch.Tensor,  # [total_new_tokens]
+    max_q_seq_len: int,
+):
+    BLOCK = 128
+    batch_size = b_seq_len.shape[0]
+    grid = (batch_size,)
+    fill_req_to_token_indexes_kernel[grid](
+        req_to_token_indexs,
+        b_req_idx,
+        b_seq_len,
+        b_ready_cache_len,
+        b_start_loc,
+        alloc_mem_index,
+        req_to_token_indexs.stride(0),
+        req_to_token_indexs.stride(1),
+        BLOCK=BLOCK,
+    )
