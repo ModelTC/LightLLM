@@ -1,12 +1,7 @@
 import torch
 import copy
-from typing import List, Tuple
-from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
+from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
-from lightllm.utils.dist_utils import get_current_device_id
 
 
 def prepare_mtp_prefill_inputs(
