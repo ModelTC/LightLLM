@@ -11,6 +11,7 @@ def _gen_cumsum_pad0_kernel(
     b_kv_seq_len,
     b1_cu_kv_seq_len,
     size,
+    b_kv_seq_len_stride_0,
     BLOCK: tl.constexpr,  # num_warps
 ):
     offs = tl.arange(0, BLOCK)
@@ -29,7 +30,7 @@ def _gen_cumsum_pad0_kernel(
     start_value = tl.cast(0, tl.int64)
     for start_index in range(0, size, BLOCK):
         current_offs = start_index + offs
-        in_data = tl.load(b_kv_seq_len + offs, mask=current_offs < size, other=0)
+        in_data = tl.load(b_kv_seq_len + offs * b_kv_seq_len_stride_0, mask=current_offs < size, other=0)
         in_data = tl.cumsum(in_data) + start_value
         start_value = tl.max(in_data, 0)
         tl.store(b1_cu_kv_seq_len + current_offs + 1, in_data, mask=current_offs < size)
@@ -51,6 +52,7 @@ def gen_cumsum_pad0_tensor(b_q_seq_len: torch.Tensor, b_kv_seq_len: torch.Tensor
         b_kv_seq_len,
         b1_cu_kv_seq_len,
         b_q_seq_len.shape[0],
+        b_kv_seq_len.stride(0),
         BLOCK=1024,
         num_warps=4,
     )

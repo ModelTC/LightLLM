@@ -11,8 +11,6 @@ def gen_decode_params(b_seq_len: torch.Tensor):
     position_ids = b_seq_len - 1
     mtp_step = get_env_start_args().mtp_step
     mtp_size = mtp_step + 1
-    b_q_seq_len = torch.ones_like(b_seq_len) * mtp_size
-    b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(
-        b_q_seq_len[mtp_size - 1 :: mtp_size], b_kv_seq_len[mtp_size - 1 :: mtp_size]
-    )
+    b_q_seq_len = torch.ones(b_seq_len.shape[0] // mtp_size, dtype=torch.int32, device=b_seq_len.device) * mtp_size
+    b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len[mtp_size - 1 :: mtp_size])
     return b_q_seq_len, b1_cu_q_seq_len, b_kv_seq_len, b1_cu_kv_seq_len, position_ids

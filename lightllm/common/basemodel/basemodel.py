@@ -479,26 +479,28 @@ class TpPartBaseModel:
         input_ids0, input_ids1 = model_input0.input_ids, model_input1.input_ids
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        init_req_to_token_indexes(
-            self.req_manager.req_to_token_indexs,
-            model_input0.b_req_idx,
-            model_input0.b_seq_len,
-            infer_state0.b_ready_cache_len,
-            model_input0.max_len_in_batch,
-            infer_state0.mem_index,
-        )
         infer_state0.init_some_extra_state(self, input_ids0)
+        init_req_to_token_indexes(
+            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state0.b_req_idx,
+            b_seq_len=infer_state0.b_seq_len,
+            b_ready_cache_len=infer_state0.b_ready_cache_len,
+            b_start_loc=infer_state0.b_start_loc,
+            alloc_mem_index=infer_state0.mem_index,
+            max_q_seq_len=infer_state0.max_q_seq_len,
+        )
 
         infer_state1 = self._create_inferstate(model_input1, 1)
-        init_req_to_token_indexes(
-            self.req_manager.req_to_token_indexs,
-            model_input1.b_req_idx,
-            model_input1.b_seq_len,
-            infer_state1.b_ready_cache_len,
-            model_input1.max_len_in_batch,
-            infer_state1.mem_index,
-        )
         infer_state1.init_some_extra_state(self, input_ids1)
+        init_req_to_token_indexes(
+            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state1.b_req_idx,
+            b_seq_len=infer_state1.b_seq_len,
+            b_ready_cache_len=infer_state1.b_ready_cache_len,
+            b_start_loc=infer_state1.b_start_loc,
+            alloc_mem_index=infer_state1.mem_index,
+            max_q_seq_len=infer_state1.max_q_seq_len,
+        )
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(
             input_ids0, infer_state0, input_ids1=input_ids1, infer_state1=infer_state1

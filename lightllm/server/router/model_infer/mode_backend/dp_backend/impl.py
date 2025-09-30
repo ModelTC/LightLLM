@@ -400,11 +400,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         b_mtp_index_cpu = model_input.b_mtp_index
         eagle_mem_indexes_cpu = None
         req_num = len(run_reqs)
-        if self.is_mtp_eagle:
-            draft_model_input, eagle_mem_indexes_cpu = padded_prepare_eagle_decode_inputs(
-                decode_reqs, padded_req_num=padded_req_num, mtp_step=self.mtp_step
-            )
-
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             mtp_accept_len, b_req_mtp_start_loc, next_token_ids = None, None, None
@@ -441,27 +436,15 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             verify_event = torch.cuda.Event()
             verify_event.record()
-            if self.is_mtp_eagle:
-                self._draft_decode_eagle(
-                    model_input=model_input,
-                    model_output=model_output,
-                    next_token_ids=next_token_ids,
-                    b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    mtp_accept_len=mtp_accept_len,
-                    eagle_mem_indexes_cpu=eagle_mem_indexes_cpu,
-                    draft_model_input=draft_model_input,
-                    req_num=req_num,
-                    padded_req_num=padded_req_num,
-                )
-            else:
-                self._draft_decode_vanilla(
-                    model_input=model_input,
-                    model_output=model_output,
-                    next_token_ids=next_token_ids,
-                    b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    mtp_accept_len=mtp_accept_len,
-                    req_num=req_num,
-                )
+
+            eagle_mem_indexes_cpu = self._draft_decode_vanilla(
+                model_input=model_input,
+                model_output=model_output,
+                next_token_ids=next_token_ids,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                mtp_accept_len=mtp_accept_len,
+                req_num=req_num,
+            )
             if req_num > 0:
                 g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
                     b_req_idx=model_input.b_req_idx[:req_num],
@@ -483,8 +466,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
             need_free_mem_indexes = model_input.mem_indexes_cpu[0:req_num][accepted_index_cpu == 0]
-            if self.is_mtp_eagle:
-                need_free_mem_indexes = torch.cat([need_free_mem_indexes, eagle_mem_indexes_cpu], dim=0)
+            need_free_mem_indexes = torch.cat([need_free_mem_indexes, eagle_mem_indexes_cpu], dim=0)
 
             self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
             select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
@@ -522,18 +504,36 @@ class DPChunkedPrefillBackend(ModeBackend):
         draft_model_input = model_input
         draft_model_output = model_output
         all_next_token_ids.append(next_token_ids)
-
         draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
         if req_num > 0:
             draft_next_token_ids_gpu[:req_num].copy_(next_token_ids, non_blocking=True)
 
+        real_req_num = req_num // (self.mtp_step + 1)
+        eagle_mem_indexes_cpu = None
+        if self.is_mtp_eagle:
+            g_infer_state_lock.acquire()
+            if g_infer_context.radix_cache is not None:
+                g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_req_num * self.mtp_step)
+            eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_req_num * self.mtp_step)
+            g_infer_state_lock.release()
+            eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
+
         # process the draft model output
-        for draft_model_idx in range(self.mtp_step):
+        for _step in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids_gpu
             draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
             # spec decode: MTP
+            draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
+            if self.is_mtp_eagle:
+                draft_model_input.b_seq_len += 1
+                draft_model_input.max_len_in_batch += 1
+                eagle_mem_indexes_i = eagle_mem_indexes[_step * real_req_num : (_step + 1) * real_req_num]
+                draft_model_input.mem_indexes = torch.cat(
+                    [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
+                    dim=1,
+                ).view(-1)
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
             all_next_token_ids.append(draft_next_token_ids_gpu)
 
@@ -782,37 +782,19 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             verify_event = torch.cuda.Event()
             verify_event.record()
-            if self.is_mtp_eagle:
-                self._draft_decode_eagle_overlap(
-                    model_input0=model_input0,
-                    model_input1=model_input1,
-                    model_output0=model_output0,
-                    model_output1=model_output1,
-                    draft_model_input0=draft_model_input0,
-                    draft_model_input1=draft_model_input1,
-                    next_token_ids=next_token_ids,
-                    mtp_accept_len=mtp_accept_len,
-                    b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    eagle_mem_indexes_cpu0=eagle_mem_indexes0_cpu,
-                    eagle_mem_indexes_cpu1=eagle_mem_indexes1_cpu,
-                    req_num0=req_num0,
-                    req_num1=req_num1,
-                    padded_req_num0=padded_req_num0,
-                    padded_req_num1=padded_req_num1,
-                )
-            else:
-                self._draft_decode_vanilla_overlap(
-                    model_input0=model_input0,
-                    model_input1=model_input1,
-                    model_output0=model_output0,
-                    model_output1=model_output1,
-                    b_req_idx=b_req_idx,
-                    next_token_ids=next_token_ids,
-                    mtp_accept_len=mtp_accept_len,
-                    b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    req_num0=req_num0,
-                    req_num1=req_num1,
-                )
+
+            self._draft_decode_vanilla_overlap(
+                model_input0=model_input0,
+                model_input1=model_input1,
+                model_output0=model_output0,
+                model_output1=model_output1,
+                b_req_idx=b_req_idx,
+                next_token_ids=next_token_ids,
+                mtp_accept_len=mtp_accept_len,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                req_num0=req_num0,
+                req_num1=req_num1,
+            )
 
             if (req_num0 + req_num1) > 0:
                 g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
