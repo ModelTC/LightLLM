@@ -37,7 +37,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
             self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
-            self.prefill_mtp_step = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
+            self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
             else:
@@ -360,7 +360,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             self._draft_prefill_forward(
                 model_input=model_input,
                 model_output=model_output,
-                mtp_step=self.prefill_mtp_step,
+                mtp_step=self.num_mtp_models,
                 next_token_ids=draft_next_token_ids_gpu,
             )
             sync_event = torch.cuda.Event()
@@ -596,7 +596,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             draft_model_output0, draft_model_output1 = model_output0, model_output1
 
-            for draft_model_idx in range(self.prefill_mtp_step):
+            for draft_model_idx in range(self.num_mtp_models):
 
                 draft_model_input0 = prepare_mtp_prefill_inputs(
                     model_input=draft_model_input0,

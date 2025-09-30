@@ -133,6 +133,8 @@ def padded_prepare_decode_inputs(
     b_req_idx = []
     b_mtp_index = []
     b_seq_len = []
+    max_q_seq_len = 0
+    max_kv_seq_len = 0
     for req in req_objs:
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
@@ -141,6 +143,8 @@ def padded_prepare_decode_inputs(
         b_seq_len.append(seq_len)
         total_token_num += seq_len
         max_len_in_batch = max(max_len_in_batch, seq_len)
+        max_q_seq_len = max(max_q_seq_len, req.mtp_step + 1)
+        max_kv_seq_len = max(max_kv_seq_len, seq_len)
         b_mtp_index.append(0)
         # process the draft tokens.
         for step in range(req.mtp_step):
@@ -150,6 +154,7 @@ def padded_prepare_decode_inputs(
             b_seq_len.append(seq_len)
             total_token_num += seq_len
             max_len_in_batch = max(max_len_in_batch, seq_len)
+            max_kv_seq_len = max(max_kv_seq_len, seq_len)
             b_mtp_index.append(step + 1)
 
     if dest_batch_size is None:
@@ -170,6 +175,8 @@ def padded_prepare_decode_inputs(
         b_mtp_index.append(0)
         total_token_num += seq_len
         max_len_in_batch = max(max_len_in_batch, seq_len)
+        max_q_seq_len = max(max_q_seq_len, 1)
+        max_kv_seq_len = max(max_kv_seq_len, seq_len)
 
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
@@ -194,6 +201,8 @@ def padded_prepare_decode_inputs(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
         max_len_in_batch=max_len_in_batch,
+        max_q_seq_len=max_q_seq_len,
+        max_kv_seq_len=max_kv_seq_len,
         input_ids=None,
         mem_indexes_cpu=mem_indexes,
         b_req_idx=b_req_idx,

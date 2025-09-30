@@ -253,7 +253,8 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 处理需要释放的内存索引
         need_free_mem_indexes = model_input.mem_indexes_cpu[verify_info["accepted_index_cpu"] == 0]
-        need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
+        if additional_mem_indexes_cpu is not None:
+            need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
 
         self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=verify_info["mtp_accept_len_cpu"])
         select_mask = torch.tensor(verify_info["accepted_index_cpu"], dtype=torch.bool, device="cpu")
