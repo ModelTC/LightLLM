@@ -42,6 +42,7 @@ class ChunkedPrefillBackend(ModeBackend):
             self.decode = self.decode_mtp
             self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
+            self._draft_decode_func = self._draft_decode_eagle if self.is_mtp_eagle else self._draft_decode_vanilla
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
@@ -231,7 +232,7 @@ class ChunkedPrefillBackend(ModeBackend):
             verify_info = self._draft_verify(model_input, run_reqs)
 
             # 调用具体的draft decode函数
-            additional_mem_indexes_cpu = self._draft_decode(main_model_input=model_input, verify_info=verify_info)
+            additional_mem_indexes_cpu = self._draft_decode_func(main_model_input=model_input, verify_info=verify_info)
 
             g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
                 b_req_idx=model_input.b_req_idx,
@@ -339,7 +340,44 @@ class ChunkedPrefillBackend(ModeBackend):
             "next_token_logprobs_cpu": next_token_logprobs_cpu,
         }
 
-    def _draft_decode(
+    def _draft_decode_vanilla(
+        self,
+        main_model_input: ModelInput,
+        verify_info: Dict[str, Any],
+    ):
+        main_model_output = verify_info["main_model_output"]
+        next_token_ids = verify_info["next_token_ids"]
+        mtp_accept_len = verify_info["mtp_accept_len"]
+        b_req_mtp_start_loc = verify_info["b_req_mtp_start_loc"]
+        # share some inference info with the main model
+        draft_model_input = main_model_input
+        draft_model_output = main_model_output
+        draft_next_token_ids = next_token_ids
+        all_next_token_ids = []
+        all_next_token_ids.append(next_token_ids)
+        # process the draft model output
+        for _step in range(self.mtp_step):
+
+            draft_model_input.input_ids = draft_next_token_ids
+            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
+            # spec decode: MTP
+            draft_model_idx = _step % self.num_mtp_models
+            draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
+            draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
+            all_next_token_ids.append(draft_next_token_ids)
+
+        all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
+
+        mtp_scatter_next_token_ids(
+            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            all_next_token_ids=all_next_token_ids,
+            b_req_idx=main_model_input.b_req_idx,
+            mtp_accept_len=mtp_accept_len,
+        )
+        return None
+
+    def _draft_decode_eagle(
         self,
         main_model_input: ModelInput,
         verify_info: Dict[str, Any],
@@ -350,14 +388,12 @@ class ChunkedPrefillBackend(ModeBackend):
         b_req_mtp_start_loc = verify_info["b_req_mtp_start_loc"]
         batch_size = main_model_input.batch_size
         num_reqs = batch_size // (self.mtp_step + 1)
-        eagle_mem_indexes_cpu = None
-        if self.is_mtp_eagle:
-            g_infer_state_lock.acquire()
-            if g_infer_context.radix_cache is not None:
-                g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(num_reqs * self.mtp_step)
-            eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(num_reqs * self.mtp_step)
-            g_infer_state_lock.release()
-            eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
+        g_infer_state_lock.acquire()
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(num_reqs * self.mtp_step)
+        eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(num_reqs * self.mtp_step)
+        g_infer_state_lock.release()
+        eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
         # share some inference info with the main model
         draft_model_input = main_model_input
@@ -374,14 +410,13 @@ class ChunkedPrefillBackend(ModeBackend):
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
-            if self.is_mtp_eagle:
-                draft_model_input.b_seq_len += 1
-                draft_model_input.max_len_in_batch += 1
-                eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
-                draft_model_input.mem_indexes = torch.cat(
-                    [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                    dim=1,
-                ).view(-1)
+            draft_model_input.b_seq_len += 1
+            draft_model_input.max_len_in_batch += 1
+            eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
+            draft_model_input.mem_indexes = torch.cat(
+                [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
+                dim=1,
+            ).view(-1)
             all_next_token_ids.append(draft_next_token_ids)
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
