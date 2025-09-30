@@ -45,6 +45,9 @@ def test_silu_and_mul_masked(expert_num, token_num, hidden_dim):
 
     silu_and_mul_masked_post_quant_fwd(in_tensor, out_tensor, out_scale_tensor, quant_group_size, masked_m)
 
+    true_out_tensor = true_out_tensor.view(out_tensor.shape)
+    true_out_scale_tensor = true_out_scale_tensor.view(out_scale_tensor.shape)
+
     for expert_id, expert_token_num in enumerate(masked_m.cpu().numpy()):
         assert torch.allclose(
             true_out_tensor[expert_id, :expert_token_num, :].to(torch.float32),
