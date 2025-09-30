@@ -11,10 +11,8 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.server.router.model_infer.mode_backend.pre import (
     padded_prepare_prefill_inputs,
     padded_prepare_decode_inputs,
-    padded_prepare_eagle_decode_inputs,
     padded_overlap_prepare_prefill_inputs,
     padded_overlap_prepare_decode_inputs,
-    padded_overlap_prepare_eagle_decode_inputs,
 )
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
@@ -549,81 +547,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
         return all_next_token_ids
 
-    def _draft_decode_eagle(
-        self,
-        model_input: ModelInput,
-        model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
-        eagle_mem_indexes_cpu: torch.Tensor,
-        draft_model_input: ModelInput,
-        req_num: int,
-        padded_req_num: int,
-    ):
-        all_next_token_ids = []
-        # share some inference info with the main model
-        real_req_num = req_num // (self.mtp_step + 1)
-        draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
-        if req_num > 0:
-            selected_index = b_req_mtp_start_loc + mtp_accept_len - 1
-            all_next_token_ids.append(next_token_ids[selected_index])
-            draft_next_token_ids_gpu[:req_num].copy_(next_token_ids, non_blocking=True)
-
-        # 第一步draft，填充接受token的kv.
-        model_input.input_ids = draft_next_token_ids_gpu
-        model_input.deepseekv3_mtp_draft_input_hiddens = model_output.deepseekv3_mtp_main_output_hiddens
-        draft_model_output: ModelOutput = self.draft_models[0].forward(model_input)
-        draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
-
-        # 剩余的draft step
-        if req_num > 0:
-            all_next_token_ids.append(draft_next_token_ids_gpu[selected_index])
-            selected_index = F.pad(
-                selected_index,
-                (0, padded_req_num),
-                value=0,
-            )
-        else:
-            selected_index = torch.zeros((real_req_num + padded_req_num,), dtype=torch.int32, device="cpu").cuda(
-                non_blocking=True
-            )
-
-        draft_model_input.input_ids = draft_next_token_ids_gpu[selected_index]
-        draft_model_input.b_seq_len = draft_model_input.b_seq_len.cuda(non_blocking=True)
-        draft_model_input.b_seq_len[:real_req_num] += mtp_accept_len if real_req_num > 0 else 0
-        draft_model_input.max_len_in_batch += self.mtp_step * 2
-        draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens[
-            selected_index
-        ]
-
-        for _step in range(1, self.mtp_step):
-            draft_model_input.mem_indexes = None
-            draft_model_input.mem_indexes_cpu = torch.cat(
-                [
-                    eagle_mem_indexes_cpu[(_step - 1) * real_req_num : (_step * real_req_num)],
-                    torch.tensor(
-                        [g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX] * padded_req_num,
-                        dtype=torch.int32,
-                        device="cpu",
-                    ),
-                ],
-                dim=0,
-            )
-
-            draft_model_output = self.draft_models[0].forward(draft_model_input)
-            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
-            draft_model_input.input_ids = draft_next_token_ids_gpu
-            draft_model_input.b_seq_len[:real_req_num] += 1
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
-            all_next_token_ids.append(draft_next_token_ids_gpu[:real_req_num])
-        if req_num > 0:
-            all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
-            self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids[
-                draft_model_input.b_req_idx[:real_req_num], : self.mtp_step + 1
-            ] = all_next_token_ids
-        return
-
     def prefill_overlap_mtp(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         (
             model_input0,
@@ -727,13 +650,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             run_reqs1,
             padded_req_num1,
         ) = padded_overlap_prepare_decode_inputs(decode_reqs)
-        if self.is_mtp_eagle:
-            (
-                draft_model_input0,
-                eagle_mem_indexes0_cpu,
-                draft_model_input1,
-                eagle_mem_indexes1_cpu,
-            ) = padded_overlap_prepare_eagle_decode_inputs(decode_reqs, padded_req_num0, padded_req_num1, self.mtp_step)
         req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
         all_next_token_ids = []
         b_mtp_index_cpu0 = model_input0.b_mtp_index
@@ -818,9 +734,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
             need_free_mem_indexes = mem_indexes_cpu[accepted_index_cpu == 0]
 
-            if self.is_mtp_eagle:
-                eagle_mem_indexes_cpu = torch.cat((eagle_mem_indexes0_cpu, eagle_mem_indexes1_cpu), dim=0)
-                need_free_mem_indexes = torch.cat((need_free_mem_indexes, eagle_mem_indexes_cpu), dim=0)
             self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
             select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
             self._post_handle(
@@ -918,155 +831,3 @@ class DPChunkedPrefillBackend(ModeBackend):
                 b_req_idx=b_req_idx,
                 mtp_accept_len=mtp_accept_len,
             )
-
-    def _draft_decode_eagle_overlap(
-        self,
-        model_input0: ModelInput,
-        model_input1: ModelInput,
-        model_output0: ModelOutput,
-        model_output1: ModelOutput,
-        draft_model_input0: ModelInput,
-        draft_model_input1: ModelInput,
-        next_token_ids: torch.Tensor = None,
-        mtp_accept_len: torch.Tensor = None,
-        b_req_mtp_start_loc: torch.Tensor = None,
-        eagle_mem_indexes_cpu0: torch.Tensor = None,
-        eagle_mem_indexes_cpu1: torch.Tensor = None,
-        req_num0: int = 0,
-        req_num1: int = 0,
-        padded_req_num0: int = 0,
-        padded_req_num1: int = 0,
-    ):
-
-        all_next_token_ids = []  # 真实的请求个数，排除mtp 个数的影响
-        real_req_num0 = req_num0 // (self.mtp_step + 1)
-        real_req_num1 = req_num1 // (self.mtp_step + 1)
-
-        if padded_req_num0 > 0:
-            padded_req_num0 = max(padded_req_num0 // (self.mtp_step + 1), 1)
-        if padded_req_num1 > 0:
-            padded_req_num1 = max(padded_req_num1 // (self.mtp_step + 1), 1)
-
-        # share some inference info with the main model
-        draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")
-        draft_next_token_ids_gpu1 = torch.zeros((model_input1.batch_size), dtype=torch.int64, device="cuda")
-        if req_num0 > 0:
-            draft_next_token_ids_gpu0[0:req_num0].copy_(next_token_ids[0:req_num0], non_blocking=True)
-        if req_num1 > 1:
-            draft_next_token_ids_gpu1[0:req_num1].copy_(
-                next_token_ids[req_num0 : (req_num0 + req_num1)], non_blocking=True
-            )
-
-        if req_num0 + req_num1 > 0:
-            selected_index = b_req_mtp_start_loc + mtp_accept_len - 1
-            all_next_token_ids.append(next_token_ids[selected_index])
-
-        # 第一步draft，填充接受token的kv.
-        model_input0.input_ids = draft_next_token_ids_gpu0
-        model_input0.deepseekv3_mtp_draft_input_hiddens = model_output0.deepseekv3_mtp_main_output_hiddens
-        model_input1.input_ids = draft_next_token_ids_gpu1
-        model_input1.deepseekv3_mtp_draft_input_hiddens = model_output1.deepseekv3_mtp_main_output_hiddens
-
-        draft_model_output0, draft_model_output1 = self.draft_models[0].microbatch_overlap_decode(
-            model_input0, model_input1
-        )
-
-        draft_next_token_ids_gpu0 = self._gen_argmax_token_ids(draft_model_output0)
-        draft_next_token_ids_gpu1 = self._gen_argmax_token_ids(draft_model_output1)
-        draft_next_token_ids = torch.cat(
-            (draft_next_token_ids_gpu0[0:req_num0], draft_next_token_ids_gpu1[0:req_num1]), dim=0
-        )
-        if req_num0 + req_num1 > 0:
-            all_next_token_ids.append(draft_next_token_ids[selected_index])
-
-        # 剩余的draft step
-        if real_req_num0 == 0:
-            selected_index0 = torch.zeros((padded_req_num0), dtype=torch.int32, device="cpu").cuda(non_blocking=True)
-        else:
-            selected_index0 = F.pad(
-                selected_index[0:real_req_num0],
-                (0, padded_req_num0),
-                value=0,
-            )
-        if real_req_num1 == 0:
-            selected_index1 = torch.zeros((padded_req_num1), dtype=torch.int32, device="cpu").cuda(non_blocking=True)
-        else:
-            selected_index1 = F.pad(
-                selected_index[real_req_num0 : real_req_num0 + real_req_num1] - req_num0,
-                (0, padded_req_num1),
-                value=0,
-            )
-        draft_model_input0.input_ids = draft_next_token_ids_gpu0[selected_index0]
-        draft_model_input0.b_seq_len = draft_model_input0.b_seq_len.cuda(non_blocking=True)
-        draft_model_input0.b_seq_len[:real_req_num0] += mtp_accept_len[:real_req_num0] if real_req_num0 > 0 else 0
-        draft_model_input0.max_len_in_batch += self.mtp_step * 2
-        draft_model_input0.deepseekv3_mtp_draft_input_hiddens = draft_model_output0.deepseekv3_mtp_main_output_hiddens[
-            selected_index0
-        ]
-
-        draft_model_input1.input_ids = draft_next_token_ids_gpu1[selected_index1]
-        draft_model_input1.b_seq_len = draft_model_input1.b_seq_len.cuda(non_blocking=True)
-        draft_model_input1.b_seq_len[:real_req_num1] += (
-            mtp_accept_len[real_req_num0 : real_req_num0 + real_req_num1] if real_req_num1 > 0 else 0
-        )
-        draft_model_input1.max_len_in_batch += self.mtp_step * 2
-        draft_model_input1.deepseekv3_mtp_draft_input_hiddens = draft_model_output1.deepseekv3_mtp_main_output_hiddens[
-            selected_index1
-        ]
-
-        for _step in range(1, self.mtp_step):
-            draft_model_input0.mem_indexes = None
-            draft_model_input1.mem_indexes = None
-
-            draft_model_input0.mem_indexes_cpu = torch.cat(
-                [
-                    eagle_mem_indexes_cpu0[(_step - 1) * real_req_num0 : _step * real_req_num0],
-                    torch.tensor(
-                        [g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX] * padded_req_num0,
-                        dtype=torch.int32,
-                        device="cpu",
-                    ),
-                ],
-                dim=0,
-            )
-            draft_model_input1.mem_indexes_cpu = torch.cat(
-                [
-                    eagle_mem_indexes_cpu1[(_step - 1) * real_req_num1 : _step * real_req_num1],
-                    torch.tensor(
-                        [g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX] * padded_req_num1,
-                        dtype=torch.int32,
-                        device="cpu",
-                    ),
-                ],
-                dim=0,
-            )
-            draft_model_output0, draft_model_output1 = self.draft_models[0].microbatch_overlap_decode(
-                draft_model_input0, draft_model_input1
-            )
-
-            draft_next_token_ids_gpu0 = self._gen_argmax_token_ids(draft_model_output0)
-            draft_next_token_ids_gpu1 = self._gen_argmax_token_ids(draft_model_output1)
-            draft_model_input0.input_ids = draft_next_token_ids_gpu0
-            draft_model_input1.input_ids = draft_next_token_ids_gpu1
-            draft_model_input0.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output0.deepseekv3_mtp_main_output_hiddens
-            )
-            draft_model_input1.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output1.deepseekv3_mtp_main_output_hiddens
-            )
-            draft_model_input0.b_seq_len[:real_req_num0] += 1
-            draft_model_input1.b_seq_len[:real_req_num1] += 1
-
-            draft_next_token_ids = torch.cat(
-                (draft_next_token_ids_gpu0[0:real_req_num0], draft_next_token_ids_gpu1[0:real_req_num1]), dim=0
-            )
-            all_next_token_ids.append(draft_next_token_ids)
-
-        if req_num0 + req_num1 > 0:
-            all_next_token_ids = torch.stack(all_next_token_ids, dim=1)
-            b_req_idx = torch.cat(
-                (draft_model_input0.b_req_idx[0:real_req_num0], draft_model_input1.b_req_idx[0:real_req_num1]), dim=0
-            )
-            self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids[
-                b_req_idx, : self.mtp_step + 1
-            ] = all_next_token_ids
