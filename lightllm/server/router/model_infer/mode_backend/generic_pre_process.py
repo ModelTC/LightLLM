@@ -47,13 +47,13 @@ def prepare_prefill_inputs(
         prefix_total_token_num += req.cur_kv_len
         max_len_in_batch = max(max_len_in_batch, input_token_len)
         max_q_seq_len = max(max_q_seq_len, input_token_len)
-        max_kv_seq_len = max(max_kv_seq_len, seq_len)
-        max_cache_len = max(max_cache_len, req.cur_kv_len)
         b_ready_cache_len.append(req.cur_kv_len)
         b_mtp_index.append(0)
 
-    input_ids = np.concatenate(input_ids, dtype=np.int64)
+    max_kv_seq_len = max(b_seq_len)
+    max_cache_len = max(b_ready_cache_len)
 
+    input_ids = np.concatenate(input_ids, dtype=np.int64)
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
@@ -120,7 +120,8 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
             max_len_in_batch = max(max_len_in_batch, seq_len)
             b_mtp_index.append(step + 1)
         max_q_seq_len = max(max_q_seq_len, req.mtp_step + 1)
-        max_kv_seq_len = max_len_in_batch
+
+    max_kv_seq_len = max(b_seq_len)
 
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
