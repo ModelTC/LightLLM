@@ -226,15 +226,7 @@ def padded_overlap_prepare_decode_inputs(
     req_objs_0 = req_objs[0:split_req_bound]
     req_objs_1 = req_objs[split_req_bound:]
 
-    enable_mtp = get_env_start_args().mtp_mode is not None
-    if enable_mtp:
-        micro_batch_size = max(
-            sum([req.mtp_step + 1 for req in req_objs_0]),
-            sum([req.mtp_step + 1 for req in req_objs_1]),
-        )
-    else:
-        micro_batch_size = triton.cdiv(len(req_objs), 2)
-
+    micro_batch_size = triton.cdiv(len(req_objs), 2)
     micro_batch_size = max(1, micro_batch_size)
 
     micro_input, run_reqs, padded_req_num = padded_prepare_decode_inputs(req_objs_0, dest_batch_size=micro_batch_size)
