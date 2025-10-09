@@ -528,7 +528,7 @@ class TpPartBaseModel:
                 model_input1.b_req_idx,
                 model_input1.b_mtp_index,
             )
-
+        # TODO 动态 mtp fix
         assert model_input0.batch_size == model_input1.batch_size
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
@@ -538,6 +538,8 @@ class TpPartBaseModel:
 
         if self.graph is not None and self.graph.can_run(origin_batch_size, max_len_in_batch):
             find_graph_batch_size = self.graph.find_closest_graph_batch_size(origin_batch_size)
+            # TODO 如果支持动态步数的 mtp，在不同的mtp步上，model_input0 和 model_input1 的内部batch size可能不
+            # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, find_graph_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, find_graph_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
@@ -575,6 +577,8 @@ class TpPartBaseModel:
                     input_ids1=padded_model_input1.input_ids,
                     infer_state1=infer_state1,
                 )
+
+            # TODO 动态 mtp fix
             model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
             model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
         else:
