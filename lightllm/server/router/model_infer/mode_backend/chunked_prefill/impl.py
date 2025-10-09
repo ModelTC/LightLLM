@@ -103,7 +103,7 @@ class ChunkedPrefillBackend(ModeBackend):
         )
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
+            _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -142,7 +142,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
+            _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -192,7 +192,9 @@ class ChunkedPrefillBackend(ModeBackend):
                 mask_func=self.prefill_mask_func,
             )
             # mtp kv fill
-            self._draft_prefill_forward(model_input, model_output, self.num_mtp_models, next_token_ids)
+            self._draft_prefill_forward(
+                model_input=model_input, model_output=model_output, next_token_ids=next_token_ids
+            )
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -276,14 +278,12 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_pre_post_handle()
         return
 
-    def _draft_prefill_forward(
-        self, model_input: ModelInput, model_output: ModelOutput, mtp_step: int, next_token_ids: torch.Tensor
-    ):
+    def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
         # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
         draft_model_input = model_input
         draft_model_output = model_output
         draft_next_token_ids_gpu = next_token_ids
-        for draft_model_idx in range(mtp_step):
+        for draft_model_idx in range(self.num_mtp_models):
             draft_model_input = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input,
                 b_next_token_ids=draft_next_token_ids_gpu,

@@ -1,4 +1,3 @@
-from this import d
 import torch
 import time
 import numpy as np
@@ -22,7 +21,6 @@ from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids
 from .control_state import DPControlState
 
