@@ -57,7 +57,7 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         self, q, kv, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
     ) -> torch.Tensor:
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)
         context_attention_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             kv[:, 0 : self.tp_k_head_num_, :],
@@ -77,7 +77,7 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         self, q, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
     ) -> torch.Tensor:
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)
         token_attention_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             kv[:, 0 : self.tp_k_head_num_, :],

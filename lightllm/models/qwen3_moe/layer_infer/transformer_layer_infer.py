@@ -33,6 +33,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         self.head_dim_ = network_config["head_dim"]
         self.tp_k_head_num_ = max(self.tp_k_head_num_, 1)
         self.tp_v_head_num_ = max(self.tp_v_head_num_, 1)
+        self.partial_rotary_factor = network_config.get("partial_rotary_factor", 1.0)
         return
 
     def _bind_func(self):
@@ -50,6 +51,9 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
 
+    def rmsnorm(self, input, weight, out):
+        return rmsnorm_forward(input, weight, self.eps_, out=input)
+
     def _get_qkv(
         self,
         input: torch.Tensor,
@@ -62,26 +66,42 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         cache_kv = layer_weight.kv_proj.mm(
             input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
         ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-        rmsnorm_forward(
+        self.rmsnorm(
             q.view(-1, self.head_dim_),
             weight=layer_weight.q_norm_weight_.weight,
-            eps=self.eps_,
             out=q.view(-1, self.head_dim_),
         )
 
-        cache_kv[:, : self.tp_k_head_num_, :] = rmsnorm_forward(
-            cache_kv[:, : self.tp_k_head_num_, :].reshape(-1, cache_kv.shape[-1]),
+        k_slice = cache_kv[:, : self.tp_k_head_num_, :].clone()
+        self.rmsnorm(
+            k_slice.reshape(-1, cache_kv.shape[-1]),
             weight=layer_weight.k_norm_weight_.weight,
-            eps=self.eps_,
-        ).view(-1, self.tp_k_head_num_, cache_kv.shape[-1])
+            out=k_slice.reshape(-1, cache_kv.shape[-1]),
+        )
+        cache_kv[:, : self.tp_k_head_num_, :] = k_slice
 
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
             infer_state.position_cos,
             infer_state.position_sin,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
         return q, cache_kv
+
+    def _att_norm(
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
+    ) -> torch.Tensor:
+        out = self.alloc_tensor(input.shape, input.dtype)
+        self.rmsnorm(input, weight=layer_weight.att_norm_weight_.weight, out=out)
+        return out
+
+    def _ffn_norm(
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
+    ) -> torch.Tensor:
+        out = self.alloc_tensor(input.shape, input.dtype)
+        self.rmsnorm(input, weight=layer_weight.ffn_norm_weight_.weight, out=out)
+        return out
 
     def _tpsp_get_qkv(
         self,
@@ -104,17 +124,16 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
         ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
-        rmsnorm_forward(
+        self.rmsnorm(
             q.view(-1, self.head_dim_),
             weight=layer_weight.q_norm_weight_.weight,
-            eps=self.eps_,
             out=q.view(-1, self.head_dim_),
         )
 
-        cache_kv[:, : self.tp_k_head_num_, :] = rmsnorm_forward(
+        cache_kv[:, : self.tp_k_head_num_, :] = self.rmsnorm(
             cache_kv[:, : self.tp_k_head_num_, :].reshape(-1, cache_kv.shape[-1]),
             weight=layer_weight.k_norm_weight_.weight,
-            eps=self.eps_,
+            out=cache_kv[:, : self.tp_k_head_num_, :].reshape(-1, cache_kv.shape[-1]),
         ).view(-1, self.tp_k_head_num_, cache_kv.shape[-1])
 
         rotary_emb_fwd(
@@ -122,6 +141,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             cache_kv[:, : self.tp_k_head_num_, :],
             infer_state.position_cos,
             infer_state.position_sin,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
         return q, cache_kv
 
