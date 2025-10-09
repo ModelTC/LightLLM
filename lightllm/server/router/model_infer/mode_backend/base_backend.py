@@ -230,7 +230,14 @@ class ModeBackend:
         self.draft_models: List[Deepseek3MTPModel] = []
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
-        num_mtp_modules = self.args.mtp_step if self.args.mtp_mode == "deepseekv3_vanilla" else 1
+
+        if self.args.mtp_mode == "deepseekv3_vanilla":
+            num_mtp_modules = self.args.mtp_step
+        elif self.args.mtp_mode == "deepseekv3_eagle":
+            num_mtp_modules = 1
+        else:
+            assert False, f"error mtp mode {self.args.mtp_mode}"
+
         for i in range(num_mtp_modules):
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
             mtp_model_kvargs = {
@@ -260,6 +267,7 @@ class ModeBackend:
             assert mtp_model_cfg["model_type"] == "deepseek_v3"
             assert mtp_model_cfg["architectures"][0] == "DeepseekV3ForCausalLMNextN"
             self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
+
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
 
@@ -653,6 +661,7 @@ class ModeBackend:
     ):
 
         if mask_func is not None:
+            assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)
 
         next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
