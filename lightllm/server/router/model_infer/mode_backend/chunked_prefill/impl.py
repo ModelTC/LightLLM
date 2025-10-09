@@ -230,24 +230,58 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            # draft verify with main model
-            verify_info = self._draft_verify(model_input, run_reqs)
+            b_mtp_index_cpu = model_input.b_mtp_index
+            model_output = self.model.forward(model_input)
+            next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
+            # verify the next_token_ids
+            b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]
+            b_req_mtp_start_loc = g_pin_mem_manager.gen_from_list(
+                key="b_req_mtp_start_loc",
+                data=b_req_mtp_start_loc,
+                dtype=torch.int32,
+            ).cuda(non_blocking=True)
+
+            mtp_accept_len, accepted_index = self._verify_mtp_v2(
+                new_next_token_ids=next_token_ids,
+                b_req_idx=model_input.b_req_idx,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+            )
+            accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="accepted_index",
+                gpu_tensor=accepted_index,
+            )
+            mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="mtp_accept_len",
+                gpu_tensor=mtp_accept_len,
+            )
+            verify_event = torch.cuda.Event()
+            verify_event.record()
+
+            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
+                next_token_ids, next_token_logprobs
+            )
 
             # 调用具体的draft decode函数
-            additional_mem_indexes_cpu = self._draft_decode_func(main_model_input=model_input, verify_info=verify_info)
+            additional_mem_indexes_cpu = self._draft_decode_func(
+                main_model_input=model_input,
+                main_model_output=model_output,
+                next_token_ids=next_token_ids,
+                mtp_accept_len=mtp_accept_len,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+            )
 
             g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
                 b_req_idx=model_input.b_req_idx,
-                next_token_ids=verify_info["next_token_ids"],
-                mask=verify_info["accepted_index"] == 1,
+                next_token_ids=next_token_ids,
+                mask=accepted_index == 1,
             )
             sync_event = torch.cuda.Event()
             sync_event.record()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
-        verify_info["verify_event"].synchronize()
-        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if verify_info["accepted_index_cpu"][i] == 1]
+        verify_event.synchronize()
+        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
         # 第三阶段
@@ -255,16 +289,16 @@ class ChunkedPrefillBackend(ModeBackend):
         sync_event.synchronize()
 
         # 处理需要释放的内存索引
-        need_free_mem_indexes = model_input.mem_indexes_cpu[verify_info["accepted_index_cpu"] == 0]
+        need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
         if additional_mem_indexes_cpu is not None:
             need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
 
-        self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=verify_info["mtp_accept_len_cpu"])
-        select_mask = torch.tensor(verify_info["accepted_index_cpu"], dtype=torch.bool, device="cpu")
+        self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
+        select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
         self._post_handle(
             run_reqs=verify_ok_reqs,
-            next_token_ids=verify_info["next_token_ids_cpu"][select_mask],
-            next_token_logprobs=verify_info["next_token_logprobs_cpu"][select_mask],
+            next_token_ids=next_token_ids_cpu[select_mask],
+            next_token_logprobs=next_token_logprobs_cpu[select_mask],
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
@@ -293,62 +327,14 @@ class ChunkedPrefillBackend(ModeBackend):
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
         return
 
-    def _draft_verify(self, model_input: ModelInput, run_reqs: List[InferReq]):
-        """
-        main model forward and verify the next_token_ids
-        """
-        b_mtp_index_cpu = model_input.b_mtp_index
-        model_output = self.model.forward(model_input)
-        next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
-        # verify the next_token_ids
-        b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]
-        b_req_mtp_start_loc = g_pin_mem_manager.gen_from_list(
-            key="b_req_mtp_start_loc",
-            data=b_req_mtp_start_loc,
-            dtype=torch.int32,
-        ).cuda(non_blocking=True)
-
-        mtp_accept_len, accepted_index = self._verify_mtp_v2(
-            new_next_token_ids=next_token_ids,
-            b_req_idx=model_input.b_req_idx,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-        )
-        accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-            key="accepted_index",
-            gpu_tensor=accepted_index,
-        )
-        mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-            key="mtp_accept_len",
-            gpu_tensor=mtp_accept_len,
-        )
-        verify_event = torch.cuda.Event()
-        verify_event.record()
-
-        next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
-            next_token_ids, next_token_logprobs
-        )
-        return {
-            "verify_event": verify_event,
-            "main_model_output": model_output,
-            "b_req_mtp_start_loc": b_req_mtp_start_loc,
-            "mtp_accept_len": mtp_accept_len,
-            "accepted_index": accepted_index,
-            "next_token_ids": next_token_ids,
-            "accepted_index_cpu": accepted_index_cpu,
-            "mtp_accept_len_cpu": mtp_accept_len_cpu,
-            "next_token_ids_cpu": next_token_ids_cpu,
-            "next_token_logprobs_cpu": next_token_logprobs_cpu,
-        }
-
     def _draft_decode_vanilla(
         self,
         main_model_input: ModelInput,
-        verify_info: Dict[str, Any],
+        main_model_output: ModelOutput,
+        next_token_ids: torch.Tensor,
+        mtp_accept_len: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
     ):
-        main_model_output = verify_info["main_model_output"]
-        next_token_ids = verify_info["next_token_ids"]
-        mtp_accept_len = verify_info["mtp_accept_len"]
-        b_req_mtp_start_loc = verify_info["b_req_mtp_start_loc"]
         # share some inference info with the main model
         draft_model_input = main_model_input
         draft_model_output = main_model_output
@@ -380,12 +366,11 @@ class ChunkedPrefillBackend(ModeBackend):
     def _draft_decode_eagle(
         self,
         main_model_input: ModelInput,
-        verify_info: Dict[str, Any],
+        main_model_output: ModelOutput,
+        next_token_ids: torch.Tensor,
+        mtp_accept_len: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
     ):
-        main_model_output = verify_info["main_model_output"]
-        next_token_ids = verify_info["next_token_ids"]
-        mtp_accept_len = verify_info["mtp_accept_len"]
-        b_req_mtp_start_loc = verify_info["b_req_mtp_start_loc"]
         batch_size = main_model_input.batch_size
         num_reqs = batch_size // (self.mtp_step + 1)
         g_infer_state_lock.acquire()
