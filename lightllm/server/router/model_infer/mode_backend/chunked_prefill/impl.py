@@ -342,12 +342,11 @@ class ChunkedPrefillBackend(ModeBackend):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
         # process the draft model output
-        for _step in range(self.mtp_step):
+        for draft_model_idx in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids
             draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
             # spec decode: MTP
-            draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
             all_next_token_ids.append(draft_next_token_ids)
