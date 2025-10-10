@@ -53,7 +53,6 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
                 model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k],
                 non_blocking=True,
             )
-            self.page_table[:, max_seq_len_k:].fill_(0)
 
         if "offline_calibration_fp8kv" in model.mode:
             if self.is_prefill:
