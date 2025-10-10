@@ -1,5 +1,4 @@
 import torch
-from typing import final, Dict
 from typing_extensions import override
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
@@ -7,11 +6,8 @@ from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import Qwe
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
-from lightllm.common.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager, MambaStateBufferConfig
-from lightllm.models.llama.model import LlamaFlashInferStateExtraInfo
 
 logger = init_logger(__name__)
 
@@ -26,7 +22,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def __init__(self, kvargs) -> None:
         super().__init__(kvargs)
-        return
 
     @override
     def autotune_layers(self):
@@ -35,9 +30,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     @override
     def _init_config(self):
         super()._init_config()
-        self.config["num_hidden_layers"] = 4
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
-        return
 
     @override
     def _init_custom(self):
@@ -80,4 +73,3 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             mamba_state_buffer_config=mamba_state_buffer_config,
             mem_fraction=self.mem_fraction,
         )
-        return
