@@ -317,7 +317,11 @@ class ChunkedPrefillReq(Req):
         """
         # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
         need_tokens = min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
-        if need_tokens == 1:
+        if need_tokens == 1 and self._mtp_step > 0:
+            # self._mtp_step > 0 时，说明开启了mtp 模式，每次decode需要额外的mem token 资源
+            # "deepseekv3_vanilla" 模式需要的 mem 用量为 self._mtp_step + 1
+            # "deepseekv3_eagle" 模式需要的 mem 用量为 （self._mtp_step + 1）* 2
+            # 为了简化统一 返回 （self._mtp_step + 1）* 2
             need_tokens = (self._mtp_step + 1) * 2
 
         return need_tokens
