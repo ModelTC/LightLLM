@@ -486,7 +486,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mtp_mode",
-        choices=["deepseekv3", None],
+        choices=["deepseekv3_vanilla", "deepseekv3_eagle", None],
         default=None,
         help="""supported mtp mode, None is not enable mtp, """,
     )

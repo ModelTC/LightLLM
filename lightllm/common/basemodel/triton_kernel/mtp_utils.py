@@ -34,7 +34,9 @@ def _fwd_kernel_mtp_verify(
     cur_new_next_token_id = tl.load(new_next_token_ids + req_offset, mask=offset + 1 < req_mtp_num, other=-2)
 
     match_mask = cur_next_token_id == cur_new_next_token_id
-    accept_len = tl.sum(tl.where(match_mask, 1, 0)) + 1
+    mismatch_positions = tl.where(match_mask, BLOCK_SIZE, offset)
+    first_mismatch_pos = tl.min(mismatch_positions)
+    accept_len = first_mismatch_pos + 1
     tl.store(mtp_accept_len + cur_index, accept_len)
     accpeted_index = tl.where((offset < accept_len), 1, 0)
     tl.store(accepted_index + req_offset, accpeted_index, mask=offset < req_mtp_num)
@@ -183,17 +185,16 @@ def test_mtp_verify():
         [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int32, device="cuda"
     )
     b_req_idx = torch.tensor([0, 0, 2, 2, 2], dtype=torch.int32, device="cuda")
-    b_mtp_index = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32, device="cuda")
     b_req_mtp_start_loc = torch.tensor([0, 2], dtype=torch.int32, device="cuda")
-    new_next_token_ids = torch.tensor([1, 4, 3, 4, 13], dtype=torch.int32, device="cuda")
+    new_next_token_ids = torch.tensor([1, 4, 2, 4, 13], dtype=torch.int32, device="cuda")
     all_next_token_ids = torch.tensor(
         [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int32, device="cuda"
     )
     mtp_accept_len, accepted_index = mtp_verify(
-        req_to_next_token_ids, b_req_mtp_start_loc, new_next_token_ids, b_req_idx, b_mtp_index
+        req_to_next_token_ids, b_req_mtp_start_loc, new_next_token_ids, b_req_idx
     )
     mtp_scatter_next_token_ids(
-        req_to_next_token_ids, b_req_mtp_start_loc, all_next_token_ids, b_req_idx, b_mtp_index, mtp_accept_len
+        req_to_next_token_ids, b_req_mtp_start_loc, all_next_token_ids, b_req_idx, mtp_accept_len
     )
     print(mtp_accept_len)
     print(req_to_next_token_ids)
@@ -208,5 +209,5 @@ def test_gen_b_req_mtp_start_loc():
 
 
 if __name__ == "__main__":
-    # test_mtp_verify()
-    test_gen_b_req_mtp_start_loc()
+    test_mtp_verify()
+    # test_gen_b_req_mtp_start_loc()

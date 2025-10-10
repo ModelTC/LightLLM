@@ -19,27 +19,27 @@ class CudaGraph:
     def __init__(self, max_batch_size=8, max_len_in_batch=8192):
         self.graph = {}
         self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
+        self.args = get_env_start_args()
+        self.mtp_step = self.args.mtp_step
         self.max_batch_size = max_batch_size
         self.graph_max_len_in_batch = max_len_in_batch
-        self.args = get_env_start_args()
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
 
         # gen cuda graph batch_sizes
         # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
         # and [graph_split_batch_size + graph_grow_step_size,
-        # graph_split_batch_size + 2 * graph_grow_step_size,  ...,  self.max_batch_size]
-        graph_split_batch_size = self.args.graph_split_batch_size
-        max_batch_size = self.max_batch_size
-        graph_grow_step_size = self.args.graph_grow_step_size
+        # if the mtp_step is not 0, then the batch_sizes will be multiply of (mtp_step + 1)
 
-        batch_sizes = [i for i in range(1, graph_split_batch_size + 1)]
+        graph_split_batch_size = self.args.graph_split_batch_size * (self.mtp_step + 1)
+        graph_grow_step_size = self.args.graph_grow_step_size * (self.mtp_step + 1)
+
+        batch_sizes = [i * (self.mtp_step + 1) for i in range(1, graph_split_batch_size + 1)]
         for _batch_size in range(graph_split_batch_size + graph_grow_step_size, max_batch_size, graph_grow_step_size):
             batch_sizes.append(_batch_size)
 
         batch_sizes = list(set([e for e in batch_sizes if e < max_batch_size]))
         batch_sizes.append(max_batch_size)
         batch_sizes.sort()
-
         self.cuda_graph_batch_sizes = batch_sizes
         assert batch_sizes[-1] == self.max_batch_size
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
@@ -208,6 +208,8 @@ class CudaGraph:
                 batch_size=batch_size,
                 total_token_num=total_token_num,
                 max_len_in_batch=max_len_in_batch,
+                max_q_seq_len=self.mtp_step + 1,
+                max_kv_seq_len=max_len_in_batch,
                 input_ids=input_ids,
                 mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
@@ -265,6 +267,8 @@ class CudaGraph:
                     batch_size=batch_size,
                     total_token_num=total_token_num,
                     max_len_in_batch=max_len_in_batch,
+                    max_q_seq_len=self.mtp_step + 1,
+                    max_kv_seq_len=max_len_in_batch,
                     input_ids=input_ids,
                     b_mtp_index=b_mtp_index,
                     mem_indexes=mem_indexes,
