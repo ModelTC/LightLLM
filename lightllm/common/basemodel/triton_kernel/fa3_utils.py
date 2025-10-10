@@ -33,11 +33,11 @@ def page_table_copy(
     page_table,  # destination tensor [batch, seq]
     req_to_token_indexs,  # source tensor [batch, seq]
     b_req_idx,  # request index to copy from
-    max_seq_len_k,  # sequence length to copy
 ):
     assert page_table.dim() == 2, "page_table should be 2D"
     assert req_to_token_indexs.dim() == 2, "req_to_token_indexs should be 2D"
 
+    max_seq_len_k = page_table.shape[1]
     batch_size = page_table.size(0)
     BLOCK_SIZE = 128
 
@@ -57,10 +57,9 @@ def page_table_copy(
     )
 
 
-import torch
-
-
 def test_page_table_copy():
+    import torch
+
     batch_size, seq_len = 2, 8
 
     req_to_token_indexs = torch.arange(batch_size * seq_len, dtype=torch.int32).reshape(batch_size, seq_len).cuda()
@@ -69,9 +68,8 @@ def test_page_table_copy():
 
     b_req_idx = torch.tensor([0, 2, 1, 3], dtype=torch.int32, device="cuda")[::2]
     print(b_req_idx.stride())
-    max_seq_len_k = seq_len
 
-    page_table_copy(page_table, req_to_token_indexs, b_req_idx, max_seq_len_k)
+    page_table_copy(page_table, req_to_token_indexs, b_req_idx)
 
     print("req_to_token_indexs:")
     print(req_to_token_indexs.cpu().numpy())

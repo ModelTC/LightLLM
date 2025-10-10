@@ -57,7 +57,6 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
                 page_table=self.page_table[:, :max_seq_len_k],
                 req_to_token_indexs=model.req_manager.req_to_token_indexs,
                 b_req_idx=self.b_req_idx[args_mtp_step :: (args_mtp_step + 1)],
-                max_seq_len_k=max_seq_len_k,
             )
             if args_mtp_step > 0:
                 self.b_att_seq_len = self.b_seq_len[args_mtp_step :: (args_mtp_step + 1)].contiguous()
