@@ -27,6 +27,9 @@ class InferStateInfo:
         self.max_len_in_batch: int = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
+        # prefix_total_token_num 用于 prefill 阶段标识当前请求中所有已经ready的kv的长度
+        # 的sum值, 其值等于 sum(b_ready_cache_len)
+        self.prefix_total_token_num: int = None
         self.is_prefill: bool = None
 
         self.mem_manager: MemoryManager = None
