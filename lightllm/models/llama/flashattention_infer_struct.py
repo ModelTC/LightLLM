@@ -7,6 +7,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
 from lightllm.common.basemodel.batch_objs import ModelInput
+from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 
 
 class FlashAttentionStateInfo(LlamaInferStateInfo):
@@ -48,10 +49,10 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
                 self.page_table = torch.empty(
                     (self.batch_size, self.max_len_in_batch), dtype=torch.int32, device=input_ids.device
                 )
-
-            self.page_table[:, :max_seq_len_k].copy_(
-                model.req_manager.req_to_token_indexs[self.b_req_idx, :max_seq_len_k],
-                non_blocking=True,
+            page_table_copy(
+                page_table=self.page_table[:, :max_seq_len_k],
+                req_to_token_indexs=model.req_manager.req_to_token_indexs,
+                b_req_idx=self.b_req_idx,
             )
 
         if "offline_calibration_fp8kv" in model.mode:
