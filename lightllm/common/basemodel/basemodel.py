@@ -68,12 +68,15 @@ class TpPartBaseModel:
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.data_type = kvargs.get("data_type", "float16")
         mtp_step = get_env_start_args().mtp_step
-        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16) * (mtp_step + 1)
+        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         self.graph_max_batch_size = (
             self.graph_max_batch_size // 2
             if get_env_start_args().enable_decode_microbatch_overlap
             else self.graph_max_batch_size
         )
+        # mtp 模式下需要修缮对应的最大batch size，为 （mtp_step + 1) 的倍数
+        self.graph_max_batch_size = self.graph_max_batch_size * (mtp_step + 1)
+
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
         self.quant_type = kvargs.get("quant_type", "none")
