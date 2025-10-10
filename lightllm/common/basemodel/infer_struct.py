@@ -25,6 +25,8 @@ class InferStateInfo:
         # prefill 阶段指每个req 输入token的长度（不包括已经cache的部分）最大值
         # decode 阶段指的是每个req的总长 最大值
         self.max_len_in_batch: int = None
+        # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
+        self.max_cache_len: int = None
         self.is_prefill: bool = None
 
         self.mem_manager: MemoryManager = None

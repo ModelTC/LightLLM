@@ -13,7 +13,6 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
 
     def __init__(self):
         super().__init__()
-        self.mtp_step = get_env_start_args().mtp_step
 
     @classmethod
     def get_page_table_buffer(cls, graph_max_batch_size: int, max_seq_len: int):
@@ -26,6 +25,7 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         super().init_some_extra_state(model, input_ids)
+        args_mtp_step = get_env_start_args().mtp_step
         if self.is_prefill:
             self.cu_seqlens_q = self.b1_cu_q_seq_len
             self.cu_seqlens_k = self.b1_cu_kv_seq_len
@@ -41,7 +41,7 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
             self.cu_seqlens_q = self.b1_cu_q_seq_len
             self.cu_seqlens_k = self.b1_cu_kv_seq_len
             max_seq_len_k = self.max_kv_seq_len
-            att_batch_size = self.batch_size // (self.mtp_step + 1)
+            att_batch_size = self.batch_size // (args_mtp_step + 1)
             if self.batch_size <= model.graph_max_batch_size and self.max_len_in_batch <= model.graph_max_len_in_batch:
                 page_buffer = Deepseek2FlashAttentionStateInfo.get_page_table_buffer(
                     model.graph_max_batch_size, model.graph_max_len_in_batch
@@ -56,11 +56,11 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
             page_table_copy(
                 page_table=self.page_table[:, :max_seq_len_k],
                 req_to_token_indexs=model.req_manager.req_to_token_indexs,
-                b_req_idx=self.b_req_idx[self.mtp_step :: (self.mtp_step + 1)],
+                b_req_idx=self.b_req_idx[args_mtp_step :: (args_mtp_step + 1)],
                 max_seq_len_k=max_seq_len_k,
             )
-            if self.mtp_step > 0:
-                self.b_att_seq_len = self.b_seq_len[self.mtp_step :: (self.mtp_step + 1)].contiguous()
+            if args_mtp_step > 0:
+                self.b_att_seq_len = self.b_seq_len[args_mtp_step :: (args_mtp_step + 1)].contiguous()
             else:
                 self.b_att_seq_len = self.b_seq_len
         return
