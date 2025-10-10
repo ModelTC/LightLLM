@@ -1,6 +1,6 @@
 import os
 import torch
-import torch.functional as F
+import torch.nn.functional as F
 import torch.distributed as dist
 import numpy as np
 import triton
@@ -11,6 +11,7 @@ from functools import partial
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
@@ -33,8 +34,25 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         self.is_linear = (layer_num + 1) % network_config["full_attention_interval"] != 0
         if self.is_linear:
             self.linear_attn_infer = Qwen3NextGatedDeltaNetInfer(network_config, layer_num, self.tp_world_size_)
-
         return
+
+    @override
+    def _bind_norm(self):
+        self._att_norm = partial(Qwen3MOETransformerLayerInfer._att_norm, self)
+        self._ffn_norm = partial(Qwen3MOETransformerLayerInfer._ffn_norm, self)
+        return
+
+    def _ffn_with_shared_expert(
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+        up_gate_out = layer_weight.shared_expert_gate_up_proj.mm(input)
+        ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
+        silu_and_mul_fwd(up_gate_out, ffn1_out)
+        ffn2_out = layer_weight.shared_expert_down_proj.mm(ffn1_out)
+        shared_expert_out = F.sigmoid(layer_weight.shared_expert_gate.mm(input)) * ffn2_out
+        moe_out = self._ffn(input, infer_state, layer_weight)
+        return shared_expert_out + moe_out
 
     @override
     def rmsnorm(self, input, weight, out: torch.Tensor):
@@ -50,11 +68,8 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ) -> torch.Tensor:
-        # TODO fuse it
-        input = input.view(-1, self.tp_o_head_num_, self.head_dim_)
         input = input * layer_weight._gate
         layer_weight._gate = None
-        input = input.reshape(-1, self.tp_o_head_num_ * self.head_dim_)
         o_tensor = layer_weight.o_proj.mm(input)
         return o_tensor
 
@@ -78,15 +93,13 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         if self.is_linear:
             o = self.linear_attn_infer._linear_attn(input1, infer_state, layer_weight, is_prefill=True, infer_cls=self)
         else:
-            layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1)).view(
-                -1, self.tp_o_head_num_, self.head_dim_
-            )
+            layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
             o = self.context_attention_forward(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        ffn_out = self._ffn(input1, infer_state, layer_weight)
+        ffn_out = self._ffn_with_shared_expert(input1, infer_state, layer_weight)
         input1 = None
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
@@ -113,15 +126,13 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         if self.is_linear:
             o = self.linear_attn_infer._linear_attn(input1, infer_state, layer_weight, is_prefill=False, infer_cls=self)
         else:
-            layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1)).view(
-                -1, self.tp_o_head_num_, self.head_dim_
-            )
+            layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
             o = self.token_attention_forward(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        ffn_out = self._ffn(input1, infer_state, layer_weight)
+        ffn_out = self._ffn_with_shared_expert(input1, infer_state, layer_weight)
         input1 = None
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
@@ -206,20 +217,14 @@ class Qwen3NextGatedDeltaNetInfer:
         assert isinstance(infer_state.mem_manager, Qwen3NextMemoryManager)
         input = input.view(-1, infer_cls.embed_dim_)
 
-        # Get conv_states and ssm_states buffer
         conv_states, ssm_states = infer_state.mem_manager.get_mamba_state_buffer(self.layer_idx_)
 
-        # Project input to qkvzba
-        mixed_qkvzba = layer_weight.linear_in_proj.mm(
-            input
-        )  # tgt: [batch_size, (self.key_dim * 2 + self.value_dim * 2) + (self.num_v_heads * 2)]
+        mixed_qkvzba = layer_weight.linear_in_proj.mm(input)
         q, k, v, z, b, a = self._fix_query_key_value_ba_ordering(mixed_qkvzba)
-        mixed_qkv = torch.cat([q, k, v], dim=-1)  # tgt: [batch_size, tp_qkv_dim]
+        mixed_qkv = torch.cat([q, k, v], dim=-1)
 
-        # Convolution: different paths for prefill and decode
         if is_prefill:
-            # Prefill: use causal_conv1d_fn for full sequence processing
-            mixed_qkv = mixed_qkv.transpose(0, 1)  # [tp_qkv_dim, seq_len]
+            mixed_qkv = mixed_qkv.transpose(0, 1)
             out_tensor = infer_cls.alloc_tensor(mixed_qkv.shape, mixed_qkv.dtype, device=mixed_qkv.device)
             causal_conv1d_fn(
                 mixed_qkv,
@@ -229,12 +234,10 @@ class Qwen3NextGatedDeltaNetInfer:
                 infer_state.b1_cu_q_seq_len,
                 out=out_tensor,
                 cache_indices=infer_state.b_req_idx,
-                activation=self.activation,  # 添加 activation 参数
+                activation=self.activation,
             )
-            mixed_qkv = out_tensor.transpose(0, 1)  # [seq_len, tp_qkv_dim]
+            mixed_qkv = out_tensor.transpose(0, 1)
         else:
-            # Decode: use causal_conv1d_update for single token update
-            # Need to transpose conv_states to match expected format: (..., dim, state_len)
             mixed_qkv = causal_conv1d_update(
                 mixed_qkv,
                 conv_states.transpose(1, 2),
@@ -253,12 +256,9 @@ class Qwen3NextGatedDeltaNetInfer:
         g = fused_gdn_gating(layer_weight.linear_A_log.weight, a, layer_weight.linear_dt_bias.weight)
         g, beta = map(lambda x: rearrange(x, "l d -> 1 l d"), (g, beta))
 
-        # Recurrent attention: different paths for prefill and decode
         if is_prefill:
-            # Prefill: use chunk_gated_delta_rule
-            # Get initial state and clear it for new requests (no prompt cache support yet)
             initial_state = ssm_states[infer_state.b_req_idx].contiguous()
-            initial_state[...] = 0  # Clear initial state for all requests
+            initial_state[...] = 0
             (core_attn_out, last_recurrent_state,) = chunk_gated_delta_rule(
                 q=query,
                 k=key,
@@ -274,7 +274,6 @@ class Qwen3NextGatedDeltaNetInfer:
             # Update SSM state with final state
             ssm_states[infer_state.b_req_idx, ...] = last_recurrent_state.to(ssm_states.dtype)
         else:
-            # Decode: use fused_recurrent_gated_delta_rule for single token
             batch_size = input.shape[0]
             cu_seqlens = torch.arange(0, batch_size + 1, dtype=torch.int32, device=input.device)
             (core_attn_out, last_recurrent_state,) = fused_recurrent_gated_delta_rule(
@@ -290,7 +289,6 @@ class Qwen3NextGatedDeltaNetInfer:
                 use_qk_l2norm_in_kernel=True,
             )
 
-        # Gated RMSNorm and output projection
         z_shape_og = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])

@@ -35,10 +35,8 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     @override
     def _init_weight(self):
-        if self.is_moe:
-            self._init_moe()
-        else:
-            self._init_ffn()
+        self._init_moe()
+        self._init_shared_expert_weight()
 
         self.att_norm_weight_ = NormWeight(
             self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
@@ -80,14 +78,48 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             self._split_q_with_gate(weights)
         super().load_hf_weights(weights)
 
+    def _init_shared_expert_weight(self):
+        prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
+        self.shared_expert_gate_up_proj = MultiROWMMWeight(
+            weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
+            data_type=self.data_type_,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="shared_expert_gate_up_proj",
+        )
+        self.shared_expert_down_proj = COLMMWeight(
+            weight_name=f"{prefix}.down_proj.weight",
+            data_type=self.data_type_,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="shared_expert_down_proj",
+        )
+        self.shared_expert_gate = ROWMMWeight(
+            weight_name=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
+            data_type=self.data_type_,
+            bias_name=None,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="shared_expert_gate",
+            tp_rank=0,
+            tp_world_size=1,
+        )
+
     def _split_q_with_gate(self, weights):
         if self.q_proj.weight_name in weights:
-            q_size = self.tp_q_head_num_ * self.head_dim * self.tp_world_size_
-            _q_proj, _gate_proj = torch.split(weights[self.q_proj.weight_name], [q_size, q_size], dim=0)
+            weight = weights[self.q_proj.weight_name]
+            num_heads = self.tp_q_head_num_ * self.tp_world_size_
+            weight = weight.view(num_heads * 2, self.head_dim, -1)
+            _q_proj = weight[0::2].reshape(-1, weight.shape[-1])
+            _gate_proj = weight[1::2].reshape(-1, weight.shape[-1])
             weights[self.q_proj.weight_name] = _q_proj
             weights[self.o_gate_proj.weight_name] = _gate_proj
         if self.q_proj.bias_name in weights:
-            _q_proj, _gate_proj = torch.split(weights[self.q_proj.bias_name], [q_size, q_size], dim=0)
+            bias = weights[self.q_proj.bias_name]
+            num_heads = self.tp_q_head_num_ * self.tp_world_size_
+            bias = bias.view(num_heads * 2, self.head_dim)
+            _q_proj = bias[0::2].reshape(-1)
+            _gate_proj = bias[1::2].reshape(-1)
             weights[self.q_proj.bias_name] = _q_proj
             weights[self.o_gate_proj.bias_name] = _gate_proj
 
@@ -117,7 +149,6 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         self.linear_conv1d = ROWMMWeight(
             weight_name=f"{prefix}.conv1d.weight",
             data_type=self.data_type_,
-            bias_name=f"{prefix}.conv1d.bias",
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="conv1d_weight",
@@ -126,7 +157,6 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         self.linear_in_proj = MultiROWMMWeight(
             weight_names=[f"{prefix}.in_proj_qkvz.weight", f"{prefix}.in_proj_ba.weight"],
             data_type=self.data_type_,
-            bias_names=[None],
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="in_proj_weight",
@@ -142,20 +172,17 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
         self.linear_dt_bias = TpParameterWeight(
             weight_name=f"{prefix}.dt_bias",
-            data_type=self.data_type_,
+            data_type=torch.float32,
             split_n_embed=self.linear_num_v_heads // self.tp_world_size_,
-            bias_name=None,
         )
 
         self.linear_A_log = TpParameterWeight(
             weight_name=f"{prefix}.A_log",
-            data_type=self.data_type_,
+            data_type=torch.float32,
             split_n_embed=self.linear_num_v_heads // self.tp_world_size_,
-            bias_name=None,
         )
 
         self.linear_norm = NormWeight(
             weight_name=f"{prefix}.norm.weight",
             data_type=self.data_type_,
-            bias_name=None,
         )

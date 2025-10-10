@@ -3,8 +3,6 @@ from typing import final, Dict
 from typing_extensions import override
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
-from lightllm.models.qwen3next.layer_weights.gdn_layer_weight import Qwen3NextGatedDeltaNetWeight
-from lightllm.models.qwen3next.layer_infer.gdn_layer_infer import Qwen3NextGatedDeltaNetInfer
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import Qwen3NextTransformerLayerWeight
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 from lightllm.utils.log_utils import init_logger

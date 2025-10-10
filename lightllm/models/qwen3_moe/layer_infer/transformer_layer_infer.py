@@ -52,7 +52,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
 
     def rmsnorm(self, input, weight, out):
-        return rmsnorm_forward(input, weight, self.eps_, out=input)
+        return rmsnorm_forward(input, weight, self.eps_, out=out)
 
     def _get_qkv(
         self,
