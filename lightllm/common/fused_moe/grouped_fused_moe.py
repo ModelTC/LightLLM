@@ -220,6 +220,91 @@ def moe_align1(
 
 
 @triton.jit
+def moe_align_fused_kernel(
+    topk_ids_ptr,  # [token_num, topk]
+    topk_weights_ptr,  # [token_num, topk]
+    expert_to_token_index_ptr,  # [expert_num, token_num * topk]
+    expert_to_weight_ptr,  # [expert_num, token_num * topk]
+    expert_token_num_ptr,  # [expert_num]
+    token_num,
+    topk_num: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_block = tl.program_id(0)
+    offs = token_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < token_num * topk_num
+
+    expert_ids = tl.load(topk_ids_ptr + offs, mask=mask, other=0)
+    weights = tl.load(topk_weights_ptr + offs, mask=mask, other=0.0)
+
+    # 用 atomic_add 给 expert 分配写位置
+    write_pos = tl.atomic_add(expert_token_num_ptr + expert_ids, 1, mask=mask)
+
+    # 按 token 顺序写 index 和 weight
+    tl.store(
+        expert_to_token_index_ptr + expert_ids * (token_num * topk_num) + write_pos,
+        offs,
+        mask=mask,
+    )
+    tl.store(
+        expert_to_weight_ptr + expert_ids * (token_num * topk_num) + write_pos,
+        weights,
+        mask=mask,
+    )
+
+
+def _get_moe_align_fused_static_key(
+    topk_weights: torch.Tensor,
+) -> dict:
+    topk_num = topk_weights.shape[1]
+    return {
+        "topk_num": topk_num,
+    }
+
+
+def _get_moe_align_fused_configs():
+    return [
+        {
+            "BLOCK_SIZE": bt,
+            "num_warps": nw,
+        }
+        for nw in [1, 2, 4, 8]
+        for bt in [128, 256, 512, 1024, 2048]
+    ]
+
+
+@autotune(
+    kernel_name="moe_align_fused:v1",
+    configs_gen_func=_get_moe_align_fused_configs,
+    static_key_func=_get_moe_align_fused_static_key,
+    run_key_func=lambda topk_ids: topk_ids.shape[0],
+    mutates_args=["expert_to_token_index", "expert_to_weight", "expert_token_num"],
+)
+def moe_align_fused(
+    expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config: Optional[dict] = None
+):
+    token_num, topk_num = topk_ids.shape
+    if run_config is None:
+        run_config = {}
+    BLOCK_SIZE = run_config.get("BLOCK_SIZE", 256)
+    num_warps = run_config.get("num_warps", 4)
+
+    grid = (triton.cdiv(token_num * topk_num, BLOCK_SIZE),)
+    moe_align_fused_kernel[grid](
+        topk_ids,
+        topk_weights,
+        expert_to_token_index,
+        expert_to_weight,
+        expert_token_num,
+        token_num,
+        topk_num,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=num_warps,
+    )
+    return expert_to_token_index, expert_to_weight, expert_token_num
+
+
+@triton.jit
 def moe_align2_kernel(
     experts_token_num_ptr,  # [expert_num,]
     mblocks_to_expert_id,  # [max_num_m_blocks,]
@@ -309,6 +394,9 @@ def grouped_matmul_kernel(
     weight_stride_0,
     weight_stride_1,
     weight_stride_2,
+    bias_ptr,  # [expert_num, n]
+    bias_stride_0,
+    bias_stride_1,
     expert_to_weights_ptr,  # [expert_num, token_num * topk]
     expert_to_weights_stride0,
     expert_to_weights_stride1,
@@ -333,6 +421,7 @@ def grouped_matmul_kernel(
     MUL_ROUTED_WEIGHT: tl.constexpr = False,
     NEED_K_MASK: tl.constexpr = True,
     NEED_TRANS: tl.constexpr = False,
+    ADD_BIAS: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
 
@@ -344,6 +433,7 @@ def grouped_matmul_kernel(
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     in_group_index = pid % num_pid_in_group
+
     back_mark = (in_group_index // group_size_m) % 2
     back_mark1 = -1 * (2 * back_mark - 1)
     pid_m = first_pid_m + back_mark * (group_size_m - 1) + back_mark1 * (in_group_index % group_size_m)
@@ -441,6 +531,13 @@ def grouped_matmul_kernel(
         if not (block_size_k > 0 and block_size_n > 0):
             accumulator *= ab_scale
 
+    # Apply bias if requested
+    if ADD_BIAS:
+        offs_bn_bias = offs_bn  # [BLOCK_SIZE_N]
+        bias_ptrs = bias_ptr + expert_id * bias_stride_0 + offs_bn_bias
+        bias_vals = tl.load(bias_ptrs)  # [BLOCK_SIZE_N]
+        accumulator += bias_vals[None, :]  # broadcast across M dimension
+
     if MUL_ROUTED_WEIGHT:
         a_m_scale = tl.load(
             expert_to_weights_ptr + expert_id * expert_to_weights_stride0 + offs_am,
@@ -521,6 +618,7 @@ def grouped_matmul(
     alloc_tensor_func=torch.empty,
     reused_mblock_infos=None,
     run_config: Optional[dict] = None,
+    bias: Optional[torch.Tensor] = None,  # per-expert bias [expert_num, N]
 ):
     """
     token_num_mul_topk_num is int equal token_num * topk_num,
@@ -630,6 +728,9 @@ def grouped_matmul(
         expert_weights.stride(0),
         expert_weights.stride(1),
         expert_weights.stride(2),
+        bias,
+        bias.stride(0) if bias is not None else 0,
+        bias.stride(1) if bias is not None and bias.ndim >= 2 else 0,
         expert_to_weights,
         expert_to_weights.stride(0),
         expert_to_weights.stride(1),
@@ -654,6 +755,7 @@ def grouped_matmul(
         NEED_TRANS=NEED_TRANS,
         num_warps=num_warps,
         num_stages=num_stages,
+        ADD_BIAS=bias is not None,
     )
     return (mblocks_to_expert_id, mblocks_to_m_index, BLOCK_SIZE_M)
 
@@ -662,6 +764,8 @@ def fused_experts_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     inplace: bool = False,
@@ -673,6 +777,9 @@ def fused_experts_impl(
     a2_scale: Optional[torch.Tensor] = None,
     alloc_tensor_func=torch.empty,
     run_config: Optional[dict] = None,
+    layout="blocked",
+    limit=None,
+    alpha=None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -719,9 +826,14 @@ def fused_experts_impl(
 
         expert_to_tokens = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.int32, device="cuda")
         expert_to_weights = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.float32, device="cuda")
-        moe_align(topk_ids=curr_topk_ids, out=expert_to_tokens)
-        expert_to_token_num = torch.empty((E,), dtype=torch.int32, device="cuda")
-        moe_align1(expert_to_tokens, curr_topk_weights, expert_to_weights, expert_to_token_num, topk=topk_num)
+        expert_to_token_num = torch.zeros((E,), dtype=torch.int32, device="cuda")
+        moe_align_fused(
+            expert_to_token_index=expert_to_tokens,
+            expert_to_weight=expert_to_weights,
+            expert_token_num=expert_to_token_num,
+            topk_ids=curr_topk_ids,
+            topk_weights=curr_topk_weights,
+        )
 
         reused_mblock_infos = grouped_matmul(
             curr_topk_ids.numel(),
@@ -738,9 +850,16 @@ def fused_experts_impl(
             use_fp8_w8a8=use_fp8_w8a8,
             alloc_tensor_func=alloc_tensor_func,
             run_config=run_config,
+            bias=w1_bias,
         )
 
-        silu_and_mul_fwd(intermediate_cache1.view(-1, N), intermediate_cache2.view(-1, N // 2))
+        silu_and_mul_fwd(
+            intermediate_cache1.view(-1, N),
+            intermediate_cache2.view(-1, N // 2),
+            limit=limit,
+            alpha=alpha,
+            layout=layout,
+        )
 
         grouped_matmul(
             curr_topk_ids.numel(),
@@ -758,6 +877,7 @@ def fused_experts_impl(
             alloc_tensor_func=alloc_tensor_func,
             reused_mblock_infos=reused_mblock_infos,
             run_config=run_config,
+            bias=w2_bias,
         )
 
         moe_sum_reduce(
@@ -770,6 +890,9 @@ def inplace_fused_experts_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    # optional bias for w1 and w2
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     use_fp8_w8a8: bool = False,
@@ -778,11 +901,16 @@ def inplace_fused_experts_impl(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    layout: str = "blocked",
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
 ) -> None:
     fused_experts_impl(
         hidden_states,
         w1,
         w2,
+        w1_bias,
+        w2_bias,
         topk_weights,
         topk_ids,
         True,
@@ -792,6 +920,9 @@ def inplace_fused_experts_impl(
         w2_scale,
         a1_scale,
         a2_scale,
+        layout=layout,
+        alpha=alpha,
+        limit=limit,
     )
 
 
@@ -799,6 +930,9 @@ def inplace_fused_experts_impl_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    # optional bias for w1 and w2
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     use_fp8_w8a8: bool = False,
@@ -807,6 +941,9 @@ def inplace_fused_experts_impl_fake(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    layout: str = "blocked",
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
 ) -> None:
     pass
 
@@ -823,6 +960,9 @@ def outplace_fused_experts_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    # optional bias for w1 and w2
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     use_fp8_w8a8: bool = False,
@@ -831,11 +971,16 @@ def outplace_fused_experts_impl(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    layout: str = "blocked",
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
 ) -> None:
     return fused_experts_impl(
         hidden_states,
         w1,
         w2,
+        w1_bias,
+        w2_bias,
         topk_weights,
         topk_ids,
         False,
@@ -845,6 +990,9 @@ def outplace_fused_experts_impl(
         w2_scale,
         a1_scale,
         a2_scale,
+        layout=layout,
+        alpha=alpha,
+        limit=limit,
     )
 
 
@@ -852,6 +1000,9 @@ def outplace_fused_experts_impl_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    # optional bias for w1 and w2
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     use_fp8_w8a8: bool = False,
@@ -860,6 +1011,9 @@ def outplace_fused_experts_impl_fake(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    layout: str = "blocked",
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
 ) -> None:
     return torch.empty_like(hidden_states)
 
@@ -885,12 +1039,20 @@ def fused_experts(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    # optional bias for w1 and w2
+    w1_bias: Optional[torch.Tensor] = None,
+    w2_bias: Optional[torch.Tensor] = None,
+    layout: str = "blocked",
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
 ):
     if inplace:
         torch.ops.lightllm.inplace_fused_experts_impl(
             hidden_states,
             w1,
             w2,
+            w1_bias,
+            w2_bias,
             topk_weights,
             topk_ids,
             use_fp8_w8a8,
@@ -899,6 +1061,9 @@ def fused_experts(
             w2_scale,
             a1_scale,
             a2_scale,
+            layout=layout,
+            alpha=alpha,
+            limit=limit,
         )
         return hidden_states
     else:
@@ -906,6 +1071,8 @@ def fused_experts(
             hidden_states,
             w1,
             w2,
+            w1_bias,
+            w2_bias,
             topk_weights,
             topk_ids,
             use_fp8_w8a8,
@@ -914,4 +1081,7 @@ def fused_experts(
             w2_scale,
             a1_scale,
             a2_scale,
+            layout=layout,
+            alpha=alpha,
+            limit=limit,
         )

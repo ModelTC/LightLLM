@@ -166,3 +166,10 @@ def set_model_init_status(status: bool):
     global g_model_init_done
     g_model_init_done = status
     return g_model_init_done
+
+
+def use_whisper_sdpa_attention() -> bool:
+    """
+    whisper重训后,使用特定的实现可以提升精度，用该函数控制使用的att实现。
+    """
+    return enable_env_vars("LIGHTLLM_USE_WHISPER_SDPA_ATTENTION")

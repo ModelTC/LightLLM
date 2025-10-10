@@ -86,6 +86,7 @@ class AudioManager:
                 while len(self.waiting_reqs) > 0:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
+                    disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
                     is_aborted = shm_req.is_aborted
                     self.shm_req_manager.put_back_req_obj(shm_req)
                     if is_aborted:
@@ -98,7 +99,11 @@ class AudioManager:
                     multimodal_params = group_req_indexes.multimodal_params
 
                     audio_uuids = [audio.uuid for audio in multimodal_params.audios]
-                    ready_audio = obtain(self.cache_client.root.get_items_embed(audio_uuids))
+                    # disable prompt cache通常用来测试，需要也去掉audio cache的影响
+                    if disable_prompt_cache:
+                        ready_audio = [False] * len(audio_uuids)
+                    else:
+                        ready_audio = obtain(self.cache_client.root.get_items_embed(audio_uuids))
 
                     for audio, ready in zip(multimodal_params.audios, ready_audio):
                         if not ready:

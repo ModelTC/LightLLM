@@ -5,6 +5,7 @@ import threading
 import websockets
 import inspect
 import setproctitle
+import pickle
 
 from typing import Dict
 from dataclasses import asdict
@@ -90,7 +91,7 @@ class UpStatusManager:
                             if pd_master_obj.node_id in self.id_to_handle_queue:
                                 task_queue = self.id_to_handle_queue[pd_master_obj.node_id]
                                 upkv_status: UpKVStatus = await task_queue.get()
-                                await websocket.send(json.dumps(asdict(upkv_status)))
+                                await websocket.send(pickle.dumps(upkv_status))
                                 logger.info(f"up status: {upkv_status}")
                             else:
                                 await asyncio.sleep(3)

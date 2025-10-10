@@ -1,21 +1,16 @@
 import sys
-import zmq
-import zmq.asyncio
 import asyncio
 import uvloop
-import rpyc
 import time
-import hashlib
 import datetime
-import aiohttp
 import ujson as json
 import pickle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, UpKVStatus, ObjType
-from lightllm.server.core.objs import SamplingParams
+from ..pd_io_struct import PD_Client_Obj, UpKVStatus, NixlUpKVStatus, ObjType, NodeRole, NIXLDecodeNodeInfo
+from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
 from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
@@ -33,8 +28,8 @@ logger = init_logger(__name__)
 class HttpServerManagerForPDMaster:
     def __init__(
         self,
-        args,
-        metric_port,
+        args: StartArgs,
+        metric_port: int,
     ):
         self.args = args
         self.metric_client = MetricClient(metric_port)
@@ -59,7 +54,7 @@ class HttpServerManagerForPDMaster:
         self.pd_manager.remove_pd(pd_info_json)
         return
 
-    async def update_req_status(self, upkv_status: UpKVStatus):
+    async def update_req_status(self, upkv_status: Union[UpKVStatus, NixlUpKVStatus]):
         try:
             group_request_id = convert_sub_id_to_group_id(upkv_status.group_request_id)
             up_status_event = self.req_id_to_out_inf[group_request_id].up_status_event
@@ -110,6 +105,10 @@ class HttpServerManagerForPDMaster:
 
             p_node, d_node = await self.select_p_d_node(prompt, sampling_params, multimodal_params)
 
+            if not p_node or not d_node:
+                logger.error(f"{group_request_id}: No p_node or d_node found")
+                raise Exception(f"{group_request_id}: No p_node or d_node found")
+
             results_generator = self._wait_to_token_package(
                 p_node,
                 d_node,
@@ -124,7 +123,10 @@ class HttpServerManagerForPDMaster:
 
         except BaseException as e:
             logger.error(f"has exception {str(e)}")
-            await self.abort(group_request_id)
+            try:
+                await self.abort(group_request_id, p_node=p_node, d_node=d_node)
+            except:
+                await self.abort(group_request_id)
             raise e
 
         finally:
@@ -142,16 +144,6 @@ class HttpServerManagerForPDMaster:
         )
         return
 
-    async def _to_req_info(
-        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ):
-        req = {
-            "inputs": prompt,
-            "parameters": sampling_params.to_origin_dict(),
-            "multimodal_params": multimodal_params.to_origin_dict(),
-        }
-        return req
-
     async def fetch_stream(
         self,
         p_node: PD_Client_Obj,
@@ -162,6 +154,7 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         group_request_id = sampling_params.group_request_id
+        sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
 
         req_status = ReqStatus(group_request_id, p_node, d_node)
         self.req_id_to_out_inf[group_request_id] = req_status
@@ -174,7 +167,6 @@ class HttpServerManagerForPDMaster:
             "ip": d_start_args["host"],
             "rpyc_port": d_start_args["pd_decode_rpyc_port"],
             "max_new_tokens": sampling_params.max_new_tokens - 1,
-            "pd_master_node_id": self.args.pd_node_id,
         }
 
         old_max_new_tokens = sampling_params.max_new_tokens
@@ -215,9 +207,12 @@ class HttpServerManagerForPDMaster:
 
         sampling_params.move_kv_to_decode_node.initialize(None)
         sampling_params.max_new_tokens = old_max_new_tokens - 1
-        sampling_params.suggested_dp_index = up_status_event.upkv_status.dp_index
+        upkv_status: UpKVStatus = up_status_event.upkv_status
+        sampling_params.suggested_dp_index = upkv_status.dp_index
 
-        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, multimodal_params))))
+        await d_node.websocket.send_bytes(
+            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+        )
 
         while True:
             await req_status.wait_to_ready()
@@ -227,6 +222,84 @@ class HttpServerManagerForPDMaster:
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     yield sub_req_id, request_output, metadata, finish_status
+
+        return
+
+    async def fetch_nixl_stream(
+        self,
+        p_node: PD_Client_Obj,
+        d_node: PD_Client_Obj,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+    ):
+        group_request_id = sampling_params.group_request_id
+        sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
+
+        req_status = ReqStatus(group_request_id, p_node, d_node)
+        self.req_id_to_out_inf[group_request_id] = req_status
+
+        up_status_event = req_status.up_status_event
+        nixl_np_up_prompt_ids_event = req_status.nixl_np_up_prompt_ids_event
+
+        old_max_new_tokens = sampling_params.max_new_tokens
+        sampling_params.max_new_tokens = 1
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+
+        try:
+            await asyncio.wait_for(nixl_np_up_prompt_ids_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning(f"group_request_id: {group_request_id} wait np up prompt ids time out")
+            raise ServerBusyError()
+
+        if await request.is_disconnected():
+            raise Exception(f"req_id {group_request_id} disconnected")
+
+        prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
+        logger.info(f"group_request_id: {group_request_id} get np up prompt ids len {len(prompt_ids)}")
+
+        sampling_params.max_new_tokens = old_max_new_tokens
+        await d_node.websocket.send_bytes(
+            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+        )
+
+        try:
+            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
+            raise ServerBusyError()
+
+        # 将 decode 节点上报的当前请求使用的decode节点的信息下发给 p 节点，这样 p 节点才知道将 kv 传输给那个 d 节点。
+        upkv_status: NixlUpKVStatus = up_status_event.upkv_status
+        nixl_params: bytes = upkv_status.nixl_params
+        decode_node_info: NIXLDecodeNodeInfo = pickle.loads(nixl_params)
+        await p_node.websocket.send_bytes(
+            pickle.dumps((ObjType.NIXL_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
+        )
+
+        first_token_gen = False
+        while True:
+            await req_status.wait_to_ready()
+            if await request.is_disconnected():
+                raise Exception(f"req_id {group_request_id} disconnected")
+            if await req_status.can_read(self.req_id_to_out_inf):
+                token_list = await req_status.pop_all_tokens()
+                for sub_req_id, request_output, metadata, finish_status in token_list:
+                    output_index = metadata.get("count_output_tokens")
+                    # 因为 nixl 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
+                    if output_index == 1:
+                        if first_token_gen is False:
+                            first_token_gen = True
+                            node_run_mode = metadata.pop("node_mode", None)
+                            if node_run_mode == "nixl_prefill":
+                                if old_max_new_tokens != 1 and finish_status.is_finished_length():
+                                    finish_status = FinishStatus(FinishStatus.NO_FINISH)
+                            yield sub_req_id, request_output, metadata, finish_status
+                        else:
+                            continue
+                    else:
+                        yield sub_req_id, request_output, metadata, finish_status
 
         return
 
@@ -240,13 +313,20 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
+        if sampling_params.disable_prompt_cache:
+            assert False, "pd mode dont support set disable_prompt_cache to True"
+
         out_token_counter = 0
         first_token_cost_ms = float("inf")
         group_request_id = sampling_params.group_request_id
         unfinished_count = sampling_params.best_of
         is_first_token = True
 
-        async for sub_req_id, out_str, metadata, finish_status in self.fetch_stream(
+        client_mode: NodeRole = NodeRole(d_node.mode)
+
+        fetch_stream = self.fetch_nixl_stream if client_mode.is_NP_or_ND() else self.fetch_stream
+
+        async for sub_req_id, out_str, metadata, finish_status in fetch_stream(
             p_node, d_node, prompt, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
@@ -292,22 +372,26 @@ class HttpServerManagerForPDMaster:
         self.metric_client.counter_inc("lightllm_request_success")
         return
 
-    async def abort(self, group_request_id):
+    async def abort(
+        self, group_request_id, p_node: Optional[PD_Client_Obj] = None, d_node: Optional[PD_Client_Obj] = None
+    ):
         logger.warning(f"aborted group_request_id {group_request_id}")
 
         try:
             req_status = self.req_id_to_out_inf[group_request_id]
             del self.req_id_to_out_inf[group_request_id]
+            p_node = req_status.p_node
+            d_node = req_status.d_node
         except:
             pass
 
         try:
-            await req_status.p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+            await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 
         try:
-            await req_status.d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+            await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 
@@ -358,6 +442,17 @@ class HttpServerManagerForPDMaster:
                                     req_status.event.set()
                             except:
                                 pass
+                    elif obj[0] == ObjType.NIXL_UPLOAD_NP_PROMPT_IDS:
+                        _, group_req_id, prompt_ids = obj
+                        try:
+                            req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
+                            async with req_status.lock:
+                                req_status.nixl_np_up_prompt_ids_event.prompt_ids = prompt_ids
+                                req_status.nixl_np_up_prompt_ids_event.set()
+                        except:
+                            logger.error(
+                                f"NIXL_UPLOAD_NP_PROMPT_IDS fail find req status for group_req_id: {group_req_id}"
+                            )
                     else:
                         logger.error(f"recevie error obj {obj}")
             except BaseException as e:
@@ -371,6 +466,7 @@ class ReqStatus:
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
         self.up_status_event = asyncio.Event()
+        self.nixl_np_up_prompt_ids_event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
@@ -398,8 +494,8 @@ class ReqStatus:
 
 
 class PDManager:
-    def __init__(self, args):
-        self.args = args
+    def __init__(self, args: StartArgs):
+        self.args: StartArgs = args
         self.prefill_nodes: List[PD_Client_Obj] = []
         self.decode_nodes: List[PD_Client_Obj] = []
         self.url_to_pd_nodes: Dict[str, PD_Client_Obj] = {}
@@ -411,10 +507,10 @@ class PDManager:
         pd_client.websocket = websocket
         self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
 
-        if pd_client.mode == "prefill":
+        if pd_client.mode in ["prefill", "nixl_prefill"]:
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.prefill_nodes.append(pd_client)
-        elif pd_client.mode == "decode":
+        elif pd_client.mode in ["decode", "nixl_decode"]:
             self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.decode_nodes.append(pd_client)
         else:

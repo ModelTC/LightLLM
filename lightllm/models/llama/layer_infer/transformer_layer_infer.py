@@ -194,9 +194,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return out
 
     def _get_qkv(
-        self, input, cache_kv, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         q = layer_weight.q_proj.mm(input)
+        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
         cache_kv = layer_weight.kv_proj.mm(
             input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
         ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
@@ -210,7 +211,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return q, cache_kv
 
     def _tpsp_get_qkv(
-        self, input, cache_kv, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         if self.tp_world_size_ > 1:
             sp_token_num, hidden_dim = input.shape
@@ -221,6 +222,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             input = gather_input[0 : len(infer_state.position_cos), :]
 
         q = layer_weight.q_proj.mm(input)
+        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
         cache_kv = layer_weight.kv_proj.mm(
             input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
         ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)

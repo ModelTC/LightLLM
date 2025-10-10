@@ -35,6 +35,9 @@ class FinishStatus(ctypes.Structure):
     def is_stopped(self):
         return self.status == self.FINISHED_STOP
 
+    def is_finished_length(self):
+        return self.status == self.FINISHED_LENGTH
+
     def get_finish_reason(self):
         if self.status == self.FINISHED_STOP:
             return "stop"
@@ -255,6 +258,15 @@ class Req(ctypes.Structure):
         self._cache_prompt_metadata = metadata
         return metadata
 
+    def is_infer_decode(self) -> bool:
+        """
+        judge the req is in decode stage
+        """
+        if self.shm_cur_kv_len >= self.input_len:
+            return True
+        else:
+            return False
+
 
 # 由于目前加入了很多异步调度的方法，为了缓解异步调度带来的很多
 # 估计不准确的问题，通过加长输出的长度，进行偏向保守一些的调度
@@ -305,8 +317,12 @@ class ChunkedPrefillReq(Req):
         """
         # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
         need_tokens = min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
-        if need_tokens == 1:
-            need_tokens = self._mtp_step + 1
+        if need_tokens == 1 and self._mtp_step > 0:
+            # self._mtp_step > 0 时，说明开启了mtp 模式，每次decode需要额外的mem token 资源
+            # "deepseekv3_vanilla" 模式需要的 mem 用量为 self._mtp_step + 1
+            # "deepseekv3_eagle" 模式需要的 mem 用量为 （self._mtp_step + 1）* 2
+            # 为了简化统一 返回 （self._mtp_step + 1）* 2
+            need_tokens = (self._mtp_step + 1) * 2
 
         return need_tokens
 

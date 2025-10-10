@@ -32,8 +32,8 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         return fused_experts_impl(
             hidden_states=hidden_states,
-            w1=layer_weight.experts.w1,
-            w2=layer_weight.experts.w2,
+            w1=layer_weight.experts.w1[0],
+            w2=layer_weight.experts.w2[0],
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,

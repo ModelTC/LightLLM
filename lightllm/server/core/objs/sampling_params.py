@@ -3,6 +3,7 @@ import ctypes
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
+from .nixl_params import NIXLParamObj
 
 _SAMPLING_EPS = 1e-5
 DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in ["ON", "TRUE", "1"]
@@ -223,17 +224,30 @@ class ExponentialDecayLengthPenalty(ctypes.Structure):
         return (self.item0, self.item1)
 
 
+class NodeUUId(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [
+        ("node_id_high", ctypes.c_uint64),
+        ("node_id_low", ctypes.c_uint64),
+    ]
+
+    def initialize(self, node_id: int):
+        self.node_id_high = (node_id >> 64) & 0xFFFFFFFFFFFFFFFF
+        self.node_id_low = node_id & 0xFFFFFFFFFFFFFFFF
+        return
+
+    def get(self) -> int:
+        return (self.node_id_high << 64) | self.node_id_low
+
+
 class DecodeNode(ctypes.Structure):
+    _pack_ = 4
     _fields_ = [
         ("exists", ctypes.c_bool),
-        ("node_id_high", ctypes.c_uint64),  # UUID 的高 64 位
-        ("node_id_low", ctypes.c_uint64),  # UUID 的低 64 位
+        ("node_id", NodeUUId),
         ("ip", ctypes.c_int32 * 4),
         ("rpyc_port", ctypes.c_int),
         ("max_new_tokens", ctypes.c_int),
-        # 记录当前请求使用的 pd_master 节点的 id
-        ("pd_master_node_id_high", ctypes.c_uint64),
-        ("pd_master_node_id_low", ctypes.c_uint64),
     ]
 
     def initialize(self, data_dict):
@@ -244,8 +258,8 @@ class DecodeNode(ctypes.Structure):
         self.exists = True
 
         pd_node_id = data_dict["node_id"]
-        self.node_id_high = (pd_node_id >> 64) & 0xFFFFFFFFFFFFFFFF
-        self.node_id_low = pd_node_id & 0xFFFFFFFFFFFFFFFF
+        self.node_id = NodeUUId()
+        self.node_id.initialize(pd_node_id)
 
         ip_parts = [int(part) for part in data_dict["ip"].split(".")]
         self.ip = (ctypes.c_int32 * 4)(*ip_parts)
@@ -253,19 +267,14 @@ class DecodeNode(ctypes.Structure):
         self.rpyc_port = data_dict["rpyc_port"]
         self.max_new_tokens = data_dict["max_new_tokens"]
 
-        pd_master_node_id = data_dict["pd_master_node_id"]
-        self.pd_master_node_id_high = (pd_master_node_id >> 64) & 0xFFFFFFFFFFFFFFFF
-        self.pd_master_node_id_low = pd_master_node_id & 0xFFFFFFFFFFFFFFFF
-
     def to_dict(self):
         if not self.exists:
             return None
         return {
-            "node_id": ((self.node_id_high << 64) | self.node_id_low),
+            "node_id": self.node_id.get(),
             "ip": ".".join(str(self.ip[i]) for i in range(4)),
             "rpyc_port": self.rpyc_port,
             "max_new_tokens": self.max_new_tokens,
-            "pd_master_node_id": ((self.pd_master_node_id_high << 64) | self.pd_master_node_id_low),
         }
 
 
@@ -300,6 +309,10 @@ class SamplingParams(ctypes.Structure):
         ("group_request_id", ctypes.c_int64),  # p d mode used params
         ("suggested_dp_index", ctypes.c_int),  # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         ("move_kv_to_decode_node", DecodeNode),  # move kv to deocde node, only used in pd mode
+        # in pd split mode, use to keep the id of pd master
+        ("pd_master_node_id", NodeUUId),
+        # nixl params object, only used in nixl pd mode, used to build nixl connection in p and d
+        ("nixl_params", NIXLParamObj),
         ("skip_special_tokens", ctypes.c_bool),  # whether to skip special tokens when decoding
         ("add_special_tokens", ctypes.c_bool),  # whether to add special tokens when encoding
         (
@@ -307,6 +320,7 @@ class SamplingParams(ctypes.Structure):
             ctypes.c_bool,
         ),  # whether to add spaces between special tokens when decoding
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
+        ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
     ]
 
     _do_sample: bool = False
@@ -337,6 +351,7 @@ class SamplingParams(ctypes.Structure):
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
+        self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
 
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
@@ -347,6 +362,10 @@ class SamplingParams(ctypes.Structure):
 
         self.move_kv_to_decode_node = DecodeNode()
         self.move_kv_to_decode_node.initialize(kwargs.get("move_kv_to_decode_node", None))
+        self.nixl_params = NIXLParamObj()
+        self.nixl_params.set(kwargs.get("nixl_params", None))
+        self.pd_master_node_id = NodeUUId()
+        self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
         # Initialize regular_constraint
         regular_constraint = kwargs.get("regular_constraint", "")
@@ -477,6 +496,7 @@ class SamplingParams(ctypes.Structure):
             "add_special_tokens": self.add_special_tokens,
             "add_spaces_between_special_tokens": self.add_spaces_between_special_tokens,
             "print_eos_token": self.print_eos_token,
+            "disable_prompt_cache": self.disable_prompt_cache,
         }
 
     def to_origin_dict(self):

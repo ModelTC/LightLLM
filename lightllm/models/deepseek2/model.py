@@ -100,7 +100,9 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
         # mtp 模式下需要在mem manger上扩展draft model使用的layer
         added_mtp_layer_num = 0
-        if get_env_start_args().mtp_mode == "deepseekv3":
+        if get_env_start_args().mtp_mode == "deepseekv3_eagle":
+            added_mtp_layer_num += 1
+        elif get_env_start_args().mtp_mode == "deepseekv3_vanilla":
             added_mtp_layer_num += get_env_start_args().mtp_step
 
         self.mem_manager = manager_class(

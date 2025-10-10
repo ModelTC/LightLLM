@@ -12,14 +12,18 @@ import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import multiprocessing
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
-from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd, StopStrMatchedReqCmd
+from lightllm.server.core.objs.io_objs import (
+    GroupReqIndexes,
+    AbortedReqCmd,
+    StopStrMatchedReqCmd,
+)
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
-from .shm_reqs_io_buffer import ShmReqsIOBuffer
+from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
@@ -45,6 +49,7 @@ class RouterManager:
         self.schedule_time_interval = args.schedule_time_interval  # 默认30ms 的调度周期
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
+        self.dp_world_size = self.world_size // self.dp_size
         self.is_multinode_tp = args.nnodes > 1 and args.dp == 1
         self.is_multinode_tp_master = self.is_multinode_tp and args.node_rank == 0
         self.is_multinode_tp_slave = self.is_multinode_tp and args.node_rank != 0
@@ -86,14 +91,14 @@ class RouterManager:
             )
 
         self.metric_client = MetricClient(metric_port)
-        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
-        self.is_pd_decode_mode = self.args.run_mode == "decode"
+        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]
+        self.is_pd_decode_mode = self.args.run_mode in ["decode", "nixl_decode"]
         # p d 分离模式下，需要调度锁来同步调度端和推理端的一些数据操作
         # 主要是为了防止调度失误，造成 OOM 等错误
         self.router_lock = mp.Lock()
         g_router_lock.obj = self.router_lock
 
-        self.shm_reqs_io_buffer = ShmReqsIOBuffer()
+        self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         return
 
     async def wait_to_model_ready(self):
@@ -112,19 +117,27 @@ class RouterManager:
 
         assert (self.world_size % self.nnodes) == 0
         node_world_size = self.world_size // self.nnodes
+
+        # Create tasks for parallel startup
+        tasks = []
         for rank_id in range(self.node_rank * node_world_size, (self.node_rank + 1) * node_world_size):
-            rpc_model = await start_model_process(
-                args=self.args,
-                rank=rank_id,
-                rank_in_node=rank_id % node_world_size,
-                node_world_size=node_world_size,
-                rpc_event=self.rpc_event,
-                rpc_finished_event=self.rpc_finished_event,
-                info_queue=self.info_queue,
-                mem_queue=self.mem_queues[(rank_id % node_world_size)],
-                router_lock=self.router_lock,
+            task = asyncio.create_task(
+                start_model_process(
+                    args=self.args,
+                    rank=rank_id,
+                    rank_in_node=rank_id % node_world_size,
+                    node_world_size=node_world_size,
+                    rpc_event=self.rpc_event,
+                    rpc_finished_event=self.rpc_finished_event,
+                    info_queue=self.info_queue,
+                    mem_queue=self.mem_queues[(rank_id % node_world_size)],
+                    router_lock=self.router_lock,
+                )
             )
-            self.model_rpc_servers.append(rpc_model)
+            tasks.append(task)
+
+        # Wait for all tasks to complete in parallel
+        self.model_rpc_servers = await asyncio.gather(*tasks)
 
         self.model_rpc_client = ModelRpcClient(
             rpc_event=self.rpc_event,
@@ -174,7 +187,7 @@ class RouterManager:
                 get_unique_server_name(),
                 self.max_total_token_num,
                 node_world_size=self.node_world_size,
-                dp_world_size=self.world_size // self.dp_size,
+                dp_world_size=self.dp_world_size,
             )
         self.req_queue = build_req_queue(self.args, self, self.dp_size_in_node)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
@@ -187,9 +200,23 @@ class RouterManager:
 
             start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
+        if self.args.run_mode == "nixl_prefill":
+            from lightllm.server.router.model_infer.mode_backend.pd_nixl.prefill_node_impl import (
+                start_prefill_kv_move_manager_process,
+            )
+
+            start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+
         if self.args.run_mode == "decode":
             # 启动 decode kv move 管理进程
             from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.decode_node_impl import (
+                start_decode_kv_move_manager_process,
+            )
+
+            start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+
+        if self.args.run_mode == "nixl_decode":
+            from lightllm.server.router.model_infer.mode_backend.pd_nixl.decode_node_impl import (
                 start_decode_kv_move_manager_process,
             )
 
