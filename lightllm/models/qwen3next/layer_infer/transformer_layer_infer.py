@@ -1,20 +1,13 @@
-import os
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-import numpy as np
-import triton
-from typing import Tuple
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import Qwen3NextTransformerLayerWeight
 from lightllm.models.qwen3_moe.layer_infer.transformer_layer_infer import Qwen3MOETransformerLayerInfer
 from functools import partial
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.dist_utils import get_global_world_size
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from typing_extensions import override
 from einops import rearrange
 from lightllm.models.qwen3next.triton_kernel.gated_rmsnorm import gated_rmsnorm_forward
