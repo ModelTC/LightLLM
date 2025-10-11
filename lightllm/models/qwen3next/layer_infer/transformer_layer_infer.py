@@ -219,6 +219,7 @@ class Qwen3NextGatedDeltaNetInfer:
         if is_prefill:
             mixed_qkv = mixed_qkv.transpose(0, 1)
             out_tensor = infer_cls.alloc_tensor(mixed_qkv.shape, mixed_qkv.dtype, device=mixed_qkv.device)
+            conv_states.zero_()
             causal_conv1d_fn(
                 mixed_qkv,
                 layer_weight.linear_conv1d.weight.transpose(0, 1),
@@ -251,7 +252,7 @@ class Qwen3NextGatedDeltaNetInfer:
 
         if is_prefill:
             initial_state = ssm_states[infer_state.b_req_idx].contiguous()
-            initial_state[...] = 0
+            initial_state.zero_()
             (core_attn_out, last_recurrent_state,) = chunk_gated_delta_rule(
                 q=query,
                 k=key,

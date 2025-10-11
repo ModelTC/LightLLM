@@ -56,12 +56,12 @@ class Qwen3NextMemoryManager(MemoryManager):
         super().__init__(size, dtype, num_kv_heads, head_dim, self.full_attn_layer_num, always_copy, mem_fraction)
 
     def init_mamba_state_buffer(self):
-        self.conv_state_buffers = torch.empty(
+        self.conv_state_buffers = torch.zeros(
             (self.linear_attn_layer_num, self.max_req_num + 1, *self.conv_state_shape),
             dtype=self.conv_state_dtype,
             device="cuda",
         )
-        self.ssm_state_buffers = torch.empty(
+        self.ssm_state_buffers = torch.zeros(
             (self.linear_attn_layer_num, self.max_req_num + 1, *self.ssm_state_shape),
             dtype=self.ssm_state_dtype,
             device="cuda",
