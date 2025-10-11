@@ -8,6 +8,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from typing import Tuple
 from typing_extensions import override
 from einops import rearrange
 from lightllm.models.qwen3next.triton_kernel.gated_rmsnorm import gated_rmsnorm_forward
@@ -16,7 +17,7 @@ from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_g
 from lightllm.models.qwen3next.triton_kernel.fla.ops.chunk import chunk_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.fla.ops.fused_recurrent import fused_recurrent_gated_delta_rule
 from lightllm.distributed import all_reduce
-
+from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
 logger = init_logger(__name__)
 
@@ -25,15 +26,15 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     def __init__(self, layer_num, network_config, mode=[]):
         super().__init__(layer_num, network_config, mode)
         self.is_linear = (layer_num + 1) % network_config["full_attention_interval"] != 0
+        self.partial_rotary_factor = network_config.get("partial_rotary_factor", 1.0)
+
         if self.is_linear:
             self.linear_attn_infer = Qwen3NextGatedDeltaNetInfer(network_config, layer_num, self.tp_world_size_)
         return
 
     @override
     def _bind_norm(self):
-        self._att_norm = partial(Qwen3MOETransformerLayerInfer._att_norm, self)
-        self._ffn_norm = partial(Qwen3MOETransformerLayerInfer._ffn_norm, self)
-        return
+        pass
 
     def _ffn_with_shared_expert(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
@@ -47,8 +48,7 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         moe_out = self._ffn(input, infer_state, layer_weight)
         return shared_expert_out + moe_out
 
-    @override
-    def rmsnorm(self, input, weight, out: torch.Tensor):
+    def _qwen3next_rmsnorm(self, input, weight, out: torch.Tensor):
         # Zero-Centered RMSNorm TODO trion op
         input_float32 = self.alloc_tensor(input.shape, torch.float32, device=input.device)
         input_float32.copy_(input)
@@ -56,6 +56,58 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         input_float32 = input_float32 * (1.0 + weight.float())
         out.copy_(input_float32.to(input.dtype))
         return out
+
+    @override
+    def _att_norm(
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+    ) -> torch.Tensor:
+        out = self.alloc_tensor(input.shape, input.dtype)
+        self._qwen3next_rmsnorm(input, weight=layer_weight.att_norm_weight_.weight, out=out)
+        return out
+
+    @override
+    def _ffn_norm(
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+    ) -> torch.Tensor:
+        out = self.alloc_tensor(input.shape, input.dtype)
+        self._qwen3next_rmsnorm(input, weight=layer_weight.ffn_norm_weight_.weight, out=out)
+        return out
+
+    @override
+    def _get_qkv(
+        self,
+        input: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen3NextTransformerLayerWeight,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        input = input.view(-1, self.embed_dim_)
+        q = layer_weight.q_proj.mm(input)
+        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
+        cache_kv = layer_weight.kv_proj.mm(
+            input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
+        ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        self._qwen3next_rmsnorm(
+            q.view(-1, self.head_dim_),
+            weight=layer_weight.q_norm_weight_.weight,
+            out=q.view(-1, self.head_dim_),
+        )
+
+        k_slice = cache_kv[:, : self.tp_k_head_num_, :].clone()
+        self._qwen3next_rmsnorm(
+            k_slice.reshape(-1, cache_kv.shape[-1]),
+            weight=layer_weight.k_norm_weight_.weight,
+            out=k_slice.reshape(-1, cache_kv.shape[-1]),
+        )
+        cache_kv[:, : self.tp_k_head_num_, :] = k_slice
+
+        rotary_emb_fwd(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            cache_kv[:, : self.tp_k_head_num_, :],
+            infer_state.position_cos,
+            infer_state.position_sin,
+            partial_rotary_factor=self.partial_rotary_factor,
+        )
+        return q, cache_kv
 
     @override
     def _get_o(
@@ -66,7 +118,7 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         o_tensor = layer_weight.o_proj.mm(input)
         return o_tensor
 
-    def context_attention_forward(
+    def _context_full_attn(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
         q, cache_kv = self._get_qkv(input, infer_state, layer_weight)
@@ -87,7 +139,7 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
             o = self.linear_attn_infer._linear_attn(input1, infer_state, layer_weight, is_prefill=True, infer_cls=self)
         else:
             layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
-            o = self.context_attention_forward(input1, infer_state, layer_weight)
+            o = self._context_full_attn(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
@@ -99,9 +151,7 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
-    def token_attention_forward(
-        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
-    ):
+    def _token_full_attn(self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight):
         q, cache_kv = self._get_qkv(input, infer_state, layer_weight)
         input = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
@@ -120,7 +170,7 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
             o = self.linear_attn_infer._linear_attn(input1, infer_state, layer_weight, is_prefill=False, infer_cls=self)
         else:
             layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
-            o = self.token_attention_forward(input1, infer_state, layer_weight)
+            o = self._token_full_attn(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
