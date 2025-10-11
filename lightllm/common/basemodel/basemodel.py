@@ -67,12 +67,16 @@ class TpPartBaseModel:
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.data_type = kvargs.get("data_type", "float16")
+        mtp_step = get_env_start_args().mtp_step
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         self.graph_max_batch_size = (
             self.graph_max_batch_size // 2
             if get_env_start_args().enable_decode_microbatch_overlap
             else self.graph_max_batch_size
         )
+        # mtp 模式下需要修缮对应的最大batch size，为 （mtp_step + 1) 的倍数
+        self.graph_max_batch_size = self.graph_max_batch_size * (mtp_step + 1)
+
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
         self.quant_type = kvargs.get("quant_type", "none")
@@ -81,7 +85,7 @@ class TpPartBaseModel:
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
-        self.is_deepseekv3_mtp_mode = self.args.mtp_mode == "deepseekv3"
+        self.is_deepseekv3_mtp_mode = self.args.mtp_mode in ["deepseekv3_vanilla", "deepseekv3_eagle"]
 
         self._init_datatype()
         self._init_config()
@@ -258,6 +262,10 @@ class TpPartBaseModel:
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_len_in_batch = model_input.max_len_in_batch
+        infer_state.max_q_seq_len = model_input.max_q_seq_len
+        infer_state.max_kv_seq_len = model_input.max_kv_seq_len
+        infer_state.max_cache_len = model_input.max_cache_len
+        infer_state.prefix_total_token_num = model_input.prefix_total_token_num
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
@@ -335,16 +343,16 @@ class TpPartBaseModel:
         model_input: ModelInput,
     ):
         infer_state = self._create_inferstate(model_input)
-        init_req_to_token_indexes(
-            self.req_manager.req_to_token_indexs,
-            model_input.b_req_idx,
-            model_input.b_seq_len,
-            infer_state.b_ready_cache_len,
-            model_input.max_len_in_batch,
-            infer_state.mem_index,
-        )
-
         infer_state.init_some_extra_state(self, model_input.input_ids)
+        init_req_to_token_indexes(
+            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_seq_len=infer_state.b_seq_len,
+            b_ready_cache_len=infer_state.b_ready_cache_len,
+            b_start_loc=infer_state.b_start_loc,
+            alloc_mem_index=infer_state.mem_index,
+            max_q_seq_len=infer_state.max_q_seq_len,
+        )
         return self._context_forward(model_input.input_ids, infer_state)
 
     def _decode(
@@ -474,26 +482,28 @@ class TpPartBaseModel:
         input_ids0, input_ids1 = model_input0.input_ids, model_input1.input_ids
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        init_req_to_token_indexes(
-            self.req_manager.req_to_token_indexs,
-            model_input0.b_req_idx,
-            model_input0.b_seq_len,
-            infer_state0.b_ready_cache_len,
-            model_input0.max_len_in_batch,
-            infer_state0.mem_index,
-        )
         infer_state0.init_some_extra_state(self, input_ids0)
+        init_req_to_token_indexes(
+            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state0.b_req_idx,
+            b_seq_len=infer_state0.b_seq_len,
+            b_ready_cache_len=infer_state0.b_ready_cache_len,
+            b_start_loc=infer_state0.b_start_loc,
+            alloc_mem_index=infer_state0.mem_index,
+            max_q_seq_len=infer_state0.max_q_seq_len,
+        )
 
         infer_state1 = self._create_inferstate(model_input1, 1)
-        init_req_to_token_indexes(
-            self.req_manager.req_to_token_indexs,
-            model_input1.b_req_idx,
-            model_input1.b_seq_len,
-            infer_state1.b_ready_cache_len,
-            model_input1.max_len_in_batch,
-            infer_state1.mem_index,
-        )
         infer_state1.init_some_extra_state(self, input_ids1)
+        init_req_to_token_indexes(
+            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state1.b_req_idx,
+            b_seq_len=infer_state1.b_seq_len,
+            b_ready_cache_len=infer_state1.b_ready_cache_len,
+            b_start_loc=infer_state1.b_start_loc,
+            alloc_mem_index=infer_state1.mem_index,
+            max_q_seq_len=infer_state1.max_q_seq_len,
+        )
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(
             input_ids0, infer_state0, input_ids1=input_ids1, infer_state1=infer_state1
@@ -521,7 +531,7 @@ class TpPartBaseModel:
                 model_input1.b_req_idx,
                 model_input1.b_mtp_index,
             )
-
+        # TODO 动态 mtp fix
         assert model_input0.batch_size == model_input1.batch_size
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
@@ -531,6 +541,8 @@ class TpPartBaseModel:
 
         if self.graph is not None and self.graph.can_run(origin_batch_size, max_len_in_batch):
             find_graph_batch_size = self.graph.find_closest_graph_batch_size(origin_batch_size)
+            # TODO 如果支持动态步数的 mtp，在不同的mtp步上，model_input0 和 model_input1 的内部batch size可能不
+            # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, find_graph_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, find_graph_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
@@ -568,6 +580,8 @@ class TpPartBaseModel:
                     input_ids1=padded_model_input1.input_ids,
                     infer_state1=infer_state1,
                 )
+
+            # TODO 动态 mtp fix
             model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
             model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
         else:
@@ -696,6 +710,10 @@ class TpPartBaseModel:
                 batch_size=1,
                 total_token_num=total_token_num,
                 max_len_in_batch=self.batch_max_tokens,
+                max_q_seq_len=self.batch_max_tokens,
+                max_kv_seq_len=self.batch_max_tokens,
+                max_cache_len=0,
+                prefix_total_token_num=0,
                 input_ids=dummy_input_ids,
                 mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
@@ -766,6 +784,10 @@ class TpPartBaseModel:
                     batch_size=1,
                     total_token_num=total_token_num,
                     max_len_in_batch=input_len,
+                    max_q_seq_len=input_len,
+                    max_kv_seq_len=input_len,
+                    max_cache_len=0,
+                    prefix_total_token_num=0,
                     input_ids=dummy_input_ids,
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
@@ -822,6 +844,10 @@ class TpPartBaseModel:
             batch_size=batch_size,
             total_token_num=total_token_num,
             max_len_in_batch=prefill_input_len,
+            max_q_seq_len=prefill_input_len,
+            max_kv_seq_len=prefill_input_len,
+            max_cache_len=0,
+            prefix_total_token_num=0,
             input_ids=dummy_input_ids,
             mem_indexes=mem_indexes,
             b_req_idx=b_req_idx,

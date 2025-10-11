@@ -325,6 +325,10 @@ class InferReq:
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
+        if self.mtp_step > 0:
+            self.decode_need_token_num = self._mtp_decode_need_token_num
+        else:
+            self.decode_need_token_num = self._normal_decode_need_token_num
 
         self._init_all_state()
         if init_prefix_cache:
@@ -442,8 +446,14 @@ class InferReq:
         input_token_len = seq_len - self.cur_kv_len
         return input_token_len
 
-    def decode_need_token_num(self):
-        return 1 + self.mtp_step
+    def decode_need_token_num(self) -> int:
+        raise NotImplementedError("error")
+
+    def _normal_decode_need_token_num(self) -> int:
+        return 1
+
+    def _mtp_decode_need_token_num(self) -> int:
+        return (1 + self.mtp_step) * 2
 
 
 class InferReqGroup:

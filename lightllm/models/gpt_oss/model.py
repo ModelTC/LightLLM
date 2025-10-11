@@ -11,7 +11,6 @@ from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.mem_manager import MemoryManager
 
-from lightllm.models.vit.infer_struct import LlamaInferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
