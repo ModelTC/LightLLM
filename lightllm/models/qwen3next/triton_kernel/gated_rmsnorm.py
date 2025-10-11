@@ -1,6 +1,7 @@
 import triton
 import triton.language as tl
 import torch
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.heuristics(
@@ -62,6 +63,39 @@ def gated_rmsnorm_forward_kernel(
     tl.store(Y + cols, y, mask=mask)
 
 
+def _get_gated_rmsnorm_configs():
+    """Generate configurations for autotuning gated RMSNorm kernel."""
+    configs = []
+    # Different BLOCK_N sizes (powers of 2)
+    for block_n in [64, 128, 256, 512, 1024, 2048, 4096]:
+        # Different number of warps
+        for num_warps in [1, 2, 4, 8]:
+            # Skip configurations that are likely to be inefficient
+            if block_n >= 2048 and num_warps > 4:
+                continue
+            if block_n <= 128 and num_warps > 2:
+                continue
+            configs.append({"BLOCK_N": block_n, "num_warps": num_warps})
+    return configs
+
+
+def _get_gated_rmsnorm_static_key(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor):
+    """Generate static key for caching autotuned configurations."""
+    M, N = x.shape
+    return {
+        "x_dtype": str(x.dtype),
+        "weight_dtype": str(weight.dtype),
+        "N": N,
+        "has_bias": bias is not None,
+    }
+
+
+@autotune(
+    kernel_name="gated_rmsnorm_forward:v1",
+    configs_gen_func=_get_gated_rmsnorm_configs,
+    static_key_func=_get_gated_rmsnorm_static_key,
+    run_key_func=lambda x: x.shape[0],
+)
 def gated_rmsnorm_forward(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -71,6 +105,7 @@ def gated_rmsnorm_forward(
     out: torch.Tensor = None,
     group_size: int = None,
     norm_before_gate: bool = True,
+    run_config: dict = None,
 ):
     M, N = x.shape
     if group_size is None:
@@ -95,13 +130,29 @@ def gated_rmsnorm_forward(
     assert out.stride(-1) == 1
     # For RMS norm, we still need rstd for the kernel
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
-    # Less than 64KB per feature: enqueue fused kernel
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
+
+    # Default heuristic when autotune is disabled or no config provided
+    if not run_config:
+        # Less than 64KB per feature: enqueue fused kernel
+        MAX_FUSED_SIZE = 65536 // x.element_size()
+        BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
+        if group_size > BLOCK_N:
+            raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+        # heuristics for number of warps
+        num_warps = min(max(BLOCK_N // 256, 1), 8)
+        run_config = {"BLOCK_N": BLOCK_N, "num_warps": num_warps}
+
+    BLOCK_N = run_config["BLOCK_N"]
+    num_warps = run_config["num_warps"]
+
+    # Validate BLOCK_N against group_size
     if group_size > BLOCK_N:
-        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # heuristics for number of warps
-    num_warps = min(max(BLOCK_N // 256, 1), 8)
+        # Fall back to largest valid BLOCK_N
+        MAX_FUSED_SIZE = 65536 // x.element_size()
+        BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
+        if group_size > BLOCK_N:
+            raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+
     grid = (M, ngroups)
     gated_rmsnorm_forward_kernel[grid](
         x,
