@@ -79,6 +79,11 @@ class Qwen3NextMemoryManager(MemoryManager):
         ssm_states = self.ssm_state_buffers[real_layer_index]
         return conv_states, ssm_states
 
+    def free_mamba_state_buffer(self, req_indexes: List[int]):
+        self.conv_state_buffers[:, req_indexes, ...] = 0
+        self.ssm_state_buffers[:, req_indexes, ...] = 0
+        return
+
     @override
     def _free_buffers(self):
         super()._free_buffers()

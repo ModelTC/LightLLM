@@ -8,6 +8,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager, MambaStateBufferConfig
+from lightllm.models.qwen3next.req_manager import Qwen3NextReqManager
 
 logger = init_logger(__name__)
 
@@ -73,3 +74,14 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             mamba_state_buffer_config=mamba_state_buffer_config,
             mem_fraction=self.mem_fraction,
         )
+
+    @override
+    def _init_req_manager(self):
+        create_max_seq_len = 0
+
+        if self.batch_max_tokens is not None:
+            create_max_seq_len = max(create_max_seq_len, self.batch_max_tokens)
+        if self.max_seq_length is not None:
+            create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
+
+        self.req_manager = Qwen3NextReqManager(self.max_req_num, create_max_seq_len, self.mem_manager)
