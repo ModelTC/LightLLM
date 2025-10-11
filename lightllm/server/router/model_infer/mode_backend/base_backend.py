@@ -122,6 +122,14 @@ class ModeBackend:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
+        # 针对qwen3next模型自动禁用dynamic_prompt_cache
+        # qwen3next使用混合架构（线性注意力+全注意力）和特殊的Mamba状态缓冲区，
+        # 与标准的KV缓存机制不兼容，需要禁用dynamic_prompt_cache
+        if model_cfg.get("model_type") == "qwen3_next":
+            if not self.args.disable_dynamic_prompt_cache:
+                self.logger.info("Qwen3Next model detected. Automatically disabling dynamic_prompt_cache. ")
+                self.use_dynamic_prompt_cache = False
+
         model_kvargs = {
             "weight_dir": self.weight_dir,
             "max_total_token_num": max_total_token_num,
