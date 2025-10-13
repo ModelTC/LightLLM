@@ -82,10 +82,13 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             moe_mode = os.environ.get("MOE_MODE", "TP")
             if moe_mode == "EP":
                 self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn_edp, self)
+                self._tpsp_ffn = self._tpsp_ffn_ep
             else:
                 self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn, self)
+                self._tpsp_ffn = self._tpsp_ffn_tp
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
+            self._tpsp_ffn = self._tpsp_ffn_tp
 
     def _bind_attention(self):
         if "triton_fp8kv" in self.mode:
@@ -187,23 +190,34 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _tpsp_get_qkv(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
-        if self.tp_world_size_ > 1:
-            sp_token_num, hidden_dim = input.shape
-            gather_input = self.alloc_tensor(
-                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
-            )
-            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-            input = gather_input[0 : len(infer_state.position_cos), :]
-
         input = input.view(-1, self.embed_dim_)
         if self.q_lora_rank is None:
+            # q_lora_rank is None 的时候，当前不支持低rank通信优化。
+            if self.tp_world_size_ > 1:
+                sp_token_num, hidden_dim = input.shape
+                gather_input = self.alloc_tensor(
+                    (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
+                )
+                all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
+                input = gather_input[0 : len(infer_state.position_cos), :]
+
+            input = input.view(-1, self.embed_dim_)
             q = layer_weight.q_weight_.mm(input)
             cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
             layer_weight.kv_a_proj_with_mqa_.mm(input, out=cache_kv.view(-1, self.kv_lora_rank + self.qk_rope_head_dim))
         else:
-            q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
-            )
+            input = input.view(-1, self.embed_dim_)
+            qkv = layer_weight.qkv_a_proj_with_mqa_.mm(input)
+            # 在 lora rank 之后，进行通信，可以减少通信量。
+            if self.tp_world_size_ > 1:
+                sp_token_num, qkv_dim = qkv.shape
+                gather_qkv = self.alloc_tensor(
+                    (sp_token_num * self.tp_world_size_, qkv_dim), dtype=qkv.dtype, device=qkv.device
+                )
+                all_gather_into_tensor(gather_qkv, qkv, group=infer_state.dist_group, async_op=False)
+                qkv = gather_qkv[0 : len(infer_state.position_cos), :]
+
+            q, cache_kv = qkv.split([self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1)
             q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_)
             q = layer_weight.q_b_proj_.mm(q)
             cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
@@ -725,6 +739,43 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         ep_output = ep_output.view(token_num, hidden_dim)
         return ep_output
+
+    def _tpsp_ffn(self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight):
+        raise Exception("need bind to real impl")
+
+    def _tpsp_ffn_tp(
+        self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+        if self.tp_world_size_ > 1:
+            sp_token_num, hidden_dim = input.shape
+            gather_input = self.alloc_tensor(
+                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
+            )
+            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
+            input = gather_input
+
+        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+
+        if self.tp_world_size_ > 1:
+            sp_token_num = ffn2_out.shape[0] // self.tp_world_size_
+            reduce_o_tensor = self.alloc_tensor(
+                (sp_token_num, self.embed_dim_), dtype=ffn2_out.dtype, device=ffn2_out.device
+            )
+            reduce_scatter_tensor(
+                reduce_o_tensor, ffn2_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False
+            )
+            ffn2_out = reduce_o_tensor
+        return ffn2_out
+
+    def _tpsp_ffn_ep(
+        self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+
+        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+
+        return ffn2_out
 
     def overlap_tpsp_token_forward(
         self,

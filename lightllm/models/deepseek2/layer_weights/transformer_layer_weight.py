@@ -209,20 +209,41 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _load_mlp(self, mlp_prefix):
-        self.gate_up_proj = MultiROWMMWeight(
-            weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
-            data_type=self.data_type_,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="gate_up_proj",
-        )
-        self.down_proj = COLMMWeight(
-            weight_name=f"{mlp_prefix}.down_proj.weight",
-            data_type=self.data_type_,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="down_proj",
-        )
+        moe_mode = os.getenv("MOE_MODE", "TP")
+        if self.is_moe and moe_mode == "EP":
+            self.gate_up_proj = MultiROWMMWeight(
+                weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
+                data_type=self.data_type_,
+                quant_cfg=self.quant_cfg,
+                layer_num=self.layer_num_,
+                name="gate_up_proj",
+                tp_rank=0,
+                tp_world_size=1,
+            )
+            self.down_proj = COLMMWeight(
+                weight_name=f"{mlp_prefix}.down_proj.weight",
+                data_type=self.data_type_,
+                quant_cfg=self.quant_cfg,
+                layer_num=self.layer_num_,
+                name="down_proj",
+                tp_rank=0,
+                tp_world_size=1,
+            )
+        else:
+            self.gate_up_proj = MultiROWMMWeight(
+                weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
+                data_type=self.data_type_,
+                quant_cfg=self.quant_cfg,
+                layer_num=self.layer_num_,
+                name="gate_up_proj",
+            )
+            self.down_proj = COLMMWeight(
+                weight_name=f"{mlp_prefix}.down_proj.weight",
+                data_type=self.data_type_,
+                quant_cfg=self.quant_cfg,
+                layer_num=self.layer_num_,
+                name="down_proj",
+            )
 
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
