@@ -82,10 +82,13 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             moe_mode = os.environ.get("MOE_MODE", "TP")
             if moe_mode == "EP":
                 self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn_edp, self)
+                self._tpsp_ffn = self._tpsp_ffn_ep
             else:
                 self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn, self)
+                self._tpsp_ffn = self._tpsp_ffn_tp
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
+            self._tpsp_ffn = self._tpsp_ffn_tp
 
     def _bind_attention(self):
         if "triton_fp8kv" in self.mode:
@@ -737,7 +740,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         ep_output = ep_output.view(token_num, hidden_dim)
         return ep_output
 
-    def _tpsp_ffn(
+    def _tpsp_ffn(self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight):
+        raise Exception("need bind to real impl")
+
+    def _tpsp_ffn_tp(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
@@ -760,6 +766,15 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                 reduce_o_tensor, ffn2_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False
             )
             ffn2_out = reduce_o_tensor
+        return ffn2_out
+
+    def _tpsp_ffn_ep(
+        self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+
+        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+
         return ffn2_out
 
     def overlap_tpsp_token_forward(
