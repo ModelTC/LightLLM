@@ -2,6 +2,8 @@ import torch
 
 import triton
 import triton.language as tl
+import itertools
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.jit
@@ -92,8 +94,39 @@ def _rotary_kernel(
     return
 
 
+def get_test_configs():
+    configs = []
+    result = itertools.product([1, 2, 4, 8, 16, 32], [1, 2, 4, 8], [1, 2, 3, 4, 5], [1, 2, 4, 8, 16])
+    for BLOCK_SEQ, num_warps, num_stages, HEAD_PARALLEL_NUM in result:
+        t_config = {
+            "BLOCK_SEQ": BLOCK_SEQ,
+            "HEAD_PARALLEL_NUM": HEAD_PARALLEL_NUM,
+            "num_warps": num_warps,
+            "num_stages": num_stages,
+        }
+        configs.append(t_config)
+    return configs
+
+
+def get_static_key(q, k):
+    head_num_q, head_num_k, head_dim = q.shape[1], k.shape[1], q.shape[2]
+    return {
+        "Q_HEAD_NUM": head_num_q,
+        "K_HEAD_NUM": head_num_k,
+        "HEAD_DIM": head_dim,
+        "dtype": str(q.dtype),
+    }
+
+
+@autotune(
+    kernel_name="rotary_emb_fwd:v1",
+    configs_gen_func=get_test_configs,
+    static_key_func=get_static_key,
+    run_key_func=lambda q: q.shape[0],
+    mutates_args=["q", "k"],
+)
 @torch.no_grad()
-def rotary_emb_fwd(q, k, cos, sin, **run_config):
+def rotary_emb_fwd(q, k, cos, sin, run_config=None):
     total_len = q.shape[0]
     head_num_q, head_num_k = q.shape[1], k.shape[1]
     head_dim = q.shape[2]

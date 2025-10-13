@@ -49,14 +49,14 @@ def test_kernel(
         input_tuples.append((q.clone(), k.clone(), cos.clone(), sin.clone()))
 
     # warm_up
-    rotary_emb_fwd(q=q, k=k, cos=cos, sin=sin, **config)
+    rotary_emb_fwd(q=q, k=k, cos=cos, sin=sin, run_config=config)
 
     graph = torch.cuda.CUDAGraph()
 
     with torch.cuda.graph(graph):
         for index in range(test_count):
             q, k, cos, sin = input_tuples[index]
-            rotary_emb_fwd(q=q, k=k, cos=cos, sin=sin, **config)
+            rotary_emb_fwd(q=q, k=k, cos=cos, sin=sin, run_config=config)
 
     graph.replay()
 

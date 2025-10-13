@@ -73,7 +73,7 @@ def check_and_set_args(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "llm_only", "visual"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual"]:
         return
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]

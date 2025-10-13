@@ -222,7 +222,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         finish_reason = None
         from .req_id_generator import convert_sub_id_to_group_id
 
+        prompt_tokens = 0
+        completion_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            prompt_tokens = metadata["prompt_tokens"]
+            completion_tokens += 1
             if request.tool_choice != "none" and request.tools:
                 delta = request_output
                 group_request_id = convert_sub_id_to_group_id(sub_req_id)
@@ -309,6 +313,22 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     choices=[stream_choice],
                 )
                 yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
+                # Additional usage chunk
+
+        if request.stream_options and request.stream_options.include_usage:
+            usage = UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+            usage_chunk = ChatCompletionStreamResponse(
+                id=group_request_id,
+                created=created_time,
+                choices=[],  # Empty choices array as per OpenAI spec
+                model=request.model,
+                usage=usage,
+            )
+            yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
@@ -453,9 +473,13 @@ async def _handle_streaming_completion(
     async def stream_results() -> AsyncGenerator[bytes, None]:
         from .req_id_generator import convert_sub_id_to_group_id
 
+        prompt_tokens = 0
+        completion_tokens = 0
+
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
-
+            prompt_tokens = metadata["prompt_tokens"]
+            completion_tokens += 1
             current_finish_reason = None
             if finish_status.is_finished():
                 current_finish_reason = finish_status.get_finish_reason()
@@ -482,6 +506,21 @@ async def _handle_streaming_completion(
             yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
 
         yield "data: [DONE]\n\n".encode("utf-8")
+
+        if request.stream_options and request.stream_options.include_usage:
+            usage = UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+            usage_chunk = CompletionStreamResponse(
+                id=group_request_id,
+                created=created_time,
+                choices=[],  # Empty choices array as per OpenAI spec
+                model=request.model,
+                usage=usage,
+            )
+            yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)

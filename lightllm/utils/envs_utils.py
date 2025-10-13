@@ -149,6 +149,11 @@ def get_kv_quant_calibration_inference_count():
     return int(os.getenv("LIGHTLLM_KV_QUANT_CALIBRARTION_INFERENCE_COUNT", 4000))
 
 
+@lru_cache(maxsize=None)
+def get_triton_autotune_level():
+    return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
+
+
 g_model_init_done = False
 
 
@@ -161,3 +166,10 @@ def set_model_init_status(status: bool):
     global g_model_init_done
     g_model_init_done = status
     return g_model_init_done
+
+
+def use_whisper_sdpa_attention() -> bool:
+    """
+    whisper重训后,使用特定的实现可以提升精度，用该函数控制使用的att实现。
+    """
+    return enable_env_vars("LIGHTLLM_USE_WHISPER_SDPA_ATTENTION")

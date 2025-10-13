@@ -4,14 +4,9 @@ import argparse
 
 import torch
 import triton
-import vllm
 from transformers import AutoConfig
 from lightllm.common.fused_moe.topk_select import select_experts
-from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_moe_vllm
-from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
-    fused_moe as fused_moe_sglang,
-)
+from lightllm.common.fused_moe.grouped_fused_moe import fused_experts
 
 
 def get_model_config(model_name: str, tp_size: int):
@@ -59,12 +54,10 @@ def get_model_config(model_name: str, tp_size: int):
         intermediate_size = config.intermediate_size
         shard_intermediate_size = 2 * intermediate_size // tp_size
 
-    vllm_version_num = vllm.__version_tuple__[0] * 100 + vllm.__version_tuple__[1] * 10 + vllm.__version_tuple__[2]
     block_shape = None
     if hasattr(config, "quantization_config") and "weight_block_size" in config.quantization_config:
         block_shape = config.quantization_config["weight_block_size"]
         assert len(block_shape) == 2
-        assert vllm_version_num >= 66, "Block-wise quantized fp8 fused_moe is only supported for VLLM>=0.6.6.post1"
 
     shape_configs = {
         "num_experts": E,
@@ -105,7 +98,7 @@ def fused_moe_lightllm_api(
     )
     use_fp8_w8a8 = use_fp8_w8a8
 
-    return fused_experts_impl(
+    return fused_experts(
         hidden_states=x,
         w1=w1,
         w2=w2,
@@ -131,6 +124,8 @@ def fused_moe_vllm_api(
     a2_scale=None,
     block_shape=None,
 ):
+    from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_moe_vllm
+
     if block_shape is not None:
         return fused_moe_vllm(
             x,
@@ -177,14 +172,21 @@ def fused_moe_sglang_api(
     a2_scale=None,
     block_shape=None,
 ):
+    from sglang.srt.layers.moe.topk import TopKConfig, select_experts
+    from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
+        fused_moe as fused_moe_sglang,
+    )
+
+    topk_output = select_experts(
+        hidden_states=x,
+        router_logits=input_gating,
+        topk_config=TopKConfig(top_k=topk, renormalize=False),
+    )
     return fused_moe_sglang(
         x,
         w1,
         w2,
-        input_gating,
-        topk,
-        renormalize=True,
-        inplace=True,
+        topk_output,
         use_fp8_w8a8=use_fp8_w8a8,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -197,7 +199,7 @@ def fused_moe_sglang_api(
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["batch_size"],
-        x_vals=[1, 8, 16, 32, 64, 128],
+        x_vals=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
         line_arg="provider",
         line_vals=[
             "vllm_fused_moe_triton",
@@ -219,7 +221,7 @@ def fused_moe_sglang_api(
         args={},
     )
 )
-def benchmark(batch_size, provider, model_config, use_fp8=False):
+def benchmark(batch_size, provider, model_config, use_fp8=False, use_cuda_graph=False):
     torch.set_default_device("cuda")
     torch.cuda.manual_seed_all(0)
 
@@ -264,9 +266,9 @@ def benchmark(batch_size, provider, model_config, use_fp8=False):
     api_func = (
         fused_moe_vllm_api
         if provider == "vllm_fused_moe_triton"
-        else fused_moe_sglang_api
-        if provider == "lightllm_fused_moe_triton"
         else fused_moe_lightllm_api
+        if provider == "lightllm_fused_moe_triton"
+        else fused_moe_sglang_api
     )
     for _ in range(10):
         api_func(
@@ -285,7 +287,8 @@ def benchmark(batch_size, provider, model_config, use_fp8=False):
     torch.cuda.synchronize()
 
     quantiles = [0.5, 0.2, 0.8]
-    ms, min_ms, max_ms = triton.testing.do_bench(
+    do_bench = triton.testing.do_bench if not use_cuda_graph else triton.testing.do_bench_cudagraph
+    ms, min_ms, max_ms = do_bench(
         lambda: api_func(
             x,
             w1,
@@ -309,6 +312,7 @@ def main():
     parser.add_argument("--model", type=str, default="mistralai/Mixtral-8x7B-Instruct-v0.1")
     parser.add_argument("--tp-size", type=int, default=8)
     parser.add_argument("--use-fp8", action="store_true")
+    parser.add_argument("--use-cuda-graph", action="store_true")
     parser.add_argument(
         "--save-path",
         type=str,
@@ -323,6 +327,7 @@ def main():
         save_path=args.save_path,
         model_config=model_config,
         use_fp8=args.use_fp8,
+        use_cuda_graph=args.use_cuda_graph,
     )
 
 

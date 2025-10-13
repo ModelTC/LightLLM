@@ -4,6 +4,7 @@ import torch.multiprocessing as mp
 import multiprocessing
 import threading
 import inspect
+import setproctitle
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from lightllm.server.router.model_infer.mode_backend import (
@@ -20,6 +21,10 @@ from lightllm.server.router.model_infer.mode_backend import (
     DPForDecodeNode,
     ChunckedPrefillForPrefillNode,
     DPChunkedForPrefillNode,
+    NIXLChunckedPrefillForPrefillNode,
+    NIXLDPChunkedForPrefillNode,
+    NIXLDecodeNode,
+    NIXLDPForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.core.objs import RpcShmParams, RpcShmResults, ShmSyncStatusArray
@@ -27,6 +32,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -116,17 +122,32 @@ class ModelRpcServer:
         assert not (is_outlines_constraint_mode and is_xgrammar_constraint_mode), "only one constraint mode can be true"
         is_prefill_node = self.args.run_mode == "prefill"
         is_decode_node = self.args.run_mode == "decode"
+        is_nixl_prefill_node = self.args.run_mode == "nixl_prefill"
+        is_nixl_decode_node = self.args.run_mode == "nixl_decode"
 
         if is_prefill_node:
             if self.args.dp > 1:
                 self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
             else:
                 self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
+        elif is_nixl_prefill_node:
+            if self.args.dp > 1:
+                self.backend = NIXLDPChunkedForPrefillNode(self.info_queue, self.mem_queue)
+            else:
+                self.backend = NIXLChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
+
         elif is_decode_node:
             if self.args.dp > 1:
                 self.backend = DPForDecodeNode(self.info_queue, self.mem_queue)
             else:
                 self.backend = DecodeNode(self.info_queue, self.mem_queue)
+
+        elif is_nixl_decode_node:
+            if self.args.dp > 1:
+                self.backend = NIXLDPForDecodeNode(self.info_queue, self.mem_queue)
+            else:
+                self.backend = NIXLDecodeNode(self.info_queue, self.mem_queue)
+
         elif self.args.dp > 1:
             self.backend = DPChunkedPrefillBackend()
         elif use_reward_model:
@@ -207,6 +228,7 @@ def _init_env(
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::model_infer:RANK{rank}")
     start_parent_check_thread()
 
     # 将调度锁注册到全局的共享变量中
@@ -253,7 +275,9 @@ async def start_model_process(
         ),
     )
     proc.start()
-    success_event.wait(timeout=40)
+
+    # Use asyncio.to_thread to make the blocking wait non-blocking
+    await asyncio.to_thread(success_event.wait, timeout=40)
     assert proc.is_alive()
 
     return None

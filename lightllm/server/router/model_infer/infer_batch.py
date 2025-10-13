@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 import numpy as np
 import collections
+import pickle
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any
@@ -18,6 +19,7 @@ from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
 
 logger = init_logger(__name__)
 
@@ -199,16 +201,20 @@ class InferenceContext:
             g_infer_state_lock.release()
         return self
 
-    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
+    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
             g_infer_state_lock.acquire()
 
             for req in paused_reqs:
+                prefill_need_token_num = req.get_cur_total_len()
+                if prefill_need_token_num > can_alloc_token_num:
+                    break
                 req._match_radix_cache()
                 assert req.paused is True
                 req.paused = False
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
+                can_alloc_token_num -= prefill_need_token_num
 
             g_infer_state_lock.release()
         return
@@ -232,6 +238,7 @@ class InferSamplingParams:
         vocab_size: int,
     ) -> None:
         self.shm_param = shm_req.sample_params
+        self.disable_prompt_cache = self.shm_param.disable_prompt_cache
         if self.shm_param.top_k == -1:
             self.shm_param.top_k = vocab_size
 
@@ -262,6 +269,15 @@ class InferSamplingParams:
             if not all(e < vocab_size for e in self.allowed_token_ids):
                 logger.error("allowed_token_ids contain tokenid >= vobsize, we remove these token ids")
                 self.allowed_token_ids = [e for e in self.allowed_token_ids if e < vocab_size]
+
+        # nixl decode node information
+        if self.shm_param.nixl_params.data_len > 0:
+            self.nixl_decode_node: NIXLDecodeNodeInfo = pickle.loads(self.shm_param.nixl_params.get())
+        else:
+            self.nixl_decode_node: NIXLDecodeNodeInfo = None
+
+        # only pd mode used.
+        self.pd_master_node_id: int = self.shm_param.pd_master_node_id.get()
         return
 
     def has_constraint_setting(self) -> bool:
@@ -299,9 +315,20 @@ class InferReq:
         self.need_out_token_id_statistics = True
         self.out_token_id_count: Dict[int, int] = None
 
+        # nixl pd 分离模式使用的变量, 普通模式下这些变量没有具体用途
+        self.nixl_trans_kv_start_index: int = 0
+        self.nixl_pd_task_num: int = 0
+        self.nixl_pd_task_sunccess_num: int = 0
+        self.nixl_pd_task_failed_num: int = 0
+        self.nixl_trans_device_id: int = -1
+
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
+        if self.mtp_step > 0:
+            self.decode_need_token_num = self._mtp_decode_need_token_num
+        else:
+            self.decode_need_token_num = self._normal_decode_need_token_num
 
         self._init_all_state()
         if init_prefix_cache:
@@ -313,6 +340,11 @@ class InferReq:
         self.shm_req.link_prompt_ids_shm_array()
         self.shm_req.link_logprobs_shm_array()
         self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
+
+        # 更新 nixl pd 分离模式下， prefill 节点需要开始传输的起始位置
+        if self.sampling_param.nixl_decode_node is not None:
+            self.nixl_trans_kv_start_index = self.sampling_param.nixl_decode_node.ready_kv_len
+
         self.cur_kv_len = 0
         self.cur_output_len = 0
 
@@ -331,6 +363,8 @@ class InferReq:
         return
 
     def _match_radix_cache(self):
+        if self.sampling_param.disable_prompt_cache:
+            return
         if g_infer_context.radix_cache is not None and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
@@ -412,8 +446,14 @@ class InferReq:
         input_token_len = seq_len - self.cur_kv_len
         return input_token_len
 
-    def decode_need_token_num(self):
-        return 1 + self.mtp_step
+    def decode_need_token_num(self) -> int:
+        raise NotImplementedError("error")
+
+    def _normal_decode_need_token_num(self) -> int:
+        return 1
+
+    def _mtp_decode_need_token_num(self) -> int:
+        return (1 + self.mtp_step) * 2
 
 
 class InferReqGroup:
@@ -480,7 +520,13 @@ class InferReqUpdatePack:
         eos_ids: List[int],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
         is_master_in_dp: bool,
+        nixl_prefill_chuncked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
     ):
+        # nixl_prefill_chuncked_handle_func 主要是为了处理 nixl prefill 模式下
+        # 分块 prefill 后，形成对应的pd 分块传输处理。
+        if nixl_prefill_chuncked_handle_func is not None:
+            nixl_prefill_chuncked_handle_func(self.req_obj, next_token_id, next_token_logprob, self.output_len)
+
         if self.output_len <= 0:
             return
 

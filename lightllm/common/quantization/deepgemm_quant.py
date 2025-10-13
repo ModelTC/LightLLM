@@ -66,5 +66,14 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
 
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        deep_gemm.gemm_fp8_fp8_bf16_nt([qinput_tensor, input_scale], [qweight.t(), weight_scale.t()], out)
+        _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight.t(), weight_scale.t()), out)
         return out
+
+
+def _deepgemm_fp8_nt(a_tuple, b_tuple, out):
+    if HAS_DEEPGEMM:
+        if hasattr(deep_gemm, "gemm_fp8_fp8_bf16_nt"):
+            return deep_gemm.gemm_fp8_fp8_bf16_nt([a_tuple[0], a_tuple[1]], [b_tuple[0], b_tuple[1]], out)
+        if hasattr(deep_gemm, "fp8_gemm_nt"):
+            return deep_gemm.fp8_gemm_nt((a_tuple[0], a_tuple[1]), (b_tuple[0], b_tuple[1]), out)
+    raise RuntimeError("deep_gemm does not provide fp8 NT GEMM kernel in this version")

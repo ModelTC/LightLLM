@@ -46,6 +46,7 @@ class MoeGroupedGemmKernelConfig(KernelConfigs):
                     "BLOCK_SIZE_N": 32,
                     "BLOCK_SIZE_K": 64,
                     "GROUP_SIZE_M": 1,
+                    "NEED_TRANS": False,
                     "num_warps": 4,
                     "num_stages": 1,
                 }
@@ -55,6 +56,7 @@ class MoeGroupedGemmKernelConfig(KernelConfigs):
                     "BLOCK_SIZE_N": 64,
                     "BLOCK_SIZE_K": 32,
                     "GROUP_SIZE_M": 8,
+                    "NEED_TRANS": False,
                     "num_warps": 4,
                     "num_stages": 1,
                 }

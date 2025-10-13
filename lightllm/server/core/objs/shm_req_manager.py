@@ -10,6 +10,7 @@ from .atomic_lock import AtomicShmLock
 from .start_args_type import StartArgs
 from typing import List
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.shm_utils import create_or_link_shm
 
 logger = init_logger(__name__)
 
@@ -51,13 +52,7 @@ class ShmReqManager:
 
     def _init_reqs_shm(self):
         shm_name = f"{get_unique_server_name()}_req_shm_total"
-        try:
-            shm = shared_memory.SharedMemory(name=shm_name, create=True, size=self.req_shm_byte_size)
-            logger.info(f"create lock shm {shm_name}")
-        except:
-            shm = shared_memory.SharedMemory(name=shm_name, create=False, size=self.req_shm_byte_size)
-            logger.info(f"link lock shm {shm_name}")
-        self.reqs_shm = shm
+        self.reqs_shm = create_or_link_shm(shm_name, self.req_shm_byte_size)
         return
 
     def init_to_req_objs(self):

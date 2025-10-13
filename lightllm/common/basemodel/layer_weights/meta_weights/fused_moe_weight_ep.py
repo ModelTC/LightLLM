@@ -4,7 +4,11 @@ import threading
 from typing import Optional, Tuple, List, Dict, Any
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_device_id
 from .base_weight import BaseWeight
-from lightllm.common.fused_moe.grouped_fused_moe_ep import fused_experts_impl, masked_group_gemm
+from lightllm.common.fused_moe.grouped_fused_moe_ep import (
+    fused_experts_impl,
+    masked_group_gemm,
+    _deepgemm_grouped_fp8_nt_contiguous,
+)
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.distributed import dist_group_manager
 from lightllm.common.fused_moe.topk_select import select_experts
@@ -18,13 +22,10 @@ from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
 from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.triton_utils.autotuner import Autotuner
+
 
 logger = init_logger(__name__)
-
-try:
-    import deep_gemm
-except:
-    logger.warning("no deepep or deep_gemm")
 
 
 class FusedMoeWeightEP(BaseWeight):
@@ -334,7 +335,7 @@ class FusedMoeWeightEP(BaseWeight):
             # groupgemm (contiguous layout)
             gemm_out_a = torch.empty((all_tokens, N), device=device, dtype=hidden_dtype)
 
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
+            _deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
 
             # silu_and_mul_fwd + qaunt
             # TODO fused kernel
@@ -348,11 +349,18 @@ class FusedMoeWeightEP(BaseWeight):
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=device, dtype=hidden_dtype)
 
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices
-            )
+            _deepgemm_grouped_fp8_nt_contiguous((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices)
             # gather and local reduce
             ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
+        else:
+            ######################################## warning ##################################################
+            # here is used to match autotune feature, make moe model run same triton kernel in different rank.
+            # in some special case, one rank will recv 0 token, so add a token to make it run triton kernel.
+            if Autotuner.is_autotune_warmup():
+                _gemm_out_a = torch.zeros((1, N), device=device, dtype=hidden_dtype)
+                _silu_out = torch.zeros((1, N // 2), device=device, dtype=hidden_dtype)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                _gemm_out_a, _silu_out = None, None
 
         return gather_out
 

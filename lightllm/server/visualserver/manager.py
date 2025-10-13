@@ -11,12 +11,14 @@ import datetime
 import inspect
 from fastapi import Request
 from ..tokenizer import get_tokenizer
+import setproctitle
+from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.embed_cache.utils import get_shm_name_data, create_shm
 from lightllm.server.core.objs import ShmReqManager
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs import Req, FinishStatus
-from typing import Union, List, Tuple, Dict, Optional
+from typing import Union, Tuple, Dict, Optional
 from ..req_id_generator import ReqIDGenerator
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.embed_cache.impl.memory_cache_with_redis import MemoryCacheWithRedis
@@ -27,6 +29,7 @@ from .model_infer.model_rpc import start_model_process, VisualModelRpcClient
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
 
 
@@ -117,6 +120,7 @@ class VisualManager:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
                     is_aborted = shm_req.is_aborted
+                    disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
                     self.shm_req_manager.put_back_req_obj(shm_req)
                     if is_aborted:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
@@ -128,7 +132,11 @@ class VisualManager:
                     multimodal_params = group_req_indexes.multimodal_params
 
                     img_uuids = [img.uuid for img in multimodal_params.images]
-                    ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
+                    # disable prompt cache通常用来测试，需要也去掉image cache的影响
+                    if disable_prompt_cache:
+                        ready_image = [False] * len(img_uuids)
+                    else:
+                        ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
 
                     for img, ready in zip(multimodal_params.images, ready_image):
                         if not ready:
@@ -266,6 +274,7 @@ def create_forward_loop(args, visualserver: VisualManager, loop: asyncio.Abstrac
 def start_visual_process(args, next_module_port, visual_port, cache_port, model_rpc_ports, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
     start_parent_check_thread()
     try:
         visualserver = VisualManager(args, next_module_port, visual_port, cache_port, model_rpc_ports)
