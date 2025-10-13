@@ -253,10 +253,7 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
         for i, img in enumerate(images):
             if isinstance(img, ImageItem):
                 uuids.append(img.uuid)
-                if self.remote_vit:
-                    image_data = img._preload_data
-                else:
-                    image_data = read_shm(get_shm_name_data(img.uuid))
+                image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
                 image_data = resize_image(image_data)
                 pixel_values, image_grid_thw = self.processor.preprocess(image=image_data)
