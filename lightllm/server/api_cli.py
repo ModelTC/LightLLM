@@ -367,7 +367,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_nccl_ports",
         nargs="+",
         type=int,
-        default=None,
+        default=[29500],
         help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
     )
     parser.add_argument(
