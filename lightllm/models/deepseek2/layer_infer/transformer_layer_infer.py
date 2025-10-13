@@ -209,7 +209,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             if self.tp_world_size_ > 1:
                 sp_token_num, qkv_dim = qkv.shape
                 gather_qkv = self.alloc_tensor(
-                    (sp_token_num * self.tp_world_size_, qkv_dim), dtype=input.dtype, device=input.device
+                    (sp_token_num * self.tp_world_size_, qkv_dim), dtype=qkv.dtype, device=qkv.device
                 )
                 all_gather_into_tensor(gather_qkv, qkv, group=infer_state.dist_group, async_op=False)
                 qkv = gather_qkv[0 : len(infer_state.position_cos), :]
@@ -736,6 +736,31 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         ep_output = ep_output.view(token_num, hidden_dim)
         return ep_output
+
+    def _tpsp_ffn(
+        self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+        if self.tp_world_size_ > 1:
+            sp_token_num, hidden_dim = input.shape
+            gather_input = self.alloc_tensor(
+                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
+            )
+            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
+            input = gather_input
+
+        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+
+        if self.tp_world_size_ > 1:
+            sp_token_num = ffn2_out.shape[0] // self.tp_world_size_
+            reduce_o_tensor = self.alloc_tensor(
+                (sp_token_num, self.embed_dim_), dtype=ffn2_out.dtype, device=ffn2_out.device
+            )
+            reduce_scatter_tensor(
+                reduce_o_tensor, ffn2_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False
+            )
+            ffn2_out = reduce_o_tensor
+        return ffn2_out
 
     def overlap_tpsp_token_forward(
         self,
