@@ -333,7 +333,6 @@ class TransformerBlock(nn.Module):
 class QWenVisionTransformer(nn.Module):
     def __init__(
         self,
-        kvargs,
         image_size: int,
         patch_size: int,
         width: int,
