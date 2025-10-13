@@ -200,7 +200,6 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         self.patch_size = patch_size
         self.spatial_merge_size = spatial_merge_size
         self.temporal_patch_size = temporal_patch_size
-        self.remote_vit = kvargs.get("remote_vit", False)
 
         self.patch_embed = PatchEmbed(
             patch_size=self.patch_size,

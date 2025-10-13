@@ -48,7 +48,6 @@ class VisionTransformer:
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.load_image_func = get_load_image_func(self.weight_dir_)
         self.max_batch_size = kvargs.get("max_batch_size", 1)
-        self.remote_vit = kvargs.get("remote_vit", False)
 
         self._init_datatype()
         self._init_config()

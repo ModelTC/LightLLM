@@ -171,7 +171,6 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         self.window_size = window_size
         self.fullatt_block_indexes = fullatt_block_indexes
         self.out_hidden_size = out_hidden_size
-        self.remote_vit = kvargs.get("remote_vit", False)
 
         self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
 

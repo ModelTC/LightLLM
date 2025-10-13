@@ -166,7 +166,6 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.remote_vit = kvargs.get("remote_vit", False)
         self.vision_tower = Qwen2VisionTransformerPretrainedModel(**vision_config)
 
         if projection_head == "Pixel_Shuffle":

@@ -16,7 +16,6 @@ logger = init_logger(__name__)
 
 class LlavaVisionModel:
     def __init__(self, kvargs):
-        self.remote_vit = kvargs.get("remote_vit", False)
         pass
 
     def load_model(self, weight_dir):
