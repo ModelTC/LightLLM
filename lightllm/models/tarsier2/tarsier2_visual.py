@@ -152,7 +152,6 @@ class LlavaMultiModalProjector(nn.Module):
 class TarsierVisionTransformerPretrainedModel(nn.Module):
     def __init__(
         self,
-        kvargs,
         vision_config=None,
         text_config=None,
         ignore_index=-100,

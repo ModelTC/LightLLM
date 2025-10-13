@@ -1,5 +1,4 @@
 import os
-import time
 import json
 import torch
 from lightllm.models.vit.layer_infer.pre_layer_infer import ViTPreLayerInfer

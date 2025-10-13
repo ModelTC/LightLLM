@@ -423,7 +423,7 @@ class QWenVisionTransformer(nn.Module):
         for i, item in enumerate(image_uuids):
             if isinstance(item, int):
                 uuids.append(item)
-                image_data = read_shm(get_shm_name_data(item.uuid))
+                image_data = read_shm(get_shm_name_data(item))
                 image_data = Image.open(BytesIO(image_data)).convert("RGB")
                 t = self.image_transform(image_data)
                 img_tensors.append(t)

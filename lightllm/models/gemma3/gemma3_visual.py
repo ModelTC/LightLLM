@@ -16,7 +16,7 @@ logger = init_logger(__name__)
 
 
 class Gemma3VisionModel:
-    def __init__(self, kvargs):
+    def __init__(self):
         pass
 
     def load_model(self, weight_dir):
