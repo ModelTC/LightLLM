@@ -13,15 +13,18 @@ logger = init_logger(__name__)
 
 
 def check_recommended_shm_size(args):
-    shm_size, recommended_shm_size, is_shm_sufficient = _check_shm_size(args)
-    if not is_shm_sufficient:
-        _start_shm_size_warning_thread(shm_size, recommended_shm_size)
-    else:
-        logger.info(
-            f"SHM check: Available={shm_size:.2f} GB,"
-            f"Recommended={recommended_shm_size:.2f} GB."
-            f"Sufficient: {is_shm_sufficient}",
-        )
+    try:
+        shm_size, recommended_shm_size, is_shm_sufficient = _check_shm_size(args)
+        if not is_shm_sufficient:
+            _start_shm_size_warning_thread(shm_size, recommended_shm_size)
+        else:
+            logger.info(
+                f"SHM check: Available={shm_size:.2f} GB,"
+                f"Recommended={recommended_shm_size:.2f} GB."
+                f"Sufficient: {is_shm_sufficient}",
+            )
+    except BaseException as e:
+        logger.error(f"check_recommended_shm_size error: {str(e)}")
 
 
 def _check_shm_size(args):
@@ -114,6 +117,8 @@ def _get_recommended_shm_size_gb(args, max_image_resolution=(3940, 2160), dtype_
         )
         fake_image_item.image_w = fake_image_item._data[0]
         fake_image_item.image_h = fake_image_item._data[1]
+        # for internvl model shm check
+        fake_image_item.extra_params["image_patch_max_num"] = 12
         max_image_tokens = tokenizer.get_image_token_length(fake_image_item)
 
         # 估算图片 token 所需的资源

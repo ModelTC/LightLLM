@@ -5,6 +5,7 @@ import uvloop
 import rpyc
 import pickle
 import inspect
+import setproctitle
 from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager
@@ -15,6 +16,7 @@ from .model_infer.model_rpc import start_model_process, VisualModelRpcClient
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
 
 
@@ -111,6 +113,7 @@ class VisualManager:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
                     is_aborted = shm_req.is_aborted
+                    disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
                     self.shm_req_manager.put_back_req_obj(shm_req)
                     if is_aborted:
                         # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
@@ -122,9 +125,13 @@ class VisualManager:
                     multimodal_params = group_req_indexes.multimodal_params
 
                     img_uuids = [img.uuid for img in multimodal_params.images]
-                    img_uuids = pickle.dumps(img_uuids)
-                    ready_image = self.cache_client.root.get_items_embed_v2(img_uuids)
-                    ready_image = pickle.loads(ready_image)
+                    # disable prompt cache通常用来测试，需要也去掉image cache的影响
+                    if disable_prompt_cache:
+                        ready_image = [False] * len(img_uuids)
+                    else:
+                        img_uuids = pickle.dumps(img_uuids)
+                        ready_image = self.cache_client.root.get_items_embed(img_uuids)
+                        ready_image = pickle.loads(ready_image)
 
                     for img, ready in zip(multimodal_params.images, ready_image):
                         if not ready:
@@ -180,6 +187,7 @@ class VisualManager:
 def start_visual_process(args, next_module_port, visual_port, cache_port, model_rpc_ports, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
     start_parent_check_thread()
     try:
         visualserver = VisualManager(args, next_module_port, visual_port, cache_port, model_rpc_ports)

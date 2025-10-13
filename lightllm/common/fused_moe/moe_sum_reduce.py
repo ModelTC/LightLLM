@@ -3,6 +3,8 @@ import torch
 import triton
 import triton.language as tl
 from .moe_sum_recude_config import MoeSumReduceKernelConfig
+from typing import Any, Callable, Dict, Optional, Tuple
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.jit
@@ -46,7 +48,28 @@ def _moe_sum_reduce_kernel(
         tl.store(store_t_ptr, accumulator.to(input_ptr.dtype.element_ty), mask=offs_dim < dim_end)
 
 
-def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, **run_config):
+def _get_moe_sum_reduce_static_key(input: torch.Tensor, output: torch.Tensor):
+    return {"topk_num": input.shape[1], "hidden_dim": input.shape[2], "out_dtype": str(output.dtype)}
+
+
+def _get_moe_sum_reduce_configs():
+    return [
+        {"BLOCK_M": bm, "BLOCK_DIM": bd, "NUM_STAGE": ns, "num_warps": nw}
+        for ns in [1, 2, 4]
+        for nw in [1, 2, 4, 8, 16]
+        for bm in [1, 2, 4, 8, 16, 32]
+        for bd in [64, 128, 256, 512, 1024]
+    ]
+
+
+@autotune(
+    kernel_name="moe_sum_reduce:v1",
+    configs_gen_func=_get_moe_sum_reduce_configs,
+    static_key_func=_get_moe_sum_reduce_static_key,
+    run_key_func=lambda input: input.shape[0],
+    mutates_args=["output"],
+)
+def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict = None):
     assert input.is_contiguous()
     assert output.is_contiguous()
 

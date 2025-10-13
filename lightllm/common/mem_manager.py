@@ -12,6 +12,8 @@ from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.config_utils import get_num_key_value_heads
+from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 
 logger = init_logger(__name__)
 
@@ -30,6 +32,10 @@ class MemoryManager:
         self.mem_state = torch.arange(
             0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
         )
+        self._mem_state_return = torch.arange(
+            0, self.size * 3, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
+        )
+        self._return_start = 0
         self.mark_start = 0
         self.mark_end = self.size
 
@@ -95,6 +101,77 @@ class MemoryManager:
         self.kv_move_buf_indexes = torch.arange(0, max_req_total_len + 8, dtype=torch.int64, device="cuda")
         self.token_dim_size = self.kv_move_buffer.shape[-2] * self.kv_move_buffer.shape[-1]
         return
+
+    def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
+        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+            raise NotImplementedError("subclass need reimpl this method")
+
+        num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
+        self.kv_move_buffer = torch.empty(
+            (page_num, page_size, self.layer_num, 2 * num_kv_head, self.head_dim), dtype=self.dtype, device="cuda"
+        )
+        self._buffer_mem_indexes_tensors = [
+            torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
+        ]
+        return self.kv_move_buffer
+
+    def write_mem_to_page_kv_move_buffer(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+    ):
+        cur_page = self.kv_move_buffer[page_index]
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        repeat_count = dp_world_size * self.kv_buffer.shape[2] // self.kv_move_buffer.shape[3]
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        for tp_index in range(dp_world_size):
+            if tp_index % repeat_count == 0:
+                page_io(
+                    mem_indexes=mem_indexes_gpu,
+                    page_tensor=cur_page,
+                    kv_buffer=dp_mems[tp_index].kv_buffer,
+                    tp_index=tp_index,
+                    tp_world_size=dp_world_size,
+                    mode="write",
+                )
+        # keep for debug
+        # logger.info(f"src token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
+        # logger.info(f"src page token tensor {cur_page[0, :, 0, 0]}")
+        return
+
+    def read_page_kv_move_buffer_to_mem(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+    ):
+        cur_page = self.kv_move_buffer[page_index]
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
+            non_blocking=True
+        )
+        for tp_index in range(dp_world_size):
+            page_io(
+                mem_indexes=mem_indexes_gpu,
+                page_tensor=cur_page,
+                kv_buffer=dp_mems[tp_index].kv_buffer,
+                tp_index=tp_index,
+                tp_world_size=dp_world_size,
+                mode="read",
+            )
+        # keep for debug
+        # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
+        # logger.info(f"dst page token tensor {cur_page[0, :, 0, 0]}")
 
     def send_to_decode_node(
         self,
@@ -250,11 +327,17 @@ class MemoryManager:
 
         start = self.mark_start
         end = self.mark_start + need_size
-        ans = self.mem_state[start:end]
         self.mark_start += need_size
 
         self.can_use_mem_size -= need_size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+
+        # 利用缓冲区返回，避免异步情况下的内存竞争
+        if self._return_start + need_size > self._mem_state_return.shape[0]:
+            self._return_start = 0
+        ans = self._mem_state_return[self._return_start : self._return_start + need_size]
+        ans.copy_(self.mem_state[start:end])
+        self._return_start += need_size
         return ans
 
     def free(self, free_index: Union[torch.Tensor, List[int]]):

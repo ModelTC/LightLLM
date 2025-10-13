@@ -71,7 +71,7 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
         return
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
@@ -96,9 +96,6 @@ def normal_or_p_d_start(args):
         args.graph_max_len_in_batch = args.max_req_total_len
 
     # mode setting check.
-    if not args.disable_chunked_prefill:
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
     if args.output_constraint_mode != "none":
         assert args.disable_dynamic_prompt_cache is False
         assert args.disable_chunked_prefill is False

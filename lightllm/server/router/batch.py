@@ -40,6 +40,15 @@ class Batch:
                 req_list.append(req)
         return req_list
 
+    def get_all_dp_req_num(self) -> List[int]:
+        if self.dp_size_in_node == 1:
+            return [len(self.reqs)]
+
+        all_dp_req_num = [0 for _ in range(self.dp_size_in_node)]
+        for req in self.reqs:
+            all_dp_req_num[req.sample_params.suggested_dp_index] += 1
+        return all_dp_req_num
+
     def filter_out_finished_req(self, shm_req_manager: ShmReqManager):
         unfinished_req_ids = []
         for req in self.reqs:

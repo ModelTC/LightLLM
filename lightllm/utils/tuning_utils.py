@@ -54,7 +54,7 @@ def mp_tuning(func, args: Dict[str, Any]):
                 best_cost_time = _cost_time
                 best_config = _config
 
-    logger.info(f"best config {best_config} best cost time {best_cost_time}")
+    logger.info(f"args: {args} best config {best_config} best cost time {best_cost_time}")
     return best_config
 
 

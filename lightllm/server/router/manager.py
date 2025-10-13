@@ -4,6 +4,7 @@ import asyncio
 import torch
 import pickle
 import inspect
+import setproctitle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -11,14 +12,18 @@ import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import multiprocessing
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
-from lightllm.server.core.objs.io_objs import GroupReqIndexes, AbortedReqCmd
+from lightllm.server.core.objs.io_objs import (
+    GroupReqIndexes,
+    AbortedReqCmd,
+    StopStrMatchedReqCmd,
+)
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
-from .shm_reqs_io_buffer import ShmReqsIOBuffer
+from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
@@ -44,6 +49,7 @@ class RouterManager:
         self.schedule_time_interval = args.schedule_time_interval  # 默认30ms 的调度周期
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
+        self.dp_world_size = self.world_size // self.dp_size
         self.is_multinode_tp = args.nnodes > 1 and args.dp == 1
         self.is_multinode_tp_master = self.is_multinode_tp and args.node_rank == 0
         self.is_multinode_tp_slave = self.is_multinode_tp and args.node_rank != 0
@@ -85,14 +91,14 @@ class RouterManager:
             )
 
         self.metric_client = MetricClient(metric_port)
-        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
-        self.is_pd_decode_mode = self.args.run_mode == "decode"
+        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]
+        self.is_pd_decode_mode = self.args.run_mode in ["decode", "nixl_decode"]
         # p d 分离模式下，需要调度锁来同步调度端和推理端的一些数据操作
         # 主要是为了防止调度失误，造成 OOM 等错误
         self.router_lock = mp.Lock()
         g_router_lock.obj = self.router_lock
 
-        self.shm_reqs_io_buffer = ShmReqsIOBuffer()
+        self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         return
 
     async def wait_to_model_ready(self):
@@ -111,19 +117,27 @@ class RouterManager:
 
         assert (self.world_size % self.nnodes) == 0
         node_world_size = self.world_size // self.nnodes
+
+        # Create tasks for parallel startup
+        tasks = []
         for rank_id in range(self.node_rank * node_world_size, (self.node_rank + 1) * node_world_size):
-            rpc_model = await start_model_process(
-                args=self.args,
-                rank=rank_id,
-                rank_in_node=rank_id % node_world_size,
-                node_world_size=node_world_size,
-                rpc_event=self.rpc_event,
-                rpc_finished_event=self.rpc_finished_event,
-                info_queue=self.info_queue,
-                mem_queue=self.mem_queues[(rank_id % node_world_size)],
-                router_lock=self.router_lock,
+            task = asyncio.create_task(
+                start_model_process(
+                    args=self.args,
+                    rank=rank_id,
+                    rank_in_node=rank_id % node_world_size,
+                    node_world_size=node_world_size,
+                    rpc_event=self.rpc_event,
+                    rpc_finished_event=self.rpc_finished_event,
+                    info_queue=self.info_queue,
+                    mem_queue=self.mem_queues[(rank_id % node_world_size)],
+                    router_lock=self.router_lock,
+                )
             )
-            self.model_rpc_servers.append(rpc_model)
+            tasks.append(task)
+
+        # Wait for all tasks to complete in parallel
+        self.model_rpc_servers = await asyncio.gather(*tasks)
 
         self.model_rpc_client = ModelRpcClient(
             rpc_event=self.rpc_event,
@@ -173,7 +187,7 @@ class RouterManager:
                 get_unique_server_name(),
                 self.max_total_token_num,
                 node_world_size=self.node_world_size,
-                dp_world_size=self.world_size // self.dp_size,
+                dp_world_size=self.dp_world_size,
             )
         self.req_queue = build_req_queue(self.args, self, self.dp_size_in_node)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
@@ -181,6 +195,13 @@ class RouterManager:
         if self.args.run_mode == "prefill":
             # 启动 prefill kv move 管理进程
             from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.prefill_node_impl import (
+                start_prefill_kv_move_manager_process,
+            )
+
+            start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+
+        if self.args.run_mode == "nixl_prefill":
+            from lightllm.server.router.model_infer.mode_backend.pd_nixl.prefill_node_impl import (
                 start_prefill_kv_move_manager_process,
             )
 
@@ -194,13 +215,16 @@ class RouterManager:
 
             start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
+        if self.args.run_mode == "nixl_decode":
+            from lightllm.server.router.model_infer.mode_backend.pd_nixl.decode_node_impl import (
+                start_decode_kv_move_manager_process,
+            )
+
+            start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+
         return
 
     def _get_schedule_time_interval(self):
-        if self.running_batch is None:
-            # 没有运行中的 batch 时，每 10ms 触发一次请求调度
-            return 0.01
-
         # dp 模式，为了更好的配平，需要更长的调度间隔，以便于能收到更多的请求
         return self.schedule_time_interval
 
@@ -279,6 +303,9 @@ class RouterManager:
         aborted_reqs = self._get_aborted_reqs_from_running_batch()
         if aborted_reqs:
             await self._aborted_reqs(aborted_reqs=aborted_reqs)
+        stop_str_matched_reqs = self._get_stop_str_reqs_from_running_batch()
+        if stop_str_matched_reqs:
+            await self._stop_str_matched_reqs(stop_str_matched_reqs=stop_str_matched_reqs)
         return
 
     async def _add_batch(self, batch: Batch):
@@ -294,6 +321,15 @@ class RouterManager:
 
     async def _aborted_reqs(self, aborted_reqs: List[Req]):
         cmds = [AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs]
+        while not self.shm_reqs_io_buffer.is_empty():
+            await asyncio.sleep(0.02)
+
+        self.shm_reqs_io_buffer.write_obj(cmds)
+        self.shm_reqs_io_buffer.set_ready()
+        return
+
+    async def _stop_str_matched_reqs(self, stop_str_matched_reqs: List[Req]):
+        cmds = [StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs]
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.02)
 
@@ -320,8 +356,22 @@ class RouterManager:
         if self.running_batch is None:
             return ans
         for req in self.running_batch.reqs:
-            if req.is_aborted and req.router_aborted is False:
-                req.router_aborted = True
+            if req.is_aborted and req._router_aborted is False:
+                req._router_aborted = True
+                ans.append(req)
+        return ans
+
+    def _get_stop_str_reqs_from_running_batch(self) -> List[Req]:
+        # to do, 多节点tp模式，暂时不能支持 stop str 匹配退出
+        if self.is_multinode_tp:
+            return []
+
+        ans = []
+        if self.running_batch is None:
+            return ans
+        for req in self.running_batch.reqs:
+            if req.stop_str_matched and req._router_stop_str_matched is False:
+                req._router_stop_str_matched = True
                 ans.append(req)
         return ans
 
@@ -361,6 +411,11 @@ class RouterManager:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
             req.multimodal_params = group_req_indexes.multimodal_params
             req.start_time = group_req_indexes.time_mark
+            # 附加一个私有标记变量，标记请求是否已经被router发送过abort命令给推理进程，
+            # 防止反复发送abort命令给推理进程
+            req._router_aborted = False
+            # 作用同 _router_aborted 类似
+            req._router_stop_str_matched = False
             req_group.append(req)
 
             logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
@@ -480,6 +535,7 @@ class RouterManager:
 def start_router_process(args, router_port, detokenization_port, metric_port, pipe_writer):
     # 注册 graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::router_server")
     start_parent_check_thread()
 
     def handle_exception(loop, context):

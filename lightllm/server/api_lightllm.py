@@ -52,6 +52,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     prompt_tokens = 0
     prompt_token_ids = None
     is_first_metadata = True
+    input_usage = None
     async for sub_req_id, request_output, metadata, finish_status in results_generator:
         # when set "--return_all_prompt_logprobs", the first token metadata will contains
         # prompt_logprobs and prompt_token_ids
@@ -59,10 +60,14 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
             prompt_logprobs = metadata.get("prompt_logprobs", None)
             prompt_token_ids = metadata.get("prompt_token_ids", None)
             prompt_tokens = metadata.get("prompt_tokens", 0)
+            input_usage = metadata.get("input_usage", None)
             if prompt_logprobs is not None:
                 del metadata["prompt_logprobs"]
             if prompt_token_ids is not None:
                 del metadata["prompt_token_ids"]
+            if input_usage is not None:
+                del metadata["input_usage"]
+
             is_first_metadata = False
 
         count_output_tokens_dict[sub_req_id] += 1
@@ -95,6 +100,9 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
         ret["prompt_token_ids"] = prompt_token_ids
     if prompt_logprobs is not None:
         ret["prompt_logprobs"] = prompt_logprobs
+    if input_usage is not None:
+        ret["input_usage"] = input_usage
+
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
 
 
@@ -116,7 +124,12 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
+        # input_usage 只会在第一个metadata中出现，所以需要保存下来
+        input_usage = None
         async for _, request_output, metadata, finish_status in results_generator:
+            if input_usage is None:
+                input_usage = metadata.get("input_usage", None)
+
             ret = {
                 "token": {
                     "id": metadata.get("id", None),
@@ -130,6 +143,7 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
                 "finished": finish_status.is_finished(),
                 "finish_reason": finish_status.get_finish_reason(),
                 "details": None,
+                "input_usage": input_usage,
             }
 
             yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")

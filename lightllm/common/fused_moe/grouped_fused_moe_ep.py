@@ -14,6 +14,7 @@ from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
 )
 from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
+from lightllm.common.triton_utils.autotuner import Autotuner
 import numpy as np
 
 logger = init_logger(__name__)
@@ -22,23 +23,14 @@ try:
     from deep_ep import Buffer, EventOverlap
     import deep_gemm
 
+    HAS_DEEPGEMM = True
 except:
     logger.warning("no deepep or deep_gemm")
-
-
-def tma_aligned_quantize(
-    input_tensor: torch.Tensor, block_size: int = 128, dtype: torch.dtype = torch.float8_e4m3fn
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    m, k = input_tensor.shape
-    input_scale = torch.empty((m, k // block_size), dtype=torch.float32, device=input_tensor.device)
-    qinput_tensor = torch.empty((m, k), dtype=dtype, device=input_tensor.device)
-    per_token_group_quant_fp8(input_tensor, block_size, qinput_tensor, input_scale)
-    input_scale = tma_align_input_scale(input_scale)
-    return qinput_tensor, input_scale
+    HAS_DEEPGEMM = False
 
 
 def masked_group_gemm(
-    recv_x: Tuple[torch.Tensor],
+    recv_x: Tuple[torch.Tensor, torch.Tensor],
     masked_m: torch.Tensor,
     dtype: torch.dtype,
     w1: torch.Tensor,
@@ -58,12 +50,10 @@ def masked_group_gemm(
     # groupgemm (masked layout)
     gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
 
-    deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
+    _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
     silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m)
-    deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(
-        (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m
-    )
+    _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
 
@@ -106,9 +96,7 @@ def fused_experts_impl(
 
     combined_x = None
     if is_prefill:
-        input_scale = torch.empty((M, K // block_size_k), dtype=torch.float32, device=hidden_states.device)
-        qinput_tensor = torch.empty((M, K), dtype=w1.dtype, device=hidden_states.device)
-        per_token_group_quant_fp8(hidden_states, block_size_k, qinput_tensor, input_scale)
+        qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
 
         # get_dispatch_layout
         (
@@ -179,24 +167,34 @@ def fused_experts_impl(
             # groupgemm (contiguous layout)
             gemm_out_a = torch.empty((all_tokens, N), device=hidden_states.device, dtype=hidden_states.dtype)
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
+            _deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
 
             # silu_and_mul_fwd + qaunt
             # TODO fused kernel
             silu_out = torch.empty((all_tokens, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
 
             silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
-            qsilu_out, qsilu_out_scale = tma_aligned_quantize(silu_out)
+            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
+                silu_out, block_size_k, dtype=w1.dtype, column_major_scales=True, scale_tma_aligned=True
+            )
 
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=hidden_states.device, dtype=hidden_states.dtype)
 
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices
-            )
+            _deepgemm_grouped_fp8_nt_contiguous((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices)
 
             # gather and local reduce
             ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
+        else:
+            ######################################## warning ##################################################
+            # here is used to match autotune feature, make moe model run same triton kernel in different rank.
+            # in some special case, one rank will recv 0 token, so add a token to make it run triton kernel.
+            if Autotuner.is_autotune_warmup():
+                _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
+                _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                _gemm_out_a, _silu_out = None, None
+
         # normal combine
         combined_x, _, event = buffer.combine(
             gather_out,
@@ -226,3 +224,32 @@ def fused_experts_impl(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
         )
     return combined_x
+
+
+def _deepgemm_grouped_fp8_nt_contiguous(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    m_indices: torch.Tensor,
+):
+    if HAS_DEEPGEMM:
+        if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous"):
+            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tuple, w_tuple, out, m_indices)
+        if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_contiguous"):
+            return deep_gemm.m_grouped_fp8_gemm_nt_contiguous(input_tuple, w_tuple, out, m_indices)
+    raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
+
+
+def _deepgemm_grouped_fp8_nt_masked(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+):
+    if HAS_DEEPGEMM:
+        if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_masked"):
+            return deep_gemm.m_grouped_fp8_gemm_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
+        if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked"):
+            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
+    raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")

@@ -14,14 +14,15 @@ import concurrent.futures
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
+from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
-from ..pd_io_struct import NodeRole
+from ..pd_io_struct import NodeRole, ObjType, NIXLDecodeNodeInfo
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
-from lightllm.server.core.objs import Req, FinishStatus
+from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
@@ -33,6 +34,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
 from lightllm.utils.infer_utils import calculate_cpu_time_async, calculate_cpu_time_sync
 from rpyc.utils.classic import obtain
 
@@ -42,7 +44,7 @@ logger = init_logger(__name__)
 class HttpServerManager:
     def __init__(
         self,
-        args,
+        args: StartArgs,
         router_port,
         cache_port,
         detokenization_pub_port,
@@ -50,7 +52,7 @@ class HttpServerManager:
         metric_port,
         enable_multimodal,
     ):
-        self.args = args
+        self.args: StartArgs = args
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
@@ -103,7 +105,7 @@ class HttpServerManager:
         self.metric_client = MetricClient(metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
-        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL]
+        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL, NodeRole.NP, NodeRole.ND]
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -350,7 +352,7 @@ class HttpServerManager:
         # health 请求 request_id 为负数，直接返回
         if is_health_req:
             return sampling_params.group_request_id
-        if self.pd_mode == NodeRole.NORMAL:
+        if self.pd_mode.is_normal():
             if not self.is_multinode_tp:
                 group_request_id = self.id_gen.generate_id()
             else:
@@ -360,7 +362,7 @@ class HttpServerManager:
                     assert sampling_params.group_request_id != -1
                     group_request_id = sampling_params.group_request_id
             sampling_params.group_request_id = group_request_id
-        elif self.pd_mode == NodeRole.P or self.pd_mode == NodeRole.D:
+        elif self.pd_mode.is_P_or_D():
             assert sampling_params.group_request_id is not None, "p d mode, group_request_id must be setting"
             group_request_id = sampling_params.group_request_id
         else:
@@ -374,6 +376,10 @@ class HttpServerManager:
         multimodal_params: MultimodalParams,
         request: Request,
         is_health_req: bool = False,
+        # 该参数只会在 nixl pd mode 中使用，用于上报一些信息给 pd_master
+        nixl_pd_upload_websocket: ClientConnection = None,
+        # 用于等待 pd_master 下发的交换信息
+        nixl_pd_event: asyncio.Event = None,
     ) -> Tuple[int, str, dict, FinishStatus]:
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
@@ -389,9 +395,9 @@ class HttpServerManager:
 
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
-            # 监控
-
+            # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+
             prompt_tokens = len(prompt_ids)
             # 监控
             if group_request_id > 0:
@@ -399,6 +405,29 @@ class HttpServerManager:
                 self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
                 self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
             prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
+
+            if nixl_pd_upload_websocket is not None and not is_health_req and self.pd_mode.is_NP():
+                # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
+                # 再等待 pd_master 传输下来的对应的进行 decode 节点的decode信息，然后再执行后续的流程
+                logger.info(
+                    f"nixl prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
+                )
+                await nixl_pd_upload_websocket.send(
+                    pickle.dumps((ObjType.NIXL_UPLOAD_NP_PROMPT_IDS, group_request_id, prompt_ids))
+                )
+                try:
+                    await asyncio.wait_for(nixl_pd_event.wait(), timeout=80)
+                except asyncio.TimeoutError:
+                    logger.error(f"nixl np node wait nixl_pd_event 36s time out, group_req_id {group_request_id}")
+                    raise Exception(f"group_req_id {group_request_id} wait nixl_pd_event time out")
+
+                decode_node_info: NIXLDecodeNodeInfo = nixl_pd_event.decode_node_info
+                sampling_params.nixl_params.set(pickle.dumps(decode_node_info))
+
+                if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
+                    # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
+                    # 直接 raise NixlPrefillNodeStopGenToken
+                    raise NixlPrefillNodeStopGenToken(group_request_id=group_request_id)
 
             # 申请资源并存储
             alloced_req_indexes = []
@@ -439,7 +468,23 @@ class HttpServerManager:
                 req_status,
                 request,
             )
+
+            # 计算输入 token 使用量统计
+            image_tokens, audio_tokens = self._count_multimodal_tokens(multimodal_params)
+            text_tokens = len(prompt_ids) - (image_tokens + audio_tokens)
+            input_usage = {
+                "input_text_tokens": text_tokens,
+                "input_audio_tokens": audio_tokens,
+                "input_image_tokens": image_tokens,
+            }
+
+            is_first_gen_token = True
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                # 只有第一个生成的 token 的 metadata 中包含 input_usage
+                if is_first_gen_token:
+                    metadata["input_usage"] = input_usage
+                    is_first_gen_token = False
+
                 yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
@@ -453,6 +498,20 @@ class HttpServerManager:
             await self.abort(group_request_id)
             raise e
         return
+
+    def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
+        image_tokens = 0
+        audio_tokens = 0
+
+        if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL() and multimodal_params is not None:
+            for img in multimodal_params.images:
+                if img.token_num is not None:
+                    image_tokens += img.token_num
+            for audio in multimodal_params.audios:
+                if audio.token_num is not None:
+                    audio_tokens += audio.token_num
+
+        return image_tokens, audio_tokens
 
     async def _log_req_header(self, request_headers, group_request_id: int):
         x_request_id = request_headers.get("X-Request-Id", "")
@@ -549,6 +608,8 @@ class HttpServerManager:
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
+
+        if self.pd_mode.is_P() or self.pd_mode.is_normal():
         if self.pd_mode == NodeRole.P:
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
@@ -562,7 +623,7 @@ class HttpServerManager:
                 )
             return
 
-        if self.pd_mode == NodeRole.D:
+        if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了, 传输一个空的即可
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
@@ -570,17 +631,6 @@ class HttpServerManager:
             )
             return
 
-        if self.pd_mode == NodeRole.NORMAL:
-            if self.enable_multimodal:
-                self.send_to_visual.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
-            else:
-                self.send_to_router.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
             return
 
         assert False, "dead code path"
@@ -621,7 +671,7 @@ class HttpServerManager:
                     # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
                     metadata["prompt_tokens"] = prompt_tokens
                     # p 节点返回 prompt_ids 信息，防止 d 节点重新 encode
-                    if self.pd_mode == NodeRole.P and is_first_token:
+                    if self.pd_mode.is_P() and is_first_token:
                         metadata["prompt_ids"] = prompt_ids
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
@@ -684,17 +734,17 @@ class HttpServerManager:
                 req_status.out_token_info_list.clear()
         return
 
-    async def abort(self, group_req_id: int):
+    async def abort(self, group_req_id: int) -> bool:
         req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, None)
         if req_status is None:
             logger.warning(f"aborted group_request_id {group_req_id} not exist")
-            return
+            return False
 
         group_req_objs: GroupReqObjs = req_status.group_req_objs
         for req in group_req_objs.shm_req_objs:
             req.is_aborted = True
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
-        return
+        return True
 
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()
@@ -788,10 +838,18 @@ class HttpServerManager:
 
                                 req.out_tokens_queue.pop_no_ret()
 
-                                if req.finish_token_index != src_index:
+                                finished_token_index = (
+                                    req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
+                                )
+
+                                if finished_token_index != src_index:
                                     token_list.append((req_id, text, metadata, FinishStatus()))
                                 else:
-                                    finish_status = FinishStatus(req.finish_status.status)
+                                    if req.stop_str_matched:
+                                        finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
+                                    else:
+                                        finish_status = FinishStatus(req.finish_status.status)
+
                                     token_list.append((req_id, text, metadata, finish_status))
                             else:
                                 break

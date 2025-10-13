@@ -5,6 +5,7 @@ import asyncio
 import uvloop
 import rpyc
 import inspect
+import setproctitle
 from typing import List
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -14,6 +15,7 @@ from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.multimodal_params import AudioItem
 from .model_infer.model_rpc import start_model_process, AudioModelRpcClient
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -84,6 +86,7 @@ class AudioManager:
                 while len(self.waiting_reqs) > 0:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
+                    disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
                     is_aborted = shm_req.is_aborted
                     self.shm_req_manager.put_back_req_obj(shm_req)
                     if is_aborted:
@@ -96,9 +99,13 @@ class AudioManager:
                     multimodal_params = group_req_indexes.multimodal_params
 
                     audio_uuids = [audio.uuid for audio in multimodal_params.audios]
-                    audio_uuids = pickle.dumps(audio_uuids)
-                    ready_audio = self.cache_client.root.get_items_embed_v2(audio_uuids)
-                    ready_audio = pickle.loads(ready_audio)
+                    # disable prompt cache通常用来测试，需要也去掉audio cache的影响
+                    if disable_prompt_cache:
+                        ready_audio = [False] * len(audio_uuids)
+                    else:
+                        audio_uuids = pickle.dumps(audio_uuids)
+                        ready_audio = self.cache_client.root.get_items_embed(audio_uuids)
+                        ready_audio = pickle.loads(ready_audio)
 
                     for audio, ready in zip(multimodal_params.audios, ready_audio):
                         if not ready:
@@ -142,6 +149,7 @@ class AudioManager:
 def start_audio_process(args, router_port, audio_port, cache_port, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::audio_server")
 
     try:
         audioserver = AudioManager(args, router_port, audio_port, cache_port)

@@ -1,8 +1,9 @@
 import os
 import ctypes
-from typing import List, Tuple, Union
+from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
+from .nixl_params import NIXLParamObj
 
 _SAMPLING_EPS = 1e-5
 DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in ["ON", "TRUE", "1"]
@@ -10,6 +11,7 @@ SKIP_SPECIAL_TOKENS = os.getenv("SKIP_SPECIAL_TOKENS", "True").upper() in ["ON",
 
 # 从环境变量获取最大长度限制
 STOP_SEQUENCE_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_MAX_LENGTH", 256))
+STOP_SEQUENCE_STR_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_STR_MAX_LENGTH", 256))
 ALLOWED_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_ALLOWED_TOKEN_IDS_MAX_LENGTH", 256))
 MAX_STOP_SEQUENCES = int(os.getenv("LIGHTLLM_MAX_STOP_SEQUENCES", 10))
 REGULAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_REGULAR_CONSTRAINT_MAX_LENGTH", 2048))
@@ -22,16 +24,29 @@ class StopSequence(ctypes.Structure):
     _fields_ = [
         ("sequence", ctypes.c_int * STOP_SEQUENCE_MAX_LENGTH),
         ("size", ctypes.c_int),
+        ("sequence_str", ctypes.c_char * STOP_SEQUENCE_STR_MAX_LENGTH),
+        ("sequence_str_len", ctypes.c_int),
     ]
 
-    def initialize(self, sequence: List[int]):
+    def initialize(self, sequence: List[int], sequence_str: Optional[str] = None):
         self.size = len(sequence)
         assert self.size <= STOP_SEQUENCE_MAX_LENGTH, "stop token length too long."
         assert all(isinstance(e, int) for e in sequence), "all must be int"
         self.sequence[: self.size] = sequence[:]
 
-    def to_list(self):
+        if sequence_str is not None:
+            sequence_str_bytes = sequence_str.encode("utf-8")
+            assert len(sequence_str_bytes) < STOP_SEQUENCE_STR_MAX_LENGTH, "stop sequence string too long."
+            self.sequence_str = sequence_str_bytes
+            self.sequence_str_len = len(sequence_str_bytes)
+        else:
+            self.sequence_str_len = 0
+
+    def to_list(self) -> List[int]:
         return list(self.sequence[0 : self.size])
+
+    def to_string(self) -> str:
+        return bytes(self.sequence_str[0 : self.sequence_str_len]).decode("utf-8")
 
 
 class StopSequenceGroups(ctypes.Structure):
@@ -41,39 +56,51 @@ class StopSequenceGroups(ctypes.Structure):
         ("size", ctypes.c_int),
     ]
 
-    def initialize(self, stop_sequences: Union[str, List], tokenizer):
+    def initialize(self, stop_sequences: Union[str, List[Union[List[int], str]]], tokenizer):
+        if stop_sequences is None:
+            stop_sequences = []
+        elif isinstance(stop_sequences, str):
+            stop_sequences = [stop_sequences]
+
         groups: List[List[int]] = self.stop_sentences_to_token_ids(stop_sequences, tokenizer)
         self.size = len(groups)
         assert self.size <= MAX_STOP_SEQUENCES, "Too many stop sequence groups."
+
         for group_idx in range(self.size):
-            self.groups[group_idx].initialize(groups[group_idx])
+            if isinstance(stop_sequences[group_idx], str):
+                self.groups[group_idx].initialize(groups[group_idx], sequence_str=stop_sequences[group_idx])
+            else:
+                self.groups[group_idx].initialize(groups[group_idx])
 
-    def stop_sentences_to_token_ids(self, stop_sequences, tokenizer):
-        if stop_sequences is None:
-            stop_sequences = []
-        else:
-            if isinstance(stop_sequences, str):
-                stop_sequences = [stop_sequences]
+    def stop_sentences_to_token_ids(self, stop_sequences: List[Union[List[int], str]], tokenizer) -> List[List[int]]:
+        new_stop_sequences = []
+        for stop_info in stop_sequences:
+            if isinstance(stop_info, str):
+                stop_str_ids = self._stop_str_to_token_ids(stop_info, tokenizer)
+                if stop_str_ids is not None and len(stop_str_ids) > 0:
+                    new_stop_sequences.append(stop_str_ids)
+            if isinstance(stop_info, list):
+                if all(isinstance(x, int) for x in stop_info):
+                    if len(stop_info) > 0:
+                        new_stop_sequences.append(stop_info)
+                else:
+                    assert False, "stop_sequences item must be type List[int] when it is a list."
+        return new_stop_sequences
 
-            new_stop_sequences = []
-            for stop_info in stop_sequences:
-                if isinstance(stop_info, str):
-                    stop_str_ids = self._stop_str_to_token_ids(stop_info, tokenizer)
-                    if stop_str_ids is not None and len(stop_str_ids) > 0:
-                        new_stop_sequences.append(stop_str_ids)
-                if isinstance(stop_info, list):
-                    if all(isinstance(x, int) for x in stop_info):
-                        if len(stop_info) > 0:
-                            new_stop_sequences.append(stop_info)
-            stop_sequences = new_stop_sequences
-        return stop_sequences
-
-    def _stop_str_to_token_ids(self, stop_str: str, tokenizer):
+    def _stop_str_to_token_ids(self, stop_str: str, tokenizer) -> List[int]:
         stop_str_ids = tokenizer.encode(stop_str, add_special_tokens=False)
         return stop_str_ids
 
-    def to_list(self):
+    def to_list(self) -> List[List[int]]:
         return [self.groups[i].to_list() for i in range(self.size)]
+
+    def to_strings(self) -> List[str]:
+        # 降序匹配，在出现"\n\n"和"\n"情况时，优先匹配“\n\n”
+        return sorted(
+            [self.groups[i].to_string() for i in range(self.size) if self.groups[i].sequence_str_len > 0],
+            key=len,
+            reverse=True,
+        )
 
 
 class RegularConstraint(ctypes.Structure):
@@ -197,17 +224,30 @@ class ExponentialDecayLengthPenalty(ctypes.Structure):
         return (self.item0, self.item1)
 
 
+class NodeUUId(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [
+        ("node_id_high", ctypes.c_uint64),
+        ("node_id_low", ctypes.c_uint64),
+    ]
+
+    def initialize(self, node_id: int):
+        self.node_id_high = (node_id >> 64) & 0xFFFFFFFFFFFFFFFF
+        self.node_id_low = node_id & 0xFFFFFFFFFFFFFFFF
+        return
+
+    def get(self) -> int:
+        return (self.node_id_high << 64) | self.node_id_low
+
+
 class DecodeNode(ctypes.Structure):
+    _pack_ = 4
     _fields_ = [
         ("exists", ctypes.c_bool),
-        ("node_id_high", ctypes.c_uint64),  # UUID 的高 64 位
-        ("node_id_low", ctypes.c_uint64),  # UUID 的低 64 位
+        ("node_id", NodeUUId),
         ("ip", ctypes.c_int32 * 4),
         ("rpyc_port", ctypes.c_int),
         ("max_new_tokens", ctypes.c_int),
-        # 记录当前请求使用的 pd_master 节点的 id
-        ("pd_master_node_id_high", ctypes.c_uint64),
-        ("pd_master_node_id_low", ctypes.c_uint64),
     ]
 
     def initialize(self, data_dict):
@@ -218,8 +258,8 @@ class DecodeNode(ctypes.Structure):
         self.exists = True
 
         pd_node_id = data_dict["node_id"]
-        self.node_id_high = (pd_node_id >> 64) & 0xFFFFFFFFFFFFFFFF
-        self.node_id_low = pd_node_id & 0xFFFFFFFFFFFFFFFF
+        self.node_id = NodeUUId()
+        self.node_id.initialize(pd_node_id)
 
         ip_parts = [int(part) for part in data_dict["ip"].split(".")]
         self.ip = (ctypes.c_int32 * 4)(*ip_parts)
@@ -227,19 +267,14 @@ class DecodeNode(ctypes.Structure):
         self.rpyc_port = data_dict["rpyc_port"]
         self.max_new_tokens = data_dict["max_new_tokens"]
 
-        pd_master_node_id = data_dict["pd_master_node_id"]
-        self.pd_master_node_id_high = (pd_master_node_id >> 64) & 0xFFFFFFFFFFFFFFFF
-        self.pd_master_node_id_low = pd_master_node_id & 0xFFFFFFFFFFFFFFFF
-
     def to_dict(self):
         if not self.exists:
             return None
         return {
-            "node_id": ((self.node_id_high << 64) | self.node_id_low),
+            "node_id": self.node_id.get(),
             "ip": ".".join(str(self.ip[i]) for i in range(4)),
             "rpyc_port": self.rpyc_port,
             "max_new_tokens": self.max_new_tokens,
-            "pd_master_node_id": ((self.pd_master_node_id_high << 64) | self.pd_master_node_id_low),
         }
 
 
@@ -274,6 +309,10 @@ class SamplingParams(ctypes.Structure):
         ("group_request_id", ctypes.c_int64),  # p d mode used params
         ("suggested_dp_index", ctypes.c_int),  # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         ("move_kv_to_decode_node", DecodeNode),  # move kv to deocde node, only used in pd mode
+        # in pd split mode, use to keep the id of pd master
+        ("pd_master_node_id", NodeUUId),
+        # nixl params object, only used in nixl pd mode, used to build nixl connection in p and d
+        ("nixl_params", NIXLParamObj),
         ("skip_special_tokens", ctypes.c_bool),  # whether to skip special tokens when decoding
         ("add_special_tokens", ctypes.c_bool),  # whether to add special tokens when encoding
         (
@@ -281,6 +320,7 @@ class SamplingParams(ctypes.Structure):
             ctypes.c_bool,
         ),  # whether to add spaces between special tokens when decoding
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
+        ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
     ]
 
     _do_sample: bool = False
@@ -311,6 +351,7 @@ class SamplingParams(ctypes.Structure):
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
+        self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
 
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
@@ -321,6 +362,10 @@ class SamplingParams(ctypes.Structure):
 
         self.move_kv_to_decode_node = DecodeNode()
         self.move_kv_to_decode_node.initialize(kwargs.get("move_kv_to_decode_node", None))
+        self.nixl_params = NIXLParamObj()
+        self.nixl_params.set(kwargs.get("nixl_params", None))
+        self.pd_master_node_id = NodeUUId()
+        self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
         # Initialize regular_constraint
         regular_constraint = kwargs.get("regular_constraint", "")
@@ -451,6 +496,7 @@ class SamplingParams(ctypes.Structure):
             "add_special_tokens": self.add_special_tokens,
             "add_spaces_between_special_tokens": self.add_spaces_between_special_tokens,
             "print_eos_token": self.print_eos_token,
+            "disable_prompt_cache": self.disable_prompt_cache,
         }
 
     def to_origin_dict(self):

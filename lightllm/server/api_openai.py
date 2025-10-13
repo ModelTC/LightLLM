@@ -222,7 +222,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         finish_reason = None
         from .req_id_generator import convert_sub_id_to_group_id
 
+        prompt_tokens = 0
+        completion_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            prompt_tokens = metadata["prompt_tokens"]
+            completion_tokens += 1
             if request.tool_choice != "none" and request.tools:
                 delta = request_output
                 group_request_id = convert_sub_id_to_group_id(sub_req_id)
@@ -309,6 +313,22 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     choices=[stream_choice],
                 )
                 yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
+                # Additional usage chunk
+
+        if request.stream_options and request.stream_options.include_usage:
+            usage = UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+            usage_chunk = ChatCompletionStreamResponse(
+                id=group_request_id,
+                created=created_time,
+                choices=[],  # Empty choices array as per OpenAI spec
+                model=request.model,
+                usage=usage,
+            )
+            yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
@@ -426,7 +446,9 @@ async def _process_prompts_completion(
             prompt, individual_sampling_params, multimodal_params, request=raw_request
         )
 
-        return await _collect_generation_results(generator, request, prompt_str, prompt_index)
+        return await _collect_generation_results(
+            generator, request, prompt_str, prompt_index, individual_sampling_params
+        )
 
     tasks = [asyncio.create_task(process_single_prompt(prompt, i)) for i, prompt in enumerate(prompts)]
 
@@ -451,9 +473,13 @@ async def _handle_streaming_completion(
     async def stream_results() -> AsyncGenerator[bytes, None]:
         from .req_id_generator import convert_sub_id_to_group_id
 
+        prompt_tokens = 0
+        completion_tokens = 0
+
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
-
+            prompt_tokens = metadata["prompt_tokens"]
+            completion_tokens += 1
             current_finish_reason = None
             if finish_status.is_finished():
                 current_finish_reason = finish_status.get_finish_reason()
@@ -481,11 +507,28 @@ async def _handle_streaming_completion(
 
         yield "data: [DONE]\n\n".encode("utf-8")
 
+        if request.stream_options and request.stream_options.include_usage:
+            usage = UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+            usage_chunk = CompletionStreamResponse(
+                id=group_request_id,
+                created=created_time,
+                choices=[],  # Empty choices array as per OpenAI spec
+                model=request.model,
+                usage=usage,
+            )
+            yield f"data: {usage_chunk.model_dump_json()}\n\n"
+
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
-async def _collect_generation_results(generator, request: CompletionRequest, prompt: str, prompt_index: int):
+async def _collect_generation_results(
+    generator, request: CompletionRequest, prompt: str, prompt_index: int, sampling_params: SamplingParams
+):
     final_output = []
     count_output_tokens = 0
     finish_reason = None
@@ -516,9 +559,20 @@ async def _collect_generation_results(generator, request: CompletionRequest, pro
             finish_reason = finish_status.get_finish_reason()
             prompt_tokens = metadata["prompt_tokens"]
 
+    # 处理停止序列剔除
+    final_text = "".join(final_output)
+    if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
+        valid_stop_strings = sampling_params.stop_sequences.to_strings()
+        for stop_str in valid_stop_strings:
+            stop_index = final_text.rfind(stop_str, max(0, len(final_text) - len(stop_str) - 20), len(final_text))
+            if stop_index != -1:
+                logger.debug(f"removed stop sequence in tail: '{final_text[stop_index:]}'")
+                final_text = final_text[:stop_index]
+                break
+
     return {
         "index": prompt_index,
-        "text": "".join(final_output),
+        "text": final_text,
         "finish_reason": finish_reason,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": count_output_tokens,

@@ -25,6 +25,11 @@ class InferStateInfo:
         # prefill 阶段指每个req 输入token的长度（不包括已经cache的部分）最大值
         # decode 阶段指的是每个req的总长 最大值
         self.max_len_in_batch: int = None
+        # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
+        self.max_cache_len: int = None
+        # prefix_total_token_num 用于 prefill 阶段标识当前请求中所有已经ready的kv的长度
+        # 的sum值, 其值等于 sum(b_ready_cache_len)
+        self.prefix_total_token_num: int = None
         self.is_prefill: bool = None
 
         self.mem_manager: MemoryManager = None
@@ -35,7 +40,6 @@ class InferStateInfo:
 
         self.is_token_healing: bool = False
         self.return_all_prompt_logics: bool = False
-        self.use_dynamic_prompt_cache: bool = False
         self.multimodal_params: dict = None
         self.is_cuda_graph: bool = False  # 标记是否是cuda graph的捕获推理
         self.dist_group: CustomProcessGroup = None
@@ -73,8 +77,6 @@ class InferStateInfo:
                 self.b_kv_seq_len,
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
-                self.max_q_seq_len,
-                self.max_kv_seq_len,
             ) = gen_prefill_params(
                 input_token_num=input_ids.shape[0],
                 b_ready_cache_len=self.b_ready_cache_len,
@@ -89,7 +91,6 @@ class InferStateInfo:
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
             ) = gen_decode_params(self.b_seq_len)
-            self.max_q_seq_len = 1
             # TODO: check the correctness
             self.max_kv_seq_len = self.max_len_in_batch
             self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
