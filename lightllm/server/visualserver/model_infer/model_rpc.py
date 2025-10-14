@@ -97,9 +97,8 @@ class VisualModelRpcServer(rpyc.Service):
     def alloc_img_embed_resources(self, all_img_embeds, uuids, valid_ids):
         if self.tp_rank_id == 0:
             uuids_blob = pickle.dumps(uuids)
-            ready_flags_status = self.cache_client.root.get_items_embed_v2(uuids_blob)
+            ready_flags_status = self.cache_client.root.get_items_embed(uuids_blob)
             ready_flags = pickle.loads(ready_flags_status)
-
             ids_to_set = []
             for i, ready in enumerate(ready_flags):
                 if ready:
@@ -111,7 +110,7 @@ class VisualModelRpcServer(rpyc.Service):
                 ids_to_set.append(uid)
             if ids_to_set:
                 ids_to_set = pickle.dumps(ids_to_set)
-                self.cache_client.root.set_items_embed_v2(ids_to_set)
+                self.cache_client.root.set_items_embed(ids_to_set)
         return
 
     def exposed_encode(self, images: List[ImageItem]):

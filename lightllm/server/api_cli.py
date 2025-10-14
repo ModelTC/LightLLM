@@ -324,6 +324,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )
+    parser.add_argument('--max_tasks_per_worker', type=int, default=32, 
+                    help='Maximum number of tasks each worker thread can handle (default: 32)')
     parser.add_argument("--concurrent_alloc_workers", type=int, default=2, help="max concurrent threadpool workers")
     parser.add_argument(
         "--data_type",

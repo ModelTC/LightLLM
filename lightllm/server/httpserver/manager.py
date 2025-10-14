@@ -118,7 +118,7 @@ class HttpServerManager:
         self.latest_success_infer_time_mark.set_value(int(time.time()))
 
         # 线程池用于multimodal resource alloc
-        self.max_concurrent = self.args.concurrent_alloc_workers * 48 # 经验值，合适即可
+        self.max_concurrent = self.args.concurrent_alloc_workers * self.args.max_tasks_per_worker
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.args.concurrent_alloc_workers)
         return
 
@@ -543,17 +543,16 @@ class HttpServerManager:
     ):
 
         if self.pd_mode.is_P() or self.pd_mode.is_normal():
-        if self.pd_mode == NodeRole.P:
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
-                )
+                    )
             else:
                 self.send_to_router.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
-                )
+                    )
             return
 
         if self.pd_mode.is_D():
@@ -562,8 +561,6 @@ class HttpServerManager:
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
-            return
-
             return
 
         assert False, "dead code path"
