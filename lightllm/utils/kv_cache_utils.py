@@ -1,12 +1,20 @@
+import torch
 import ctypes
 import dataclasses
+import os
 import xxhash
+import threading
+import time
 import numpy as np
+import triton
 from functools import lru_cache
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import get_config_json
 from typing import List, Tuple, Optional
+from tqdm import tqdm
+from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
+from lightllm.utils.dist_utils import get_current_device_id
 
 logger = init_logger(__name__)
 
@@ -36,6 +44,41 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
     return chunks_hash_value
 
 
+class AsyncRegistrationHandle:
+    """A handle for async host memory registration.
+
+    - wait(): blocks until registration finishes, prints tqdm progress, and returns device pointer (int).
+    """
+
+    def __init__(self, total_tasks: int):
+        self.total_tasks = total_tasks
+        self.task_count = 0
+        self.thread: Optional[threading.Thread] = None
+        self.tasks_finished = threading.Event()
+
+    def wait(self):
+        """Block until the async registration completes. Only here we print tqdm progress."""
+        last_count = 0
+        desc = f"pid {os.getpid()} Registering pinned host memory (async)"
+        with tqdm(total=self.total_tasks, desc=desc) as pbar:
+            while not self.tasks_finished.is_set():
+                cur = self.task_count
+                if cur > last_count:
+                    pbar.update(cur - last_count)
+                    last_count = cur
+                time.sleep(0.01)
+            # final update
+            cur = self.task_count
+            if cur > last_count:
+                pbar.update(cur - last_count)
+                last_count = cur
+
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join()
+
+        return
+
+
 @lru_cache(maxsize=None)
 def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
@@ -43,6 +86,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     model_config = get_config_json(args.model_dir)
     item_size = 2
     head_dim = model_config["hidden_size"] // model_config["num_attention_heads"]
+    head_dim = model_config.get("head_dim", head_dim)
     num_key_value_heads = model_config["num_key_value_heads"] * 2  # key and value
     layer_num = model_config["num_hidden_layers"]
 
@@ -66,72 +110,71 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
 @lru_cache(maxsize=None)
 def create_shm_kv_cache_ptr() -> int:
-    args = get_env_start_args()
-
-    # 加载 libc
-    libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6")
-
-    # 设置 shmget 函数的参数类型和返回类型
+    libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
     libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
     libc.shmget.restype = ctypes.c_int
-
-    # 设置 shmat 函数的参数类型和返回类型
     libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
     libc.shmat.restype = ctypes.c_void_p
 
-    # 创建共享内存
-    key = args.cpu_kv_cache_shm_id  # 共享内存的键
-    size = calcu_cpu_cache_meta().calcu_size()  # 共享内存大小
+    args = get_env_start_args()
+    key = args.cpu_kv_cache_shm_id
+    requested_size = calcu_cpu_cache_meta().calcu_size()
+    use_hugetlb = True
+
+    # 计算大页大小（默认从 /proc/meminfo 读取 Hugepagesize）
+    def _get_default_hugepage_size() -> int:
+        try:
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    if line.startswith("Hugepagesize:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            kb = int(parts[1])
+                            return kb * 1024
+        except Exception:
+            pass
+        return 2 * 1024 * 1024  # fallback 2MB
+
+    # 向上对齐到大页大小
+    huge_sz = _get_default_hugepage_size()
+    size_to_alloc = triton.cdiv(requested_size, huge_sz) * huge_sz
     shmflg = 0o666 | 0o1000  # 权限和 IPC_CREAT 标志
+    if use_hugetlb:
+        SHM_HUGETLB = 0o4000
+        shmflg |= SHM_HUGETLB
+        logger.info(
+            f"Using SHM_HUGETLB, hugepage_size={huge_sz} bytes, requested={requested_size}, alloc={size_to_alloc}"
+        )
 
-    shmid = libc.shmget(key, size, shmflg)
+    # 优先尝试 HugeTLB 分配，失败则回退到普通页
+    shmid = libc.shmget(key, size_to_alloc, shmflg)
+    if shmid < 0 and use_hugetlb:
+        err = ctypes.get_errno()
+        logger.error(
+            f"shmget with SHM_HUGETLB failed (errno={err}). Falling back to regular pages."
+            f"You may need to configure hugepages manually, e.g.,"
+            f"sudo sed -i 's/^GRUB_CMDLINE_LINUX=\"/& default_hugepagesz=1G \
+                hugepagesz=1G hugepages=1000/' /etc/default/grub"
+            f"sudo update-grub"
+            f"sudo reboot"
+        )
+        # 回退：去掉 HUGETLB 标志，使用请求原始大小
+        shmflg_n = 0o666 | 0o1000
+        shmid = libc.shmget(key, size_to_alloc, shmflg_n)
 
     if shmid < 0:
-        raise Exception("Error creating shared memory")
+        err = ctypes.get_errno()
+        raise Exception(f"Error creating shared memory (errno={err})")
 
+    register_sysv_shm_for_cleanup(key, shmid)
     logger.info(f"Shared memory ID: {shmid}")
 
     # 附加共享内存
     shm_addr = libc.shmat(shmid, ctypes.c_void_p(0), 0)
-
     if shm_addr == ctypes.c_void_p(-1).value:
         raise Exception("Error attaching shared memory")
-
     logger.info(f"Shared memory attached at address: {shm_addr}")
 
-    return shm_addr
-
-
-@lru_cache(maxsize=None)
-def attach_shm_kv_cache_ptr() -> int:
-    """
-    Attach to the shared memory segment with the given shmid.
-    """
-    args = get_env_start_args()
-    libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6")
-
-    # 设置 shmget 和 shmat 函数的参数类型和返回类型
-    libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
-    libc.shmget.restype = ctypes.c_int
-    libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
-    libc.shmat.restype = ctypes.c_void_p
-
-    # 通过键获取共享内存 ID
-    key = args.cpu_kv_cache_shm_id  # 共享内存的键
-    shmid = libc.shmget(key, 0, 0)
-
-    if shmid < 0:
-        raise Exception("Error getting shared memory")
-
-    logger.info(f"Shared memory ID: {shmid}")
-
-    # 附加共享内存
-    shm_addr = libc.shmat(shmid, ctypes.c_void_p(0), 0)
-
-    if shm_addr == ctypes.c_void_p(-1).value:
-        raise Exception("Error attaching shared memory")
-
-    logger.info(f"Shared memory attached at address: {shm_addr}")
     return shm_addr
 
 
@@ -148,37 +191,72 @@ class CpuKVCacheMeta:
         return self.page_num * self.layer_num * self.token_page_size * self.num_heads * self.head_dim * self.item_size
 
 
-def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
-    # 加载 CUDA 库
-    cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")  # Linux 下的 CUDA 库路径
+@lru_cache(maxsize=None)
+def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> AsyncRegistrationHandle:
+    """Start async cudaHostRegister on the given [shm_ptr, shm_ptr+size) and return a handle."""
+    chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
+    tasks: list[tuple[int, int]] = []
+    offset = 0
+    while offset < size:
+        seg_len = min(chunk_bytes, size - offset)
+        tasks.append((offset, seg_len))
+        offset += seg_len
 
-    # 定义 cudaHostRegister 函数的参数和返回类型
-    cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
-    cuda.cudaHostRegister.restype = ctypes.c_int
+    handle = AsyncRegistrationHandle(total_tasks=len(tasks))
 
-    # 定义 cudaHostGetDevicePointer 函数原型
-    cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
-    cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
+    def _worker():
+        cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
+        cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+        cuda.cudaHostRegister.restype = ctypes.c_int
+        cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
+        cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
 
-    # 定义常量
-    cudaHostRegisterDefault = 0  # 默认注册标志
+        cudaHostRegisterDefault = 0
 
-    # 调用 cudaHostRegister
-    result = cuda.cudaHostRegister(shm_ptr, size, cudaHostRegisterDefault)
+        torch.cuda.set_device(get_current_device_id())
+        for offset, seg_len in tasks:
+            ptr = ctypes.c_void_p(shm_ptr + offset)
+            r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterDefault)
+            if r != 0:
+                raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
+            handle.task_count += 1
 
-    if result != 0:
-        raise Exception(f"Error registering host memory: {result}")
-    else:
-        logger.info("Host memory registered successfully.")
+        device_ptr = ctypes.c_void_p()
+        host_ptr = ctypes.c_void_p(shm_ptr)
+        res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+        if res != 0:
+            raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
+        handle.tasks_finished.set()
 
-    device_ptr = ctypes.c_void_p()  # 输出设备指针
-    host_ptr = ctypes.c_void_p(shm_ptr)  # 输入主机指针
+    th = threading.Thread(target=_worker, name="cpu_cache_register", daemon=True)
+    handle.thread = th
+    th.start()
+    return handle
 
-    result = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
 
-    if result != 0:
-        raise RuntimeError(f"cudaHostGetDevicePointer failed with error code {result}")
+@lru_cache(maxsize=None)
+def attach_shm_kv_cache_ptr() -> int:
+    libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
+    libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
+    libc.shmget.restype = ctypes.c_int
+    libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
+    libc.shmat.restype = ctypes.c_void_p
 
-    logger.info(f"get Host memory registered Device ptr {device_ptr.value}")
+    # Try to locate an existing SHM without creating a new one
+    args = get_env_start_args()
+    key = args.cpu_kv_cache_shm_id
+    shmid = libc.shmget(key, 0, 0)
+    if shmid < 0:
+        size = calcu_cpu_cache_meta().calcu_size()
+        shmid = libc.shmget(key, size, 0)
+    if shmid < 0:
+        err = ctypes.get_errno()
+        raise Exception(f"Error locating existing shared memory (errno={err})")
 
-    return device_ptr.value
+    shm_addr = libc.shmat(shmid, ctypes.c_void_p(0), 0)
+    if shm_addr == ctypes.c_void_p(-1).value:
+        err = ctypes.get_errno()
+        raise Exception(f"Error attaching shared memory (errno={err})")
+
+    logger.info(f"Attached to SHM key={key}, shmid={shmid}, addr={shm_addr}")
+    return shm_addr

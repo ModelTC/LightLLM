@@ -6,6 +6,7 @@ from typing import List
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_utils import create_or_link_shm
+from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
 
 logger = init_logger(__name__)
 
@@ -20,8 +21,13 @@ class RpcShmParams:
 
     def create_or_link_shm(self):
         self.shm = create_or_link_shm(self.name, LIGHTLLM_RPC_BYTE_SIZE)
+        try:
+            shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_RPC_BYTE_SIZE)
+            register_posix_shm_for_cleanup(self.name)
+        except:
+            shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_RPC_BYTE_SIZE)
 
-        return
+        return shm
 
     def write_func_params(self, func_name, args):
         objs_bytes = pickle.dumps((func_name, args))
@@ -42,6 +48,24 @@ class RpcShmResults:
 
     def create_or_link_shm(self):
         self.shm = create_or_link_shm(self.name, LIGHTLLM_RPC_RESULT_BYTE_SIZE)
+        try:
+            shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
+            register_posix_shm_for_cleanup(self.name)
+        except:
+            shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
+
+        if shm.size != LIGHTLLM_RPC_RESULT_BYTE_SIZE:
+            logger.warning(f"size not same, unlink shm {self.name} and create again")
+            shm.close()
+            shm.unlink()
+            try:
+                shm = shared_memory.SharedMemory(name=self.name, create=True, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
+                logger.info(f"create shm {self.name}")
+            except:
+                shm = shared_memory.SharedMemory(name=self.name, create=False, size=LIGHTLLM_RPC_RESULT_BYTE_SIZE)
+                logger.info(f"link shm {self.name}")
+
+        self.shm = shm
         return
 
     def write_func_result(self, func_name, ret):
@@ -68,12 +92,17 @@ class ShmSyncStatusArray:
 
     def create_or_link_shm(self):
         self.shm = create_or_link_shm(self.name, self.dest_size)
+        try:
+            shm = shared_memory.SharedMemory(name=self.name, create=True, size=self.dest_size)
+            register_posix_shm_for_cleanup(self.name)
+        except:
+            shm = shared_memory.SharedMemory(name=self.name, create=False, size=self.dest_size)
 
         self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
         self.arr[:] = 0
         self.arr0 = self.arr[0 : self.world_size]
         self.arr1 = self.arr[self.world_size : 2 * self.world_size]
-        return
+        return shm
 
     def add_mark(self, tp_rank: int):
         self.arr0[tp_rank] += 1

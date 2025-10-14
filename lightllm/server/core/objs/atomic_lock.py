@@ -3,6 +3,7 @@ import time
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_utils import create_or_link_shm
+from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
 
 logger = init_logger(__name__)
 
@@ -14,6 +15,17 @@ class AtomicShmLock:
         self.shm = create_or_link_shm(self.lock_name, self.dest_size)
 
         self.shm.buf.cast("i")[0] = 0
+        return
+
+    def _init_shm(self):
+        try:
+            shm = shared_memory.SharedMemory(name=self.lock_name, create=True, size=self.dest_size)
+            logger.info(f"create lock shm {self.lock_name}")
+            register_posix_shm_for_cleanup(self.lock_name)
+        except:
+            shm = shared_memory.SharedMemory(name=self.lock_name, create=False, size=self.dest_size)
+            logger.info(f"link lock shm {self.lock_name}")
+        self.shm = shm
         return
 
     def __enter__(self):

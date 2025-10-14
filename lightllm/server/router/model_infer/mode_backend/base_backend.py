@@ -123,6 +123,11 @@ class ModeBackend:
         # 所以做一次barrier等待
         dist.barrier()
 
+        waiting_hook = None
+        if self.args.enable_cpu_cache:
+            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
+            waiting_hook = self.multi_level_cache_module.wait_for_init
+
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
         model_kvargs = {
@@ -144,6 +149,7 @@ class ModeBackend:
             "quant_type": kvargs.get("quant_type", None),
             "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
+            "waiting_hook": waiting_hook,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
@@ -202,9 +208,6 @@ class ModeBackend:
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
-
-        if self.args.enable_cpu_cache:
-            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。

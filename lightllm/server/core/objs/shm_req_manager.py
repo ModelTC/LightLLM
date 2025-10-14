@@ -2,6 +2,7 @@ import ctypes
 import numpy as np
 from lightllm.utils.envs_utils import get_unique_server_name
 from multiprocessing import shared_memory
+from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
 from lightllm.utils.log_utils import init_logger
 from .req import Req, ChunkedPrefillReq, TokenHealingReq
 from .shm_array import ShmArray
@@ -53,6 +54,14 @@ class ShmReqManager:
     def _init_reqs_shm(self):
         shm_name = f"{get_unique_server_name()}_req_shm_total"
         self.reqs_shm = create_or_link_shm(shm_name, self.req_shm_byte_size)
+        try:
+            shm = shared_memory.SharedMemory(name=shm_name, create=True, size=self.req_shm_byte_size)
+            register_posix_shm_for_cleanup(shm_name)
+            logger.info(f"create lock shm {shm_name}")
+        except:
+            shm = shared_memory.SharedMemory(name=shm_name, create=False, size=self.req_shm_byte_size)
+            logger.info(f"link lock shm {shm_name}")
+        self.reqs_shm = shm
         return
 
     def init_to_req_objs(self):

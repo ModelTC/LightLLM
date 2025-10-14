@@ -3,6 +3,7 @@ import numpy as np
 from multiprocessing import shared_memory
 from typing import List, Optional
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
 
 logger = init_logger(__name__)
 
@@ -263,6 +264,7 @@ class _HashLinkItem(_LinkedListItem):
 def _create_shm(name: str, byte_size: int):
     try:
         shm = shared_memory.SharedMemory(name=name, create=True, size=byte_size)
+        register_posix_shm_for_cleanup(name)
         logger.info(f"create lock shm {name}")
     except:
         shm = shared_memory.SharedMemory(name=name, create=False, size=byte_size)
