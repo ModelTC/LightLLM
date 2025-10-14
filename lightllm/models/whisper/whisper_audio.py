@@ -12,6 +12,7 @@ from transformers.processing_utils import ProcessorMixin
 from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
 from lightllm.server.multimodal_params import AudioItem
 from rpyc.utils.classic import obtain
+import pickle
 
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
@@ -190,7 +191,9 @@ class WhisperAudioModel:
         audio_lens_after_cnn = np.array(audio_lens_after_cnn, dtype=np.int32)
         audio_token_num = (audio_lens_after_cnn - 2) // 2 + 1
 
-        ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
+        uuids_blob = pickle.dumps(uuids)
+        ready_audio = self.cache_client.root.get_items_embed(uuids_blob)
+        ready_audio = pickle.loads(ready_audio)
         ids_to_set = []
         for i, ready in enumerate(ready_audio):
             if not ready:
@@ -199,4 +202,5 @@ class WhisperAudioModel:
                 create_shm(get_shm_name_embed(uid), cur_embed_bytes)
                 ids_to_set.append(uid)
         if ids_to_set:
-            self.cache_client.root.set_items_embed(ids=ids_to_set)
+            ids_to_set_blob = pickle.dumps(ids_to_set)
+            self.cache_client.root.set_items_embed(ids_to_set_blob)
