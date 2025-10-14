@@ -34,6 +34,7 @@ from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
+from .multi_level_kv_cache import MultiLevelKvCacheModule
 
 
 class ModeBackend:
@@ -164,6 +165,7 @@ class ModeBackend:
 
         self.logger.info(f"loaded model class {self.model.__class__}")
         g_infer_context.register(
+            backend=self,
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
@@ -200,6 +202,9 @@ class ModeBackend:
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
+
+        if self.args.enable_cpu_cache:
+            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
@@ -360,6 +365,8 @@ class ModeBackend:
                     assert False, f"error type {type(obj)}"
             if init_reqs:
                 self._init_reqs(reqs=init_reqs)
+                if self.args.enable_cpu_cache:
+                    self._fill_cpu_cache_to_reqs(req_ids=init_reqs)
         return
 
     def _read_nixl_trans_io_buffer_and_update_req_status(self):
@@ -393,6 +400,7 @@ class ModeBackend:
                                     is_master_in_dp=self.is_master_in_dp,
                                     nixl_prefill_chuncked_handle_func=None,
                                 )
+
         return
 
     # 一些可以复用的通用功能函数
@@ -413,6 +421,13 @@ class ModeBackend:
         g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
         return req_ids
+
+    def _fill_cpu_cache_to_reqs(self, req_ids):
+        req_objs: List[InferReq] = [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
+        g_infer_state_lock.acquire()
+        self.multi_level_cache_module.fill_cpu_cache_to_reqs(reqs=req_objs)
+        g_infer_state_lock.release()
+        return
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
         """
@@ -448,6 +463,8 @@ class ModeBackend:
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
         """
+        if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
+            self.multi_level_cache_module.update_cpu_cache_task_states()
 
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
@@ -532,8 +549,13 @@ class ModeBackend:
         g_infer_state_lock.release()
 
         self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
-        g_infer_context.filter_reqs(finished_reqs=finished_reqs)
+        # 如果使能了 cpu cache 功能，对于已经完成的请求，进行 gpu kv 卸载到 cpu cache的操作。
+        if self.args.enable_cpu_cache:
+            true_finished_reqs = self.multi_level_cache_module.handle_finished_reqs(finished_reqs=finished_reqs)
+        else:
+            true_finished_reqs = finished_reqs
 
+        g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
         g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
         if recover_paused:

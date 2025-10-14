@@ -5,7 +5,7 @@ import setproctitle
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
 import inspect
-from lightllm.server.core.objs import ShmReqManager
+from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from typing import Union, Dict, List
@@ -24,26 +24,20 @@ logger = init_logger(__name__)
 class DeTokenizationManager:
     def __init__(
         self,
-        args,
-        eos_id,
-        model_weightdir,
-        tokenizor_mode,
-        detokenization_port,
-        detokenization_pub_port,
-        trust_remote_code,
+        args: StartArgs,
     ):
         self.args = args
         context = zmq.Context(2)
-        self.recv_from_router = context.socket(zmq.PULL)
-        self.recv_from_router.bind(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
+        self.zmq_recv_socket = context.socket(zmq.PULL)
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.detokenization_port}")
 
         self.pub_to_httpserver = context.socket(zmq.PUB)
-        self.pub_to_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{detokenization_pub_port}")
+        self.pub_to_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
         logger.info(f"pub_to_httpserver sendhwm {self.pub_to_httpserver.getsockopt(zmq.SNDHWM)}")
-        self.tokenizer = get_tokenizer(model_weightdir, tokenizor_mode, trust_remote_code=trust_remote_code)
+        self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
         self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out: Dict[int, DecodeReq] = {}
-        self.eos_id = eos_id
+        self.eos_id = args.eos_id
         self._init_get_token_id_to_token_str()
         self.is_pd_decode_mode = self.args.run_mode == "decode"
         self.shm_req_manager = ShmReqManager()
@@ -80,7 +74,7 @@ class DeTokenizationManager:
                 try:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
                     for _ in range(recv_max_count):
-                        recv_obj: GroupReqIndexes = self.recv_from_router.recv_pyobj(zmq.NOBLOCK)
+                        recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                         assert isinstance(recv_obj, GroupReqIndexes)
                         self._add_new_group_req_index(recv_obj=recv_obj)
 
@@ -172,20 +166,14 @@ class DeTokenizationManager:
         return
 
 
-def start_detokenization_process(args, detokenization_port, detokenization_pub_port, pipe_writer):
+def start_detokenization_process(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::detokenization_server")
 
     try:
         manager = DeTokenizationManager(
-            args,
-            args.eos_id,
-            args.model_dir,
-            args.tokenizer_mode,
-            detokenization_port=detokenization_port,
-            detokenization_pub_port=detokenization_pub_port,
-            trust_remote_code=args.trust_remote_code,
+            args=args,
         )
     except Exception as e:
         pipe_writer.send(str(e))

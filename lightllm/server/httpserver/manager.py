@@ -43,17 +43,11 @@ class HttpServerManager:
     def __init__(
         self,
         args: StartArgs,
-        router_port,
-        cache_port,
-        detokenization_pub_port,
-        visual_port,
-        metric_port,
-        enable_multimodal,
     ):
         self.args: StartArgs = args
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{router_port}")
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
@@ -82,17 +76,21 @@ class HttpServerManager:
                     f"HttpServerManager listening for child node requests on *:{args.multinode_httpmanager_port}"
                 )
 
-        self.enable_multimodal = enable_multimodal
+        self.enable_multimodal = args.enable_multimodal
         if self.enable_multimodal:
-            self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
+            self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
             self.send_to_visual = context.socket(zmq.PUSH)
-            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{visual_port}")
+            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+        if args.enable_cpu_cache and not self.args.enable_multimodal:
+            self.send_to_multi_level_kv_cache = context.socket(zmq.PUSH)
+            self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
 
         self.shm_req_manager = ShmReqManager()
 
-        self.recv_from_detokenization = context.socket(zmq.SUB)
-        self.recv_from_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{detokenization_pub_port}")
-        self.recv_from_detokenization.setsockopt(zmq.SUBSCRIBE, b"")
+        # recv from detokenization
+        self.zmq_recv_socket = context.socket(zmq.SUB)
+        self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
+        self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -100,7 +98,7 @@ class HttpServerManager:
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
 
         self.max_req_total_len = args.max_req_total_len
-        self.metric_client = MetricClient(metric_port)
+        self.metric_client = MetricClient(args.metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL, NodeRole.NP, NodeRole.ND]
@@ -496,27 +494,33 @@ class HttpServerManager:
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
 
-        if self.pd_mode.is_P() or self.pd_mode.is_normal():
+        if self.pd_mode.is_P_or_NORMAL():
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
-            else:
-                self.send_to_router.send_pyobj(
+                return
+
+            if self.args.enable_cpu_cache:
+                self.send_to_multi_level_kv_cache.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
-            return
+                return
 
-        if self.pd_mode.is_D():
-            # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了, 传输一个空的即可
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
             return
 
+        if self.pd_mode == NodeRole.D:
+            # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
+            self.send_to_router.send_pyobj(
+                group_req_objs.to_group_req_index(),
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
             return
 
         assert False, "dead code path"
@@ -562,6 +566,7 @@ class HttpServerManager:
                         metadata["prompt_ids"] = prompt_ids
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
+                    cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
                         is_first_token = False
@@ -598,6 +603,7 @@ class HttpServerManager:
                             f"prompt_token_num:{prompt_tokens} "
                             f"prompt_cache_len:{prompt_cache_len} "
                             f"prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
                         if group_request_id < 0:
@@ -689,7 +695,7 @@ class HttpServerManager:
 
         while True:
             try:
-                await asyncio.wait_for(self.recv_from_detokenization.recv_pyobj(), timeout=0.05)
+                await asyncio.wait_for(self.zmq_recv_socket.recv_pyobj(), timeout=0.05)
             except asyncio.TimeoutError:
                 pass
 
@@ -718,6 +724,7 @@ class HttpServerManager:
                                     "special": special,
                                     "count_output_tokens": count_output_tokens,
                                     "prompt_cache_len": req.prompt_cache_len,
+                                    "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
                                 }
                                 if self.args.return_all_prompt_logprobs:

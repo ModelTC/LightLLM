@@ -8,6 +8,7 @@ import queue
 import setproctitle
 from .metrics import Monitor
 from prometheus_client import generate_latest
+from lightllm.server.core.objs import StartArgs
 from rpyc import SocketStream
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
@@ -135,7 +136,7 @@ class MetricClient(threading.Thread):
                 logger.error(f"monitor error {str(e)}")
 
 
-def start_metric_manager(port: int, args, pipe_writer):
+def start_metric_manager(args: StartArgs, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::metric_manager")
@@ -147,6 +148,6 @@ def start_metric_manager(port: int, args, pipe_writer):
 
     from rpyc.utils.server import ThreadedServer
 
-    t = ThreadedServer(service, port=port)
+    t = ThreadedServer(service, port=args.metric_port)
     pipe_writer.send("init ok")
     t.start()
