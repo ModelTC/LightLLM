@@ -393,7 +393,13 @@ class InferReq:
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
-        return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
+
+        if chunked_end < self.get_cur_total_len():
+            next_token_id = self.shm_req.shm_prompt_ids.arr[chunked_end]
+        else:
+            next_token_id = -1  # last chunk
+
+        return self.shm_req.shm_prompt_ids.arr[0:chunked_end], next_token_id
 
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
@@ -438,7 +444,7 @@ class InferReq:
 
     def prefill_need_token_num(self, is_chuncked_prefill: bool):
         if is_chuncked_prefill:
-            input_token_ids = self.get_chuncked_input_token_ids()
+            input_token_ids, _ = self.get_chuncked_input_token_ids()
         else:
             input_token_ids = self.get_input_token_ids()
 

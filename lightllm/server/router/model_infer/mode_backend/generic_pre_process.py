@@ -20,6 +20,7 @@ def prepare_prefill_inputs(
     b_ready_cache_len = []
     b_mtp_index = []
     b_prefill_has_output = []
+    b_chunked_prefill_next_token_ids = []
 
     for req in req_objs:
         run_reqs.append(req)
@@ -27,7 +28,8 @@ def prepare_prefill_inputs(
         b_req_idx.append(req.req_idx)
 
         if is_chuncked_mode:
-            input_token_ids = req.get_chuncked_input_token_ids()
+            input_token_ids, next_token_id = req.get_chuncked_input_token_ids()
+            b_chunked_prefill_next_token_ids.append(next_token_id)
         else:
             input_token_ids = req.get_input_token_ids()
 
@@ -80,6 +82,7 @@ def prepare_prefill_inputs(
         b_ready_cache_len=b_ready_cache_len,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
+        b_chunked_prefill_next_token_ids_cpu=b_chunked_prefill_next_token_ids,
         prefix_total_token_num=prefix_total_token_num,
     )
     if is_multimodal:
