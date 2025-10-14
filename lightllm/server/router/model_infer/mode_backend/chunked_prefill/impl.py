@@ -190,16 +190,10 @@ class ChunkedPrefillBackend(ModeBackend):
                 is_prefill=True,
                 b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
                 mask_func=self.prefill_mask_func,
+                b_next_chunck_first_token_ids_cpu=model_input.b_next_chunck_first_token_ids_cpu,
             )
-            # mtp kv fill
-            b_has_out = torch.tensor(model_input.b_prefill_has_output_cpu, dtype=torch.bool, device="cuda")
-            b_chunked_next_token_ids = torch.tensor(
-                model_input.b_chunked_prefill_next_token_ids_cpu, dtype=torch.int64, device="cuda"
-            )
-            mtp_next_token_ids = torch.where(b_has_out, next_token_ids, b_chunked_next_token_ids)
-
             self._draft_prefill_forward(
-                model_input=model_input, model_output=model_output, next_token_ids=mtp_next_token_ids
+                model_input=model_input, model_output=model_output, next_token_ids=next_token_ids
             )
             sync_event = torch.cuda.Event()
             sync_event.record()

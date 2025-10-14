@@ -397,7 +397,8 @@ class InferReq:
         if chunked_end < self.get_cur_total_len():
             next_token_id = self.shm_req.shm_prompt_ids.arr[chunked_end]
         else:
-            next_token_id = -1  # last chunk
+            # padding id for last chunck, will be discarded.
+            next_token_id = self.shm_req.shm_prompt_ids.arr[0]
 
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end], next_token_id
 

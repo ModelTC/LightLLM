@@ -354,13 +354,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             # mtp kv fill
             draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
             if req_num > 0:
-                b_has_out = torch.tensor(b_has_out_cpu, dtype=torch.bool, device="cuda")
-                b_chunked_next_token_ids = torch.tensor(
-                    model_input.b_chunked_prefill_next_token_ids_cpu[0:req_num], dtype=torch.int64, device="cuda"
-                )
-                mtp_next_token_ids = torch.where(b_has_out, next_token_ids, b_chunked_next_token_ids)
-                draft_next_token_ids_gpu[0:req_num].copy_(mtp_next_token_ids)
-
+                draft_next_token_ids_gpu[0:req_num].copy_(next_token_ids)
             self._draft_prefill_forward(
                 model_input=model_input,
                 model_output=model_output,
@@ -622,6 +616,10 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_has_out_cpu = (
                 model_input0.b_prefill_has_output_cpu[0:req_num0] + model_input1.b_prefill_has_output_cpu[0:req_num1]
             )
+            b_next_chunck_first_token_ids_cpu = (
+                model_input0.b_next_chunck_first_token_ids_cpu[0:req_num0]
+                + model_input1.b_next_chunck_first_token_ids_cpu[0:req_num1]
+            )
             b_mtp_index = torch.cat((model_input0.b_mtp_index[0:req_num0], model_input1.b_mtp_index[0:req_num1]), dim=0)
             b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
 
@@ -633,33 +631,20 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_mtp_index=b_mtp_index,
                     is_prefill=True,
                     b_prefill_has_output_cpu=b_has_out_cpu,
+                    b_next_chunck_first_token_ids_cpu=b_next_chunck_first_token_ids_cpu,
                 )
 
             # spec prefill: MTP
             draft_model_input0, draft_model_input1 = model_input0, model_input1
             draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")
             if req_num0 > 0:
-                b_has_out0 = torch.tensor(
-                    model_input0.b_prefill_has_output_cpu[0:req_num0], dtype=torch.bool, device="cuda"
-                )
-                b_chunked_next_token_ids0 = torch.tensor(
-                    model_input0.b_chunked_prefill_next_token_ids_cpu[0:req_num0], dtype=torch.int64, device="cuda"
-                )
-                mtp_next_token_ids0 = torch.where(b_has_out0, next_token_ids[0:req_num0], b_chunked_next_token_ids0)
-                draft_next_token_ids_gpu0[0:req_num0].copy_(mtp_next_token_ids0, non_blocking=True)
+                draft_next_token_ids_gpu0[0:req_num0].copy_(next_token_ids[0:req_num0], non_blocking=True)
 
             draft_next_token_ids_gpu1 = torch.zeros((model_input1.batch_size), dtype=torch.int64, device="cuda")
             if req_num1 > 0:
-                b_has_out1 = torch.tensor(
-                    model_input1.b_prefill_has_output_cpu[0:req_num1], dtype=torch.bool, device="cuda"
+                draft_next_token_ids_gpu1[0:req_num1].copy_(
+                    next_token_ids[req_num0 : (req_num0 + req_num1)], non_blocking=True
                 )
-                b_chunked_next_token_ids1 = torch.tensor(
-                    model_input1.b_chunked_prefill_next_token_ids_cpu[0:req_num1], dtype=torch.int64, device="cuda"
-                )
-                mtp_next_token_ids1 = torch.where(
-                    b_has_out1, next_token_ids[req_num0 : (req_num0 + req_num1)], b_chunked_next_token_ids1
-                )
-                draft_next_token_ids_gpu1[0:req_num1].copy_(mtp_next_token_ids1, non_blocking=True)
 
             draft_model_output0, draft_model_output1 = model_output0, model_output1
 

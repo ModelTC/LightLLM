@@ -20,7 +20,7 @@ def prepare_prefill_inputs(
     b_ready_cache_len = []
     b_mtp_index = []
     b_prefill_has_output = []
-    b_chunked_prefill_next_token_ids = []
+    b_next_chunck_first_token_ids = []
 
     for req in req_objs:
         run_reqs.append(req)
@@ -29,7 +29,7 @@ def prepare_prefill_inputs(
 
         if is_chuncked_mode:
             input_token_ids, next_token_id = req.get_chuncked_input_token_ids()
-            b_chunked_prefill_next_token_ids.append(next_token_id)
+            b_next_chunck_first_token_ids.append(next_token_id)
         else:
             input_token_ids = req.get_input_token_ids()
 
@@ -59,6 +59,7 @@ def prepare_prefill_inputs(
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
+    b_next_chunck_first_token_ids = torch.tensor(b_next_chunck_first_token_ids, dtype=torch.int64, device="cpu")
 
     # dynamic prompt cache 准备 token
     g_infer_state_lock.acquire()
@@ -82,7 +83,7 @@ def prepare_prefill_inputs(
         b_ready_cache_len=b_ready_cache_len,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
-        b_chunked_prefill_next_token_ids_cpu=b_chunked_prefill_next_token_ids,
+        b_next_chunck_first_token_ids_cpu=b_next_chunck_first_token_ids,
         prefix_total_token_num=prefix_total_token_num,
     )
     if is_multimodal:

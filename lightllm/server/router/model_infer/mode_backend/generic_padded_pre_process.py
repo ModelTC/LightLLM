@@ -36,7 +36,7 @@ def padded_prepare_prefill_inputs(
     b_ready_cache_len = []
     b_mtp_index = []
     b_prefill_has_output = []
-    b_chunked_prefill_next_token_ids = []
+    b_next_chunck_first_token_ids = []
 
     for req in req_objs:
 
@@ -45,7 +45,7 @@ def padded_prepare_prefill_inputs(
         b_req_idx.append(req.req_idx)
 
         input_token_ids, next_token_id = req.get_chuncked_input_token_ids()
-        b_chunked_prefill_next_token_ids.append(next_token_id)
+        b_next_chunck_first_token_ids.append(next_token_id)
         b_prefill_has_output.append(False if len(input_token_ids) < req.get_cur_total_len() else True)
         seq_len = len(input_token_ids)
         input_token_len = seq_len - req.cur_kv_len
@@ -67,7 +67,7 @@ def padded_prepare_prefill_inputs(
         b_q_seq_len.append(1)
         b_mtp_index.append(0)
         b_prefill_has_output.append(False)
-        b_chunked_prefill_next_token_ids.append(-1)
+        b_next_chunck_first_token_ids.append(0)
         b_ready_cache_len.append(0)
         total_token_num += 1
         prefix_total_token_num += 0
@@ -115,7 +115,7 @@ def padded_prepare_prefill_inputs(
         b_ready_cache_len=b_ready_cache_len,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
-        b_chunked_prefill_next_token_ids_cpu=b_chunked_prefill_next_token_ids,
+        b_next_chunck_first_token_ids_cpu=b_next_chunck_first_token_ids,
     )
     if is_multimodal:
         model_input.multimodal_params = batch_multimodal_params

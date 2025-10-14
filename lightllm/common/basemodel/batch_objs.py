@@ -31,7 +31,7 @@ class ModelInput:
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
     # 的一些变量
     b_prefill_has_output_cpu: List[bool] = None  # 标记进行prefill的请求是否具有输出
-    b_chunked_prefill_next_token_ids_cpu: List[int] = None  # for chunked prefill mtp
+    b_next_chunck_first_token_ids_cpu: List[int] = None  # for chuncked prefill mtp
 
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输入变量。只在特殊的模型模式下才会具体使用和生效。
