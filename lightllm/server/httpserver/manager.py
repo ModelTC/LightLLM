@@ -515,7 +515,7 @@ class HttpServerManager:
             )
             return
 
-        if self.pd_mode == NodeRole.D:
+        if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
