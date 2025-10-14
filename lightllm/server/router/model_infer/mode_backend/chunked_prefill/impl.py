@@ -190,8 +190,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 is_prefill=True,
                 b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
                 mask_func=self.prefill_mask_func,
+                b_next_chunck_first_token_ids_cpu=model_input.b_next_chunck_first_token_ids_cpu,
             )
-            # mtp kv fill
             self._draft_prefill_forward(
                 model_input=model_input, model_output=model_output, next_token_ids=next_token_ids
             )

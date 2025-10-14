@@ -658,6 +658,7 @@ class ModeBackend:
         is_prefill: bool,
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
+        b_next_chunck_first_token_ids_cpu: torch.Tensor = None,
     ):
 
         if mask_func is not None:
@@ -670,6 +671,11 @@ class ModeBackend:
             b_has_out = g_pin_mem_manager.gen_from_list(
                 key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
             ).cuda(non_blocking=True)
+            if b_next_chunck_first_token_ids_cpu is not None:
+                b_next_chunck_first_token_ids = g_pin_mem_manager.gen_from_list(
+                    key="b_next_chunck_first_token_ids", data=b_next_chunck_first_token_ids_cpu, dtype=torch.int64
+                ).cuda(non_blocking=True)
+                next_token_ids = torch.where(b_has_out, next_token_ids, b_next_chunck_first_token_ids)
 
         scatter_token(
             next_token_ids=next_token_ids,

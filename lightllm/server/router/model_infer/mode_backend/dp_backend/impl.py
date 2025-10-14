@@ -616,6 +616,10 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_has_out_cpu = (
                 model_input0.b_prefill_has_output_cpu[0:req_num0] + model_input1.b_prefill_has_output_cpu[0:req_num1]
             )
+            b_next_chunck_first_token_ids_cpu = (
+                model_input0.b_next_chunck_first_token_ids_cpu[0:req_num0]
+                + model_input1.b_next_chunck_first_token_ids_cpu[0:req_num1]
+            )
             b_mtp_index = torch.cat((model_input0.b_mtp_index[0:req_num0], model_input1.b_mtp_index[0:req_num1]), dim=0)
             b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
 
@@ -627,6 +631,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_mtp_index=b_mtp_index,
                     is_prefill=True,
                     b_prefill_has_output_cpu=b_has_out_cpu,
+                    b_next_chunck_first_token_ids_cpu=b_next_chunck_first_token_ids_cpu,
                 )
 
             # spec prefill: MTP
