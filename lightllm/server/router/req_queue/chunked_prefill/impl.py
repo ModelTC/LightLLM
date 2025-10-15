@@ -78,13 +78,8 @@ class ChunkedPrefillQueue(BaseQueue):
         aborted_count = 0
 
         waiting_queue = self.waiting_req_list
-        # 在开启 cpu cache 功能的情况下，由于multi_level_kv_cache 模块会对请求申请一些cpu kv cache
-        # 页面，这些页面的释放是在推理进程中完成的，所以如果直接在调度的时候就退出，会导致这些页面无法回收
-        # ，所以在使能 cpu cache 的情况下，不在调度的过程中进行 cpu cache页面的释放，而是延迟到推理的
-        # 过程中进行回收
-        disable_queue_aborted = get_env_start_args().enable_cpu_cache
         for req in waiting_queue:
-            if req.is_aborted and not disable_queue_aborted:
+            if req.is_aborted:
                 # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.
                 # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token的泄漏
                 aborted_count += 1
@@ -101,6 +96,7 @@ class ChunkedPrefillQueue(BaseQueue):
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
         for req in abort_req_list:
+            self.free_aborted_req_cpu_cache_pages(req)
             self.router.shm_req_manager.put_back_req_obj(req)
         self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
         return new_batch

@@ -4,10 +4,11 @@ from ..batch import Batch, Req
 from lightllm.server.core.objs import FinishStatus
 from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.utils.config_utils import get_fixed_kv_len
+from lightllm.server.core.objs import StartArgs
 
 
 class BaseQueue:
-    def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
+    def __init__(self, args: StartArgs, router, dp_index, dp_size_in_node) -> None:
         self.args = args
         self.dp_index = dp_index
         self.dp_size_in_node = dp_size_in_node
@@ -25,6 +26,13 @@ class BaseQueue:
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
         self.router_max_new_token_len = args.router_max_new_token_len
+
+    def free_aborted_req_cpu_cache_pages(self, req: Req):
+        if self.args.enable_cpu_cache:
+            self.router.cpu_cache_client.lock.acquire_sleep1ms()
+            self.router.cpu_cache_client.deref_pages(req.cpu_cache_match_page_indexes.get_all())
+            req.cpu_cache_match_page_indexes.clear()
+            self.router.cpu_cache_client.lock.release()
 
     def extend(self, req_group: List[Req]):
         for req in req_group:
