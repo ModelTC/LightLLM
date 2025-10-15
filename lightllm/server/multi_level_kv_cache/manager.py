@@ -33,11 +33,9 @@ class MultiLevelKVCacheManager:
         logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
-        # 控制同时进行cpu cache 匹配操作的数量。
-        self.semaphore = threading.Semaphore(3)
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
-        # 控制 cpu cache time out的时间，如果超过这个时间无法获取信号量则直接转发。
-        self.cpu_cache_time_out = 0.3
+        # 控制进行 cpu cache 页面匹配的时间，超过时间则不再匹配，直接转发。
+        self.cpu_cache_time_out = 0.5
         self.recv_queue = Queue(maxsize=1024)
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
@@ -57,17 +55,14 @@ class MultiLevelKVCacheManager:
         """
         match cpu cache pages
         """
-        # 进行超时判定，如果太长时间拿不到信号量，则说明匹配任务繁忙，
-        # 放弃进行 cpu cache page 的匹配。
-        while True:
-            current_time = time.time()
-            if current_time - start_time >= self.cpu_cache_time_out:
-                self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-                return
-
-            if self.semaphore.acquire(blocking=False):
-                break
-            time.sleep(0.005)
+        # 超时时，放弃进行 cpu cache page 的匹配。
+        current_time = time.time()
+        if current_time - start_time >= self.cpu_cache_time_out:
+            self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.warning(
+                f"cpu cache match time out {current_time - start_time}s, group_req_id: {group_req_indexes.group_req_id}"
+            )
+            return
 
         reqs_shm_index = group_req_indexes.shm_req_indexes
         reqs = [self.shm_req_manager.get_req_obj_by_index(index) for index in reqs_shm_index]
@@ -77,6 +72,7 @@ class MultiLevelKVCacheManager:
             # diverse_mode 只有主请求一个初始化 cpu cache 信息。
             if self.args.diverse_mode and req.request_id != req.group_req_id:
                 continue
+
             if req.is_aborted:
                 continue
 
@@ -92,7 +88,7 @@ class MultiLevelKVCacheManager:
                     break
             self.cpu_cache_client.lock.release()
 
-            # 等待所有的cpu cache 页面ready
+            # 等待所有的 cpu cache 页面ready
             while not self.cpu_cache_client.check_allpages_ready(finded_page_indexes):
                 time.sleep(0.01)
 
@@ -100,9 +96,6 @@ class MultiLevelKVCacheManager:
 
         for req in reqs:
             self.shm_req_manager.put_back_req_obj(req)
-
-        # 释放信号量
-        self.semaphore.release()
 
         self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
         return
