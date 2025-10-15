@@ -842,7 +842,8 @@ class TpPartBaseModel:
         )
         b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
         b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-        b_prefill_start_loc = F.pad(torch.cumsum(b_seq_len, dim=0), (1, 0), value=0)[:-1]
+        b_q_seq_len = b_seq_len - b_ready_cache_len
+        b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         total_token_num = prefill_input_len * batch_size
         b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         model_input = ModelInput(
