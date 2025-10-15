@@ -10,7 +10,7 @@ import triton
 from functools import lru_cache
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import get_config_json
+from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, get_model_type
 from typing import List, Tuple, Optional
 from tqdm import tqdm
 from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
@@ -83,12 +83,21 @@ class AsyncRegistrationHandle:
 def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
-    model_config = get_config_json(args.model_dir)
-    item_size = 2
-    head_dim = model_config["hidden_size"] // model_config["num_attention_heads"]
-    head_dim = model_config.get("head_dim", head_dim)
-    num_key_value_heads = model_config["num_key_value_heads"] * 2  # key and value
-    layer_num = model_config["num_hidden_layers"]
+
+    if get_model_type() in ["deepseek_v2", "deepseek_v3"]:
+        item_size = 2
+        num_key_value_heads = get_num_key_value_heads(args.model_dir) * 2
+        head_dim = get_head_dim(args.model_dir)
+        layer_num = get_layer_num(args.model_dir)
+    else:
+        item_size = 2
+        num_key_value_heads = 1
+        head_dim = 512 + 64
+        layer_num = get_layer_num(args.model_dir)
+
+    if args.mtp_mode is not None:
+        # TODO others mode support
+        layer_num += 1
 
     one_token_byte_size = layer_num * num_key_value_heads * head_dim * item_size
     one_page_byte_size = args.cpu_cache_token_page_size * one_token_byte_size
