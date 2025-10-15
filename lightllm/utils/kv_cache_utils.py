@@ -44,41 +44,6 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
     return chunks_hash_value
 
 
-class AsyncRegistrationHandle:
-    """A handle for async host memory registration.
-
-    - wait(): blocks until registration finishes, prints tqdm progress, and returns device pointer (int).
-    """
-
-    def __init__(self, total_tasks: int):
-        self.total_tasks = total_tasks
-        self.task_count = 0
-        self.thread: Optional[threading.Thread] = None
-        self.tasks_finished = threading.Event()
-
-    def wait(self):
-        """Block until the async registration completes. Only here we print tqdm progress."""
-        last_count = 0
-        desc = f"pid {os.getpid()} Registering pinned host memory (async)"
-        with tqdm(total=self.total_tasks, desc=desc) as pbar:
-            while not self.tasks_finished.is_set():
-                cur = self.task_count
-                if cur > last_count:
-                    pbar.update(cur - last_count)
-                    last_count = cur
-                time.sleep(0.01)
-            # final update
-            cur = self.task_count
-            if cur > last_count:
-                pbar.update(cur - last_count)
-                last_count = cur
-
-        if self.thread is not None and self.thread.is_alive():
-            self.thread.join()
-
-        return
-
-
 @lru_cache(maxsize=None)
 def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
@@ -202,7 +167,7 @@ class CpuKVCacheMeta:
 
 
 @lru_cache(maxsize=None)
-def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> AsyncRegistrationHandle:
+def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle":
     """Start async cudaHostRegister on the given [shm_ptr, shm_ptr+size) and return a handle."""
     chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
     tasks: list[tuple[int, int]] = []
@@ -224,6 +189,7 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> AsyncRegistrationHandle:
         cudaHostRegisterDefault = 0
 
         torch.cuda.set_device(get_current_device_id())
+        # TODO 这个地方的分块注册是否具备合法性和合理性。
         for offset, seg_len in tasks:
             ptr = ctypes.c_void_p(shm_ptr + offset)
             r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterDefault)
@@ -242,6 +208,41 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> AsyncRegistrationHandle:
     handle.thread = th
     th.start()
     return handle
+
+
+class AsyncRegistrationHandle:
+    """A handle for async host memory registration.
+
+    - wait(): blocks until registration finishes, prints tqdm progress, and returns device pointer (int).
+    """
+
+    def __init__(self, total_tasks: int):
+        self.total_tasks = total_tasks
+        self.task_count = 0
+        self.thread: Optional[threading.Thread] = None
+        self.tasks_finished = threading.Event()
+
+    def wait(self):
+        """Block until the async registration completes. Only here we print tqdm progress."""
+        last_count = 0
+        desc = f"pid {os.getpid()} Registering pinned host memory (async)"
+        with tqdm(total=self.total_tasks, desc=desc) as pbar:
+            while not self.tasks_finished.is_set():
+                cur = self.task_count
+                if cur > last_count:
+                    pbar.update(cur - last_count)
+                    last_count = cur
+                time.sleep(0.01)
+            # final update
+            cur = self.task_count
+            if cur > last_count:
+                pbar.update(cur - last_count)
+                last_count = cur
+
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join()
+
+        return
 
 
 @lru_cache(maxsize=None)
