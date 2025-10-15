@@ -84,15 +84,15 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    if get_model_type(model_path=args.model_dir) not in ["deepseek_v2", "deepseek_v3"]:
-        item_size = 2
-        num_key_value_heads = get_num_key_value_heads(args.model_dir) * 2
-        head_dim = get_head_dim(args.model_dir)
-        layer_num = get_layer_num(args.model_dir)
-    else:
+    if get_model_type(model_path=args.model_dir) in ["deepseek_v2", "deepseek_v3"]:
         item_size = 2
         num_key_value_heads = 1
         head_dim = 512 + 64
+        layer_num = get_layer_num(args.model_dir)
+    else:
+        item_size = 2
+        num_key_value_heads = get_num_key_value_heads(args.model_dir) * 2
+        head_dim = get_head_dim(args.model_dir)
         layer_num = get_layer_num(args.model_dir)
 
     if args.mtp_mode is not None:
@@ -157,13 +157,14 @@ def create_shm_kv_cache_ptr() -> int:
 
     # 优先尝试 HugeTLB 分配，失败则回退到普通页
     shmid = libc.shmget(key, size_to_alloc, shmflg)
+    hugepages_num = (size_to_alloc + 1024 * 1024 * 1024 - 1) // (1024 * 1024 * 1024)
     if shmid < 0 and use_hugetlb:
         err = ctypes.get_errno()
         logger.error(
             f"shmget with SHM_HUGETLB failed (errno={err}). Falling back to regular pages."
             f"You may need to configure hugepages manually, e.g.,"
             f"sudo sed -i 's/^GRUB_CMDLINE_LINUX=\"/& default_hugepagesz=1G \
-                hugepagesz=1G hugepages=1000/' /etc/default/grub"
+                hugepagesz=1G hugepages={hugepages_num}/' /etc/default/grub"
             f"sudo update-grub"
             f"sudo reboot"
         )
