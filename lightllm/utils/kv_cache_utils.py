@@ -84,7 +84,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    if get_model_type() in ["deepseek_v2", "deepseek_v3"]:
+    if get_model_type() not in ["deepseek_v2", "deepseek_v3"]:
         item_size = 2
         num_key_value_heads = get_num_key_value_heads(args.model_dir) * 2
         head_dim = get_head_dim(args.model_dir)
@@ -96,7 +96,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         layer_num = get_layer_num(args.model_dir)
 
     if args.mtp_mode is not None:
-        # TODO others mode support
+        # TODO 可能会存在不同mtp模式的精度问题
         layer_num += 1
 
     one_token_byte_size = layer_num * num_key_value_heads * head_dim * item_size
