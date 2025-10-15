@@ -28,7 +28,7 @@ def _get_config_llm_keyvalue(model_path: str, key_name: str):
     if value is None:
         logger.error(f"cannot get {key_name} from config.json, return None")
 
-    return None
+    return value
 
 
 def get_hidden_size(model_path: str) -> Optional[int]:

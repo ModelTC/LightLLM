@@ -84,7 +84,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    if get_model_type() not in ["deepseek_v2", "deepseek_v3"]:
+    if get_model_type(model_path=args.model_dir) not in ["deepseek_v2", "deepseek_v3"]:
         item_size = 2
         num_key_value_heads = get_num_key_value_heads(args.model_dir) * 2
         head_dim = get_head_dim(args.model_dir)
