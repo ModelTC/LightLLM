@@ -119,13 +119,12 @@ def get_vocab_size(model_path: str):
 
 
 def get_dtype(model_path: str):
-    config_json = get_config_json(model_path)
-    try:
-        torch_dtype = config_json["torch_dtype"]
-        return torch_dtype
-    except:
+    torch_dtype = _get_config_llm_keyvalue(model_path=model_path, key_name="torch_dtype")
+    if torch_dtype is None:
         logger.warning("torch_dtype not in config.json, use float16 as default")
         return "float16"
+    else:
+        return torch_dtype
 
 
 @lru_cache(maxsize=None)
