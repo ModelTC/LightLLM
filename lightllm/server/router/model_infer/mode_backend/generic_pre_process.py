@@ -20,6 +20,7 @@ def prepare_prefill_inputs(
     b_ready_cache_len = []
     b_mtp_index = []
     b_prefill_has_output = []
+    b_prefill_start_loc = [0]
 
     for req in req_objs:
         run_reqs.append(req)
@@ -40,6 +41,7 @@ def prepare_prefill_inputs(
 
         b_seq_len.append(seq_len)
         b_q_seq_len.append(input_token_len)
+        b_prefill_start_loc.append(b_prefill_start_loc[-1] + input_token_len)
         input_ids.append(input_id)
         total_token_num += seq_len
         prefix_total_token_num += req.cur_kv_len
@@ -57,6 +59,7 @@ def prepare_prefill_inputs(
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
+    b_prefill_start_loc = torch.tensor(b_prefill_start_loc, dtype=torch.int32, device="cpu")
 
     # dynamic prompt cache 准备 token
     g_infer_state_lock.acquire()
@@ -78,6 +81,7 @@ def prepare_prefill_inputs(
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
         b_ready_cache_len=b_ready_cache_len,
+        b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
         prefix_total_token_num=prefix_total_token_num,
