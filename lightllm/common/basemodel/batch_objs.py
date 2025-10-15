@@ -24,6 +24,7 @@ class ModelInput:
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
+    b_prefill_start_loc: torch.Tensor = None
     multimodal_params: list = field(default_factory=list)
 
     # cpu 变量
@@ -49,6 +50,8 @@ class ModelInput:
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
         if self.b_ready_cache_len is not None:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
+        if self.b_prefill_start_loc is not None:
+            self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
 
 
 @dataclass
