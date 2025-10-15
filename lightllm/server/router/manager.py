@@ -23,6 +23,7 @@ from lightllm.server.core.objs.io_objs import (
 )
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
+from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
@@ -99,6 +100,8 @@ class RouterManager:
         g_router_lock.obj = self.router_lock
 
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
+
+        self.cpu_cache_client = None if not self.args.enable_cpu_cache else CpuKvCacheClient(init_shm_data=False)
         return
 
     async def wait_to_model_ready(self):
