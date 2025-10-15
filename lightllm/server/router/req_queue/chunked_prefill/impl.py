@@ -3,7 +3,6 @@ import numpy as np
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 from lightllm.common.basemodel.infer_lock import g_router_lock
-from lightllm.utils.envs_utils import get_env_start_args
 
 
 class ChunkedPrefillQueue(BaseQueue):
@@ -78,6 +77,7 @@ class ChunkedPrefillQueue(BaseQueue):
         aborted_count = 0
 
         waiting_queue = self.waiting_req_list
+
         for req in waiting_queue:
             if req.is_aborted:
                 # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.

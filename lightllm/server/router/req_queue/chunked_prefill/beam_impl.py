@@ -2,7 +2,6 @@ import uuid
 from typing import List
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
-from lightllm.utils.envs_utils import get_env_start_args
 
 
 class ChunkedBeamContinuesBatchQueue(BaseQueue):
