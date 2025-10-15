@@ -8,9 +8,9 @@ from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
+from lightllm.models.interns1.interns1_visual import InternS1VisionTransformer
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
-from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
@@ -72,6 +72,8 @@ class VisualModelRpcServer(rpyc.Service):
                 # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
                 self.model = Gemma3VisionModel()
+            elif self.model_type == "interns1":
+                self.model = InternS1VisionTransformer()
             else:
                 raise Exception(f"can not support {self.model_type} now")
 
