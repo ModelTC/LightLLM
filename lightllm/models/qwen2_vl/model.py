@@ -51,8 +51,9 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
 
     def get_image_token_length(self, img: ImageItem):
         width, height = img.image_w, img.image_h
+        factor = self.patch_size * self.merge_size
         resized_height, resized_width = smart_resize(
-            height=height, width=width, min_pixels=self.min_pixel, max_pixels=self.max_pixel
+            height=height, width=width, factor=factor, min_pixels=self.min_pixel, max_pixels=self.max_pixel
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
         token_num = (grid_h * grid_w) // (self.merge_size ** 2)
