@@ -35,7 +35,7 @@ def _compare_and_swap(x, x_1, ids, flip, i: tl.core.constexpr, n_dims: tl.core.c
     iright = right.to(idtype, bitcast=True)
     ix = x.to(idtype, bitcast=True)
 
-    cond = (left > right) ^ flip
+    cond = ((left > right) ^ flip) > 0
 
     ret = ix ^ tl.core.where(cond, ileft ^ iright, zeros_like(ix))
 

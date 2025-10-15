@@ -60,7 +60,8 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
         transformer_layer_list=transformer_layer_list,
         weight_dir=weight_dir,
     )  # noqa
-    worker = int(os.environ.get("LOADWORKER", 1))
+    cpu_count = min(16, os.cpu_count() or 4)
+    worker = min(cpu_count, len(candidate_files))
     with Pool(worker) as p:
         iterator = p.imap_unordered(partial_func, candidate_files, chunksize=1)
         desc_str = f"pid {os.getpid()} Loading model weights with {worker} workers"
