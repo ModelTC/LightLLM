@@ -33,7 +33,6 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         self.image_processor = image_processor
         self.min_pixel = self.image_processor.min_pixels
         self.max_pixel = self.image_processor.max_pixels
-        print(f"int tokenizer, self.max_pixel is {self.max_pixel}")
         self.patch_size = self.image_processor.patch_size
         self.merge_size = self.image_processor.merge_size
         self.image_start_id = kwargs["model_cfg"]["vision_start_token_id"]

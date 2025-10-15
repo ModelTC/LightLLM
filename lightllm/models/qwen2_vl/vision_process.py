@@ -100,7 +100,6 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
         self.image_std = image_std if image_std is not None else OPENAI_CLIP_STD
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
-        print(f"self.max_pixels is {self.max_pixels}")
         self.patch_size = patch_size
         self.temporal_patch_size = temporal_patch_size
         self.merge_size = merge_size
