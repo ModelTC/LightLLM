@@ -2,6 +2,7 @@ import os
 import ctypes
 import atexit
 import signal
+import threading
 import psutil
 from multiprocessing import shared_memory
 from typing import Set, Optional
@@ -11,6 +12,10 @@ logger = init_logger(__name__)
 
 
 class AutoShmCleanup:
+    """
+    自动清理 System V 和 POSIX 共享内存
+    shared_memory.SharedMemory虽然有自动请理功能，但如果自动清理时仍有进程占用会清理失败，这里可做最后兜底清理
+    """
     def __init__(self):
         self.libc = None
         self._init_libc()
@@ -19,6 +24,7 @@ class AutoShmCleanup:
         self.registered_shm_ids = []
         # POSIX
         self.registered_posix_shm_names = []
+        self.signal_handlers_registered = False
         self._register_handlers_for_cleanup()
 
     def _init_libc(self):
@@ -34,8 +40,14 @@ class AutoShmCleanup:
 
     def _register_handlers_for_cleanup(self):
         atexit.register(self._cleanup)
+        self.register_signal_handlers()
+
+    def register_signal_handlers(self):
+        if self.signal_handlers_registered or not threading.current_thread() is threading.main_thread():
+            return
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, self._signal_cleanup_handler)
+        self.signal_handlers_registered = True
 
     def _signal_cleanup_handler(self, signum, frame):
         self._cleanup()
@@ -110,6 +122,7 @@ def get_auto_cleanup() -> AutoShmCleanup:
     global _auto_cleanup
     if _auto_cleanup is None:
         _auto_cleanup = AutoShmCleanup()
+    _auto_cleanup.register_signal_handlers()
     return _auto_cleanup
 
 

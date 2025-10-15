@@ -106,7 +106,7 @@ class StartArgs:
     pd_node_id: int = field(default=-1)
     enable_cpu_cache: bool = field(default=False)
     cpu_cache_storage_size: float = field(default=2)
-    cpu_cache_token_page_size: int = field(default=256)
+    cpu_cache_token_page_size: int = field(default=64)
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
     # zmp ports

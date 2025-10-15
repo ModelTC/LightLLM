@@ -367,9 +367,9 @@ class ModeBackend:
                 else:
                     assert False, f"error type {type(obj)}"
             if init_reqs:
-                self._init_reqs(reqs=init_reqs)
-                if self.args.enable_cpu_cache:
-                    self._fill_cpu_cache_to_reqs(req_ids=init_reqs)
+                req_ids = self._init_reqs(reqs=init_reqs)
+                if self.args.enable_cpu_cache and req_ids:
+                    self._fill_cpu_cache_to_reqs(req_ids=req_ids)
         return
 
     def _read_nixl_trans_io_buffer_and_update_req_status(self):
@@ -403,7 +403,6 @@ class ModeBackend:
                                     is_master_in_dp=self.is_master_in_dp,
                                     nixl_prefill_chuncked_handle_func=None,
                                 )
-
         return
 
     # 一些可以复用的通用功能函数

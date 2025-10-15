@@ -261,10 +261,11 @@ class _HashLinkItem(_LinkedListItem):
         self.value = -1
 
 
-def _create_shm(name: str, byte_size: int):
+def _create_shm(name: str, byte_size: int, auto_cleanup: bool = False):
     try:
         shm = shared_memory.SharedMemory(name=name, create=True, size=byte_size)
-        register_posix_shm_for_cleanup(name)
+        if auto_cleanup:
+            register_posix_shm_for_cleanup(name)
         logger.info(f"create lock shm {name}")
     except:
         shm = shared_memory.SharedMemory(name=name, create=False, size=byte_size)

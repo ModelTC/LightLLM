@@ -35,14 +35,13 @@ class MultiLevelKvCacheModule(object):
         if attach_shm_handle is not None:
             attach_shm_handle.wait()
 
-    def _compute_full_sequence_hash(self, req: InferReq):
+    def _compute_sequence_hash(self, req: InferReq):
+        # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
+        if not req.shm_req.token_hash_list.is_empty():
+            return req.shm_req.token_hash_list.get_all()
+
         input_tokens = req.shm_req.get_prompt_ids()
-        total_len = req.shm_req.input_len + req.shm_req.shm_cur_output_len
-        if total_len > req.shm_req.input_len:
-            full_sequence = req.shm_req.shm_prompt_ids.arr[:total_len].tolist()
-        else:
-            full_sequence = input_tokens
-        return compute_token_list_hash(full_sequence, self.args.cpu_cache_token_page_size)
+        return compute_token_list_hash(input_tokens, self.args.cpu_cache_token_page_size)
 
     def handle_finished_reqs(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """
@@ -98,9 +97,9 @@ class MultiLevelKvCacheModule(object):
     ) -> Optional["TransTask"]:
         with torch.cuda.stream(cpu_kv_cache_stream):
             if self.backend.is_master_in_dp:
-                all_token_hash_list = self._compute_full_sequence_hash(req)
+                token_hash_list = self._compute_sequence_hash(req)
                 block_size = req.cur_kv_len // self.args.cpu_cache_token_page_size
-                move_block_size = min(block_size, len(all_token_hash_list))
+                move_block_size = min(block_size, len(token_hash_list))
 
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
@@ -110,7 +109,7 @@ class MultiLevelKvCacheModule(object):
                 try:
                     self.cpu_cache_client.lock.acquire_sleep1ms()
                     page_list, ready_list = self.cpu_cache_client.allocate_pages(
-                        all_token_hash_list[:move_block_size],
+                        token_hash_list[:move_block_size],
                         disk_offload_enable=self.args.enable_disk_cache,
                     )
                 finally:
