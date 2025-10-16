@@ -35,14 +35,6 @@ class MultiLevelKvCacheModule(object):
         if attach_shm_handle is not None:
             attach_shm_handle.wait()
 
-    def _compute_sequence_hash(self, req: InferReq):
-        # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
-        if not req.shm_req.token_hash_list.is_empty():
-            return req.shm_req.token_hash_list.get_all()
-
-        input_tokens = req.shm_req.get_prompt_ids()
-        return compute_token_list_hash(input_tokens, self.args.cpu_cache_token_page_size)
-
     def handle_finished_reqs(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """
         将满足cpu kv cache 卸载条件的请求进行处理，并返回需要真正退出的请求列表。
@@ -97,7 +89,8 @@ class MultiLevelKvCacheModule(object):
     ) -> Optional["TransTask"]:
         with torch.cuda.stream(cpu_kv_cache_stream):
             if self.backend.is_master_in_dp:
-                token_hash_list = self._compute_sequence_hash(req)
+                # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
+                token_hash_list = req.shm_req.token_hash_list.get_all()
                 block_size = req.cur_kv_len // self.args.cpu_cache_token_page_size
                 move_block_size = min(block_size, len(token_hash_list))
 
