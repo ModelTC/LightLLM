@@ -44,14 +44,14 @@ def test_kernel(
         input_tuples.append((input.clone(), output.clone()))
 
     # warm_up
-    silu_and_mul_fwd(input, output, **config)
+    silu_and_mul_fwd(input, output, run_config=config)
 
     graph = torch.cuda.CUDAGraph()
 
     with torch.cuda.graph(graph):
         for index in range(test_count):
             input, output = input_tuples[index]
-            silu_and_mul_fwd(input, output, **config)
+            silu_and_mul_fwd(input, output, run_config=config)
 
     graph.replay()
 
@@ -100,12 +100,13 @@ def worker(
 
 def get_test_configs(split_id, split_count):
     index = 0
-    result = itertools.product([1, 2, 4, 8, 16, 32], [64, 128, 256, 512, 1024], [1, 2, 4, 8, 16])
-    for BLOCK_M, BLOCK_N, num_warps in result:
+    result = itertools.product([1, 2, 4, 8, 16, 32], [64, 128, 256, 512, 1024], [1, 2, 4, 8, 16], [1, 2, 4, 8, 16])
+    for BLOCK_M, BLOCK_N, num_warps, NUM_STAGES in result:
         t_config = {
             "BLOCK_M": BLOCK_M,
             "BLOCK_N": BLOCK_N,
             "num_warps": num_warps,
+            "NUM_STAGES": NUM_STAGES,
         }
         if index % split_count == split_id:
             yield t_config
@@ -196,7 +197,7 @@ if __name__ == "__main__":
     from lightllm.utils.tuning_utils import mp_tuning
 
     # tuning to get silu and mul
-    for n in [128, 192, 256, 512, 1024, 1408, 2048, 4096, 8192]:
+    for n in [128, 2304, 192, 256, 512, 1024, 1408, 2048, 4096, 8192]:
         json_dict = {}
         for m in [1, 8, 64, 128, 200, 256, 512, 1024, 2048, 4096, 8192]:
             ans = mp_tuning(

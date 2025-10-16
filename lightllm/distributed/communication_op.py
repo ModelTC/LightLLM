@@ -49,12 +49,7 @@ from .custom_all_gather import CustomAllgather
 
 try:
     import deep_ep
-    from deep_gemm.jit_kernels.utils import set_num_sms
 
-    deepep_sms = int(os.getenv("DEEPEP_SMS", deep_ep.Buffer.num_sms))
-    device_sms = get_device_sm_count()
-    deep_ep.Buffer.set_num_sms(deepep_sms)
-    set_num_sms(device_sms - deepep_sms)
     HAS_DEEPEP = True
 except:
     HAS_DEEPEP = False
@@ -67,6 +62,7 @@ class CustomProcessGroup:
         self.custom_gather = None
         self.dp_world_size = get_dp_world_size()
         self.device_group = create_new_group_for_current_dp("nccl")
+        self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
     def init_custom_reduce(self) -> None:
         if not HAS_SGL_KERNEL or not has_nvlink() or self.dp_world_size not in [2, 4, 6, 8]:
@@ -140,6 +136,8 @@ class DistributeGroupManager:
             self.ep_buffer = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
+        self._set_num_sms_for_deep_gemm()
+
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
         low_latency_mode, num_rdma_bytes = True, 0
@@ -156,6 +154,20 @@ class DistributeGroupManager:
             low_latency_mode=low_latency_mode,
             num_qps_per_rank=(self.ll_num_experts // global_world_size if low_latency_mode else 1),
         )
+
+    def _set_num_sms_for_deep_gemm(self):
+        try:
+            try:
+                from deep_gemm.jit_kernels.utils import set_num_sms
+            except:
+                from deep_gemm import set_num_sms
+
+            deepep_sms = int(os.getenv("DEEPEP_SMS", deep_ep.Buffer.num_sms))
+            device_sms = get_device_sm_count()
+            deep_ep.Buffer.set_num_sms(deepep_sms)
+            set_num_sms(device_sms - deepep_sms)
+        except BaseException as e:
+            logger.warning(f"set num sms for deep_gemm failed: {e}")
 
     def clear_deepep_buffer(self):
         """

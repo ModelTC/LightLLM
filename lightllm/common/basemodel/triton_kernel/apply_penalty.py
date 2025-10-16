@@ -61,7 +61,7 @@ def _fwd_kernel_apply_penalty(
         cur_eos_logit_ptr = Logits + cur_batch * stride_logit_b + eos_id
         cur_eos_logit = tl.load(cur_eos_logit_ptr)
         cur_eos_logit = cur_eos_logit + tl.abs(cur_eos_logit) * penalty_scale
-        cur_eos_logit = tl.where(mask_eos, -10000000.0, cur_eos_logit)
+        cur_eos_logit = tl.where(mask_eos != 0, -10000000.0, cur_eos_logit)
         tl.store(cur_eos_logit_ptr, cur_eos_logit)
     return
 

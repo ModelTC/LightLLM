@@ -93,11 +93,11 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         qweights = torch.empty_like(weight, dtype=torch.float8_e4m3fn).cuda(self.device_id_)
         for i in range(num_experts):
             qweight, weight_scale = scaled_fp8_quant(
-                weight[i].contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=False
+                weight[i].contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
             )
             qweights[i] = qweight
             weight_scales.append(weight_scale)
-        weight_scale = torch.cat(weight_scales, dim=0).reshape(-1)
+        weight_scale = torch.stack(weight_scales, dim=0).contiguous()
         return qweights, weight_scale
 
     def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
@@ -131,21 +131,13 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         qweight, weight_scale, input_scale = weights
         m, k = input_tensor.shape
         n = weights[0].shape[1]
+        alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         if input_scale is None:
-            input_scale = self.cache_manager.alloc_tensor(
-                (m, k // self.block_size), torch.float32, device=input_tensor.device, is_graph_out=False
+            qinput_tensor, input_scale = per_token_group_quant_fp8(
+                input_tensor, self.block_size, dtype=qweight.dtype, alloc_func=alloc_func
             )
-            qinput_tensor = self.cache_manager.alloc_tensor(
-                (m, k), qweight.dtype, device=qweight.device, is_graph_out=False
-            )
-            per_token_group_quant_fp8(input_tensor, self.block_size, qinput_tensor, input_scale)
         if out is None:
-            if use_custom_tensor_mananger:
-                out = self.cache_manager.alloc_tensor(
-                    (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
-                )
-            else:
-                out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
+            out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         if n % 128 != 0:
             w8a8_block_fp8_matmul(
                 qinput_tensor,

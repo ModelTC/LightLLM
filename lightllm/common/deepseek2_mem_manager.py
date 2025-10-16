@@ -8,6 +8,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_d_node, kv_trans_v2_for_p_node
 from lightllm.distributed.pynccl import PyNcclCommunicator
+from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
 
 logger = init_logger(__name__)
 
@@ -35,6 +36,57 @@ class Deepseek2MemoryManager(MemoryManager):
         self.kv_move_buf_indexes = torch.arange(0, max_req_total_len + 8, dtype=torch.int64, device="cuda")
         self.token_dim_size = self.kv_move_buffer.shape[-1] * self.kv_move_buffer.shape[-2]
         return
+
+    def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
+        self.kv_move_buffer = torch.empty(
+            (page_num, page_size, self.layer_num, self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
+        )
+        self._buffer_mem_indexes_tensors = [
+            torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
+        ]
+        return self.kv_move_buffer
+
+    def write_mem_to_page_kv_move_buffer(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+    ):
+        cur_page = self.kv_move_buffer[page_index]
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        mla_page_io(
+            mem_indexes=mem_indexes_gpu,
+            page_tensor=cur_page,
+            kv_buffer=dp_mems[0].kv_buffer,
+            mode="write",
+        )
+        return
+
+    def read_page_kv_move_buffer_to_mem(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+    ):
+        cur_page = self.kv_move_buffer[page_index]
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        for mem in dp_mems:
+            mla_page_io(
+                mem_indexes=mem_indexes_gpu,
+                page_tensor=cur_page,
+                kv_buffer=mem.kv_buffer,
+                mode="read",
+            )
 
     def send_to_decode_node(
         self,

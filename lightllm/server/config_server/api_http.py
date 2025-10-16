@@ -2,6 +2,7 @@ import time
 import asyncio
 import base64
 import pickle
+import setproctitle
 import multiprocessing as mp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query
 from threading import Lock
@@ -10,7 +11,7 @@ from fastapi.responses import JSONResponse
 from lightllm.utils.log_utils import init_logger
 from ..pd_io_struct import PD_Master_Obj
 from .nccl_tcp_store import start_tcp_store_server
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
 from lightllm.utils.process_check import start_parent_check_thread
 
 
@@ -202,5 +203,6 @@ async def http_start_tcp_store_server(
         return {"status": "ok"}
 
 
+setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::config_server")
 logger.info("config server start_parent_check_thread...")
 start_parent_check_thread()

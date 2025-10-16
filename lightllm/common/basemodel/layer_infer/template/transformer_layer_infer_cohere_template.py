@@ -42,8 +42,9 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         raise Exception("need to impl")
 
     def _get_qkv(
-        self, input, cache_kv, infer_state: InferStateInfo, layer_weight
+        self, input, infer_state: InferStateInfo, layer_weight
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
         q = torch.mm(input.view(-1, self.embed_dim_), layer_weight.q_weight_)
         torch.mm(
             input.view(-1, self.embed_dim_),
@@ -76,8 +77,7 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         raise Exception("need to impl")
 
     def _context_attention(self, input_embding, infer_state: InferStateInfo, layer_weight):
-        cache_kv = self._pre_cache_kv(infer_state, layer_weight)
-        q, cache_kv = self._get_qkv(input_embding, cache_kv, infer_state, layer_weight)
+        q, cache_kv = self._get_qkv(input_embding, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
@@ -95,8 +95,7 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
         return
 
     def _token_attention(self, input_embding, infer_state: InferStateInfo, layer_weight):
-        cache_kv = self._pre_cache_kv(infer_state, layer_weight)
-        q, cache_kv = self._get_qkv(input_embding, cache_kv, infer_state, layer_weight)
+        q, cache_kv = self._get_qkv(input_embding, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None

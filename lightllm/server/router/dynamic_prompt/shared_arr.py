@@ -4,6 +4,7 @@
 import numpy as np
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
 
 logger = init_logger(__name__)
 
@@ -12,25 +13,7 @@ class SharedArray:
     def __init__(self, name, shape, dtype):
         dtype_byte_num = np.array([1], dtype=dtype).dtype.itemsize
         dest_size = np.prod(shape) * dtype_byte_num
-        try:
-            shm = shared_memory.SharedMemory(name=name, create=True, size=dest_size)
-            logger.info(f"create shm {name}")
-        except:
-            shm = shared_memory.SharedMemory(name=name, create=False, size=dest_size)
-            logger.info(f"link shm {name}")
-
-        if shm.size != dest_size:
-            logger.info(f"size not same, unlink shm {name} and create again")
-            shm.unlink()
-            shm.close()
-            try:
-                shm = shared_memory.SharedMemory(name=name, create=True, size=dest_size)
-                logger.info(f"create shm {name}")
-            except Exception as e:
-                shm = shared_memory.SharedMemory(name=name, create=False, size=dest_size)
-                logger.info(f"error {str(e)} to link shm {name}")
-
-        self.shm = shm  # SharedMemory 对象一定要被持有，否则会被释放
+        self.shm = create_or_link_shm(name, dest_size)
         self.arr = np.ndarray(shape, dtype=dtype, buffer=self.shm.buf)
 
 

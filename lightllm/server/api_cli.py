@@ -7,7 +7,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run_mode",
         type=str,
-        choices=["normal", "prefill", "decode", "pd_master", "config_server"],
+        choices=["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server"],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
@@ -43,6 +43,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="p d mode, decode node used for kv move manager rpyc server port",
     )
     parser.add_argument(
+        "--select_p_d_node_strategy",
+        type=str,
+        default="round_robin",
+        choices=["random", "round_robin", "adaptive_load"],
+        help="pd master use this strategy to select p d node, can be round_robin, random or adaptive_load",
+    )
+    parser.add_argument(
         "--config_server_host",
         type=str,
         default=None,
@@ -54,6 +61,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="The port number for the config server in config_server mode.",
     )
+    parser.add_argument(
+        "--nixl_pd_kv_page_num",
+        type=int,
+        default=16,
+        help="nixl pd mode, kv move page_num",
+    )
+
+    parser.add_argument(
+        "--nixl_pd_kv_page_size",
+        type=int,
+        default=1024,
+        help="nixl pd mode, kv page size.",
+    )
+
     parser.add_argument(
         "--model_name",
         type=str,
@@ -136,6 +157,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""This is just a useful parameter for deepseekv2. When
                         using the deepseekv2 model, set dp to be equal to the tp parameter. In other cases, please
                         do not set it and keep the default value as 1.""",
+    )
+    parser.add_argument(
+        "--dp_balancer",
+        type=str,
+        default="bs_balancer",
+        choices=["round_robin", "bs_balancer"],
+        help="the dp balancer type, default is bs_balancer",
     )
     parser.add_argument(
         "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
@@ -296,10 +324,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )
-    parser.add_argument(
-        "--enable_concurrent_alloc", action="store_true", help="alloc multimodal resources in threadpool to save time"
-    )
-    parser.add_argument("--concurrent_alloc_workers", type=int, default=4, help="max concurrent threadpool workers")
+    parser.add_argument('--max_tasks_per_worker', type=int, default=32, 
+                    help='Maximum number of tasks each worker thread can handle (default: 32)')
+    parser.add_argument("--concurrent_alloc_workers", type=int, default=2, help="max concurrent threadpool workers")
     parser.add_argument(
         "--data_type",
         type=str,
@@ -420,7 +447,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--sampling_backend",
         type=str,
         choices=["triton", "sglang_kernel"],
-        default="sglang_kernel",
+        default="triton",
         help="""sampling used impl. 'triton' is use torch and triton kernel,
         sglang_kernel use sglang_kernel impl""",
     )
@@ -456,8 +483,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
     )
     parser.add_argument(
+        "--enable_fused_shared_experts",
+        action="store_true",
+        help="""Whether to enable fused shared experts for deepseekv3 model. only work when MOE_MODE=TP """,
+    )
+    parser.add_argument(
         "--mtp_mode",
-        choices=["deepseekv3", None],
+        choices=["deepseekv3_vanilla", "deepseekv3_eagle", None],
         default=None,
         help="""supported mtp mode, None is not enable mtp, """,
     )
