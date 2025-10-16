@@ -509,23 +509,20 @@ class InferReqGroup:
 
     def diverse_copy(self, req_manager, is_prefill):
         # record previous status
-        prev_req = g_infer_context.requests_mapping[convert_sub_id_to_group_id(self.req_ids_group[0])]
-        if prev_req.shared_kv_node is not None:
-            prefix_len = prev_req.shared_kv_node.node_prefix_total_len
-        else:
-            prefix_len = 0
-        prefix_len = max(prefix_len, prev_req.cur_kv_len)
-        pre_input_len = prev_req.get_chuncked_input_token_len()
-        cache_token_id = req_manager.req_to_token_indexs[prev_req.req_idx][prefix_len:pre_input_len]
+        master_req = g_infer_context.requests_mapping[convert_sub_id_to_group_id(self.req_ids_group[0])]
+        new_kv_len = master_req.get_chuncked_input_token_len()
+
         # update the InferReq status and mem_manager status for cache sharing
         for req_id in self.req_ids_group[:]:
             if req_id == convert_sub_id_to_group_id(req_id):
                 continue
             req = g_infer_context.requests_mapping[req_id]
             req.finish_status.set_status(FinishStatus.NO_FINISH)
-            input_len = req.get_chuncked_input_token_len()
-            req_manager.req_to_token_indexs[req.req_idx][prefix_len:input_len] = cache_token_id
-            assert input_len == pre_input_len
+            assert req.cur_kv_len <= master_req.cur_kv_len
+            copy_token_index = req_manager.req_to_token_indexs[master_req.req_idx][req.cur_kv_len : new_kv_len]
+
+            req_manager.req_to_token_indexs[req.req_idx][req.cur_kv_len : new_kv_len] = copy_token_index
+            req.cur_kv_len = master_req.cur_kv_len
 
 
 class InferReqUpdatePack:
