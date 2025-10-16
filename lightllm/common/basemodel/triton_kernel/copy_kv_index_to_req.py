@@ -6,8 +6,7 @@ import triton.language as tl
 
 @triton.jit
 def _fwd_kernel_copy_kv_index_to_req(
-    req_to_token_indexs, b_req_idx, b_seq_len, memindex,
-    stride_req_to_token_b, stride_req_to_token_s
+    req_to_token_indexs, b_req_idx, b_seq_len, memindex, stride_req_to_token_b, stride_req_to_token_s
 ):
     cur_index = tl.program_id(0)
     cur_req_idx = tl.load(b_req_idx + cur_index)
@@ -26,8 +25,12 @@ def copy_kv_index_to_req(req_to_token_indexs, b_req_idx, b_seq_len, memindex):
     num_warps = 1
 
     _fwd_kernel_copy_kv_index_to_req[grid](
-        req_to_token_indexs, b_req_idx, b_seq_len, memindex,
-        req_to_token_indexs.stride(0), req_to_token_indexs.stride(1),
+        req_to_token_indexs,
+        b_req_idx,
+        b_seq_len,
+        memindex,
+        req_to_token_indexs.stride(0),
+        req_to_token_indexs.stride(1),
         num_warps=num_warps,
         num_stages=1,
     )
