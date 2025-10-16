@@ -129,7 +129,9 @@ class VisualManager:
                     if disable_prompt_cache:
                         ready_image = [False] * len(img_uuids)
                     else:
-                        ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
+                        img_uuids = pickle.dumps(img_uuids)
+                        ready_image = self.cache_client.root.get_items_embed(img_uuids)
+                        ready_image = pickle.loads(ready_image)
 
                     for img, ready in zip(multimodal_params.images, ready_image):
                         if not ready:

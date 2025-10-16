@@ -3,6 +3,7 @@ import numpy as np
 import rpyc
 import torch
 import inspect
+import pickle
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
@@ -93,14 +94,11 @@ class VisualModelRpcServer(rpyc.Service):
     def forward(self, images: List[ImageItem]):
         return self.model.encode(images)
 
-    # @calculate_time(show=False, min_cost_ms=300)
-    def exposed_encode(self, images: List[ImageItem]):
-        images = obtain(images)
-        all_img_embeds, uuids, valid_ids = self.forward(images)
-        all_img_embeds = all_img_embeds.to(torch.device("cpu"))
-
+    def alloc_img_embed_resources(self, all_img_embeds, uuids, valid_ids):
         if self.tp_rank_id == 0:
-            ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
+            uuids_blob = pickle.dumps(uuids)
+            ready_flags_status = self.cache_client.root.get_items_embed(uuids_blob)
+            ready_flags = pickle.loads(ready_flags_status)
             ids_to_set = []
             for i, ready in enumerate(ready_flags):
                 if ready:
@@ -111,8 +109,15 @@ class VisualModelRpcServer(rpyc.Service):
                 create_shm(get_shm_name_embed(uid), cur_embed_bytes)
                 ids_to_set.append(uid)
             if ids_to_set:
+                ids_to_set = pickle.dumps(ids_to_set)
                 self.cache_client.root.set_items_embed(ids_to_set)
         return
+
+    def exposed_encode(self, images: List[ImageItem]):
+        images = obtain(images)
+        all_img_embeds, uuids, valid_ids = self.forward(images)
+        all_img_embeds = all_img_embeds.to(torch.device("cpu"))
+        self.alloc_img_embed_resources(all_img_embeds, uuids, valid_ids)
 
 
 class VisualModelRpcClient:
@@ -179,14 +184,14 @@ async def start_model_process(port, vit_tp, device_id):
     proc.start()
     await asyncio.sleep(2)
     repeat_count = 0
-    while repeat_count < 20:
+    while repeat_count < 30:
         try:
             con = rpyc.connect("localhost", port, config={"allow_pickle": True})
             break
         except BaseException:
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
         repeat_count += 1
-    if repeat_count == 20:
+    if repeat_count == 30:
         raise Exception("init rpc env error!")
 
     assert proc.is_alive()

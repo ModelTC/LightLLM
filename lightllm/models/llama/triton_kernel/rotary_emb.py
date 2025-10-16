@@ -116,7 +116,7 @@ def _rotary_kernel(
 
 
 @torch.no_grad()
-def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
+def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.0):
     total_len = q.shape[0]
     head_num_q, head_num_k = q.shape[1], k.shape[1]
     head_dim = int(q.shape[2] * partial_rotary_factor)
