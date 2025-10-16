@@ -43,9 +43,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
                 cumsum_len += cur_input_len - req.input_len  # 减去共享的部分
                 need_max_token_num = max(need_max_token_num, cumsum_len + index * cur_ouput_len)
 
-        # prefill token 计算
-        for req in cur_handle_group_reqs:
-            new_batch_first_router_need_tokens += req.shm_cur_output_len
+        # prefill token 计算, 因为对beam的prefill计算过程是共享的，所以只计算一个请求对应的token数量
         new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
         ok_token_num = (
             need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)
