@@ -30,7 +30,10 @@ class MultiLevelKvCacheModule(object):
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)
 
-    def wait_for_init(self):
+    def wait(self):
+        """
+        等待 cpu cache 相关页面注册完成
+        """
         attach_shm_handle = self.cpu_cache_client.attach_shm_handle
         if attach_shm_handle is not None:
             attach_shm_handle.wait()

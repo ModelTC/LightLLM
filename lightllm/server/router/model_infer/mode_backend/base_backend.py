@@ -123,10 +123,10 @@ class ModeBackend:
         # 所以做一次barrier等待
         dist.barrier()
 
-        waiting_hook = None
+        wait_events = []
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
-            waiting_hook = self.multi_level_cache_module.wait_for_init
+            wait_events.append(self.multi_level_cache_module)
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
@@ -149,7 +149,7 @@ class ModeBackend:
             "quant_type": kvargs.get("quant_type", None),
             "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
-            "waiting_hook": waiting_hook,
+            "wait_events": wait_events,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
