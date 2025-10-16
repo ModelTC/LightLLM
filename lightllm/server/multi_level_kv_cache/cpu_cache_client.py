@@ -21,18 +21,20 @@ class CpuKvCacheClient(object):
     This class is responsible for handling cpu kv cache meta data.
     """
 
-    def __init__(self, init_shm_data: bool):
+    def __init__(self, only_create_meta_data: bool, init_shm_data: bool):
         self.args = get_env_start_args()
         # to do here need calcu from from settings.
         self.kv_cache_tensor_meta = calcu_cpu_cache_meta()
         self.page_num: int = self.kv_cache_tensor_meta.page_num
         self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_cpu_kv_cache_client_lock")
         self._create_cpu_status_list(init_shm_data)
-        if init_shm_data:
-            self._create_shm_cpu_kv_cache()
-            self.attach_shm_handle = None
-        else:
-            self.attach_shm_handle = self._attach_shm_cpu_kv_cache()
+
+        if not only_create_meta_data:
+            if init_shm_data:
+                self._create_shm_cpu_kv_cache()
+                self.attach_shm_handle = None
+            else:
+                self.attach_shm_handle = self._attach_shm_cpu_kv_cache()
         return
 
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:

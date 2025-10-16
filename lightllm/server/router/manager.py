@@ -101,7 +101,11 @@ class RouterManager:
 
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
 
-        self.cpu_cache_client = None if not self.args.enable_cpu_cache else CpuKvCacheClient(init_shm_data=False)
+        self.cpu_cache_client = (
+            None
+            if not self.args.enable_cpu_cache
+            else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
+        )
         return
 
     async def wait_to_model_ready(self):

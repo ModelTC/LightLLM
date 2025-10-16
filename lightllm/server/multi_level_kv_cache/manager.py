@@ -31,7 +31,7 @@ class MultiLevelKVCacheManager:
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
         logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
-        self.cpu_cache_client = CpuKvCacheClient(init_shm_data=True)
+        self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
         # 控制进行 cpu cache 页面匹配的时间，超过时间则不再匹配，直接转发。

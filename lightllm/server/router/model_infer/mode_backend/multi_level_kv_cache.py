@@ -28,7 +28,7 @@ class MultiLevelKvCacheModule(object):
         dist.barrier(group=self.init_sync_group)
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
-        self.cpu_cache_client = CpuKvCacheClient(init_shm_data=False)
+        self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
 
     def wait(self):
         """
