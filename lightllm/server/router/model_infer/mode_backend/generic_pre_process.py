@@ -57,6 +57,8 @@ def prepare_prefill_inputs(
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
+    b_q_seq_len = torch.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
+    b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
 
     # dynamic prompt cache 准备 token
     g_infer_state_lock.acquire()
@@ -78,6 +80,7 @@ def prepare_prefill_inputs(
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
         b_ready_cache_len=b_ready_cache_len,
+        b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
         prefix_total_token_num=prefix_total_token_num,

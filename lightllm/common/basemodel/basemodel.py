@@ -343,16 +343,16 @@ class TpPartBaseModel:
         model_input: ModelInput,
     ):
         infer_state = self._create_inferstate(model_input)
-        infer_state.init_some_extra_state(self, model_input.input_ids)
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             b_seq_len=infer_state.b_seq_len,
             b_ready_cache_len=infer_state.b_ready_cache_len,
-            b_start_loc=infer_state.b_start_loc,
+            b_start_loc=model_input.b_prefill_start_loc,
             alloc_mem_index=infer_state.mem_index,
             max_q_seq_len=infer_state.max_q_seq_len,
         )
+        infer_state.init_some_extra_state(self, model_input.input_ids)
         return self._context_forward(model_input.input_ids, infer_state)
 
     def _decode(
@@ -482,28 +482,28 @@ class TpPartBaseModel:
         input_ids0, input_ids1 = model_input0.input_ids, model_input1.input_ids
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        infer_state0.init_some_extra_state(self, input_ids0)
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
             b_req_idx=infer_state0.b_req_idx,
             b_seq_len=infer_state0.b_seq_len,
             b_ready_cache_len=infer_state0.b_ready_cache_len,
-            b_start_loc=infer_state0.b_start_loc,
+            b_start_loc=model_input0.b_prefill_start_loc,
             alloc_mem_index=infer_state0.mem_index,
             max_q_seq_len=infer_state0.max_q_seq_len,
         )
+        infer_state0.init_some_extra_state(self, input_ids0)
 
         infer_state1 = self._create_inferstate(model_input1, 1)
-        infer_state1.init_some_extra_state(self, input_ids1)
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
             b_req_idx=infer_state1.b_req_idx,
             b_seq_len=infer_state1.b_seq_len,
             b_ready_cache_len=infer_state1.b_ready_cache_len,
-            b_start_loc=infer_state1.b_start_loc,
+            b_start_loc=model_input1.b_prefill_start_loc,
             alloc_mem_index=infer_state1.mem_index,
             max_q_seq_len=infer_state1.max_q_seq_len,
         )
+        infer_state1.init_some_extra_state(self, input_ids1)
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(
             input_ids0, infer_state0, input_ids1=input_ids1, infer_state1=infer_state1
@@ -704,6 +704,7 @@ class TpPartBaseModel:
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
             total_token_num = self.batch_max_tokens
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
             model_input = ModelInput(
@@ -721,6 +722,7 @@ class TpPartBaseModel:
                 b_mtp_index=b_mtp_index,
                 is_prefill=True,
                 b_ready_cache_len=b_ready_cache_len,
+                b_prefill_start_loc=b_prefill_start_loc,
             )
             model_output = self.forward(
                 model_input,
@@ -778,6 +780,7 @@ class TpPartBaseModel:
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
                 total_token_num = input_len
                 b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
                 model_input = ModelInput(
@@ -795,6 +798,7 @@ class TpPartBaseModel:
                     b_mtp_index=b_mtp_index,
                     is_prefill=True,
                     b_ready_cache_len=b_ready_cache_len,
+                    b_prefill_start_loc=b_prefill_start_loc,
                     multimodal_params=[],
                     **self._gen_special_model_input(total_token_num),
                 )
@@ -838,6 +842,8 @@ class TpPartBaseModel:
         )
         b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
         b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+        b_q_seq_len = b_seq_len - b_ready_cache_len
+        b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         total_token_num = prefill_input_len * batch_size
         b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         model_input = ModelInput(
@@ -854,6 +860,7 @@ class TpPartBaseModel:
             b_mtp_index=b_mtp_index,
             b_seq_len=b_seq_len,
             b_ready_cache_len=b_ready_cache_len,
+            b_prefill_start_loc=b_prefill_start_loc,
             is_prefill=True,
             multimodal_params=[],
             **self._gen_special_model_input(total_token_num),
