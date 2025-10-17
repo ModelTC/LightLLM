@@ -3,10 +3,9 @@ from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBac
 from lightllm.server.router.model_infer.infer_batch import (
     g_infer_context,
     InferReq,
-    InferReqGroup,
+    InferReqUpdatePack,
 )
 from typing import List, Tuple
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
 )
@@ -15,6 +14,7 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from ..chunked_prefill.impl import ChunkedPrefillBackend
+from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 
 
 class DiversehBackend(ChunkedPrefillBackend):
@@ -23,32 +23,9 @@ class DiversehBackend(ChunkedPrefillBackend):
         self.prefill = self.beam_prefill
         self.classed_req_strict_prefill = True
 
-    def diverse_copy(self, groups: List[InferReqGroup]) -> Tuple[List[int], List[InferReq]]:
-        batch_idx = []
-        run_reqs = []
-        for i in range(len(groups)):
-            req_group = groups[i]
-            best_of = req_group.best_of()
-            if best_of > 1:
-                req_group.diverse_copy(g_infer_context.req_manager, is_prefill=True)
-                batch_idx.extend([i for _ in range(best_of)])
-            else:
-                batch_idx.append(i)
-            run_reqs.extend(req_group.get_all_reqs())
-        return batch_idx, run_reqs
-
     def beam_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         # 第一阶段
-        group_reqs = [
-            g_infer_context.requests_mapping[req.req_id]
-            for req in prefill_reqs
-            if convert_sub_id_to_group_id(req.req_id) == req.req_id
-        ]
-        groups = [
-            g_infer_context.group_mapping[req.req_id]
-            for req in prefill_reqs
-            if convert_sub_id_to_group_id(req.req_id) == req.req_id
-        ]
+        group_reqs = [g_infer_context.requests_mapping[req.req_id] for req in prefill_reqs if req.is_master_req()]
 
         model_input, group_run_reqs = prepare_prefill_inputs(
             group_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
@@ -59,7 +36,9 @@ class DiversehBackend(ChunkedPrefillBackend):
             model_output = self.model.forward(model_input)
             logits = model_output.logits
 
-            batch_idx, run_reqs = self.diverse_copy(groups)
+            batch_idx, run_reqs = self._diverse_copy(
+                master_reqs=group_reqs, b_prefill_has_out=model_input.b_prefill_has_output_cpu
+            )
             b_req_idx = [req.req_idx for req in run_reqs]
             b_has_out = [model_input.b_prefill_has_output_cpu[i] for i in batch_idx]
 
@@ -95,8 +74,8 @@ class DiversehBackend(ChunkedPrefillBackend):
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
-        update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
-
+        model_output.prefill_mem_indexes_ready_event.synchronize()
+        update_packs = self._diverse_pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
@@ -109,4 +88,120 @@ class DiversehBackend(ChunkedPrefillBackend):
         )
         # 第四阶段
         event_pack.notify_pre_post_handle()
+        return
+
+    def _diverse_copy(
+        self, master_reqs: List[InferReq], b_prefill_has_out: List[bool]
+    ) -> Tuple[List[int], List[InferReq]]:
+        batch_idx = []
+        run_reqs = []
+        for i in range(len(master_reqs)):
+            master_req = master_reqs[i]
+            slave_reqs = master_req.slave_reqs
+            slave_num = len(slave_reqs)
+            batch_idx.append(i)
+            run_reqs.append(master_req)
+
+            if slave_num > 0 and b_prefill_has_out[i]:
+                batch_idx.extend([i for _ in range(slave_num)])
+                run_reqs.extend(slave_reqs)
+
+        return batch_idx, run_reqs
+
+        # 一些可以复用的通用功能函数
+
+    def _diverse_pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
+        update_func_objs: List[InferReqUpdatePack] = []
+        # 通用状态预先填充
+        is_master_in_dp = self.is_master_in_dp
+        pre_master_req_pack = None
+        for req_obj in run_reqs:
+            req_obj: InferReq = req_obj
+            if req_obj.is_master_req():
+                if is_chuncked_mode:
+                    new_kv_len = req_obj.get_chuncked_input_token_len()
+                else:
+                    new_kv_len = req_obj.get_cur_total_len()
+                req_obj.cur_kv_len = new_kv_len
+                if is_master_in_dp:
+                    req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
+
+                # 对于没有到达需要输出 token 阶段的请求，直接略过, 说明还
+                # 处于chuncked prefill kv 填充的阶段。
+                if req_obj.cur_kv_len < req_obj.get_cur_total_len():
+                    pack = InferReqUpdatePack(req_obj=req_obj, output_len=0)
+                    update_func_objs.append(pack)
+                    pre_master_req_pack = pack
+                    # TODO 如果 diverse mode 需要支持 nixl pd 分离，则应该每个分块prefill后都进行相关的复制，
+                    # 暂时不支持 diverse mode 和 pd 模式的混合
+                    continue
+
+                # 将生成的下一个token的信息写入到管理对象中。
+                req_obj.cur_output_len += 1
+                pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len)
+                update_func_objs.append(pack)
+                pre_master_req_pack = pack
+                if req_obj.slave_reqs:
+                    # 存在 slave reqs 的 master req 需要将自己的 kv 信息写入到 radix cache 中
+                    # 方便 slave req 进行 kv 的复用
+                    self._master_req_to_radix_cache(master_req=req_obj)
+            else:
+                # slave req 直接复用 master req 的更新包。
+                assert pre_master_req_pack is not None
+                assert pre_master_req_pack.req_obj.shm_req.group_req_id == req_obj.shm_req.group_req_id
+                self._copy_master_req_to_slave_req(slave_req=req_obj)
+                # 在拷贝后，请求独立了，与 master_req 的关系解除
+                req_obj.remove_master_req()
+                pack = InferReqUpdatePack(req_obj=req_obj, output_len=pre_master_req_pack.output_len)
+                update_func_objs.append(pack)
+
+        torch.cuda.current_stream().synchronize()
+        return update_func_objs
+
+    def _master_req_to_radix_cache(self, master_req: InferReq):
+        g_infer_state_lock.acquire()
+        key = master_req.get_input_token_ids()[0 : master_req.cur_kv_len]
+        key = torch.tensor(key, dtype=torch.int64, device="cpu")
+        value = self.model.req_manager.req_to_token_indexs[master_req.req_idx][: master_req.cur_kv_len].detach().cpu()
+        prefix_len, new_shared_kv_node = self.radix_cache.insert(key, value)
+        old_prefix_len = 0 if master_req.shared_kv_node is None else master_req.shared_kv_node.node_prefix_total_len
+        self.model.mem_manager.free(
+            self.model.req_manager.req_to_token_indexs[master_req.req_idx][old_prefix_len:prefix_len]
+        )
+
+        # 将原有共享节点替换为新共享节点，新共享节点对应的长度为当前的cur_kv_len
+        self.radix_cache.dec_node_ref_counter(master_req.shared_kv_node)
+        self.radix_cache.add_node_ref_counter(new_shared_kv_node)
+        master_req.shared_kv_node = new_shared_kv_node
+        assert new_shared_kv_node.node_prefix_total_len == master_req.cur_kv_len
+
+        share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=False)
+        assert share_node == new_shared_kv_node and kv_len == master_req.cur_kv_len
+        self.model.req_manager.req_to_token_indexs[master_req.req_idx][0 : master_req.cur_kv_len] = value
+        g_infer_state_lock.release()
+        return
+
+    def _copy_master_req_to_slave_req(self, slave_req: InferReq):
+        g_infer_state_lock.acquire()
+        master_req = slave_req.related_master_req
+        assert master_req is not None
+
+        self.radix_cache.dec_node_ref_counter(slave_req.shared_kv_node)
+        self.radix_cache.add_node_ref_counter(master_req.shared_kv_node)
+
+        kv_len = master_req.cur_kv_len
+
+        self.model.req_manager.req_to_token_indexs[slave_req.req_idx][
+            0:kv_len
+        ] = self.model.req_manager.req_to_token_indexs[master_req.req_idx][0:kv_len]
+        # torch.cuda.current_stream().synchronize()
+        slave_req.shared_kv_node = master_req.shared_kv_node
+        slave_req.cur_kv_len = kv_len
+        slave_req.cur_output_len = master_req.cur_output_len
+        if self.is_master_in_dp:
+            slave_req.shm_req.shm_cur_kv_len = slave_req.cur_kv_len
+
+        assert kv_len <= slave_req.shm_req.input_len
+
+        g_infer_state_lock.release()
         return

@@ -361,8 +361,13 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state.mem_index,
             max_q_seq_len=infer_state.max_q_seq_len,
         )
+        prefill_mem_indexes_ready_event = torch.cuda.Event()
+        prefill_mem_indexes_ready_event.record()
+
         infer_state.init_some_extra_state(self, model_input.input_ids)
-        return self._context_forward(model_input.input_ids, infer_state)
+        model_output = self._context_forward(model_input.input_ids, infer_state)
+        model_output.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
+        return model_output
 
     def _decode(
         self,
@@ -514,6 +519,9 @@ class TpPartBaseModel:
         )
         infer_state1.init_some_extra_state(self, input_ids1)
 
+        prefill_mem_indexes_ready_event = torch.cuda.Event()
+        prefill_mem_indexes_ready_event.record()
+
         model_output0, model_output1 = self._overlap_tpsp_context_forward(
             input_ids0, infer_state0, input_ids1=input_ids1, infer_state1=infer_state1
         )
@@ -521,6 +529,8 @@ class TpPartBaseModel:
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
         dist_group_manager.clear_deepep_buffer()
+        model_output0.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
+        model_output1.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         return model_output0, model_output1
 
     @torch.no_grad()

@@ -28,7 +28,6 @@ class InferenceContext:
     radix_cache: RadixCache = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
     requests_mapping: Dict[int, "InferReq"] = None
-    group_mapping = None  # 只有进行多输出模式下才有真的使用
     infer_req_ids = None
     vocab_size = None
 
@@ -48,7 +47,6 @@ class InferenceContext:
         self.shm_req_manager = shm_req_manager
 
         self.requests_mapping = {}
-        self.group_mapping: Dict[int, InferReqGroup] = {}
         self.infer_req_ids = []
 
         self.vocab_size = vocab_size
@@ -84,46 +82,42 @@ class InferenceContext:
 
         self.infer_req_ids.extend(request_ids)
 
-        # 多输出模式下需要将请求添加到各自的组对象 InferReqGroup 中
+        # diverse mode 下，建立一组请求间的主从关系
         if get_env_start_args().diverse_mode:
+            group_reqs: Dict[int, InferReq] = collections.defaultdict(lambda: [None, list()])
             for r_id in request_ids:
                 req: InferReq = g_infer_context.requests_mapping[r_id]
                 group_req_id = req.shm_req.group_req_id
-                if group_req_id not in g_infer_context.group_mapping:
-                    g_infer_context.group_mapping[group_req_id] = InferReqGroup(group_req_id=group_req_id)
-                g_infer_context.group_mapping[group_req_id].add_req(r_id)
+                if req.req_id == group_req_id:
+                    group_reqs[group_req_id][0] = req
+                else:
+                    group_reqs[group_req_id][1].append(req)
+
+            for group_req_id, (master_req, slave_reqs) in group_reqs.items():
+                master_req: InferReq = master_req
+                master_req.slave_reqs.extend(slave_reqs)
+                for slave_req in slave_reqs:
+                    slave_req: InferReq = slave_req
+                    slave_req.related_master_req = master_req
 
         return req_objs
 
-    def free_a_req_mem(self, free_token_index: List, req: "InferReq", is_group_finished: bool):
+    def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
-            if is_group_finished:
-                free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
-            else:
-                free_token_index.append(
-                    self.req_manager.req_to_token_indexs[req.req_idx][req.shm_req.input_len : req.cur_kv_len]
-                )
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
         else:
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             # .cpu() 是 流内阻塞操作
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
 
-            if is_group_finished:
-                prefix_len, _ = self.radix_cache.insert(key, value)
-                old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-                free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
-                if req.shared_kv_node is not None:
-                    assert req.shared_kv_node.node_prefix_total_len <= prefix_len
-                    self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                    req.shared_kv_node = None
-            else:
-                free_token_index.append(
-                    self.req_manager.req_to_token_indexs[req.req_idx][req.shm_req.input_len : req.cur_kv_len]
-                )
-                if req.shared_kv_node is not None:
-                    self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                    req.shared_kv_node = None
+            prefix_len, _ = self.radix_cache.insert(key, value)
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
+            if req.shared_kv_node is not None:
+                assert req.shared_kv_node.node_prefix_total_len <= prefix_len
+                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                req.shared_kv_node = None
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -148,14 +142,10 @@ class InferenceContext:
         free_token_index = []
         for request_id in finished_request_ids:
             req: InferReq = self.requests_mapping.pop(request_id)
-            group_req_id = convert_sub_id_to_group_id(req.shm_req.request_id)
-            if group_req_id in self.group_mapping:
-                is_group_finished = self.group_mapping[group_req_id].remove_req(req.shm_req.request_id)
-                if is_group_finished:
-                    del self.group_mapping[group_req_id]
-                self.free_a_req_mem(free_token_index, req, is_group_finished)
-            else:
-                self.free_a_req_mem(free_token_index, req, True)
+            if self.args.diverse_mode:
+                req.clear_master_slave_state()
+            self.free_a_req_mem(free_token_index, req)
+
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
             req.shm_req.shm_infer_released = True
@@ -192,8 +182,10 @@ class InferenceContext:
 
             free_token_index = []
             for req in pause_reqs:
-                # 不支持多输出的情况的暂停, 不能支持 diverse 输出模式。
-                self.free_a_req_mem(free_token_index, req, is_group_finished=True)
+                if self.args.diverse_mode:
+                    # 发生暂停的时候，需要清除 diverse 模式下的主从关系
+                    req.clear_master_slave_state()
+                self.free_a_req_mem(free_token_index, req)
                 req.cur_kv_len = 0
                 req.shm_req.shm_cur_kv_len = req.cur_kv_len
                 assert req.wait_pause is True
@@ -337,6 +329,10 @@ class InferReq:
         self.need_out_token_id_statistics = True
         self.out_token_id_count: Dict[int, int] = None
 
+        # diverse mode 下，用于标记请求组之间的依赖关系
+        self.slave_reqs: List[InferReq] = []
+        self.related_master_req: InferReq = None
+
         # nixl pd 分离模式使用的变量, 普通模式下这些变量没有具体用途
         self.nixl_trans_kv_start_index: int = 0
         self.nixl_pd_task_num: int = 0
@@ -406,6 +402,37 @@ class InferReq:
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
+
+    def is_master_req(self):
+        """
+        diverse 模式下，判断当前请求是否为独立主请求，其进行prefill后，将
+        kv 通过 radix cache 共享给其他 slave 请求， 共享后 slave 请求也
+        会升级为 master 请求，具有独立推理，暂停的特性。
+        """
+        return self.related_master_req is None
+
+    def is_slave_req(self):
+        return self.related_master_req is not None
+
+    def clear_master_slave_state(self):
+        if self.is_slave_req():
+            self.remove_master_req()
+        elif self.is_master_req():
+            # 数组需要 copy 后遍历。
+            for slave_req in self.slave_reqs.copy():
+                slave_req.remove_master_req()
+
+    def remove_master_req(self):
+        """
+        一个处于 slave 状态的请求，解除与 master 请求的依赖关系后，自己会升级为
+        master_req 的状态，具有独立推理，暂停的特性。
+        """
+        master_req = self.related_master_req
+        if master_req is not None:
+            master_req.slave_reqs.remove(self)
+            self.related_master_req = None
+        else:
+            logger.warning(f"try to remove master req, but related_master_req is None, req id {self.req_id}")
 
     def get_output_len(self):
         return self.cur_output_len
@@ -480,49 +507,6 @@ class InferReq:
 
     def _mtp_decode_need_token_num(self) -> int:
         return (1 + self.mtp_step) * 2
-
-
-class InferReqGroup:
-    def __init__(
-        self,
-        group_req_id: int,
-    ) -> None:
-        self.group_req_id = group_req_id
-        self.req_ids_group = []
-
-    def get_req(self, index):
-        return g_infer_context.requests_mapping[self.req_ids_group[index]]
-
-    def get_all_reqs(self):
-        return [g_infer_context.requests_mapping[self.req_ids_group[i]] for i in range(len(self.req_ids_group))]
-
-    def add_req(self, req_id):
-        self.req_ids_group.append(req_id)
-
-    def remove_req(self, req_id):
-        assert req_id in self.req_ids_group
-        self.req_ids_group.remove(req_id)
-        return len(self.req_ids_group) == 0
-
-    def best_of(self):
-        return len(self.req_ids_group)
-
-    def diverse_copy(self, req_manager, is_prefill):
-        # record previous status
-        master_req = g_infer_context.requests_mapping[convert_sub_id_to_group_id(self.req_ids_group[0])]
-        new_kv_len = master_req.get_chuncked_input_token_len()
-
-        # update the InferReq status and mem_manager status for cache sharing
-        for req_id in self.req_ids_group[:]:
-            if req_id == convert_sub_id_to_group_id(req_id):
-                continue
-            req = g_infer_context.requests_mapping[req_id]
-            req.finish_status.set_status(FinishStatus.NO_FINISH)
-            assert req.cur_kv_len <= master_req.cur_kv_len
-            copy_token_index = req_manager.req_to_token_indexs[master_req.req_idx][req.cur_kv_len : new_kv_len]
-
-            req_manager.req_to_token_indexs[req.req_idx][req.cur_kv_len : new_kv_len] = copy_token_index
-            req.cur_kv_len = master_req.cur_kv_len
 
 
 class InferReqUpdatePack:

@@ -79,12 +79,13 @@ class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
                 self.model.mem_manager.free(
                     self.model.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
                 )
-                if req.shared_kv_node is not None:
-                    # 将原有共享节点替换为新共享节点，新共享节点对应的长度为当前的cur_kv_len
-                    self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                    self.radix_cache.add_node_ref_counter(new_shared_kv_node)
-                    req.shared_kv_node = new_shared_kv_node
-                    assert new_shared_kv_node.node_prefix_total_len == req.cur_kv_len
+                # 将原有共享节点替换为新共享节点，新共享节点对应的长度为当前的cur_kv_len
+
+                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                self.radix_cache.add_node_ref_counter(new_shared_kv_node)
+                req.shared_kv_node = new_shared_kv_node
+
+                assert new_shared_kv_node.node_prefix_total_len == req.cur_kv_len
 
                 if req.shm_req.sample_params.move_kv_to_decode_node.exists:
                     # 注意兼容纯tp 和 tp dp 混合模式的逻辑
