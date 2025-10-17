@@ -369,7 +369,7 @@ class ModeBackend:
             if init_reqs:
                 req_ids = self._init_reqs(reqs=init_reqs)
                 if self.args.enable_cpu_cache and req_ids:
-                    self._fill_cpu_cache_to_reqs(req_ids=req_ids)
+                    self._load_cpu_cache_to_reqs(req_ids=req_ids)
         return
 
     def _read_nixl_trans_io_buffer_and_update_req_status(self):
@@ -424,10 +424,10 @@ class ModeBackend:
         req_ids = [e[0] for e in reqs]
         return req_ids
 
-    def _fill_cpu_cache_to_reqs(self, req_ids):
+    def _load_cpu_cache_to_reqs(self, req_ids):
         req_objs: List[InferReq] = [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
         g_infer_state_lock.acquire()
-        self.multi_level_cache_module.fill_cpu_cache_to_reqs(reqs=req_objs)
+        self.multi_level_cache_module.load_cpu_cache_to_reqs(reqs=req_objs)
         g_infer_state_lock.release()
         return
 
@@ -536,6 +536,12 @@ class ModeBackend:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
             else:
+                # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
+                # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
+                # 放入到 prefill reqs 队列中，在其他模式下，所有请求都是 master状态，所以也不受影响
+                if req_obj.is_slave_req():
+                    continue
+
                 token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
