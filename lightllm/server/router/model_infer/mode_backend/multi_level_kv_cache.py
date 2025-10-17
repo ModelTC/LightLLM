@@ -92,9 +92,9 @@ class MultiLevelKvCacheModule(object):
             self.cpu_cache_client.lock.release()
         return
 
-    def handle_finished_reqs(self, finished_reqs: List[InferReq]) -> List[InferReq]:
+    def offload_finished_reqs_to_cpu_cache(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """
-        将满足cpu kv cache 卸载条件的请求进行处理，并返回需要真正退出的请求列表。
+        将满足cpu kv cache 卸载条件的请求进行处理, 并返回真的满足退出条件的请求list。
         """
 
         if self.args.enable_cpu_cache:

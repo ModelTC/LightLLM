@@ -559,7 +559,9 @@ class ModeBackend:
         self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
         # 如果使能了 cpu cache 功能，对于已经完成的请求，进行 gpu kv 卸载到 cpu cache的操作。
         if self.args.enable_cpu_cache:
-            true_finished_reqs = self.multi_level_cache_module.handle_finished_reqs(finished_reqs=finished_reqs)
+            true_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
+                finished_reqs=finished_reqs
+            )
         else:
             true_finished_reqs = finished_reqs
 
