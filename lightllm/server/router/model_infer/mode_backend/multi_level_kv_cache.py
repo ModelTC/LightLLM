@@ -11,7 +11,6 @@ from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.kv_cache_utils import compute_token_list_hash
 
 logger = init_logger(__name__)
 
@@ -51,8 +50,8 @@ class MultiLevelKvCacheModule(object):
                 req.shm_req.cpu_prompt_cache_len = match_tokens
 
             need_token_num = match_tokens - req.cur_kv_len
-            # 多匹配了一定数量的token 才进行复制操作，不然操作效率不高
-            if need_token_num >= 64:
+            # 多匹配了一定数量的token同时请求长度大于一定的长度，才进行复制操作，不然操作效率不高，代价过高
+            if need_token_num >= 256 and req.shm_req.input_len >= 512:
                 if need_token_num <= idle_token_num:
                     if self.backend.radix_cache is not None:
                         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
@@ -60,25 +59,26 @@ class MultiLevelKvCacheModule(object):
                     # 计算需要加载的页面（只加载未匹配的部分）
                     cur_kv_pages = req.cur_kv_len // token_page_size
                     need_pages = page_list[cur_kv_pages:]  # 只取需要的页面
-                    actual_need_tokens = len(need_pages) * token_page_size
 
-                    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=actual_need_tokens)
+                    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
                     # 将 cpu page 的内容拷贝到 gpu 页面中
                     load_cpu_kv_to_gpu(
-                        mem_indexes=mem_indexes,
+                        gpu_mem_indexes=mem_indexes.cuda(non_blocking=True),
                         gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
                         cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
                         page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
+                        tp_index=self.backend.rank_in_dp,
+                        tp_world_size=self.backend.dp_world_size,
                     )
 
                 torch.cuda.current_stream().synchronize()
 
-                idle_token_num -= actual_need_tokens
+                idle_token_num -= need_token_num
                 g_infer_context.req_manager.req_to_token_indexs[
-                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + actual_need_tokens)
+                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
                 ] = mem_indexes
-                req.cur_kv_len = req.cur_kv_len + actual_need_tokens
+                req.cur_kv_len = req.cur_kv_len + need_token_num
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
 
