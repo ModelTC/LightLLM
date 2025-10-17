@@ -96,50 +96,46 @@ class MultiLevelKvCacheModule(object):
         """
         将满足cpu kv cache 卸载条件的请求进行处理, 并返回真的满足退出条件的请求list。
         """
+        # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
+        # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
+        true_finished_reqs = []
+        cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
+        for req in finished_reqs:
+            # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
+            # 这个限制是为了兼容 diverse 模式下的请求处理。
+            if req.shm_req.group_req_id != req.shm_req.request_id:
+                true_finished_reqs.append(req)
+                continue
 
-        if self.args.enable_cpu_cache:
-            # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
-            # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
-            true_finished_reqs = []
-            cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
-            for req in finished_reqs:
-                # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
-                # 这个限制是为了兼容 diverse 模式下的请求处理。
-                if req.shm_req.group_req_id != req.shm_req.request_id:
-                    true_finished_reqs.append(req)
-                    continue
+            # 过滤不适合进行 kv 卸载到 cpu cache 的请求。
+            if req.cur_kv_len < self.args.cpu_cache_token_page_size:
+                true_finished_reqs.append(req)
+                continue
 
-                # 过滤不适合进行 kv 卸载到 cpu cache 的请求。
-                if req.cur_kv_len < self.args.cpu_cache_token_page_size:
-                    true_finished_reqs.append(req)
-                    continue
-
-                # 如果请求已经完成了 cpu cache 的任务，则满足了退出条件
-                if req.cpu_cache_task_status.is_finished():
-                    true_finished_reqs.append(req)
-                elif req.cpu_cache_task_status.is_running():
-                    # 如果请求已经发起过卸载任务，则在当前轮不进行处理
-                    continue
+            # 如果请求已经完成了 cpu cache 的任务，则满足了退出条件
+            if req.cpu_cache_task_status.is_finished():
+                true_finished_reqs.append(req)
+            elif req.cpu_cache_task_status.is_running():
+                # 如果请求已经发起过卸载任务，则在当前轮不进行处理
+                continue
+            else:
+                assert req.cpu_cache_task_status.is_not_started()
+                # 必须等待 overlap stream 上的计算任务完成，不然会崩溃
+                if g_infer_context.overlap_stream is not None:
+                    cpu_stream.wait_stream(g_infer_context.overlap_stream)
                 else:
-                    assert req.cpu_cache_task_status.is_not_started()
-                    # 必须等待 overlap stream 上的计算任务完成，不然会崩溃
-                    if g_infer_context.overlap_stream is not None:
-                        cpu_stream.wait_stream(g_infer_context.overlap_stream)
-                    else:
-                        cpu_stream.wait_stream(torch.cuda.current_stream())
+                    cpu_stream.wait_stream(torch.cuda.current_stream())
 
-                    # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
-                    trans_task = self._start_kv_cache_offload_task(req=req, cpu_kv_cache_stream=cpu_stream)
-                    if trans_task is not None:
-                        self.cpu_cache_handle_queue.append(trans_task)
-                    else:
-                        true_finished_reqs.append(req)
+                # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
+                trans_task = self._start_kv_cache_offload_task(req=req, cpu_kv_cache_stream=cpu_stream)
+                if trans_task is not None:
+                    self.cpu_cache_handle_queue.append(trans_task)
+                else:
+                    true_finished_reqs.append(req)
 
-            # 必须在这里同步，不然会崩溃
-            cpu_stream.synchronize()
-            return true_finished_reqs
-        else:
-            return finished_reqs
+        # 必须在这里同步，不然会崩溃
+        cpu_stream.synchronize()
+        return true_finished_reqs
 
     def _start_kv_cache_offload_task(
         self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
