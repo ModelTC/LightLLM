@@ -2,7 +2,6 @@ import torch
 
 import triton
 import triton.language as tl
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 
 
 @triton.jit
@@ -22,9 +21,16 @@ def _offload_gpu_kv_to_cpu(
     page_indexes_ptr,
     page_readies_ptr,
     layer_num,
-    head_all_dim,
-    cpu_head_offset,
-    BLOCK_HEAD_ALL_DIM: tl.constexpr,
+    head_dim,
+    cpu_k_start_head_index: tl.constexpr,
+    cpu_k_head_num: tl.constexpr,
+    gpu_k_start_head_index: tl.constexpr,
+    gpu_k_head_num: tl.constexpr,
+    cpu_v_start_head_index: tl.constexpr,
+    cpu_v_head_num: tl.constexpr,
+    gpu_v_start_head_index: tl.constexpr,
+    gpu_v_head_num: tl.constexpr,
+    BLOCK_HEAD_DIM: tl.constexpr,
     TOKEN_BLOCK: tl.constexpr,
 ):
     block_index = tl.program_id(0)
@@ -38,28 +44,61 @@ def _offload_gpu_kv_to_cpu(
 
     token_range = block_index * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
     token_indexes = tl.load(token_indexes_ptr + token_range).to(tl.int64)
-    head_all_dim_range = tl.arange(0, BLOCK_HEAD_ALL_DIM)
+    head_dim_range = tl.arange(0, BLOCK_HEAD_DIM)
+    head_dim_mask = head_dim_range < head_dim
 
     for layer_index in range(layer_num):
-        gpu_ptr = (
-            gpu_kv_cache_ptr
-            + layer_index.to(tl.int64) * gpu_stride0
-            + token_indexes[:, None] * gpu_stride1
-            + head_all_dim_range[None, :]
-        )
-        gpu_data = tl.load(gpu_ptr, mask=(head_all_dim_range[None, :] < head_all_dim), other=0.0)
-        cpu_ptr = (
-            cpu_kv_cache_ptr
-            + cpu_page_index * cpu_stride0
-            + layer_index * cpu_stride1
-            + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
-            + (cpu_head_offset + head_all_dim_range[None, :])
-        )
-        tl.store(
-            cpu_ptr,
-            gpu_data,
-            mask=(head_all_dim_range[None, :] < head_all_dim),
-        )
+        for k_head_index in range(gpu_k_head_num):
+            gpu_k_head_index = k_head_index + gpu_k_start_head_index
+            cpu_k_head_index = k_head_index + cpu_k_start_head_index
+
+            gpu_ptr = (
+                gpu_kv_cache_ptr
+                + layer_index.to(tl.int64) * gpu_stride0
+                + token_indexes[:, None] * gpu_stride1
+                + gpu_k_head_index.to(tl.int64) * gpu_stride2
+                + head_dim_range[None, :]
+            )
+            gpu_data = tl.load(gpu_ptr, mask=head_dim_mask[None, :], other=0.0)
+            cpu_ptr = (
+                cpu_kv_cache_ptr
+                + cpu_page_index * cpu_stride0
+                + layer_index * cpu_stride1
+                + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
+                + cpu_k_head_index * cpu_stride3
+                + head_dim_range[None, :]
+            )
+            tl.store(
+                cpu_ptr,
+                gpu_data,
+                mask=head_dim_mask[None, :],
+            )
+
+        for v_head_index in range(gpu_v_head_num):
+            gpu_v_head_index = v_head_index + gpu_v_start_head_index
+            cpu_v_head_index = v_head_index + cpu_v_start_head_index
+
+            gpu_ptr = (
+                gpu_kv_cache_ptr
+                + layer_index.to(tl.int64) * gpu_stride0
+                + token_indexes[:, None] * gpu_stride1
+                + gpu_v_head_index.to(tl.int64) * gpu_stride2
+                + head_dim_range[None, :]
+            )
+            gpu_data = tl.load(gpu_ptr, mask=head_dim_mask[None, :], other=0.0)
+            cpu_ptr = (
+                cpu_kv_cache_ptr
+                + cpu_page_index * cpu_stride0
+                + layer_index * cpu_stride1
+                + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
+                + cpu_v_head_index * cpu_stride3
+                + head_dim_range[None, :]
+            )
+            tl.store(
+                cpu_ptr,
+                gpu_data,
+                mask=head_dim_mask[None, :],
+            )
     return
 
 
@@ -70,6 +109,9 @@ def offload_gpu_kv_to_cpu(
     cpu_kv_cache: torch.Tensor,
     page_indexes: torch.Tensor,
     page_readies: torch.Tensor,
+    tp_index: int,
+    tp_world_size: int,
+    _cache_data={},
 ):
     """
     this function is used to offload GPU KV cache to CPU KV cache.
@@ -81,24 +123,107 @@ def offload_gpu_kv_to_cpu(
         page_readies: (page_num,)
     """
     token_block_size = cpu_kv_cache.shape[2]
-    token_num = page_indexes.shape[0] * token_block_size
-    assert token_indexes.shape[0] >= token_num
+    token_num = token_indexes.shape[0]
+    assert token_num == page_indexes.shape[0] * token_block_size
     assert page_indexes.shape == page_readies.shape
-    page_num = page_indexes.shape[0]
-    head_all_dim = gpu_kv_cache.shape[-1] * gpu_kv_cache.shape[-2]
-    BLOCK_HEAD_ALL_DIM = triton.next_power_of_2(gpu_kv_cache.shape[-1] * gpu_kv_cache.shape[-2])
 
-    # Calculate head offset for tensor parallelism
-    tp_rank = get_current_rank_in_dp()
-    tp_num = get_dp_world_size()
     gpu_heads = gpu_kv_cache.shape[2]
     gpu_head_dim = gpu_kv_cache.shape[3]
     cpu_heads = cpu_kv_cache.shape[3]
-    factor = (tp_num * gpu_heads) // cpu_heads
-    cpu_head_offset = (tp_rank // factor) * gpu_heads * gpu_head_dim
-    if tp_rank % factor != 0:
-        # redundant kv does not need to offload
+    cpu_head_dim = cpu_kv_cache.shape[4]
+    assert gpu_head_dim == cpu_head_dim
+    head_dim = gpu_head_dim
+    scale_size = (tp_world_size * gpu_heads) // cpu_heads
+
+    # 计算需要拷贝的 head 索引的对应关系
+    if (gpu_heads, cpu_heads, tp_index, tp_world_size) in _cache_data:
+        need_offload, head_info_tuple = _cache_data[(gpu_heads, cpu_heads, tp_index, tp_world_size)]
+    else:
+        if cpu_heads > 1:
+            assert (tp_world_size * gpu_heads) % cpu_heads == 0
+            assert cpu_heads % 2 == 0
+
+            cpu_heads_index = (
+                torch.arange(0, cpu_heads, device="cpu", dtype=torch.int32)
+                .view(cpu_heads, 1)
+                .tile((1, scale_size))
+                .view(2, tp_world_size, -1)
+            )
+            # k
+            k_cpu_heads_index = cpu_heads_index[0][tp_index]
+            # v
+            v_cpu_heads_index = cpu_heads_index[1][tp_index]
+
+            cpu_heads_index = torch.cat([k_cpu_heads_index, v_cpu_heads_index], dim=0).view(2, -1).numpy()
+            gpu_heads_index = torch.arange(0, gpu_heads, device="cpu", dtype=torch.int32).view(2, -1).numpy()
+
+            need_offload = tp_index % scale_size == 0
+
+            cpu_k_start_head_index = cpu_heads_index[0, 0]
+            cpu_k_head_num = len(cpu_heads_index[0])
+            gpu_k_start_head_index = gpu_heads_index[0, 0]
+            gpu_k_head_num = len(gpu_heads_index[0])
+            assert cpu_k_head_num == gpu_k_head_num
+            cpu_v_start_head_index = cpu_heads_index[1, 0]
+            cpu_v_head_num = len(cpu_heads_index[1])
+            gpu_v_start_head_index = gpu_heads_index[1, 0]
+            gpu_v_head_num = len(gpu_heads_index[1])
+            assert cpu_v_head_num == gpu_v_head_num
+
+            head_info_tuple = (
+                cpu_k_start_head_index,
+                cpu_k_head_num,
+                gpu_k_start_head_index,
+                gpu_k_head_num,
+                cpu_v_start_head_index,
+                cpu_v_head_num,
+                gpu_v_start_head_index,
+                gpu_v_head_num,
+            )
+
+        else:
+            assert gpu_heads == 1
+            assert cpu_heads == 1
+
+            need_offload = tp_index == 0
+
+            cpu_k_start_head_index = 0
+            cpu_k_head_num = 1
+            gpu_k_start_head_index = 0
+            gpu_k_head_num = 1
+            cpu_v_start_head_index = 0
+            cpu_v_head_num = 0
+            gpu_v_start_head_index = 0
+            gpu_v_head_num = 0
+            head_info_tuple = (
+                cpu_k_start_head_index,
+                cpu_k_head_num,
+                gpu_k_start_head_index,
+                gpu_k_head_num,
+                cpu_v_start_head_index,
+                cpu_v_head_num,
+                gpu_v_start_head_index,
+                gpu_v_head_num,
+            )
+
+        _cache_data[(gpu_heads, cpu_heads, tp_index, tp_world_size)] = (need_offload, head_info_tuple)
+
+    (
+        cpu_k_start_head_index,
+        cpu_k_head_num,
+        gpu_k_start_head_index,
+        gpu_k_head_num,
+        cpu_v_start_head_index,
+        cpu_v_head_num,
+        gpu_v_start_head_index,
+        gpu_v_head_num,
+    ) = head_info_tuple
+
+    if not need_offload:
         return
+
+    assert token_block_size == triton.next_power_of_2(token_block_size)
+    page_num = page_indexes.shape[0]
 
     grid = (page_num,)
     num_warps = 4
@@ -119,9 +244,16 @@ def offload_gpu_kv_to_cpu(
         page_indexes_ptr=page_indexes,
         page_readies_ptr=page_readies,
         layer_num=gpu_kv_cache.shape[0],
-        head_all_dim=head_all_dim,
-        cpu_head_offset=cpu_head_offset,
-        BLOCK_HEAD_ALL_DIM=BLOCK_HEAD_ALL_DIM,
+        head_dim=head_dim,
+        cpu_k_start_head_index=cpu_v_start_head_index,
+        cpu_k_head_num=cpu_k_head_num,
+        gpu_k_start_head_index=gpu_k_start_head_index,
+        gpu_k_head_num=gpu_k_head_num,
+        cpu_v_start_head_index=cpu_v_start_head_index,
+        cpu_v_head_num=cpu_v_head_num,
+        gpu_v_start_head_index=gpu_v_start_head_index,
+        gpu_v_head_num=gpu_v_head_num,
+        BLOCK_HEAD_DIM=triton.next_power_of_2(head_dim),
         TOKEN_BLOCK=token_block_size,
         num_warps=num_warps,
         num_stages=1,

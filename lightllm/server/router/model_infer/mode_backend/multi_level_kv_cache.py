@@ -190,13 +190,17 @@ class MultiLevelKvCacheModule(object):
 
             page_indexes = torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
             page_readies = torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
-            token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0 : req.cur_kv_len]
+            move_token_num = item_size * self.args.cpu_cache_token_page_size
+            assert req.cur_kv_len >= item_size * self.args.cpu_cache_token_page_size
+            token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
             offload_gpu_kv_to_cpu(
                 token_indexes=token_indexes,
                 gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
                 cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
                 page_indexes=page_indexes,
                 page_readies=page_readies,
+                tp_index=self.backend.rank_in_dp,
+                tp_world_size=self.backend.dp_world_size,
             )
 
             sync_event = torch.cuda.Event()
