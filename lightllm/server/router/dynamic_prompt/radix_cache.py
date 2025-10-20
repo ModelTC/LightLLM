@@ -333,6 +333,18 @@ class RadixCache:
             self.evict_tree_set.add(old_node)
         return
 
+    def get_mem_index_value_by_node(self, node: TreeNode) -> Optional[torch.Tensor]:
+        if node is None:
+            return None
+
+        ans_list = []
+        while node is not None:
+            ans_list.append(node.token_mem_index_value)
+            node = node.parent
+
+        ans_list.reverse()
+        return torch.concat(ans_list, dim=0)
+
     def get_refed_tokens_num(self):
         return self.refed_tokens_num.arr[0]
 

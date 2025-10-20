@@ -85,6 +85,11 @@ class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
                 self.radix_cache.add_node_ref_counter(new_shared_kv_node)
                 req.shared_kv_node = new_shared_kv_node
 
+                _kv_len = req.cur_kv_len
+                _value = self.radix_cache.get_mem_index_value_by_node(new_shared_kv_node)
+                assert len(_value) == _kv_len
+                self.model.req_manager.req_to_token_indexs[req.req_idx][0:_kv_len] = _value
+
                 assert new_shared_kv_node.node_prefix_total_len == req.cur_kv_len
 
                 if req.shm_req.sample_params.move_kv_to_decode_node.exists:
