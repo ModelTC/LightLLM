@@ -267,9 +267,6 @@ def _load_cpu_cache_to_gpu(
     copy_token_num,
     cpu_mem_indexes_ptr,
     cpu_page_indexes_ptr,
-    cpu_heads_indexes_ptr,
-    gpu_heads_indexes_ptr,
-    copy_head_num,
     gpu_kv_cache_ptr,
     gpu_stride0,
     gpu_stride1,
@@ -283,9 +280,16 @@ def _load_cpu_cache_to_gpu(
     cpu_stride4,
     layer_num,
     head_dim,
+    cpu_k_start_head_index: tl.constexpr,
+    cpu_k_head_num: tl.constexpr,
+    gpu_k_start_head_index: tl.constexpr,
+    gpu_k_head_num: tl.constexpr,
+    cpu_v_start_head_index: tl.constexpr,
+    cpu_v_head_num: tl.constexpr,
+    gpu_v_start_head_index: tl.constexpr,
+    gpu_v_head_num: tl.constexpr,
     BLOCK_HEAD_DIM: tl.constexpr,
     TOKEN_BLOCK: tl.constexpr,
-    HEAD_NUM_BLOCK: tl.constexpr,
 ):
     block_index = tl.program_id(0)
     token_range = block_index * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
@@ -293,39 +297,68 @@ def _load_cpu_cache_to_gpu(
     gpu_mem_indexes = tl.load(gpu_mem_indexes_ptr + token_range, mask=token_mask).to(tl.int64)
     cpu_mem_indexes = tl.load(cpu_mem_indexes_ptr + token_range, mask=token_mask).to(tl.int64)
     cpu_page_indexes = tl.load(cpu_page_indexes_ptr + token_range, mask=token_mask).to(tl.int64)
-    head_range = tl.arange(0, HEAD_NUM_BLOCK)
-    head_mask = head_range < copy_head_num
-    cpu_heads_indexes = tl.load(cpu_heads_indexes_ptr + head_range, mask=head_mask).to(tl.int64)
-    gpu_heads_indexes = tl.load(gpu_heads_indexes_ptr + head_range, mask=head_mask).to(tl.int64)
 
     head_dim_range = tl.arange(0, BLOCK_HEAD_DIM)
     head_dim_mask = head_dim_range < head_dim
 
     for layer_index in range(layer_num):
-        move_mask = token_mask[:, None, None] & head_mask[None, :, None] & head_dim_mask[None, None, :]
-        cpu_ptr = (
-            cpu_kv_cache_ptr
-            + cpu_page_indexes[:, None, None] * cpu_stride0
-            + layer_index * cpu_stride1
-            + cpu_mem_indexes[:, None, None] * cpu_stride2
-            + cpu_heads_indexes[None, :, None] * cpu_stride3
-            + head_dim_range[None, None, :] * cpu_stride4
-        )
-        cpu_data = tl.load(cpu_ptr, mask=move_mask, other=0.0)
+        move_mask = token_mask[:, None] & head_dim_mask[None, :]
 
-        gpu_ptr = (
-            gpu_kv_cache_ptr
-            + layer_index.to(tl.int64) * gpu_stride0
-            + gpu_mem_indexes[:, None, None] * gpu_stride1
-            + gpu_heads_indexes[None, :, None] * gpu_stride2
-            + head_dim_range[None, None, :] * gpu_stride3
-        )
+        for k_head_index in range(cpu_k_head_num):
+            gpu_k_head_index = k_head_index + gpu_k_start_head_index
+            cpu_k_head_index = k_head_index + cpu_k_start_head_index
 
-        tl.store(
-            gpu_ptr,
-            cpu_data,
-            mask=move_mask,
-        )
+            cpu_ptr = (
+                cpu_kv_cache_ptr
+                + cpu_page_indexes[:, None] * cpu_stride0
+                + layer_index * cpu_stride1
+                + cpu_mem_indexes[:, None] * cpu_stride2
+                + cpu_k_head_index * cpu_stride3
+                + head_dim_range[None, :]
+            )
+            cpu_data = tl.load(cpu_ptr, mask=move_mask, other=0.0)
+
+            gpu_ptr = (
+                gpu_kv_cache_ptr
+                + layer_index.to(tl.int64) * gpu_stride0
+                + gpu_mem_indexes[:, None] * gpu_stride1
+                + gpu_k_head_index * gpu_stride2
+                + head_dim_range[None, :]
+            )
+
+            tl.store(
+                gpu_ptr,
+                cpu_data,
+                mask=move_mask,
+            )
+
+        for v_head_index in range(cpu_v_head_num):
+            gpu_v_head_index = v_head_index + gpu_v_start_head_index
+            cpu_v_head_index = v_head_index + cpu_v_start_head_index
+
+            cpu_ptr = (
+                cpu_kv_cache_ptr
+                + cpu_page_indexes[:, None] * cpu_stride0
+                + layer_index * cpu_stride1
+                + cpu_mem_indexes[:, None] * cpu_stride2
+                + cpu_v_head_index * cpu_stride3
+                + head_dim_range[None, :]
+            )
+            cpu_data = tl.load(cpu_ptr, mask=move_mask, other=0.0)
+
+            gpu_ptr = (
+                gpu_kv_cache_ptr
+                + layer_index.to(tl.int64) * gpu_stride0
+                + gpu_mem_indexes[:, None] * gpu_stride1
+                + gpu_v_head_index * gpu_stride2
+                + head_dim_range[None, :]
+            )
+
+            tl.store(
+                gpu_ptr,
+                cpu_data,
+                mask=move_mask,
+            )
     return
 
 
@@ -364,16 +397,16 @@ def load_cpu_kv_to_gpu(
     cpu_head_dim = cpu_kv_cache.shape[4]
     assert gpu_head_dim == cpu_head_dim
     head_dim = gpu_head_dim
+    scale_size = (tp_world_size * gpu_heads) // cpu_heads
 
     # 计算需要拷贝的 head 索引的对应关系
     if (gpu_heads, cpu_heads, tp_index, tp_world_size) in _cache_data:
-        cpu_heads_index, gpu_heads_index = _cache_data[(gpu_heads, cpu_heads, tp_index, tp_world_size)]
+        head_info_tuple = _cache_data[(gpu_heads, cpu_heads, tp_index, tp_world_size)]
     else:
         if cpu_heads > 1:
             assert (tp_world_size * gpu_heads) % cpu_heads == 0
             assert cpu_heads % 2 == 0
 
-            scale_size = (tp_world_size * gpu_heads) // cpu_heads
             cpu_heads_index = (
                 torch.arange(0, cpu_heads, device="cpu", dtype=torch.int32)
                 .view(cpu_heads, 1)
@@ -385,29 +418,77 @@ def load_cpu_kv_to_gpu(
             # v
             v_cpu_heads_index = cpu_heads_index[1][tp_index]
 
-            cpu_heads_index = torch.cat([k_cpu_heads_index, v_cpu_heads_index], dim=0).pin_memory()
-            gpu_heads_index = torch.arange(0, gpu_heads, device="cpu", dtype=torch.int32).pin_memory()
+            cpu_heads_index = torch.cat([k_cpu_heads_index, v_cpu_heads_index], dim=0).view(2, -1).numpy()
+            gpu_heads_index = torch.arange(0, gpu_heads, device="cpu", dtype=torch.int32).view(2, -1).numpy()
+
+            cpu_k_start_head_index = cpu_heads_index[0, 0]
+            cpu_k_head_num = len(cpu_heads_index[0])
+            gpu_k_start_head_index = gpu_heads_index[0, 0]
+            gpu_k_head_num = len(gpu_heads_index[0])
+            assert cpu_k_head_num == gpu_k_head_num
+            cpu_v_start_head_index = cpu_heads_index[1, 0]
+            cpu_v_head_num = len(cpu_heads_index[1])
+            gpu_v_start_head_index = gpu_heads_index[1, 0]
+            gpu_v_head_num = len(gpu_heads_index[1])
+            assert cpu_v_head_num == gpu_v_head_num
+
+            head_info_tuple = (
+                cpu_k_start_head_index,
+                cpu_k_head_num,
+                gpu_k_start_head_index,
+                gpu_k_head_num,
+                cpu_v_start_head_index,
+                cpu_v_head_num,
+                gpu_v_start_head_index,
+                gpu_v_head_num,
+            )
 
         else:
             assert gpu_heads == 1
             assert cpu_heads == 1
-            cpu_heads_index = torch.arange(0, cpu_heads, device="cpu", dtype=torch.int32).pin_memory()
-            gpu_heads_index = torch.arange(0, gpu_heads, device="cpu", dtype=torch.int32).pin_memory()
-        _cache_data[(gpu_heads, cpu_heads, tp_index, tp_world_size)] = (cpu_heads_index, gpu_heads_index)
+
+            cpu_k_start_head_index = 0
+            cpu_k_head_num = 1
+            gpu_k_start_head_index = 0
+            gpu_k_head_num = 1
+            cpu_v_start_head_index = 0
+            cpu_v_head_num = 0
+            gpu_v_start_head_index = 0
+            gpu_v_head_num = 0
+            head_info_tuple = (
+                cpu_k_start_head_index,
+                cpu_k_head_num,
+                gpu_k_start_head_index,
+                gpu_k_head_num,
+                cpu_v_start_head_index,
+                cpu_v_head_num,
+                gpu_v_start_head_index,
+                gpu_v_head_num,
+            )
+
+        _cache_data[(gpu_heads, cpu_heads, tp_index, tp_world_size)] = head_info_tuple
+
+    (
+        cpu_k_start_head_index,
+        cpu_k_head_num,
+        gpu_k_start_head_index,
+        gpu_k_head_num,
+        cpu_v_start_head_index,
+        cpu_v_head_num,
+        gpu_v_start_head_index,
+        gpu_v_head_num,
+    ) = head_info_tuple
 
     TOKEN_BLOCK = 128
 
     grid = (triton.cdiv(move_token_num, TOKEN_BLOCK),)
-    num_warps = 2
+    num_warps = 4
 
     _load_cpu_cache_to_gpu[grid](
         gpu_mem_indexes_ptr=gpu_mem_indexes,
         copy_token_num=move_token_num,
         cpu_mem_indexes_ptr=cpu_mem_indexes,
         cpu_page_indexes_ptr=cpu_page_indexes,
-        cpu_heads_indexes_ptr=cpu_heads_index.cuda(non_blocking=True),
-        gpu_heads_indexes_ptr=gpu_heads_index.cuda(non_blocking=True),
-        copy_head_num=cpu_heads_index.shape[0],
         gpu_kv_cache_ptr=gpu_kv_cache,
         gpu_stride0=gpu_kv_cache.stride(0),
         gpu_stride1=gpu_kv_cache.stride(1),
@@ -421,9 +502,16 @@ def load_cpu_kv_to_gpu(
         cpu_stride4=cpu_kv_cache.stride(4),
         layer_num=gpu_kv_cache.shape[0],
         head_dim=head_dim,
+        cpu_k_start_head_index=cpu_v_start_head_index,
+        cpu_k_head_num=cpu_k_head_num,
+        gpu_k_start_head_index=gpu_k_start_head_index,
+        gpu_k_head_num=gpu_k_head_num,
+        cpu_v_start_head_index=cpu_v_start_head_index,
+        cpu_v_head_num=cpu_v_head_num,
+        gpu_v_start_head_index=gpu_v_start_head_index,
+        gpu_v_head_num=gpu_v_head_num,
         BLOCK_HEAD_DIM=triton.next_power_of_2(head_dim),
         TOKEN_BLOCK=TOKEN_BLOCK,
-        HEAD_NUM_BLOCK=triton.next_power_of_2(cpu_heads_index.shape[0]),
         num_warps=num_warps,
         num_stages=1,
     )
