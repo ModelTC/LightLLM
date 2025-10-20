@@ -5,6 +5,7 @@ from .torchao_quant import *
 from .w8a8_quant import *
 from .triton_quant.triton_quant import *
 from .deepgemm_quant import *
+from .awq_quant import *
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -43,10 +44,12 @@ class Quantcfg:
                 else:
                     self.quant_type = "vllm-fp8w8a8-b128"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
-
-            else:
-                # TODO: more quant method
-                pass
+        elif self.hf_quantization_method == "awq":
+            self.quant_type = "awq"
+            logger.info(f"select awq quant way: {self.quant_type}")
+        else:
+            # TODO: more quant method
+            pass
 
     def _parse_custom_cfg(self, custom_cfg_path):
         self.quant_cfg = collections.defaultdict(dict)

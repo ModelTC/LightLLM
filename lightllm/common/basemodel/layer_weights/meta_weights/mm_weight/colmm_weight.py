@@ -3,6 +3,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight im
     MMWeight,
     MMWeightTpl,
     generate_scale_name,
+    AWQMMWeightTpl,
 )
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_current_device_id
@@ -15,8 +16,7 @@ class COLMMWeight(MMWeight):
     def _get_mmcls(cls, quant_method: QuantizationMethod, quantized_weight: bool):
         if quant_method is None or not quantized_weight:
             return UnquantizedCOLMMWeight
-        else:
-            return W8A8B128COLMMWeight
+        return COLBMM_WEIGHT_CLS_MAP[quant_method.get_name()]
 
 
 class UnquantizedCOLMMWeight(MMWeightTpl):
@@ -97,3 +97,51 @@ class W8A8B128COLMMWeight(MMWeightTpl):
                 None,
             ]
         return
+
+
+class AWQCOLMMWeight(AWQMMWeightTpl):
+    def __init__(
+        self,
+        weight_name: str,
+        data_type: torch.dtype,
+        bias_name: Optional[str] = None,
+        quant_method: QuantizationMethod = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ) -> None:
+        super().__init__(data_type, quant_method, tp_rank, tp_world_size)
+        self.weight_name = weight_name.replace("weight", quant_method.weight_suffix)
+        self.weight_scale_name = weight_name.replace("weight", quant_method.weight_scale_suffix)
+        self.weight_zero_point_name = weight_name.replace("weight", quant_method.weight_zero_point_suffix)
+        self.bias_name = bias_name
+        self.weight_scale: Optional[torch.Tensor] = None
+        self.quantized_weight = True
+        self.weight = [None, None, None]
+
+    def _slice_weight(self, weight: torch.Tensor):
+        assert weight.shape[0] % self.tp_world_size_ == 0, f"tp slice error {weight.shape[0]} % {self.tp_world_size_}"
+        tp_size = weight.shape[0] // self.tp_world_size_
+        return weight[tp_size * self.tp_rank_ : tp_size * (self.tp_rank_ + 1), :]
+
+    def _slice_bias(self, bias):
+        assert bias.shape[0] % self.tp_world_size_ == 0, f"tp slice error {bias.shape[0]} % {self.tp_world_size_}"
+        tp_size = bias.shape[0] // self.tp_world_size_
+        return bias[tp_size * self.tp_rank_ : tp_size * (self.tp_rank_ + 1), :]
+
+    def _slice_weight_scale(self, weight_scale: torch.Tensor):
+        tp_size = weight_scale.shape[0] // self.tp_world_size_
+        scale_start = tp_size * self.tp_rank_
+        scale_end = tp_size * (self.tp_rank_ + 1)
+        return weight_scale[scale_start:scale_end, :].to(torch.half)
+
+    def _slice_weight_zero_point(self, weight_zero_point: torch.Tensor):
+        tp_size = weight_zero_point.shape[0] // self.tp_world_size_
+        zero_point_start = tp_size * self.tp_rank_
+        zero_point_end = tp_size * (self.tp_rank_ + 1)
+        return weight_zero_point[zero_point_start:zero_point_end, :]
+
+
+COLBMM_WEIGHT_CLS_MAP = {
+    "fp8w8a8b128": W8A8B128COLMMWeight,
+    "awq": AWQCOLMMWeight,
+}
