@@ -159,14 +159,14 @@ def offload_gpu_kv_to_cpu(
 
             need_offload = tp_index % scale_size == 0
 
-            cpu_k_start_head_index = cpu_heads_index[0, 0]
+            cpu_k_start_head_index = int(cpu_heads_index[0, 0])
             cpu_k_head_num = len(cpu_heads_index[0])
-            gpu_k_start_head_index = gpu_heads_index[0, 0]
+            gpu_k_start_head_index = int(gpu_heads_index[0, 0])
             gpu_k_head_num = len(gpu_heads_index[0])
             assert cpu_k_head_num == gpu_k_head_num
-            cpu_v_start_head_index = cpu_heads_index[1, 0]
+            cpu_v_start_head_index = int(cpu_heads_index[1, 0])
             cpu_v_head_num = len(cpu_heads_index[1])
-            gpu_v_start_head_index = gpu_heads_index[1, 0]
+            gpu_v_start_head_index = int(gpu_heads_index[1, 0])
             gpu_v_head_num = len(gpu_heads_index[1])
             assert cpu_v_head_num == gpu_v_head_num
 
@@ -421,14 +421,14 @@ def load_cpu_kv_to_gpu(
             cpu_heads_index = torch.cat([k_cpu_heads_index, v_cpu_heads_index], dim=0).view(2, -1).numpy()
             gpu_heads_index = torch.arange(0, gpu_heads, device="cpu", dtype=torch.int32).view(2, -1).numpy()
 
-            cpu_k_start_head_index = cpu_heads_index[0, 0]
+            cpu_k_start_head_index = int(cpu_heads_index[0, 0])
             cpu_k_head_num = len(cpu_heads_index[0])
-            gpu_k_start_head_index = gpu_heads_index[0, 0]
+            gpu_k_start_head_index = int(gpu_heads_index[0, 0])
             gpu_k_head_num = len(gpu_heads_index[0])
             assert cpu_k_head_num == gpu_k_head_num
-            cpu_v_start_head_index = cpu_heads_index[1, 0]
+            cpu_v_start_head_index = int(cpu_heads_index[1, 0])
             cpu_v_head_num = len(cpu_heads_index[1])
-            gpu_v_start_head_index = gpu_heads_index[1, 0]
+            gpu_v_start_head_index = int(gpu_heads_index[1, 0])
             gpu_v_head_num = len(gpu_heads_index[1])
             assert cpu_v_head_num == gpu_v_head_num
 
