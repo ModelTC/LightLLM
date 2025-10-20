@@ -4,6 +4,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight im
     MMWeightTpl,
     BMMWeightTpl,
     MultiMMWeightTpl,
+    AWQMMWeightTpl,
+    AWQMultiMMWeightTpl,
     generate_scale_name,
 )
 from lightllm.common.quantization import Quantcfg
@@ -17,10 +19,8 @@ class ROWMMWeight(MMWeight):
     def _get_mmcls(cls, quant_method: QuantizationMethod, quantized_weight: bool):
         if quant_method is None or not quantized_weight:
             return UnquantizedROWMMWeight
-        else:
-            return W8A8B128ROWMMWeight
-        # TODO: Implement more quantization weight
-        return None
+
+        return ROWBMM_WEIGHT_CLS_MAP[quant_method.get_name()]
 
 
 class MultiROWMMWeight(MMWeight):
@@ -28,10 +28,8 @@ class MultiROWMMWeight(MMWeight):
     def _get_mmcls(cls, quant_method: QuantizationMethod, quantized_weight: bool):
         if quant_method is None or not quantized_weight:
             return UnquantizedMultiROWMMWeight
-        else:
-            return W8A8B128MultiROWMMWeight
-        # TODO: Implement more quantization weight
-        return None
+
+        return MULTI_ROWBMM_WEIGHT_CLS_MAP[quant_method.get_name()]
 
 
 class ROWBMMWeight(MMWeight):
@@ -256,3 +254,74 @@ class W8A8B128ROWBMMWeight(UnquantizedROWBMMWeight):
                 self.weight_scale,
                 None,
             ]
+
+
+class AWQROWMMWeight(AWQMMWeightTpl):
+    def __init__(
+        self,
+        weight_name: str,
+        data_type: torch.dtype,
+        bias_name: Optional[str] = None,
+        quant_method: QuantizationMethod = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ) -> None:
+        super().__init__(data_type, quant_method, tp_rank, tp_world_size)
+        self.weight_name = weight_name.replace("weight", quant_method.weight_suffix)
+        self.weight_scale_name = weight_name.replace("weight", quant_method.weight_scale_suffix)
+        self.weight_zero_point_name = weight_name.replace("weight", quant_method.weight_zero_point_suffix)
+        self.bias_name = bias_name
+        self.weight_scale: Optional[torch.Tensor] = None
+        self.quantized_weight = True
+        self.weight = [None, None, None]
+
+    def _slice_weight(self, weight: torch.Tensor):
+        assert weight.shape[1] % self.tp_world_size_ == 0, f"tp slice error {weight.shape[1]} % {self.tp_world_size_}"
+        tp_size = weight.shape[1] // self.tp_world_size_
+        return weight[:, tp_size * self.tp_rank_ : tp_size * (self.tp_rank_ + 1)]
+
+    def _slice_bias(self, bias):
+        assert bias.shape[1] % self.tp_world_size_ == 0, f"tp slice error {bias.shape[1]} % {self.tp_world_size_}"
+        tp_size = bias.shape[1] // self.tp_world_size_
+        return bias[:, tp_size * self.tp_rank_ : tp_size * (self.tp_rank_ + 1)]
+
+    def _slice_weight_scale(self, weight_scale: torch.Tensor):
+        tp_size = weight_scale.shape[1] // self.tp_world_size_
+        scale_start = tp_size * self.tp_rank_
+        scale_end = tp_size * (self.tp_rank_ + 1)
+        return weight_scale[:, scale_start:scale_end].to(torch.half)
+
+    def _slice_weight_zero_point(self, weight_zero_point: torch.Tensor):
+        tp_size = weight_zero_point.shape[1] // self.tp_world_size_
+        zero_point_start = tp_size * self.tp_rank_
+        zero_point_end = tp_size * (self.tp_rank_ + 1)
+        return weight_zero_point[:, zero_point_start:zero_point_end]
+
+
+class AWQMultiROWMMWeight(AWQMultiMMWeightTpl):
+    _slice_weight = AWQROWMMWeight._slice_weight
+    _slice_bias = AWQROWMMWeight._slice_bias
+    _slice_weight_scale = AWQROWMMWeight._slice_weight_scale
+    _slice_weight_zero_point = AWQROWMMWeight._slice_weight_zero_point
+
+    def __init__(
+        self,
+        weight_names: List[str],
+        data_type: torch.dtype,
+        bias_names: Optional[List[str]] = None,
+        quant_method: QuantizationMethod = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ) -> None:
+        super().__init__(weight_names, data_type, bias_names, quant_method, tp_rank, tp_world_size)
+
+
+ROWBMM_WEIGHT_CLS_MAP = {
+    "fp8w8a8b128": W8A8B128ROWMMWeight,
+    "awq": AWQROWMMWeight,
+}
+
+MULTI_ROWBMM_WEIGHT_CLS_MAP = {
+    "fp8w8a8b128": W8A8B128MultiROWMMWeight,
+    "awq": AWQMultiROWMMWeight,
+}

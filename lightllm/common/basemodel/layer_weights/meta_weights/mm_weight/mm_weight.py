@@ -163,6 +163,129 @@ class BMMWeightTpl(MMWeightTpl):
         self.weight = weight.cuda(get_current_device_id())
 
 
+class AWQMMWeightTpl(MMWeightTpl):
+    def __init__(
+        self,
+        data_type: torch.dtype,
+        quant_method: QuantizationMethod = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ) -> None:
+        super().__init__(data_type, quant_method, tp_rank, tp_world_size)
+        self.weight = [None, None, None]
+
+    def verify_load(self) -> bool:
+        load_ok = True
+        # Verify weight. The weight must be not None.
+        weight_ok = all(w is not None for w in self.weight)
+        load_ok = load_ok and weight_ok
+        # Verify bias. If bias_name is set, it must be not None.
+        if self.has_bias:
+            load_ok = load_ok and self.bias is not None
+        return load_ok
+
+    def _load_weights(self, weights: Dict[str, torch.Tensor]) -> None:
+        if self.weight_name is not None and self.weight_name in weights:
+            weight = weights[self.weight_name]
+            weight = self._slice_weight(weight)
+            self.weight[0] = weight.cuda(get_current_device_id())
+        if self.bias_name is not None and self.bias_name in weights:
+            bias = weights[self.bias_name]
+            bias = self._slice_bias(bias)
+            self.bias = bias.cuda(get_current_device_id())
+
+    def _load_scales(self, weights: Dict[str, torch.Tensor]) -> None:
+        if self.weight_scale_name is not None and self.weight_scale_name in weights:
+            weight_scale = weights[self.weight_scale_name]
+            weight_scale = self._slice_weight_scale(weight_scale)
+            self.weight[1] = weight_scale.cuda(get_current_device_id())
+
+    def _load_zero_points(self, weights: Dict[str, torch.Tensor]) -> None:
+        if self.weight_zero_point_name is not None and self.weight_zero_point_name in weights:
+            weight_zero_point = weights[self.weight_zero_point_name]
+            weight_zero_point = self._slice_weight_zero_point(weight_zero_point)
+            self.weight[2] = weight_zero_point.cuda(get_current_device_id())
+
+
+class AWQMultiMMWeightTpl(AWQMMWeightTpl):
+    def __init__(
+        self,
+        weight_names: List[str],
+        data_type: torch.dtype,
+        bias_names: Optional[List[str]] = None,
+        quant_method: QuantizationMethod = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ) -> None:
+        super().__init__(data_type, quant_method, tp_rank, tp_world_size)
+        self.weight_names = [weight.replace("weight", quant_method.weight_suffix) for weight in weight_names]
+        self.weight_scale_names = [
+            weight.replace("weight", quant_method.weight_scale_suffix) for weight in weight_names
+        ]
+        self.weight_zero_point_names = [
+            weight.replace("weight", quant_method.weight_zero_point_suffix) for weight in weight_names
+        ]
+        self.bias_names = bias_names
+        self.weights = [None] * len(self.weight_names)
+        self.weight_scales = [None] * len(self.weight_names)
+        self.weight_zero_points = [None] * len(self.weight_names)
+        if self.bias_names is not None:
+            self.biases = [None] * len(self.bias_names)
+            self.has_bias = all(b is not None for b in self.bias_names) and len(bias_names) > 0
+        else:
+            self.biases = None
+            self.has_bias = False
+
+    def _fuse(self) -> None:
+        if self.weight[0] is None and (None not in self.weights):
+            weight = torch.cat(self.weights, dim=1)
+            self.weight[0] = weight.cuda(get_current_device_id())
+            delattr(self, "weights")
+
+        if self.weight[1] is None and (None not in self.weight_scales):
+            # awq 保存的量化参数，weight shape 是 in x out。所以这里的cat dim 是 1
+            weight_scale = torch.cat(self.weight_scales, dim=1).cuda(get_current_device_id())
+            self.weight[1] = weight_scale.cuda(get_current_device_id())
+            delattr(self, "weight_scales")
+
+        if self.weight[2] is None and (None not in self.weight_zero_points):
+            weight_zero_point = torch.cat(self.weight_zero_points, dim=1)
+            self.weight[2] = weight_zero_point.cuda(get_current_device_id())
+            print("weight_zero_point", self.weight[2].dtype)
+            delattr(self, "weight_zero_points")
+
+        if self.has_bias and self.bias is None and (None not in self.biases):
+            self.bias = torch.cat(self.biases, dim=0).cuda(get_current_device_id())
+            delattr(self, "biases")
+        return self
+
+    def _load_weights(self, weights: Dict[str, torch.Tensor]) -> None:
+        for i in range(len(self.weight_names)):
+            if self.weight_names[i] is not None and self.weight_names[i] in weights:
+                weight = weights[self.weight_names[i]]
+                weight = self._slice_weight(weight)
+                self.weights[i] = weight.cuda(get_current_device_id())
+
+    def _load_scales(self, weights: Dict[str, torch.Tensor]) -> None:
+        for i in range(len(self.weight_names)):
+            if self.weight_scale_names[i] is not None and self.weight_scale_names[i] in weights:
+                weight_scale = weights[self.weight_scale_names[i]]
+                weight_scale = self._slice_weight_scale(weight_scale)
+                self.weight_scales[i] = weight_scale.cuda(get_current_device_id())
+
+    def _load_zero_points(self, weights: Dict[str, torch.Tensor]) -> None:
+        for i in range(len(self.weight_names)):
+            if self.weight_zero_point_names[i] is not None and self.weight_zero_point_names[i] in weights:
+                weight_zero_point = weights[self.weight_zero_point_names[i]]
+                weight_zero_point = self._slice_weight_zero_point(weight_zero_point)
+                self.weight_zero_points[i] = weight_zero_point.cuda(get_current_device_id())
+
+    def load_hf_weights(self, weights):
+        super().load_hf_weights(weights)
+        self._fuse()
+        return
+
+
 class MMWeight:
     def __new__(cls, **kwargs):
         quant_cfg = kwargs.pop("quant_cfg", None)
@@ -178,6 +301,7 @@ class MMWeight:
         if quant_cfg is None:
             return None, False
         quant_method = quant_cfg.get_quant_method(layer_num_, name)
+        quant_method.hf_quantization_method = quant_cfg.hf_quantization_method
         quantized_weight = quant_cfg.quantized_weight
         return quant_method, quantized_weight
 

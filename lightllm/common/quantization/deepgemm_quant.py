@@ -40,6 +40,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         self.weight_scale_suffix = "weight_scale_inv"
         self.act_scale_suffix = None  # no support for static input tensor scale for ds model.
 
+    def get_name(self):
+        return "fp8w8a8b128"
+
     def quantize(self, weight: torch.Tensor):
         from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_quant_kernel import weight_quant
 
