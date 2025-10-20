@@ -186,13 +186,13 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
         cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
         cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
 
-        cudaHostRegisterDefault = 0
+        cudaHostRegisterFlag = 3
 
         torch.cuda.set_device(get_current_device_id())
         # TODO 这个地方的分块注册是否具备合法性和合理性。
         for offset, seg_len in tasks:
             ptr = ctypes.c_void_p(shm_ptr + offset)
-            r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterDefault)
+            r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
             if r != 0:
                 raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
             handle.task_count += 1

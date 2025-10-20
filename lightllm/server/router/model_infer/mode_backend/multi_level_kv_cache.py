@@ -193,6 +193,7 @@ class MultiLevelKvCacheModule(object):
             move_token_num = item_size * self.args.cpu_cache_token_page_size
             assert req.cur_kv_len >= item_size * self.args.cpu_cache_token_page_size
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
+            # assert max(page_list) < self.cpu_cache_client.cpu_kv_cache_tensor.shape[0]
             offload_gpu_kv_to_cpu(
                 token_indexes=token_indexes,
                 gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,

@@ -63,7 +63,7 @@ def _offload_gpu_kv_to_cpu(
             cpu_ptr = (
                 cpu_kv_cache_ptr
                 + cpu_page_index * cpu_stride0
-                + layer_index * cpu_stride1
+                + layer_index.to(tl.int64) * cpu_stride1
                 + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
                 + cpu_k_head_index * cpu_stride3
                 + head_dim_range[None, :]
@@ -89,7 +89,7 @@ def _offload_gpu_kv_to_cpu(
             cpu_ptr = (
                 cpu_kv_cache_ptr
                 + cpu_page_index * cpu_stride0
-                + layer_index * cpu_stride1
+                + layer_index.to(tl.int64) * cpu_stride1
                 + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
                 + cpu_v_head_index * cpu_stride3
                 + head_dim_range[None, :]
@@ -311,7 +311,7 @@ def _load_cpu_cache_to_gpu(
             cpu_ptr = (
                 cpu_kv_cache_ptr
                 + cpu_page_indexes[:, None] * cpu_stride0
-                + layer_index * cpu_stride1
+                + layer_index.to(tl.int64) * cpu_stride1
                 + cpu_mem_indexes[:, None] * cpu_stride2
                 + cpu_k_head_index * cpu_stride3
                 + head_dim_range[None, :]
@@ -339,7 +339,7 @@ def _load_cpu_cache_to_gpu(
             cpu_ptr = (
                 cpu_kv_cache_ptr
                 + cpu_page_indexes[:, None] * cpu_stride0
-                + layer_index * cpu_stride1
+                + layer_index.to(tl.int64) * cpu_stride1
                 + cpu_mem_indexes[:, None] * cpu_stride2
                 + cpu_v_head_index * cpu_stride3
                 + head_dim_range[None, :]
