@@ -76,17 +76,18 @@ class MultiLevelKVCacheManager:
             if req.is_aborted:
                 continue
 
-            self.cpu_cache_client.lock.acquire_sleep1ms()
             req: Req = req
             finded_page_indexes = []
             for token_chuncked_hash_value in req.token_hash_list.get_all():
+                self.cpu_cache_client.lock.acquire_sleep1ms()
                 page_index, ready = self.cpu_cache_client.query_one_page(token_chuncked_hash_value)
+                self.cpu_cache_client.lock.release()
+
                 if page_index is not None:
                     assert ready
                     finded_page_indexes.append(page_index)
                 else:
                     break
-            self.cpu_cache_client.lock.release()
 
             # 等待所有的 cpu cache 页面ready
             while not self.cpu_cache_client.check_allpages_ready(finded_page_indexes):
