@@ -251,7 +251,6 @@ class AWQMultiMMWeightTpl(AWQMMWeightTpl):
         if self.weight[2] is None and (None not in self.weight_zero_points):
             weight_zero_point = torch.cat(self.weight_zero_points, dim=1)
             self.weight[2] = weight_zero_point.cuda(get_current_device_id())
-            print("weight_zero_point", self.weight[2].dtype)
             delattr(self, "weight_zero_points")
 
         if self.has_bias and self.bias is None and (None not in self.biases):
