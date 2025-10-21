@@ -184,11 +184,20 @@ class AWQMMWeightTpl(MMWeightTpl):
             load_ok = load_ok and self.bias is not None
         return load_ok
 
+    def _process_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        return weight.cuda(get_current_device_id())
+
+    def _process_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
+        return weight_scale.cuda(get_current_device_id())
+
+    def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
+        return weight_zero_point.cuda(get_current_device_id())
+
     def _load_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         if self.weight_name is not None and self.weight_name in weights:
             weight = weights[self.weight_name]
             weight = self._slice_weight(weight)
-            self.weight[0] = weight.cuda(get_current_device_id())
+            self.weight[0] = self._process_weight(weight)
         if self.bias_name is not None and self.bias_name in weights:
             bias = weights[self.bias_name]
             bias = self._slice_bias(bias)
@@ -198,13 +207,13 @@ class AWQMMWeightTpl(MMWeightTpl):
         if self.weight_scale_name is not None and self.weight_scale_name in weights:
             weight_scale = weights[self.weight_scale_name]
             weight_scale = self._slice_weight_scale(weight_scale)
-            self.weight[1] = weight_scale.cuda(get_current_device_id())
+            self.weight[1] = self._process_weight_scale(weight_scale)
 
     def _load_zero_points(self, weights: Dict[str, torch.Tensor]) -> None:
         if self.weight_zero_point_name is not None and self.weight_zero_point_name in weights:
             weight_zero_point = weights[self.weight_zero_point_name]
             weight_zero_point = self._slice_weight_zero_point(weight_zero_point)
-            self.weight[2] = weight_zero_point.cuda(get_current_device_id())
+            self.weight[2] = self._process_weight_zero_point(weight_zero_point)
 
 
 class AWQMultiMMWeightTpl(AWQMMWeightTpl):
@@ -239,18 +248,18 @@ class AWQMultiMMWeightTpl(AWQMMWeightTpl):
     def _fuse(self) -> None:
         if self.weight[0] is None and (None not in self.weights):
             weight = torch.cat(self.weights, dim=1)
-            self.weight[0] = weight.cuda(get_current_device_id())
+            self.weight[0] = self._process_weight(weight)
             delattr(self, "weights")
 
         if self.weight[1] is None and (None not in self.weight_scales):
             # awq 保存的量化参数，weight shape 是 in x out。所以这里的cat dim 是 1
             weight_scale = torch.cat(self.weight_scales, dim=1).cuda(get_current_device_id())
-            self.weight[1] = weight_scale.cuda(get_current_device_id())
+            self.weight[1] = self._process_weight_scale(weight_scale)
             delattr(self, "weight_scales")
 
         if self.weight[2] is None and (None not in self.weight_zero_points):
             weight_zero_point = torch.cat(self.weight_zero_points, dim=1)
-            self.weight[2] = weight_zero_point.cuda(get_current_device_id())
+            self.weight[2] = self._process_weight_zero_point(weight_zero_point)
             delattr(self, "weight_zero_points")
 
         if self.has_bias and self.bias is None and (None not in self.biases):
@@ -300,7 +309,7 @@ class MMWeight:
         if quant_cfg is None:
             return None, False
         quant_method = quant_cfg.get_quant_method(layer_num_, name)
-        quant_method.hf_quantization_method = quant_cfg.hf_quantization_method
+        quant_method.hf_quantization_config = quant_cfg.hf_quantization_config
         quantized_weight = quant_cfg.quantized_weight
         return quant_method, quantized_weight
 
