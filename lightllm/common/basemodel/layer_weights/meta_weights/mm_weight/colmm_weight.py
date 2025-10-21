@@ -157,7 +157,9 @@ class AWQMARLINCOLMMWeight(AWQCOLMMWeight):
         return self.quant_method._process_weight_after_loading(weight.cuda(get_current_device_id()))
 
     def _process_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
-        return self.quant_method._process_weight_scale_after_loading(weight_scale.cuda(get_current_device_id()))
+        return self.quant_method._process_weight_scale_after_loading(
+            weight_scale.cuda(get_current_device_id()).to(self.data_type_)
+        )
 
     def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
         return self.quant_method._process_weight_zero_point_after_loading(
