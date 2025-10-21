@@ -46,6 +46,8 @@ class Quantcfg:
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
+            if is_awq_marlin_compatible(self.hf_quantization_config):
+                self.quant_type = "awq_marlin"
             logger.info(f"select awq quant way: {self.quant_type}")
         else:
             # TODO: more quant method

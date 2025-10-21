@@ -141,7 +141,32 @@ class AWQCOLMMWeight(AWQMMWeightTpl):
         return weight_zero_point[zero_point_start:zero_point_end, :]
 
 
+class AWQMARLINCOLMMWeight(AWQCOLMMWeight):
+    def __init__(
+        self,
+        weight_name: str,
+        data_type: torch.dtype,
+        bias_name: Optional[str] = None,
+        quant_method: QuantizationMethod = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ) -> None:
+        super().__init__(weight_name, data_type, bias_name, quant_method, tp_rank, tp_world_size)
+
+    def _process_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        return self.quant_method._process_weight_after_loading(weight.cuda(get_current_device_id()))
+
+    def _process_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
+        return self.quant_method._process_weight_scale_after_loading(weight_scale.cuda(get_current_device_id()))
+
+    def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
+        return self.quant_method._process_weight_zero_point_after_loading(
+            weight_zero_point.cuda(get_current_device_id())
+        )
+
+
 COLBMM_WEIGHT_CLS_MAP = {
     "fp8w8a8b128": W8A8B128COLMMWeight,
     "awq": AWQCOLMMWeight,
+    "awq_marlin": AWQMARLINCOLMMWeight,
 }
