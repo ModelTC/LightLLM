@@ -78,12 +78,14 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.pack_factor = 8
+        self.nbits = 4
         self.weight_scale_suffix = "scales"
         self.weight_zero_point_suffix = "qzeros"
         self.weight_suffix = "qweight"
         self.g_idx = marlin_make_empty_g_idx(torch.device("cuda"))
         self.g_idx_sort_indices = marlin_make_empty_g_idx(torch.device("cuda"))
         self.workspace = marlin_make_workspace_new(torch.device("cuda"))
+        self.vllm_quant_type = TYPE_MAP[self.nbits]
 
     def get_name(self):
         return "awq_marlin"
@@ -143,7 +145,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             self.g_idx,
             self.g_idx_sort_indices,
             self.workspace,
-            TYPE_MAP[self.hf_quantization_config["bits"]],
+            self.vllm_quant_type,
             size_m=reshaped_x.shape[0],
             size_n=self.n,
             size_k=self.k,

@@ -63,7 +63,6 @@ class Quantcfg:
 
         self.quant_type = data["quant_type"]
         for layer_quant_cfg in data.get("mix_bits", []):
-            print(layer_quant_cfg)
             name = layer_quant_cfg["name"]
             layer_nums = layer_quant_cfg.get("layer_nums", range(self.layer_num))
             layer_quant_type = layer_quant_cfg["quant_type"]
