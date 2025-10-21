@@ -228,6 +228,11 @@ class CpuKvCacheClient(object):
             self.kv_cache_tensor_meta.head_dim,
         )
         self.cpu_kv_cache_tensor = torch.from_numpy(numpy_array).view(dtype=torch.bfloat16).view(shape)
+        assert shm_ptr == self.cpu_kv_cache_tensor.data_ptr()
+
+        # test code
+        # self.cpu_kv_cache_tensor = torch.zeros_like(self.cpu_kv_cache_tensor, device="cpu", pin_memory=True)
+        # self.cpu_kv_cache_tensor = torch.zeros_like(self.cpu_kv_cache_tensor, device="cuda")
         return handle
 
 

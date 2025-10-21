@@ -231,7 +231,7 @@ def offload_gpu_kv_to_cpu(
     assert token_block_size == triton.next_power_of_2(token_block_size)
     page_num = page_indexes.shape[0]
 
-    grid = (26,)
+    grid = (1,)
     num_warps = 4
 
     _offload_gpu_kv_to_cpu[grid](

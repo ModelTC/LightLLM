@@ -148,7 +148,7 @@ def create_shm_kv_cache_ptr() -> int:
     shm_addr = libc.shmat(shmid, ctypes.c_void_p(0), 0)
     if shm_addr == ctypes.c_void_p(-1).value:
         raise Exception("Error attaching shared memory")
-    logger.info(f"Shared memory attached at address: {shm_addr}")
+    logger.info(f"Shared cpu kv cache tensor memory at address: {shm_addr}")
 
     return shm_addr
 
