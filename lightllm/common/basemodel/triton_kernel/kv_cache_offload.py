@@ -22,6 +22,7 @@ def _offload_gpu_kv_to_cpu(
     page_readies_ptr,
     layer_num,
     head_dim,
+    block_num,
     cpu_k_start_head_index: tl.constexpr,
     cpu_k_head_num: tl.constexpr,
     gpu_k_start_head_index: tl.constexpr,
@@ -33,72 +34,76 @@ def _offload_gpu_kv_to_cpu(
     BLOCK_HEAD_DIM: tl.constexpr,
     TOKEN_BLOCK: tl.constexpr,
 ):
-    block_index = tl.program_id(0)
-    cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
-    if cpu_page_index == -1:
-        return
+    block_start_index = tl.program_id(0)
+    block_split_size = tl.num_programs(axis=0)
 
-    ready_state = tl.load(page_readies_ptr + block_index)
-    if ready_state:
-        return
+    for block_index in tl.range(block_start_index, block_num, block_split_size):
+        cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
 
-    token_range = block_index * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
-    token_indexes = tl.load(token_indexes_ptr + token_range).to(tl.int64)
-    head_dim_range = tl.arange(0, BLOCK_HEAD_DIM)
-    head_dim_mask = head_dim_range < head_dim
+        ready_state = tl.load(page_readies_ptr + block_index)
 
-    for layer_index in range(layer_num):
-        for k_head_index in range(gpu_k_head_num):
-            gpu_k_head_index = k_head_index + gpu_k_start_head_index
-            cpu_k_head_index = k_head_index + cpu_k_start_head_index
+        mask_layer_num = tl.where(cpu_page_index == -1, 0, 1)
+        mask_layer_num = tl.where(ready_state, 0, mask_layer_num)
 
-            gpu_ptr = (
-                gpu_kv_cache_ptr
-                + layer_index.to(tl.int64) * gpu_stride0
-                + token_indexes[:, None] * gpu_stride1
-                + gpu_k_head_index.to(tl.int64) * gpu_stride2
-                + head_dim_range[None, :]
-            )
-            gpu_data = tl.load(gpu_ptr, mask=head_dim_mask[None, :], other=0.0)
-            cpu_ptr = (
-                cpu_kv_cache_ptr
-                + cpu_page_index * cpu_stride0
-                + layer_index.to(tl.int64) * cpu_stride1
-                + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
-                + cpu_k_head_index * cpu_stride3
-                + head_dim_range[None, :]
-            )
-            tl.store(
-                cpu_ptr,
-                gpu_data,
-                mask=head_dim_mask[None, :],
-            )
+        token_range = block_index * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
+        token_indexes = tl.load(token_indexes_ptr + token_range).to(tl.int64)
+        head_dim_range = tl.arange(0, BLOCK_HEAD_DIM)
+        head_dim_mask = head_dim_range < head_dim
 
-        for v_head_index in range(gpu_v_head_num):
-            gpu_v_head_index = v_head_index + gpu_v_start_head_index
-            cpu_v_head_index = v_head_index + cpu_v_start_head_index
+        for layer_index in range(layer_num * mask_layer_num):
+            for k_head_index in range(gpu_k_head_num):
+                gpu_k_head_index = k_head_index + gpu_k_start_head_index
+                cpu_k_head_index = k_head_index + cpu_k_start_head_index
 
-            gpu_ptr = (
-                gpu_kv_cache_ptr
-                + layer_index.to(tl.int64) * gpu_stride0
-                + token_indexes[:, None] * gpu_stride1
-                + gpu_v_head_index.to(tl.int64) * gpu_stride2
-                + head_dim_range[None, :]
-            )
-            gpu_data = tl.load(gpu_ptr, mask=head_dim_mask[None, :], other=0.0)
-            cpu_ptr = (
-                cpu_kv_cache_ptr
-                + cpu_page_index * cpu_stride0
-                + layer_index.to(tl.int64) * cpu_stride1
-                + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
-                + cpu_v_head_index * cpu_stride3
-                + head_dim_range[None, :]
-            )
-            tl.store(
-                cpu_ptr,
-                gpu_data,
-                mask=head_dim_mask[None, :],
-            )
+                gpu_ptr = (
+                    gpu_kv_cache_ptr
+                    + layer_index.to(tl.int64) * gpu_stride0
+                    + token_indexes[:, None] * gpu_stride1
+                    + gpu_k_head_index.to(tl.int64) * gpu_stride2
+                    + head_dim_range[None, :]
+                )
+                gpu_data = tl.load(gpu_ptr, mask=head_dim_mask[None, :], other=0.0)
+                cpu_ptr = (
+                    cpu_kv_cache_ptr
+                    + cpu_page_index * cpu_stride0
+                    + layer_index.to(tl.int64) * cpu_stride1
+                    + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
+                    + cpu_k_head_index * cpu_stride3
+                    + head_dim_range[None, :]
+                )
+                tl.store(
+                    cpu_ptr,
+                    gpu_data,
+                    mask=head_dim_mask[None, :],
+                    cache_modifier=".wt",
+                )
+
+            for v_head_index in range(gpu_v_head_num):
+                gpu_v_head_index = v_head_index + gpu_v_start_head_index
+                cpu_v_head_index = v_head_index + cpu_v_start_head_index
+
+                gpu_ptr = (
+                    gpu_kv_cache_ptr
+                    + layer_index.to(tl.int64) * gpu_stride0
+                    + token_indexes[:, None] * gpu_stride1
+                    + gpu_v_head_index.to(tl.int64) * gpu_stride2
+                    + head_dim_range[None, :]
+                )
+                gpu_data = tl.load(gpu_ptr, mask=head_dim_mask[None, :], other=0.0)
+                cpu_ptr = (
+                    cpu_kv_cache_ptr
+                    + cpu_page_index * cpu_stride0
+                    + layer_index.to(tl.int64) * cpu_stride1
+                    + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
+                    + cpu_v_head_index * cpu_stride3
+                    + head_dim_range[None, :]
+                )
+                tl.store(
+                    cpu_ptr,
+                    gpu_data,
+                    mask=head_dim_mask[None, :],
+                    cache_modifier=".wt",
+                )
     return
 
 
@@ -132,6 +137,7 @@ def offload_gpu_kv_to_cpu(
     cpu_heads = cpu_kv_cache.shape[3]
     cpu_head_dim = cpu_kv_cache.shape[4]
     assert gpu_head_dim == cpu_head_dim
+    assert gpu_kv_cache.shape[0] == cpu_kv_cache.shape[1]
     head_dim = gpu_head_dim
     scale_size = (tp_world_size * gpu_heads) // cpu_heads
 
@@ -225,7 +231,7 @@ def offload_gpu_kv_to_cpu(
     assert token_block_size == triton.next_power_of_2(token_block_size)
     page_num = page_indexes.shape[0]
 
-    grid = (page_num,)
+    grid = (26,)
     num_warps = 4
 
     _offload_gpu_kv_to_cpu[grid](
@@ -245,6 +251,7 @@ def offload_gpu_kv_to_cpu(
         page_readies_ptr=page_readies,
         layer_num=gpu_kv_cache.shape[0],
         head_dim=head_dim,
+        block_num=page_num,
         cpu_k_start_head_index=cpu_v_start_head_index,
         cpu_k_head_num=cpu_k_head_num,
         gpu_k_start_head_index=gpu_k_start_head_index,
