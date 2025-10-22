@@ -165,6 +165,7 @@ class DiversehBackend(ChunkedPrefillBackend):
         value = self.model.req_manager.req_to_token_indexs[master_req.req_idx][: master_req.cur_kv_len].detach().cpu()
         prefix_len, new_shared_kv_node = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if master_req.shared_kv_node is None else master_req.shared_kv_node.node_prefix_total_len
+        assert old_prefix_len <= master_req.cur_kv_len
         self.model.mem_manager.free(
             self.model.req_manager.req_to_token_indexs[master_req.req_idx][old_prefix_len:prefix_len]
         )
@@ -173,7 +174,9 @@ class DiversehBackend(ChunkedPrefillBackend):
         self.radix_cache.dec_node_ref_counter(master_req.shared_kv_node)
         self.radix_cache.add_node_ref_counter(new_shared_kv_node)
         master_req.shared_kv_node = new_shared_kv_node
-        assert new_shared_kv_node.node_prefix_total_len == master_req.cur_kv_len
+        assert (
+            new_shared_kv_node.node_prefix_total_len == master_req.cur_kv_len
+        ), f"shared len: {new_shared_kv_node.node_prefix_total_len} cur_kv_len {master_req.cur_kv_len}"
 
         share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=False)
         assert share_node == new_shared_kv_node and kv_len == master_req.cur_kv_len
