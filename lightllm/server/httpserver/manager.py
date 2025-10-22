@@ -604,7 +604,7 @@ class HttpServerManager:
                             f"prompt_cache_len:{prompt_cache_len} "
                             f"prompt_cache_ratio:{prompt_cache_ratio} "
                             f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
-                            f"used_cpu_prompt_cache_len:{cpu_prompt_cache_len - prompt_cache_len} "
+                            f"used_cpu_prompt_cache_len:{max(0, cpu_prompt_cache_len - prompt_cache_len)} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
                         if group_request_id < 0:
