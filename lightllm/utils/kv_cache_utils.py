@@ -202,6 +202,7 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
         res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
         if res != 0:
             raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
+        assert host_ptr.value == device_ptr.value
         handle.tasks_finished.set()
 
     th = threading.Thread(target=_worker, name="cpu_cache_register", daemon=True)
