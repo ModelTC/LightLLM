@@ -62,6 +62,7 @@ class MultiLevelKvCacheModule(object):
 
                     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
+                    # g_infer_context.get_overlap_stream().synchronize()
                     # 将 cpu page 的内容拷贝到 gpu 页面中
                     load_cpu_kv_to_gpu(
                         gpu_mem_indexes=mem_indexes.cuda(non_blocking=True),
@@ -70,6 +71,7 @@ class MultiLevelKvCacheModule(object):
                         page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
                         tp_index=self.backend.rank_in_dp,
                         tp_world_size=self.backend.dp_world_size,
+                        grid_num=1 if self.args.enable_fa3 else 16,  # TODO 更有效的分配策略。
                     )
 
                 torch.cuda.current_stream().synchronize()
