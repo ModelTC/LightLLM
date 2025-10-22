@@ -202,6 +202,7 @@ class MultiLevelKvCacheModule(object):
                 page_readies=page_readies,
                 tp_index=self.backend.rank_in_dp,
                 tp_world_size=self.backend.dp_world_size,
+                grid_num=1 if self.args.enable_fa3 else 16,  # TODO 更有效的分配策略。
             )
 
             sync_event = torch.cuda.Event()

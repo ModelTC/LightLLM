@@ -116,6 +116,7 @@ def offload_gpu_kv_to_cpu(
     page_readies: torch.Tensor,
     tp_index: int,
     tp_world_size: int,
+    grid_num: int,
     _cache_data={},
 ):
     """
@@ -231,7 +232,7 @@ def offload_gpu_kv_to_cpu(
     assert token_block_size == triton.next_power_of_2(token_block_size)
     page_num = page_indexes.shape[0]
 
-    grid = (1,)
+    grid = (grid_num,)
     num_warps = 4
 
     _offload_gpu_kv_to_cpu[grid](
