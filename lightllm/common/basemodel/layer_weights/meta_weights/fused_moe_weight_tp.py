@@ -134,6 +134,8 @@ class FusedMoeWeightTP(BaseWeight):
 
                 inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
                 w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(len(self.w2_list), inter_shape, hidden_size)
+                if self.fused_gate_up:
+                    w2 = w2.transpose(1, 2).contiguous()
                 if not self.quantized_weight and self.quant_method is not None:
                     self.w1 = self.quant_method.quantize(w1)
                     self.w2 = self.quant_method.quantize(w2)
@@ -178,26 +180,53 @@ class FusedMoeWeightTP(BaseWeight):
     def load_hf_weights(self, weights):
         if self.e_score_correction_bias_name in weights:
             self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
-        for i_experts in range(self.n_routed_experts):
-            w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
-            w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"
-            w3_weight = f"{self.weight_prefix}.{i_experts}.{self.w3_weight_name}.weight"
+        self.fused_gate_up = self.w3_weight_name is None  # gate_up: [E,H,2I] down: [E,I,H]
+        key_gateup_3d = f"{self.weight_prefix}.{self.w1_weight_name}"  # ...experts.gate_up_proj
+        key_down_3d = f"{self.weight_prefix}.{self.w2_weight_name}"
 
-            if w1_weight in weights:
-                self.experts_gate_projs[i_experts] = weights[w1_weight][
-                    self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
-                ]
-            if w3_weight in weights:
-                self.experts_up_projs[i_experts] = weights[w3_weight][
-                    self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
-                ]
+        if self.fused_gate_up and (key_gateup_3d in weights) and (key_down_3d in weights):
+            gate_up_3d = weights[key_gateup_3d]
+            down_3d = weights[key_down_3d]
+            assert gate_up_3d.dim() == 3 and down_3d.dim() == 3
 
-            if w2_weight in weights:
-                self.w2_list[i_experts] = weights[w2_weight][
-                    :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
-                ]
+            E_ckpt, H_, twoE = gate_up_3d.shape
+            assert E_ckpt == self.n_routed_experts, f"experts mismatch: ckpt {E_ckpt} vs cfg {self.n_routed_experts}"
+            Eint_total = twoE // 2
+            start, end = self.tp_rank_ * self.split_inter_size, (self.tp_rank_ + 1) * self.split_inter_size
+            assert end <= Eint_total, "TP split exceeds total expert-intermediate size"
+
+            for i in range(self.n_routed_experts):
+                gu2d = gate_up_3d[i]
+                gate2d = gu2d[:, :Eint_total][:, start:end].t().contiguous()
+                up2d = gu2d[:, Eint_total:][:, start:end].t().contiguous()
+                self.experts_gate_projs[i] = gate2d
+                self.experts_up_projs[i] = up2d
+
+                self.w2_list[i] = down_3d[i][start:end, :].contiguous()
+        else:
+            for i_experts in range(self.n_routed_experts):
+                w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
+                w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"
+                w3_weight = f"{self.weight_prefix}.{i_experts}.{self.w3_weight_name}.weight"
+
+                if w1_weight in weights:
+                    self.experts_gate_projs[i_experts] = weights[w1_weight][
+                        self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
+                    ]
+                if w3_weight in weights:
+                    self.experts_up_projs[i_experts] = weights[w3_weight][
+                        self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
+                    ]
+
+                if w2_weight in weights:
+                    self.w2_list[i_experts] = weights[w2_weight][
+                        :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
+                    ]
         if self.quant_method is not None:
-            self._load_weight_scale(weights)
+            if self.fused_gate_up:
+                raise ValueError("qwen3_vl_moe not support quant now")
+            else:
+                self._load_weight_scale(weights)
         self._fuse()
 
     def _load_weight_scale(self, weights: Dict[str, torch.Tensor]) -> None:

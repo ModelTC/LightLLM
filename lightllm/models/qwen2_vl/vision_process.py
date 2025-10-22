@@ -35,16 +35,16 @@ def smart_resize(
     height: int, width: int, factor: int = IMAGE_FACTOR, min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS
 ) -> tuple[int, int]:
 
-    if max(height, width) / min(height, width) > MAX_RATIO:
+    if max(height, width) / min(height, width) > 200:
         raise ValueError(
-            f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
+            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
         )
-    h_bar = max(factor, round(height / factor) * factor)
-    w_bar = max(factor, round(width / factor) * factor)
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
     if h_bar * w_bar > max_pixels:
         beta = math.sqrt((height * width) / max_pixels)
-        h_bar = math.floor(height / beta / factor) * factor
-        w_bar = math.floor(width / beta / factor) * factor
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
     elif h_bar * w_bar < min_pixels:
         beta = math.sqrt(min_pixels / (height * width))
         h_bar = math.ceil(height * beta / factor) * factor
@@ -52,7 +52,9 @@ def smart_resize(
     return h_bar, w_bar
 
 
-def resize_image(image_file: Image.Image, size_factor: int = IMAGE_FACTOR) -> tuple[Image.Image, int, int]:
+def resize_image(
+    image_file: Image.Image, factor: int = IMAGE_FACTOR, min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS
+) -> tuple[Image.Image, int, int]:
 
     image = image_file.convert("RGB")
     width, height = image.size
@@ -60,9 +62,9 @@ def resize_image(image_file: Image.Image, size_factor: int = IMAGE_FACTOR) -> tu
     resized_height, resized_width = smart_resize(
         height,
         width,
-        factor=size_factor,
-        min_pixels=MIN_PIXELS,
-        max_pixels=MAX_PIXELS,
+        factor=factor,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
     )
     image = image.resize((resized_width, resized_height))
 
@@ -72,6 +74,7 @@ def resize_image(image_file: Image.Image, size_factor: int = IMAGE_FACTOR) -> tu
 class Qwen2VLImageProcessor(BaseImageProcessor):
     def __init__(
         self,
+        size: dict = None,
         do_resize: bool = True,
         resample: PILImageResampling = PILImageResampling.BICUBIC,
         do_rescale: bool = True,
@@ -88,6 +91,7 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        self.size = size
         self.do_resize = do_resize
         self.resample = resample
         self.do_rescale = do_rescale
@@ -102,6 +106,13 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
         self.temporal_patch_size = temporal_patch_size
         self.merge_size = merge_size
         self.data_format = ChannelDimension.FIRST
+        if isinstance(self.size, dict):
+            shortest = self.size.get("shortest_edge", None)
+            longest = self.size.get("longest_edge", None)
+            if shortest is not None:
+                self.min_pixels = shortest
+            if longest is not None:
+                self.max_pixels = longest
 
     def preprocess(self, image) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.do_convert_rgb:

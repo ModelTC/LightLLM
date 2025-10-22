@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from io import BytesIO
+from typing import List, Optional
 import multiprocessing.shared_memory as shm
 
 
@@ -20,9 +21,50 @@ def tensor2bytes(t: torch.Tensor):
     return buf.read()
 
 
+def list2bytes(tensors: List[torch.Tensor]) -> bytes:
+    # 逐个张量做 detach().cpu() 和复制
+    safe_list = []
+    for t in tensors:
+        if t is None:
+            safe_list.append(None)
+            continue
+        t = t.detach().cpu()
+        if not t.is_contiguous():
+            t = t.contiguous()
+        dest = torch.empty_like(t)
+        dest.copy_(t)
+        safe_list.append(dest)
+    buf = BytesIO()
+    torch.save(safe_list, buf, _use_new_zipfile_serialization=False, pickle_protocol=4)
+    buf.seek(0)
+    return buf.read()
+
+
 def bytes2tensor(b):
     # return torch.from_numpy(np.frombuffer(b, dtype=np.float16)).cuda()
     return torch.load(BytesIO(b), weights_only=False)
+
+
+def bytes2list(b: bytes, device: Optional[torch.device] = None, non_blocking: bool = False) -> List[torch.Tensor]:
+    obj = torch.load(BytesIO(b), map_location="cpu", weights_only=False)
+
+    if isinstance(obj, tuple):
+        obj = list(obj)
+    if not isinstance(obj, list):
+        raise TypeError(f"Loaded object is {type(obj)}, expected list or tuple.")
+
+    if device is None:
+        return obj
+
+    out: List[torch.Tensor] = []
+    for x in obj:
+        if x is None:
+            out.append(None)
+        elif isinstance(x, torch.Tensor):
+            out.append(x.to(device, non_blocking=non_blocking))
+        else:
+            raise TypeError(f"List element is {type(x)}, expected Tensor or None.")
+    return out
 
 
 def create_shm(name, data):
@@ -53,3 +95,7 @@ def get_shm_name_data(uid):
 
 def get_shm_name_embed(uid):
     return str(uid) + "-embed"
+
+
+def get_shm_name_deepstack(uid):
+    return str(uid) + "-deepstack"
