@@ -16,6 +16,7 @@ class AutoShmCleanup:
     自动清理 System V 和 POSIX 共享内存
     shared_memory.SharedMemory虽然有自动请理功能，但如果自动清理时仍有进程占用会清理失败，这里可做最后兜底清理
     """
+
     def __init__(self):
         self.libc = None
         self._init_libc()
