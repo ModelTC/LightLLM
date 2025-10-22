@@ -5,7 +5,7 @@ import dataclasses
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, disable_cpu_kvcache_sync
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
@@ -28,6 +28,9 @@ class MultiLevelKvCacheModule(object):
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
+
+        # 一些算子模式需要同步计算和 cpu cache 的 load 和 offload 操作
+        self.need_sync_compute_stream: bool = self.args.enable_fa3 and not disable_cpu_kvcache_sync()
 
     def wait(self):
         """
@@ -62,7 +65,10 @@ class MultiLevelKvCacheModule(object):
 
                     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
-                    # g_infer_context.get_overlap_stream().synchronize()
+                    if self.need_sync_compute_stream:
+                        # TODO fa3 现在必须使用同步模式, 未来需要移除
+                        g_infer_context.get_overlap_stream().synchronize()
+
                     # 将 cpu page 的内容拷贝到 gpu 页面中
                     load_cpu_kv_to_gpu(
                         gpu_mem_indexes=mem_indexes.cuda(non_blocking=True),
@@ -128,11 +134,10 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             assert req.cpu_cache_task_status.is_not_started()
-            # # 必须等待 overlap stream 上的计算任务完成，不然会崩溃
-            # if g_infer_context.overlap_stream is not None:
-            #     cpu_stream.wait_stream(g_infer_context.overlap_stream)
-            # else:
-            #     cpu_stream.wait_stream(torch.cuda.current_stream())
+
+            if self.need_sync_compute_stream:
+                # TODO fa3 现在必须使用同步模式, 未来需要移除, 必须等待 overlap stream 上的计算任务完成，不然会崩溃
+                g_infer_context.get_overlap_stream().synchronize()
 
             # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
             trans_task = self._start_kv_cache_offload_task(req=req, cpu_kv_cache_stream=cpu_stream)
@@ -143,8 +148,10 @@ class MultiLevelKvCacheModule(object):
             else:
                 true_finished_reqs.append(req)
 
-        # 必须在这里同步，不然会崩溃
-        # cpu_stream.synchronize()
+        if self.need_sync_compute_stream:
+            # TODO fa3 现在必须使用同步模式, 未来需要移除
+            cpu_stream.synchronize()
+
         return true_finished_reqs
 
     def _start_kv_cache_offload_task(

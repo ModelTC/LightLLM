@@ -173,3 +173,11 @@ def use_whisper_sdpa_attention() -> bool:
     whisper重训后,使用特定的实现可以提升精度，用该函数控制使用的att实现。
     """
     return enable_env_vars("LIGHTLLM_USE_WHISPER_SDPA_ATTENTION")
+
+
+@lru_cache(maxsize=None)
+def disable_cpu_kvcache_sync() -> bool:
+    """
+    实验用环境遍历，未来可能会移除
+    """
+    return enable_env_vars("LIGHTLLM_DISABLE_CPU_CACHE_SYNC")
