@@ -21,9 +21,11 @@
 import torch
 import argparse
 import math
+import os
 from typing import Callable, Optional, List, Literal, Union
 from lightllm.utils.bench_utils import do_bench
 from fa3_mla_mtp import fa3_mla_mtp
+from lightllm.common.triton_utils.autotuner import Autotuner
 
 
 def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
@@ -95,6 +97,7 @@ def run_fa3_mla_mtp(
     causal,
     dtype,
     o,
+    enable_autotune=False,
 ):
 
     assert d > dv, "mla with rope dim should be larger than no rope dim"
@@ -109,6 +112,28 @@ def run_fa3_mla_mtp(
     b_req_idx = torch.arange(0, batch_mtp, dtype=torch.int32, device="cuda")
     cu_seqlens_k = torch.cat([torch.tensor([0]).to(cu_seqlens_k), cu_seqlens_k])
     BLOCK_H = h_q
+
+    # 如果启用 autotune，先进行调优
+    if enable_autotune:
+        print("🚀 Starting autotuning for fa3_mla_mtp kernel...")
+        Autotuner.start_autotune_warmup()
+
+        # 调用一次进行 autotune
+        fa3_mla_mtp(
+            q_nope.view(-1, BLOCK_H, dv),
+            q_pe.view(-1, BLOCK_H, dpe),
+            blocked_k_nope.view(-1, 1, dv),
+            blocked_k_pe.view(-1, 1, dpe),
+            o,
+            b_req_idx,
+            cu_seqlens_q,
+            cache_seqlens,
+            2,
+            block_table,
+        )
+
+        Autotuner.end_autotune_warmup()
+        print("✅ Autotuning completed! Configuration cached.\n")
 
     def flash_mla_fa3():
         fa3_mla_mtp(
@@ -164,13 +189,14 @@ def run_fa3_mla_mtp(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch", type=int, default=128, help="batch size")
+    parser.add_argument("--batch", type=int, default=256, help="batch size")
     parser.add_argument("--h_q", type=int, default=16, help="q heads number")
     parser.add_argument("--h_kv", type=int, default=1, help="kv heads number")
     parser.add_argument("--cache_seqlen", type=int, default=8192, help="kv cache context length")
     parser.add_argument("--d", type=int, default=576, help="query/key head dim, d = dv + dpe")
     parser.add_argument("--dv", type=int, default=512, help="value head dim")
     parser.add_argument("--mtp_size", type=int, default=2, help="Specifies the number of tokens per prediction.")
+    parser.add_argument("--autotune", default=True, help="Enable autotuning for fa3_mla_mtp kernel")
     args = parser.parse_args()
     b, h_q, h_kv, cache_seqlen, d, dv = args.batch, args.h_q, args.h_kv, args.cache_seqlen, args.d, args.dv
     mtp_size = args.mtp_size
@@ -219,7 +245,8 @@ if __name__ == "__main__":
         causal,
         dtype,
         o,
+        enable_autotune=args.autotune,
     )
 
-    print("Tile-lang: {:.3f} ms".format(latency))
-    print("Tile-lang: {:.3f} TFlops".format(total_flops / latency * 1e-9))
+    print("FA3-MLA-MTP: {:.3f} ms".format(latency))
+    print("FA3-MLA-MTP: {:.3f} TFlops".format(total_flops / latency * 1e-9))
