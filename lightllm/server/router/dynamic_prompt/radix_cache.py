@@ -488,7 +488,3 @@ class RadixCacheReadOnlyClient:
 
     def get_unrefed_tokens_num(self, dp_rank_in_node):
         return self.dp_rank_clients[dp_rank_in_node].get_unrefed_tokens_num()
-
-
-class _RecursionParams:
-    pass
