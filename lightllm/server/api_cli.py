@@ -533,7 +533,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cpu_cache_token_page_size",
         type=int,
-        default=64,
+        default=256,
         help="""The token page size of cpu cache""",
     )
     parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
