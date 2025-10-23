@@ -127,8 +127,8 @@ def test_decode_node_initialization():
     }
     node.initialize(data)
     assert node.exists is True
-    assert node.node_id_high == (12345678901234567890 >> 64) & 0xFFFFFFFFFFFFFFFF
-    assert node.node_id_low == 12345678901234567890 & 0xFFFFFFFFFFFFFFFF
+    assert node.node_id.node_id_high == (12345678901234567890 >> 64) & 0xFFFFFFFFFFFFFFFF
+    assert node.node_id.node_id_low == 12345678901234567890 & 0xFFFFFFFFFFFFFFFF
     assert node.ip[0] == 192
     assert node.ip[1] == 168
     assert node.ip[2] == 1
