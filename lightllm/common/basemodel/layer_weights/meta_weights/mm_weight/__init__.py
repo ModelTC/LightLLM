@@ -1,6 +1,7 @@
 from .mm_weight import (
     MMWeightTpl,
     MultiMMWeightTpl,
+    AWQMultiMMWeightTpl,
 )
 from .rowmm_weight import (
     ROWMMWeight,
