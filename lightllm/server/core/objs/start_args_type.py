@@ -30,7 +30,9 @@ class StartArgs:
     mem_fraction: float = field(default=0.9)
     batch_max_tokens: Optional[int] = field(default=None)
     eos_id: List[int] = field(default_factory=list)
-    tool_call_parser: Optional[str] = field(default=None, metadata={"choices": ["llama3", "qwen25", "mistral"]})
+    tool_call_parser: Optional[str] = field(
+        default=None, metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen"]}
+    )
     running_max_req_size: int = field(default=1000)
     tp: int = field(default=1)
     dp: int = field(default=1)

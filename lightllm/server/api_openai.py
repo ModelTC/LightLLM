@@ -9,7 +9,7 @@ from io import BytesIO
 import pickle
 import uuid
 
-from .function_call_parser import TOOLS_TAG_LIST, FunctionCallParser
+from .function_call_parser import TOOLS_TAG_LIST, FunctionCallParser, ToolCallItem
 from .build_prompt import build_prompt, init_tokenizer
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -61,6 +61,52 @@ def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse
 
     g_objs.metric_client.counter_inc("lightllm_request_failure")
     return JSONResponse({"message": message}, status_code=status_code.value)
+
+
+def _process_tool_call_id(
+    tool_call_parser,
+    call_item: ToolCallItem,
+    history_tool_calls_cnt: int,
+) -> str:
+    """Process for generating a new and unique `tool_call_id`"""
+    if tool_call_parser != "kimi_k2":
+        # A simple uuid is sufficient for all models except for Kimi-K2.
+        tool_call_id = f"call_{uuid.uuid4().hex[:24]}"
+        return tool_call_id
+    else:
+        # Align with Kimi-K2 format: functions.{name}:{index}
+        # Kimi-K2 allows multiple tool_calls in one message;
+        # SGLang sets call_item.tool_index to the *local* position inside that message.
+        # Therefore, the index must be corrected by using
+        # `history_tool_calls_cnt + call_item.tool_index` to ensure globally unique and properly ordered.
+        tool_call_id = f"functions.{call_item.name}:{history_tool_calls_cnt+call_item.tool_index}"
+        logger.debug(
+            f"Process tool call idx, parser: {tool_call_parser}, \
+            tool_call_id: {tool_call_id}, \
+            history_cnt: {history_tool_calls_cnt}"
+        )
+        return tool_call_id
+
+
+def _get_history_tool_calls_cnt(request: ChatCompletionRequest) -> int:
+    """Counts the number of tool calls in the request's message history.
+
+    NOTE: This method is only useful for models that include self-increasing
+    history tool call idx in tool calls id, such as kimi-k2
+
+    Args:
+        request: The chat completion request object.
+
+    Returns:
+        The total number of tool calls in the history, or 0 if not applicable.
+    """
+    messages = getattr(request, "messages", [])
+    idx = 0
+    for msg in messages:
+        if msg.role == "assistant":
+            tool_calls = getattr(msg, "tool_calls", None)
+            idx += len(list(tool_calls)) if tool_calls is not None else 0  # noqa
+    return idx
 
 
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
@@ -180,26 +226,31 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             if tool_choice != "none" and any([i in text for i in TOOLS_TAG_LIST]):
                 if finish_reason == "stop":
-                    finish_reason = "function_call"
+                    finish_reason = "tool_calls"
                 try:
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                     parser = FunctionCallParser(tools, tool_parser)
                     full_normal_text, call_info_list = parser.parse_non_stream(text)
-                    tool_calls = [
-                        ToolCall(
-                            id=str(call_info.tool_index),
-                            function=FunctionResponse(name=call_info.name, arguments=call_info.parameters),
+                    tool_calls = []
+                    history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
+                    for call_info in call_info_list:
+                        tool_id = _process_tool_call_id(tool_parser, call_info, history_tool_calls_cnt)
+                        tool_calls.append(
+                            ToolCall(
+                                id=tool_id,
+                                index=getattr(call_info, "tool_index", None),
+                                function=FunctionResponse(name=call_info.name, arguments=call_info.parameters),
+                            )
                         )
-                        for call_info in call_info_list
-                    ]
                 except Exception as e:
                     logger.error(f"Exception: {e}")
                     return create_error_response(
                         HTTPStatus.BAD_REQUEST,
                         "Failed to parse fc related info to json format!",
                     )
-
+            if finish_reason == "tool_calls":
+                text = ""
             chat_message = ChatMessage(role="assistant", content=text, tool_calls=tool_calls)
             choice = ChatCompletionResponseChoice(
                 index=i,
@@ -261,6 +312,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     yield f"data: {chunk.model_dump_json()}\n\n"
 
                 # 2) if we found calls, we output them as separate chunk(s)
+                history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                 for call_item in calls:
                     # transform call_item -> FunctionResponse + ToolCall
                     if finish_reason == "stop":
@@ -278,17 +330,27 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         remaining_call = expected_call.replace(actual_call, "", 1)
                         call_item.parameters = remaining_call
 
+                    if call_item.name:
+                        # First chunk: include ID and function name
+                        tool_call_id = _process_tool_call_id(tool_parser, call_item, history_tool_calls_cnt)
+                        function_name = call_item.name
+                    else:
+                        # Subsequent chunks: null ID and name for argument deltas
+                        tool_call_id = None
+                        function_name = None
+
                     tool_call = ToolCall(
-                        id=str(call_item.tool_index),
+                        id=tool_call_id,
+                        index=getattr(call_item, "tool_index", None),
                         function=FunctionResponse(
-                            name=call_item.name,
+                            name=function_name,
                             arguments=call_item.parameters,
                         ),
                     )
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=0,
                         delta=DeltaMessage(role="assistant", tool_calls=[tool_call]),
-                        finish_reason="function_call",
+                        finish_reason="tool_calls",
                     )
                     chunk = ChatCompletionStreamResponse(
                         id=group_request_id,
