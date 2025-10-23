@@ -23,6 +23,7 @@ from lightllm.server.core.objs.io_objs import (
 )
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
+from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
@@ -38,7 +39,7 @@ logger = init_logger(__name__)
 
 
 class RouterManager:
-    def __init__(self, args: StartArgs, router_port, detokenization_port, metric_port):
+    def __init__(self, args: StartArgs):
         self.args = args
         self.model_weightdir = args.model_dir
         self.world_size = args.tp
@@ -76,11 +77,11 @@ class RouterManager:
 
         self.running_batch: Batch = None
         context = zmq.Context(2)
-        self.recv_from_httpserver = context.socket(zmq.PULL)
-        self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{router_port}")
+        self.zmq_recv_socket = context.socket(zmq.PULL)
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
 
         self.send_to_detokenization = context.socket(zmq.PUSH)
-        self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{detokenization_port}")
+        self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{args.detokenization_port}")
 
         if self.is_multinode_tp:
             self.mulitnode_group = dist.init_process_group(
@@ -90,7 +91,7 @@ class RouterManager:
                 rank=args.node_rank,
             )
 
-        self.metric_client = MetricClient(metric_port)
+        self.metric_client = MetricClient(args.metric_port)
         self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]
         self.is_pd_decode_mode = self.args.run_mode in ["decode", "nixl_decode"]
         # p d 分离模式下，需要调度锁来同步调度端和推理端的一些数据操作
@@ -99,6 +100,12 @@ class RouterManager:
         g_router_lock.obj = self.router_lock
 
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
+
+        self.cpu_cache_client = (
+            None
+            if not self.args.enable_cpu_cache
+            else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
+        )
         return
 
     async def wait_to_model_ready(self):
@@ -508,7 +515,7 @@ class RouterManager:
         try:
             # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
             for _ in range(self.recv_max_count):
-                recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+                recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                 if isinstance(recv_req, GroupReqIndexes):
                     self._add_req(recv_req)
                 else:
@@ -532,7 +539,7 @@ class RouterManager:
         return
 
 
-def start_router_process(args, router_port, detokenization_port, metric_port, pipe_writer):
+def start_router_process(args, pipe_writer):
     # 注册 graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::router_server")
@@ -547,10 +554,7 @@ def start_router_process(args, router_port, detokenization_port, metric_port, pi
 
     try:
         router = RouterManager(
-            args,
-            router_port=router_port,
-            detokenization_port=detokenization_port,
-            metric_port=metric_port,
+            args=args,
         )
 
         loop.run_until_complete(router.wait_to_model_ready())

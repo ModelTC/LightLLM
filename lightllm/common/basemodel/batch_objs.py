@@ -58,6 +58,8 @@ class ModelInput:
 class ModelOutput:
     # 通用变量
     logits: torch.Tensor
+    # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
+    prefill_mem_indexes_ready_event: torch.Event = None
 
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输出变量。只在特殊的模型模式下才会具体使用和生效。

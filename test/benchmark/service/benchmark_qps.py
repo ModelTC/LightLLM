@@ -342,7 +342,7 @@ def main():
 
     assert args.tokenizer_path is not None
     model_name.append(args.tokenizer_path)
-    # seed_all(args.seed)
+    seed_all(args.seed)
     url = args.url
     tokenizer = get_tokenizer(args.tokenizer_path)
     if args.data_path is not None:

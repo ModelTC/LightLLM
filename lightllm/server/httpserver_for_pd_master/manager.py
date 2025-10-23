@@ -29,10 +29,9 @@ class HttpServerManagerForPDMaster:
     def __init__(
         self,
         args: StartArgs,
-        metric_port: int,
     ):
         self.args = args
-        self.metric_client = MetricClient(metric_port)
+        self.metric_client = MetricClient(args.metric_port)
         self.id_gen = ReqIDGenerator()
 
         self.pd_manager = PDManager(args)

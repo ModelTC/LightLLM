@@ -29,7 +29,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.sgl_utils import sgl_allreduce_ops
 from lightllm.utils.vllm_utils import vllm_ops
-from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 logger = init_logger(__name__)
 
@@ -225,6 +224,9 @@ class CustomAllreduce:
         buffer.
         """
         if out is None:
+            # fix circle import
+            from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+
             out = g_cache_manager.alloc_tensor(inp.shape, inp.dtype, device=inp.device, is_graph_out=False)
         if registered:
             ops.all_reduce(self._ptr, inp, out, 0, 0)
@@ -243,6 +245,9 @@ class CustomAllreduce:
             else:
                 # If warm up, mimic the allocation pattern since custom
                 # allreduce is out-of-place.
+                # fix circle import
+                from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+
                 out = g_cache_manager.alloc_tensor(input.shape, input.dtype, device=input.device, is_graph_out=False)
                 return out
         else:

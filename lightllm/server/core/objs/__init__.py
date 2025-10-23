@@ -3,3 +3,4 @@ from .req import Req, FinishStatus
 from .shm_req_manager import ShmReqManager
 from .rpc_shm import RpcShmParams, RpcShmResults, ShmSyncStatusArray
 from .start_args_type import StartArgs
+from .atomic_lock import AtomicShmLock
