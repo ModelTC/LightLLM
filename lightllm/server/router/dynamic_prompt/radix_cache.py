@@ -1,10 +1,10 @@
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/router/radix_cache.py
 import torch
 import numpy as np
-from typing import Tuple, Dict, Set, List
+import collections
+from typing import Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
-from lightllm.common.mem_manager import MemoryManager
 
 
 class UniqueTimeIdGenerator:
@@ -103,8 +103,10 @@ class RadixCache:
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager: MemoryManager = None):
-        self.mem_manager = mem_manager
+    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
+        from lightllm.common.mem_manager import MemoryManager
+
+        self.mem_manager: MemoryManager = mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -123,67 +125,110 @@ class RadixCache:
         )
         self.tree_total_tokens_num.arr[0] = 0
 
-    def insert(self, key, value=None):
+    def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
         if value is None:
             value = key
 
         assert len(key) == len(value)  # and len(key) >= 1
         if len(key) == 0:
-            return 0
+            return 0, None
         return self._insert_helper(self.root_node, key, value)
 
-    def _insert_helper(self, node: TreeNode, key, value):
+    def _insert_helper(self, node: TreeNode, key, value) -> Tuple[int, Optional[TreeNode]]:
+        handle_stack = collections.deque()
+        update_list = collections.deque()
+        handle_stack.append((node, key, value))
+
+        ans_prefix_len = 0
+        ans_node = None
+
+        while len(handle_stack) != 0:
+            node, key, value = handle_stack.popleft()
+            ans_tuple = self._insert_helper_no_recursion(node=node, key=key, value=value)
+            if len(ans_tuple) == 4:
+                (_prefix_len, new_node, new_key, new_value) = ans_tuple
+                ans_prefix_len += _prefix_len
+                handle_stack.append((new_node, new_key, new_value))
+            else:
+                _prefix_len, ans_node = ans_tuple
+                ans_prefix_len += _prefix_len
+
+            update_list.append(node)
+
+        while len(update_list) != 0:
+            cur_node: TreeNode = update_list.pop()
+            cur_node.update_time()
+            if cur_node.is_leaf():
+                self.evict_tree_set.add(cur_node)
+
+        assert ans_node is not None
+
+        return ans_prefix_len, ans_node
+
+    def _insert_helper_no_recursion(
+        self, node: TreeNode, key: torch.Tensor, value: torch.Tensor
+    ) -> Union[Tuple[int, Optional[TreeNode]], Tuple[int, TreeNode, torch.Tensor, torch.Tensor]]:
         if node.is_leaf():
             self.evict_tree_set.discard(node)
 
-        try:
-            first_key_id = key[0].item()
-            if first_key_id in node.children.keys():
-                child: TreeNode = node.children[first_key_id]
-                prefix_len = match(key, child.token_id_key)
-                if prefix_len == len(key):
+        first_key_id = key[0].item()
+        if first_key_id in node.children.keys():
+            child: TreeNode = node.children[first_key_id]
+            prefix_len = match(key, child.token_id_key)
+            if prefix_len == len(key):
+                if prefix_len == len(child.token_id_key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
                     child.update_time()
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
-                    return prefix_len
-
-                elif prefix_len < len(key) and prefix_len < len(child.token_id_key):
+                    return prefix_len, child
+                elif prefix_len < len(child.token_id_key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
 
-                    key = key[prefix_len:]
-                    value = value[prefix_len:]
                     split_parent_node = child.split_node(prefix_len)
-                    new_node = split_parent_node.add_and_return_new_child(key, value)
-                    # update total token num
-                    self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
 
                     if split_parent_node.is_leaf():
                         self.evict_tree_set.add(split_parent_node)
-                    if new_node.is_leaf():
-                        self.evict_tree_set.add(new_node)
-
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
-                    return prefix_len
-                elif prefix_len < len(key) and prefix_len == len(child.token_id_key):
-                    return prefix_len + self._insert_helper(child, key[prefix_len:], value[prefix_len:])
+
+                    return prefix_len, split_parent_node
                 else:
                     assert False, "can not run to here"
 
-            else:
-                new_node = node.add_and_return_new_child(key, value)
+            elif prefix_len < len(key) and prefix_len < len(child.token_id_key):
+                if child.is_leaf():
+                    self.evict_tree_set.discard(child)
+
+                key = key[prefix_len:]
+                value = value[prefix_len:]
+                split_parent_node = child.split_node(prefix_len)
+                new_node = split_parent_node.add_and_return_new_child(key, value)
                 # update total token num
                 self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
+
+                if split_parent_node.is_leaf():
+                    self.evict_tree_set.add(split_parent_node)
                 if new_node.is_leaf():
                     self.evict_tree_set.add(new_node)
-                return 0
-        finally:
-            node.update_time()
-            if node.is_leaf():
-                self.evict_tree_set.add(node)
+
+                if child.is_leaf():
+                    self.evict_tree_set.add(child)
+                return prefix_len, new_node
+            elif prefix_len < len(key) and prefix_len == len(child.token_id_key):
+                return (prefix_len, child, key[prefix_len:], value[prefix_len:])
+            else:
+                assert False, "can not run to here"
+
+        else:
+            new_node = node.add_and_return_new_child(key, value)
+            # update total token num
+            self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
+            if new_node.is_leaf():
+                self.evict_tree_set.add(new_node)
+            return 0, new_node
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
@@ -199,7 +244,39 @@ class RadixCache:
             self.dec_node_ref_counter(self.root_node)
             return None, 0, None
 
-    def _match_prefix_helper(self, node: TreeNode, key, ans_value_list: list, update_refs=False) -> TreeNode:
+    def _match_prefix_helper(
+        self, node: TreeNode, key: torch.Tensor, ans_value_list: list, update_refs=False
+    ) -> TreeNode:
+        handle_stack = collections.deque()
+        update_list = collections.deque()
+        handle_stack.append((node, key))
+
+        ans_node = None
+
+        while len(handle_stack) != 0:
+            node, key = handle_stack.popleft()
+            ans_tuple = self._match_prefix_helper_no_recursion(
+                node=node, key=key, ans_value_list=ans_value_list, update_refs=update_refs
+            )
+            if isinstance(ans_tuple, tuple):
+                new_node, new_key = ans_tuple
+                handle_stack.append((new_node, new_key))
+            else:
+                ans_node = ans_tuple
+
+            update_list.append(node)
+
+        while len(update_list) != 0:
+            cur_node: TreeNode = update_list.pop()
+            cur_node.update_time()
+            if cur_node.is_leaf():
+                self.evict_tree_set.add(cur_node)
+
+        return ans_node
+
+    def _match_prefix_helper_no_recursion(
+        self, node: TreeNode, key: torch.Tensor, ans_value_list: list, update_refs=False
+    ) -> TreeNode:
         if node.is_leaf():
             self.evict_tree_set.discard(node)
 
@@ -209,44 +286,39 @@ class RadixCache:
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
 
-        try:
-            if len(key) == 0:
-                return node
+        if len(key) == 0:
+            return node
 
-            first_key_id = key[0].item()
-            if first_key_id not in node.children.keys():
-                return node
+        first_key_id = key[0].item()
+        if first_key_id not in node.children.keys():
+            return node
+        else:
+            child = node.children[first_key_id]
+            prefix_len = match(key, child.token_id_key)
+            if prefix_len == len(child.token_id_key):
+                ans_value_list.append(child.token_mem_index_value)
+                return (child, key[prefix_len:])
+            elif prefix_len < len(child.token_id_key):
+                if child.is_leaf():
+                    self.evict_tree_set.discard(child)
+
+                split_parent_node = child.split_node(prefix_len)
+                ans_value_list.append(split_parent_node.token_mem_index_value)
+
+                if update_refs:
+                    split_parent_node.ref_counter += 1
+                    # from 0 to 1 need update refs token num
+                    if split_parent_node.ref_counter == 1:
+                        self.refed_tokens_num.arr[0] += len(split_parent_node.token_mem_index_value)
+
+                if child.is_leaf():
+                    self.evict_tree_set.add(child)
+                if split_parent_node.is_leaf():
+                    self.evict_tree_set.add(split_parent_node)
+
+                return split_parent_node
             else:
-                child = node.children[first_key_id]
-                prefix_len = match(key, child.token_id_key)
-                if prefix_len == len(child.token_id_key):
-                    ans_value_list.append(child.token_mem_index_value)
-                    return self._match_prefix_helper(child, key[prefix_len:], ans_value_list, update_refs=update_refs)
-                elif prefix_len < len(child.token_id_key):
-                    if child.is_leaf():
-                        self.evict_tree_set.discard(child)
-
-                    split_parent_node = child.split_node(prefix_len)
-                    ans_value_list.append(split_parent_node.token_mem_index_value)
-
-                    if update_refs:
-                        split_parent_node.ref_counter += 1
-                        # from 0 to 1 need update refs token num
-                        if split_parent_node.ref_counter == 1:
-                            self.refed_tokens_num.arr[0] += len(split_parent_node.token_mem_index_value)
-
-                    if child.is_leaf():
-                        self.evict_tree_set.add(child)
-                    if split_parent_node.is_leaf():
-                        self.evict_tree_set.add(split_parent_node)
-
-                    return split_parent_node
-                else:
-                    assert False, "error state"
-        finally:
-            node.update_time()
-            if node.is_leaf():
-                self.evict_tree_set.add(node)
+                assert False, "error state"
 
     def evict(self, need_remove_tokens, evict_callback):
         if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < need_remove_tokens:
@@ -312,6 +384,37 @@ class RadixCache:
         if old_node.is_leaf():
             self.evict_tree_set.add(old_node)
         return
+
+    def add_node_ref_counter(self, node: TreeNode):
+        if node is None:
+            return
+        # 如果减引用的是叶节点，需要先从 evict_tree_set 中移除
+        old_node = node
+        if old_node.is_leaf():
+            self.evict_tree_set.discard(old_node)
+
+        while node is not None:
+            if node.ref_counter == 0:
+                self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
+            node.ref_counter += 1
+            node = node.parent
+
+        # 加回。
+        if old_node.is_leaf():
+            self.evict_tree_set.add(old_node)
+        return
+
+    def get_mem_index_value_by_node(self, node: TreeNode) -> Optional[torch.Tensor]:
+        if node is None:
+            return None
+
+        ans_list = []
+        while node is not None:
+            ans_list.append(node.token_mem_index_value)
+            node = node.parent
+
+        ans_list.reverse()
+        return torch.concat(ans_list, dim=0)
 
     def get_refed_tokens_num(self):
         return self.refed_tokens_num.arr[0]

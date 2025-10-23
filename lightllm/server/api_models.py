@@ -101,6 +101,7 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Union[ToolChoice, Literal["auto", "required", "none"]] = Field(
         default="auto", examples=["none"]
     )  # noqa
+    parallel_tool_calls: Optional[bool] = True
 
     # Additional parameters supported by LightLLM
     do_sample: Optional[bool] = False
@@ -122,9 +123,34 @@ class FunctionResponse(BaseModel):
 class ToolCall(BaseModel):
     """Tool call response."""
 
-    id: str
+    id: Optional[str] = None
+    index: Optional[int] = None
     type: Literal["function"] = "function"
     function: FunctionResponse
+
+
+class ChatCompletionMessageGenericParam(BaseModel):
+    role: Literal["system", "assistant", "tool", "function"]
+    content: Union[str, List[MessageContent], None] = Field(default=None)
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _normalize_role(cls, v):
+        if isinstance(v, str):
+            v_lower = v.lower()
+            if v_lower not in {"system", "assistant", "tool", "function"}:
+                raise ValueError(
+                    "'role' must be one of 'system', 'assistant', 'tool', or 'function' (case-insensitive)."
+                )
+            return v_lower
+        raise ValueError("'role' must be a string")
+
+
+ChatCompletionMessageParam = Union[ChatCompletionMessageGenericParam, Message]
 
 
 class UsageInfo(BaseModel):

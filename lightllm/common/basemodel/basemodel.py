@@ -61,6 +61,8 @@ class TpPartBaseModel:
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
+        # 用于等待外围的一些模块的初始化完成（如 CPU KV Cache 注册完成）
+        self.wait_events = kvargs.get("wait_events", [])
         # is_token_healing 和 return_all_prompt_logics 是有排斥关系的两个模式，只能单独有一个生效
         # 主要是在prefill阶段返回多少个token的用于后续处理相关。
         self.is_token_healing = kvargs.get("is_token_healing", False)
@@ -110,10 +112,17 @@ class TpPartBaseModel:
         self._init_inferstate_cls()
         self._autotune_warmup()
         self._init_padded_req()
+        # wait必须在init cudagraph 之前，避免错误捕获
+        self._wait_other_modules_ready()
         self._init_cudagraph()
         self._check_max_len_infer()
         torch.cuda.empty_cache()
         set_model_init_status(True)
+        return
+
+    def _wait_other_modules_ready(self):
+        for event in self.wait_events:
+            event.wait()
         return
 
     def _init_config(self):
@@ -343,17 +352,22 @@ class TpPartBaseModel:
         model_input: ModelInput,
     ):
         infer_state = self._create_inferstate(model_input)
-        infer_state.init_some_extra_state(self, model_input.input_ids)
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             b_seq_len=infer_state.b_seq_len,
             b_ready_cache_len=infer_state.b_ready_cache_len,
-            b_start_loc=infer_state.b_start_loc,
+            b_start_loc=model_input.b_prefill_start_loc,
             alloc_mem_index=infer_state.mem_index,
             max_q_seq_len=infer_state.max_q_seq_len,
         )
-        return self._context_forward(model_input.input_ids, infer_state)
+        prefill_mem_indexes_ready_event = torch.cuda.Event()
+        prefill_mem_indexes_ready_event.record()
+
+        infer_state.init_some_extra_state(self, model_input.input_ids)
+        model_output = self._context_forward(model_input.input_ids, infer_state)
+        model_output.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
+        return model_output
 
     def _decode(
         self,
@@ -482,28 +496,31 @@ class TpPartBaseModel:
         input_ids0, input_ids1 = model_input0.input_ids, model_input1.input_ids
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        infer_state0.init_some_extra_state(self, input_ids0)
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
             b_req_idx=infer_state0.b_req_idx,
             b_seq_len=infer_state0.b_seq_len,
             b_ready_cache_len=infer_state0.b_ready_cache_len,
-            b_start_loc=infer_state0.b_start_loc,
+            b_start_loc=model_input0.b_prefill_start_loc,
             alloc_mem_index=infer_state0.mem_index,
             max_q_seq_len=infer_state0.max_q_seq_len,
         )
+        infer_state0.init_some_extra_state(self, input_ids0)
 
         infer_state1 = self._create_inferstate(model_input1, 1)
-        infer_state1.init_some_extra_state(self, input_ids1)
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
             b_req_idx=infer_state1.b_req_idx,
             b_seq_len=infer_state1.b_seq_len,
             b_ready_cache_len=infer_state1.b_ready_cache_len,
-            b_start_loc=infer_state1.b_start_loc,
+            b_start_loc=model_input1.b_prefill_start_loc,
             alloc_mem_index=infer_state1.mem_index,
             max_q_seq_len=infer_state1.max_q_seq_len,
         )
+        infer_state1.init_some_extra_state(self, input_ids1)
+
+        prefill_mem_indexes_ready_event = torch.cuda.Event()
+        prefill_mem_indexes_ready_event.record()
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(
             input_ids0, infer_state0, input_ids1=input_ids1, infer_state1=infer_state1
@@ -512,6 +529,8 @@ class TpPartBaseModel:
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
         dist_group_manager.clear_deepep_buffer()
+        model_output0.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
+        model_output1.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         return model_output0, model_output1
 
     @torch.no_grad()
@@ -704,6 +723,7 @@ class TpPartBaseModel:
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
             total_token_num = self.batch_max_tokens
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
             model_input = ModelInput(
@@ -721,6 +741,7 @@ class TpPartBaseModel:
                 b_mtp_index=b_mtp_index,
                 is_prefill=True,
                 b_ready_cache_len=b_ready_cache_len,
+                b_prefill_start_loc=b_prefill_start_loc,
             )
             model_output = self.forward(
                 model_input,
@@ -778,6 +799,7 @@ class TpPartBaseModel:
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
                 total_token_num = input_len
                 b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
                 model_input = ModelInput(
@@ -795,6 +817,7 @@ class TpPartBaseModel:
                     b_mtp_index=b_mtp_index,
                     is_prefill=True,
                     b_ready_cache_len=b_ready_cache_len,
+                    b_prefill_start_loc=b_prefill_start_loc,
                     multimodal_params=[],
                     **self._gen_special_model_input(total_token_num),
                 )
@@ -838,6 +861,8 @@ class TpPartBaseModel:
         )
         b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
         b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+        b_q_seq_len = b_seq_len - b_ready_cache_len
+        b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         total_token_num = prefill_input_len * batch_size
         b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         model_input = ModelInput(
@@ -854,6 +879,7 @@ class TpPartBaseModel:
             b_mtp_index=b_mtp_index,
             b_seq_len=b_seq_len,
             b_ready_cache_len=b_ready_cache_len,
+            b_prefill_start_loc=b_prefill_start_loc,
             is_prefill=True,
             multimodal_params=[],
             **self._gen_special_model_input(total_token_num),

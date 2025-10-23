@@ -30,7 +30,9 @@ class StartArgs:
     mem_fraction: float = field(default=0.9)
     batch_max_tokens: Optional[int] = field(default=None)
     eos_id: List[int] = field(default_factory=list)
-    tool_call_parser: Optional[str] = field(default=None, metadata={"choices": ["llama3", "qwen25", "mistral"]})
+    tool_call_parser: Optional[str] = field(
+        default=None, metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen"]}
+    )
     running_max_req_size: int = field(default=1000)
     tp: int = field(default=1)
     dp: int = field(default=1)
@@ -104,3 +106,24 @@ class StartArgs:
     nixl_pd_kv_page_num: int = field(default=16)
     nixl_pd_kv_page_size: int = field(default=1024)
     pd_node_id: int = field(default=-1)
+    enable_cpu_cache: bool = field(default=False)
+    cpu_cache_storage_size: float = field(default=2)
+    cpu_cache_token_page_size: int = field(default=64)
+    enable_disk_cache: bool = field(default=False)
+    disk_cache_storage_size: float = field(default=10)
+    # zmp ports
+    router_port: int = field(default=None)
+    detokenization_port: int = field(default=None)
+    http_server_port: int = field(default=None)
+    visual_port: int = field(default=None)
+    audio_port: int = field(default=None)
+    cache_port: int = field(default=None)
+    metric_port: int = field(default=None)
+    multinode_httpmanager_port: int = field(default=12345)
+    multi_level_kv_cache_port: int = field(default=None)
+    # multi_modal
+    enable_multimodal: bool = field(default=False)
+    enable_multimodal_audio: bool = field(default=False)
+
+    # kernel setting
+    enable_fa3: bool = field(default=False)

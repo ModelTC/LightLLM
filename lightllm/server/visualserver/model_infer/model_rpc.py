@@ -131,6 +131,7 @@ class VisualModelRpcServer(rpyc.Service):
                     create_afs(get_shm_name_embed(uid), cur_embed_bytes, self.image_embed_dir)
                 else:
                     create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                    print(f"create shm for image embed, uid: {uid}")
                 ids_to_set.append(uid)
             if ids_to_set:
                 self.cache_client.root.set_items_embed(ids_to_set)

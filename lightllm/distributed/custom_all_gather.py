@@ -28,7 +28,6 @@ from lightllm.common.cuda_wrapper import CudaRTLibrary
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.light_utils import light_ops
-from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
 try:
