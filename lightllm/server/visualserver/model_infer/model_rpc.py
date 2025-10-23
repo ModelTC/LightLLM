@@ -2,6 +2,7 @@ import asyncio
 import numpy as np
 import rpyc
 import torch
+import time
 import inspect
 from datetime import timedelta
 from typing import Dict, List, Tuple
@@ -17,12 +18,24 @@ from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
-from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
+from lightllm.server.embed_cache.utils import (
+    tensor2bytes,
+    read_shm,
+    create_shm,
+    create_afs,
+    get_shm_name_data,
+    get_shm_name_embed,
+)
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+import pickle
+import socket
+
+logger = init_logger(__name__)
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -31,15 +44,22 @@ class VisualModelRpcServer(rpyc.Service):
         import torch
         import torch.distributed as dist
 
-        self.vit_dp = kvargs["vit_dp"]
-        self.vit_tp = kvargs["vit_tp"]
+        self.args = get_env_start_args()
+
+        weight_dir = self.args.model_dir
+        cache_port = self.args.cache_port
+        data_type = self.args.data_type
+        quant_type = self.args.vit_quant_type
+        quant_cfg = self.args.vit_quant_cfg
+        max_batch_size = min(self.args.visual_infer_batch_size // self.args.visual_dp, 1)
+        remote_vit = True if self.args.run_mode == "visual" else False
+
+        self.image_embed_dir = self.args.image_embed_dir
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
-        self.cache_port = kvargs["cache_port"]
-        weight_dir = kvargs["weight_dir"]
-        self.vit_rank_id = kvargs["vit_rank_id"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
-        self.data_type = kvargs["data_type"]
+        kvargs["vit_rank_id"] = self.dp_rank_id * self.args.visual_tp + self.tp_rank_id
+        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
+        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
@@ -47,14 +67,15 @@ class VisualModelRpcServer(rpyc.Service):
         try:
             kvargs = {
                 "weight_dir": weight_dir,
-                "data_type": self.data_type,
-                "quant_type": kvargs["quant_type"],
-                "quant_cfg": kvargs["quant_cfg"],
-                "max_batch_size": kvargs["max_batch_size"],
+                "data_type": data_type,
+                "quant_type": quant_type,
+                "quant_cfg": quant_cfg,
+                "max_batch_size": max_batch_size,
+                "remote_vit": remote_vit,
             }
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":
-                self.model = QWenVisionTransformer(**model_cfg["visual"]).eval().bfloat16()
+                self.model = QWenVisionTransformer(kvargs, **model_cfg["visual"]).eval().bfloat16()
             elif self.model_type == "qwen2_vl":
                 self.model = (
                     Qwen2VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
@@ -64,17 +85,16 @@ class VisualModelRpcServer(rpyc.Service):
                     Qwen2_5_VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
             elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
-                self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
+                self.model = TarsierVisionTransformerPretrainedModel(kvargs, **model_cfg).eval().bfloat16()
             elif self.model_type == "llava":
-                self.model = LlavaVisionModel()
+                self.model = LlavaVisionModel(kvargs)
             elif self.model_type == "internvl_chat":
                 self.model = VisionTransformer(kvargs)
                 # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
-                self.model = Gemma3VisionModel()
+                self.model = Gemma3VisionModel(kvargs)
             else:
                 raise Exception(f"can not support {self.model_type} now")
-
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
         except Exception as e:
@@ -97,18 +117,21 @@ class VisualModelRpcServer(rpyc.Service):
     def exposed_encode(self, images: List[ImageItem]):
         images = obtain(images)
         all_img_embeds, uuids, valid_ids = self.forward(images)
-        all_img_embeds = all_img_embeds.to(torch.device("cpu"))
-
+        all_img_embeds = all_img_embeds.to(torch.device("cpu"), non_blocking=True)
         if self.tp_rank_id == 0:
-            ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
+            # ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
             ids_to_set = []
-            for i, ready in enumerate(ready_flags):
-                if ready:
-                    continue
+            for i in range(len(images)):
+                # if ready:
+                #     continue
                 uid = uuids[i]
                 start, end = valid_ids[i]
                 cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                if self.args.run_mode == "visual":
+                    create_afs(get_shm_name_embed(uid), cur_embed_bytes, self.image_embed_dir)
+                else:
+                    create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                    print(f"create shm for image embed, uid: {uid}")
                 ids_to_set.append(uid)
             if ids_to_set:
                 self.cache_client.root.set_items_embed(ids_to_set)
@@ -116,11 +139,13 @@ class VisualModelRpcServer(rpyc.Service):
 
 
 class VisualModelRpcClient:
-    def __init__(self, model_rpc, vit_tp, rpc_server_process=None):
-        self.model: VisualModelRpcServer = model_rpc
+    def __init__(self, conn, vit_tp, rpc_server_process=None):
+        self.conn = conn
+        self.model: VisualModelRpcServer = conn.root
         self.vit_tp = vit_tp
         self.rpc_server_process = rpc_server_process
         self.use_rpc = True
+        self._bg = rpyc.BgServingThread(self.conn)
         if self.use_rpc:
 
             def async_wrap(f):
@@ -161,7 +186,13 @@ def _init_env(port, device_id):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
-    t = ThreadedServer(VisualModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
+    auth = lambda sock: (sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) or (sock, None))
+    t = ThreadedServer(
+        VisualModelRpcServer(),
+        port=port,
+        protocol_config={"allow_pickle": True},
+        authenticator=auth,
+    )
     t.start()
     return
 
@@ -182,6 +213,7 @@ async def start_model_process(port, vit_tp, device_id):
     while repeat_count < 20:
         try:
             con = rpyc.connect("localhost", port, config={"allow_pickle": True})
+            con._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             break
         except BaseException:
             await asyncio.sleep(1)
@@ -190,4 +222,4 @@ async def start_model_process(port, vit_tp, device_id):
         raise Exception("init rpc env error!")
 
     assert proc.is_alive()
-    return VisualModelRpcClient(con.root, vit_tp, rpc_server_process=proc)
+    return VisualModelRpcClient(con, vit_tp, rpc_server_process=proc)

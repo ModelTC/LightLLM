@@ -64,6 +64,7 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
                 img.extra_params["image_patch_max_num"] = 6
             elif num_images > 6:
                 img.extra_params["image_patch_max_num"] = 0
+        img.patch_num = self.get_image_patch(img)
         return
 
     def init_audioitem_extral_params(
@@ -71,13 +72,13 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
     ):
         return
 
-    def get_image_token_length(self, img: ImageItem):
-        return (
-            self.get_image_patch_func(
-                img.image_w, img.image_h, max_num=img.extra_params["image_patch_max_num"], use_thumbnail=True
-            )
-            * self.image_length
+    def get_image_patch(self, img: ImageItem):
+        return self.get_image_patch_func(
+            img.image_w, img.image_h, max_num=img.extra_params["image_patch_max_num"], use_thumbnail=True
         )
+
+    def get_image_token_length(self, img: ImageItem):
+        return self.get_image_patch(img) * self.image_length
 
     def get_audio_token_length(self, audio: AudioItem):
         L = audio.audio_length

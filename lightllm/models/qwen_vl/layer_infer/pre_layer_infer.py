@@ -1,3 +1,5 @@
+import rpyc
+import socket
 import torch
 import torch.distributed as dist
 
@@ -6,9 +8,10 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.utils.infer_utils import mark_cost_time
-from lightllm.server.embed_cache.utils import bytes2tensor, read_shm, get_shm_name_embed
+from lightllm.server.embed_cache.utils import bytes2tensor, read_shm, get_shm_name_embed, read_afs
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 """
@@ -29,6 +32,9 @@ infer_state.multimodal_params: batch list of MultimodalParams-dict like:
 class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
     def __init__(self, network_config, mode):
         super().__init__(network_config, mode)
+        self.args = get_env_start_args()
+        self.cache_client = rpyc.connect("localhost", self.args.cache_port, config={"allow_pickle": True})
+        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
@@ -50,9 +56,13 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
                 # skip the same image
                 if img["token_id"] in img_start_token_ids or img["_prefill_"] is False:
                     continue
-                # pull the img_embeds by uid from shm
-                data = read_shm(get_shm_name_embed(img["uuid"]))
-                img_weight.append(bytes2tensor(data).cuda().reshape(img["token_num"], -1))
+                # pull the img_embeds by uid from shm or afs
+                if self.args.enable_remote_vit:
+                    embed = read_afs(get_shm_name_embed(img["uuid"]), self.args.image_embed_dir)
+                else:
+                    embed = read_shm(get_shm_name_embed(img["uuid"]))
+                self.cache_client.root.release([img["uuid"]])
+                img_weight.append(bytes2tensor(embed).cuda().reshape(img["token_num"], -1))
                 img_start_token_ids.append(img["token_id"])
                 img_token_lens.append(img["token_num"])
                 img_start_locs.append(img_start_loc)
