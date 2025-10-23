@@ -9,10 +9,12 @@ import time
 import threading
 import concurrent.futures
 from queue import Queue
+from typing import List
 from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from .cpu_cache_client import CpuKvCacheClient
+from .disk_cache_worker import DiskCacheWriter
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -33,12 +35,24 @@ class MultiLevelKVCacheManager:
         logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1000)
         # 控制进行 cpu cache 页面匹配的时间，超过时间则不再匹配，直接转发。
-        self.cpu_cache_time_out = 0.5
+        self.cpu_cache_time_out = 1.0
         self.recv_queue = Queue(maxsize=1024)
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
+
+        self.disk_cache_writer = None
+        self.disk_cache_thread = None
+        if self.args.enable_disk_cache:
+            try:
+                self.disk_cache_writer = DiskCacheWriter(args=self.args, cpu_cache_client=self.cpu_cache_client)
+                if self.disk_cache_writer.service is not None:
+                    self.disk_cache_thread = threading.Thread(target=self.disk_cache_writer.run, daemon=True)
+                    self.disk_cache_thread.start()
+            except Exception:
+                logger.exception("failed to initialize disk cache writer")
+                self.disk_cache_writer = None
         return
 
     def cpu_cache_hanle_loop(self):
@@ -60,7 +74,7 @@ class MultiLevelKVCacheManager:
         if current_time - start_time >= self.cpu_cache_time_out:
             self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
             logger.warning(
-                f"cpu cache match time out {current_time - start_time}s, group_req_id: {group_req_indexes.group_req_id}"
+                f"blueswhen cpu cache match time out {current_time - start_time}s, group_req_id: {group_req_indexes.group_req_id}"
             )
             return
 
@@ -77,21 +91,124 @@ class MultiLevelKVCacheManager:
                 continue
 
             req: Req = req
-            finded_page_indexes = []
-            for token_chuncked_hash_value in req.token_hash_list.get_all():
-                self.cpu_cache_client.lock.acquire_sleep1ms()
-                page_index, ready = self.cpu_cache_client.query_one_page(token_chuncked_hash_value)
-                self.cpu_cache_client.lock.release()
+            token_hash_list = req.token_hash_list.get_all()
+            if len(token_hash_list) == 0:
+                continue
 
-                if page_index is not None:
-                    assert ready
-                    finded_page_indexes.append(page_index)
-                else:
+            req.disk_prompt_cache_len = 0
+            finded_page_indexes: List[int] = []
+            disk_service = self.disk_cache_writer.service if (
+                self.disk_cache_writer is not None and self.disk_cache_writer.service is not None
+            ) else None
+            block_span = disk_service._n if disk_service is not None else 1
+            if block_span <= 0:
+                block_span = 1
+
+            disk_loaded_page_indexes: List[int] = []
+            idx = 0
+            while idx < len(token_hash_list):
+                chunk_len = block_span if disk_service is not None else 1
+                chunk_len = min(chunk_len, len(token_hash_list) - idx)
+                chunk_tokens = token_hash_list[idx : idx + chunk_len]
+
+                block_pages: List[int] = []
+                missing_positions: List[int] = []
+
+                self.cpu_cache_client.lock.acquire_sleep1ms()
+                try:
+                    for pos, token_hash_value in enumerate(chunk_tokens):
+                        page_index, ready = self.cpu_cache_client.query_one_page(token_hash_value)
+                        if page_index is not None:
+                            block_pages.append(page_index)
+                            continue
+
+                        existing_page_index = self.cpu_cache_client.page_hash_dict.get(token_hash_value)
+                        if existing_page_index is not None:
+                            page_item = self.cpu_cache_client.page_items.get_item_by_index(existing_page_index)
+                            page_item.ref_count += 1
+                            page_item.del_self_from_list()
+                            self.cpu_cache_client.page_items.add_item_to_tail(index=existing_page_index)
+                            block_pages.append(existing_page_index)
+                            continue
+
+                        block_pages.append(-1)
+                        missing_positions.append(pos)
+                finally:
+                    self.cpu_cache_client.lock.release()
+
+                if not block_pages:
                     break
 
-            # 等待所有的 cpu cache 页面ready
+                if not missing_positions:
+                    finded_page_indexes.extend(block_pages)
+                    idx += chunk_len
+                    continue
+
+                if disk_service is None:
+                    break
+
+                prefix_len = idx + chunk_len
+                prefix_tokens = token_hash_list[:prefix_len]
+                prefix_pages = finded_page_indexes + block_pages
+
+                if not self.disk_cache_writer.blocks_exist(tokens=prefix_tokens, start_pos=idx):
+                    break
+
+                self.cpu_cache_client.lock.acquire_sleep1ms()
+                new_page_indexes: List[int] = []
+                allocation_failed = False
+                try:
+                    for pos in missing_positions:
+                        token_hash_value = chunk_tokens[pos]
+                        page_index, ready = self.cpu_cache_client.allocate_one_page(
+                            hash_key=token_hash_value, disk_offload_enable=self.args.enable_disk_cache
+                        )
+                        if page_index is None:
+                            allocation_failed = True
+                            break
+                        block_pages[pos] = page_index
+                        if not ready:
+                            new_page_indexes.append(page_index)
+                finally:
+                    if allocation_failed and new_page_indexes:
+                        self.cpu_cache_client.reset_pages_to_empty(new_page_indexes)
+                    self.cpu_cache_client.lock.release()
+
+                if allocation_failed:
+                    break
+
+                pages_to_load = [page for page in new_page_indexes if page != -1]
+                if pages_to_load:
+                    prefix_len = idx + chunk_len
+                    prefix_tokens = token_hash_list[:prefix_len]
+                    prefix_pages = finded_page_indexes + block_pages
+
+                    if not self.disk_cache_writer.load_pages(
+                        tokens=prefix_tokens, page_indexes=prefix_pages, start_pos=idx
+                    ):
+                        self.cpu_cache_client.lock.acquire_sleep1ms()
+                        self.cpu_cache_client.reset_pages_to_empty(pages_to_load)
+                        self.cpu_cache_client.lock.release()
+                        break
+
+                    self.cpu_cache_client.lock.acquire_sleep1ms()
+                    try:
+                        self.cpu_cache_client.update_pages_status_to_ready(
+                            page_list=block_pages, deref=False, disk_offload_enable=False
+                        )
+                    finally:
+                        self.cpu_cache_client.lock.release()
+
+                    disk_loaded_page_indexes.extend(pages_to_load)
+
+                finded_page_indexes.extend(block_pages)
+                idx += chunk_len
+
             while not self.cpu_cache_client.check_allpages_ready(finded_page_indexes):
                 time.sleep(0.01)
+
+            if disk_loaded_page_indexes:
+                req.disk_prompt_cache_len = len(disk_loaded_page_indexes) * self.args.cpu_cache_token_page_size
 
             req.cpu_cache_match_page_indexes.fill(finded_page_indexes)
 
