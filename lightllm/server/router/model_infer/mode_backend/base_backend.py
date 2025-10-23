@@ -130,6 +130,12 @@ class ModeBackend:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
+        # qwen3next 不支持 dynamic_prompt_cache
+        if model_cfg.get("model_type") == "qwen3_next":
+            if not self.args.disable_dynamic_prompt_cache:
+                self.logger.info("Qwen3Next model detected. Automatically disabling dynamic_prompt_cache. ")
+                self.use_dynamic_prompt_cache = False
+
         model_kvargs = {
             "weight_dir": self.weight_dir,
             "max_total_token_num": max_total_token_num,

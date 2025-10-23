@@ -6,6 +6,7 @@ from ...infer_struct import InferStateInfo
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.distributed import all_reduce
+from lightllm.common.mem_manager import MemoryManager
 from typing import Tuple
 
 
@@ -51,8 +52,8 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         self._copy_kv_to_mem_cache(cache_kv, infer_state.mem_index, mem_manager)
         return
 
-    def _copy_kv_to_mem_cache(self, buffer, mem_index, mem_manager):
-        destindex_copy_kv(buffer, mem_index, mem_manager.kv_buffer[self.layer_num_])
+    def _copy_kv_to_mem_cache(self, buffer, mem_index, mem_manager: MemoryManager):
+        destindex_copy_kv(buffer, mem_index, mem_manager.get_kv_buffer(self.layer_num_))
         return
 
     def _context_attention_kernel(self, q, kv, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:

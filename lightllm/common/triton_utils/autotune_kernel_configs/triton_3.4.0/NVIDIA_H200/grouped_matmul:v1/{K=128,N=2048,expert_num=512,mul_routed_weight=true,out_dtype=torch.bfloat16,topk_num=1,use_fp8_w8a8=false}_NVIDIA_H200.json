@@ -1,0 +1,110 @@
+{
+  "10": {
+    "BLOCK_SIZE_K": 32,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 16,
+    "NEED_TRANS": false,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "1000": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 1,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "10240": {
+    "BLOCK_SIZE_K": 32,
+    "BLOCK_SIZE_M": 32,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 32,
+    "NEED_TRANS": false,
+    "num_stages": 5,
+    "num_warps": 4
+  },
+  "1280": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 16,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "160": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 64,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "20480": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 64,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "2560": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 64,
+    "NEED_TRANS": false,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "320": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 64,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "40960": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 128,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 64,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "640": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 1,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "80": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 64,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "84480": {
+    "BLOCK_SIZE_K": 32,
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 16,
+    "NEED_TRANS": false,
+    "num_stages": 4,
+    "num_warps": 4
+  }
+}
