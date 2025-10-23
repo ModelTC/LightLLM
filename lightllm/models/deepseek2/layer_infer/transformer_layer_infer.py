@@ -255,6 +255,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
         o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
         layer_weight.o_weight_.mm(input, out=o_tensor[0 : len(infer_state.position_cos), :])
+        e_o_tensor = o_tensor[len(infer_state.position_cos) :, :]
+        if e_o_tensor.shape[0] > 0:
+            e_o_tensor.fill_(0)
+
         if self.tp_world_size_ > 1:
             sp_token_num = o_tensor.shape[0] // self.tp_world_size_
             reduce_o_tensor = self.alloc_tensor((sp_token_num, self.embed_dim_), dtype=input.dtype, device=input.device)
