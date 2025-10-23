@@ -393,8 +393,8 @@ class Qwen25Detector(BaseFormatDetector):
         Initializes the detector with necessary state variables.
         """
         super().__init__()
-        self.bot_token = "<tool_call>\n"
-        self.eot_token = "\n</tool_call>"
+        self.bot_token = "<tool_call>"
+        self.eot_token = "</tool_call>"
         self.tool_call_separator = "\n"
         self._normal_text_buffer = ""  # Buffer for handling partial end tokens
 
@@ -440,7 +440,7 @@ class Qwen25Detector(BaseFormatDetector):
             self._normal_text_buffer += result.normal_text
 
             # Check if buffer contains complete end token (without leading newline)
-            end_token_without_newline = self.eot_token[1:]  # "</tool_call>"
+            end_token_without_newline = self.eot_token  # "</tool_call>"
             if end_token_without_newline in self._normal_text_buffer:
                 cleaned_text = self._normal_text_buffer.replace(end_token_without_newline, "")
                 self._normal_text_buffer = ""
