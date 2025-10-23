@@ -69,6 +69,9 @@ class MultiLevelKvCacheModule(object):
                         # TODO fa3 现在必须使用同步模式, 未来需要移除
                         g_infer_context.get_overlap_stream().synchronize()
 
+                    # TODO 更有效的分配策略。
+                    grid_num = 16 if self.need_sync_compute_stream or (not self.args.enable_fa3) else 1
+
                     # 将 cpu page 的内容拷贝到 gpu 页面中
                     load_cpu_kv_to_gpu(
                         gpu_mem_indexes=mem_indexes.cuda(non_blocking=True),
@@ -77,7 +80,7 @@ class MultiLevelKvCacheModule(object):
                         page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
                         tp_index=self.backend.rank_in_dp,
                         tp_world_size=self.backend.dp_world_size,
-                        grid_num=1 if self.args.enable_fa3 else 16,  # TODO 更有效的分配策略。
+                        grid_num=grid_num,
                     )
 
                 torch.cuda.current_stream().synchronize()
@@ -202,6 +205,10 @@ class MultiLevelKvCacheModule(object):
             move_token_num = item_size * self.args.cpu_cache_token_page_size
             assert req.cur_kv_len >= item_size * self.args.cpu_cache_token_page_size
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
+
+            # TODO 更有效的分配策略。
+            grid_num = 16 if self.need_sync_compute_stream or (not self.args.enable_fa3) else 1
+
             # assert max(page_list) < self.cpu_cache_client.cpu_kv_cache_tensor.shape[0]
             offload_gpu_kv_to_cpu(
                 token_indexes=token_indexes,
@@ -211,7 +218,7 @@ class MultiLevelKvCacheModule(object):
                 page_readies=page_readies,
                 tp_index=self.backend.rank_in_dp,
                 tp_world_size=self.backend.dp_world_size,
-                grid_num=1 if self.args.enable_fa3 else 16,  # TODO 更有效的分配策略。
+                grid_num=grid_num,
             )
 
             sync_event = torch.cuda.Event()
