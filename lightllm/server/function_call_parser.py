@@ -440,7 +440,7 @@ class Qwen25Detector(BaseFormatDetector):
             self._normal_text_buffer += result.normal_text
 
             # Check if buffer contains complete end token (without leading newline)
-            end_token_without_newline = self.eot_token[1:]  # "</tool_call>"
+            end_token_without_newline = self.eot_token  # "</tool_call>"
             if end_token_without_newline in self._normal_text_buffer:
                 cleaned_text = self._normal_text_buffer.replace(end_token_without_newline, "")
                 self._normal_text_buffer = ""
