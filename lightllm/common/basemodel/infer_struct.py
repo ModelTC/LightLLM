@@ -216,6 +216,7 @@ class InferStateInfo:
     def _all_to_all_balance_get(self, data: torch.Tensor):
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
+        from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
         old_shape = data.shape
         data = data.view(-1)
@@ -225,7 +226,13 @@ class InferStateInfo:
         scale_size = data.shape[0] // origin_len
         handle_len = self.dp_handle_lens[dp_rank]
 
-        dest_data = torch.empty((handle_len * scale_size), dtype=data.dtype, device="cuda")
+        dest_data = g_cache_manager.alloc_tensor(
+            shape=(handle_len * scale_size,),
+            data_dtype=data.dtype,
+            device="cuda",
+            is_graph_out=False,
+            microbatch_index=self.microbatch_index,
+        )
         dist.all_to_all_single(
             output=dest_data.view(-1),
             input=data.view(-1),
@@ -239,6 +246,7 @@ class InferStateInfo:
     def _all_to_all_unbalance_get(self, data: torch.Tensor):
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
+        from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
         old_shape = data.shape
         data = data.view(-1)
@@ -247,7 +255,13 @@ class InferStateInfo:
         scale_size = data.shape[0] // handle_len
         assert data.shape[0] % handle_len == 0
         origin_len = self.dp_origin_lens[dp_rank]
-        origin_data = torch.empty((origin_len * scale_size,), dtype=data.dtype, device="cuda")
+        origin_data = g_cache_manager.alloc_tensor(
+            shape=(origin_len * scale_size,),
+            data_dtype=data.dtype,
+            device="cuda",
+            is_graph_out=False,
+            microbatch_index=self.microbatch_index,
+        )
         dist.all_to_all_single(
             output=origin_data.view(-1),
             input=data,
