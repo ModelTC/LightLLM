@@ -7,6 +7,7 @@ from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.distributed import all_reduce
 from typing import Tuple
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
@@ -31,8 +32,14 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         raise Exception("need to impl")
 
     def _pre_cache_kv(self, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
+        if infer_state.is_prefill and get_env_start_args().enable_dp_prefill_balance:
+            shape = infer_state.kv_buffer_shapedtype[0]
+            shape = (len(infer_state.position_ids), *shape[1:])
+        else:
+            shape = infer_state.kv_buffer_shapedtype[0]
+
         cache_kv = self.alloc_tensor(
-            shape=infer_state.kv_buffer_shapedtype[0],
+            shape=shape,
             dtype=infer_state.kv_buffer_shapedtype[1],
             device="cuda",
             is_graph_out=False,
