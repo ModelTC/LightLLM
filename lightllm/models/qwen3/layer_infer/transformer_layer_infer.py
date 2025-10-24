@@ -56,3 +56,7 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.position_sin,
         )
         return q, cache_kv
+
+    def _tpsp_get_qkv(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
+        # TODO
+        raise Exception("not impl")

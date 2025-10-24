@@ -233,6 +233,11 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.position_cos,
             infer_state.position_sin,
         )
+
+        if infer_state.is_prefill and get_env_start_args().enable_dp_prefill_balance:
+            q = infer_state._all_to_all_unbalance_get(data=q)
+            cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
+
         return q, cache_kv
 
     def _context_attention_flashinfer_kernel_fp8(
@@ -402,6 +407,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _tpsp_get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
+        if infer_state.is_prefill and get_env_start_args().enable_dp_prefill_balance:
+            input = infer_state._all_to_all_balance_get(data=input)
+
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
         o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)

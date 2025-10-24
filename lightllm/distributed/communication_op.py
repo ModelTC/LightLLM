@@ -36,6 +36,7 @@ from lightllm.utils.dist_utils import (
     get_global_rank,
     get_current_rank_in_dp,
     create_new_group_for_current_dp,
+    create_dp_special_inter_group,
 )
 from lightllm.utils.device_utils import get_device_sm_count
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
@@ -62,6 +63,11 @@ class CustomProcessGroup:
         self.custom_gather = None
         self.dp_world_size = get_dp_world_size()
         self.device_group = create_new_group_for_current_dp("nccl")
+        if get_env_start_args().dp > 1 and get_env_start_args().enable_dp_prefill_balance:
+            self.dp_prefill_balance_group = create_dp_special_inter_group("nccl")
+        else:
+            self.dp_prefill_balance_group = None
+
         self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
     def init_custom_reduce(self) -> None:

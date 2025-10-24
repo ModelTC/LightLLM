@@ -14,7 +14,7 @@ from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 from functools import partial
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_global_world_size
-from lightllm.distributed.communication_op import all_gather_into_tensor
+from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 
 logger = init_logger(__name__)
 
@@ -45,10 +45,13 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             moe_mode = os.environ.get("MOE_MODE", "TP")
             if moe_mode == "EP":
                 self._ffn = partial(Qwen3MOETransformerLayerInfer._moe_ffn_edp, self)
+                self._tpsp_ffn = self._tpsp_ffn_ep
             else:
                 self._ffn = partial(Qwen3MOETransformerLayerInfer._moe_ffn, self)
+                self._tpsp_ffn = self._tpsp_ffn_tp
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
+            self._tpsp_ffn = self._tpsp_ffn_tp
 
     def _get_qkv(
         self,
@@ -164,6 +167,45 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         ep_output = ep_output.view(token_num, hidden_dim)
         return ep_output
+
+    def _tpsp_ffn(
+        self, input: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
+    ):
+        raise Exception("need bind to real impl")
+
+    def _tpsp_ffn_tp(
+        self, input: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+        if self.tp_world_size_ > 1:
+            sp_token_num, hidden_dim = input.shape
+            gather_input = self.alloc_tensor(
+                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
+            )
+            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
+            input = gather_input
+
+        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+
+        if self.tp_world_size_ > 1:
+            sp_token_num = ffn2_out.shape[0] // self.tp_world_size_
+            reduce_o_tensor = self.alloc_tensor(
+                (sp_token_num, self.embed_dim_), dtype=ffn2_out.dtype, device=ffn2_out.device
+            )
+            reduce_scatter_tensor(
+                reduce_o_tensor, ffn2_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False
+            )
+            ffn2_out = reduce_o_tensor
+        return ffn2_out
+
+    def _tpsp_ffn_ep(
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+
+        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+
+        return ffn2_out
 
     def overlap_tpsp_token_forward(
         self,

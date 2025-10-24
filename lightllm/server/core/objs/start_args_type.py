@@ -61,6 +61,7 @@ class StartArgs:
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
     enable_tpsp_mix_mode: bool = field(default=False)
+    enable_dp_prefill_balance: bool = field(default=False)
     enable_decode_microbatch_overlap: bool = field(default=False)
     enable_prefill_microbatch_overlap: bool = field(default=False)
     cache_capacity: int = field(default=200)

@@ -293,6 +293,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         only llama and deepseek v3 model supported now.""",
     )
     parser.add_argument(
+        "--enable_dp_prefill_balance",
+        action="store_true",
+        help="inference backend will use dp balance, need set --enable_tpsp_mix_mode first",
+    )
+    parser.add_argument(
         "--enable_prefill_microbatch_overlap",
         action="store_true",
         help="""inference backend will use microbatch overlap mode for prefill.

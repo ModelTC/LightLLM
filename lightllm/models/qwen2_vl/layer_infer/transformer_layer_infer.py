@@ -2,6 +2,7 @@ import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
+from typing import Tuple
 from functools import partial
 
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton
@@ -32,3 +33,7 @@ class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
         cache_kv[:, : self.tp_k_head_num_, :] = new_k.squeeze(0).permute(1, 0, 2)
 
         return new_q, cache_kv
+
+    def _tpsp_get_qkv(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
+        # TODO
+        raise Exception("not impl")

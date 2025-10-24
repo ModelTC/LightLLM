@@ -2,7 +2,7 @@ import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
-
+from typing import Tuple
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.qwen.layer_weights.transformer_layer_weight import QwenTransformerLayerWeight
@@ -32,3 +32,7 @@ class QwenTransformerLayerInfer(LlamaTransformerLayerInfer):
         if infer_state.logn_values is not None:
             q.mul_(infer_state.logn_values.view(-1, 1))
         return q, cache_kv
+
+    def _tpsp_get_qkv(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
+        # TODO
+        raise Exception("not impl")
