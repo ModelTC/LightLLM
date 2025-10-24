@@ -228,7 +228,7 @@ class InferStateInfo:
 
         dest_data = g_cache_manager.alloc_tensor(
             shape=(handle_len * scale_size,),
-            data_dtype=data.dtype,
+            data_type=data.dtype,
             device="cuda",
             is_graph_out=False,
             microbatch_index=self.microbatch_index,
@@ -257,7 +257,7 @@ class InferStateInfo:
         origin_len = self.dp_origin_lens[dp_rank]
         origin_data = g_cache_manager.alloc_tensor(
             shape=(origin_len * scale_size,),
-            data_dtype=data.dtype,
+            data_type=data.dtype,
             device="cuda",
             is_graph_out=False,
             microbatch_index=self.microbatch_index,
