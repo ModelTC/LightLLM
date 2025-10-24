@@ -2,6 +2,7 @@ import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
+from typing import Tuple
 from functools import partial
 
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton
@@ -19,10 +20,7 @@ class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _get_qkv(self, input, infer_state, layer_weight):
         q = layer_weight.q_proj.mm(input)
-        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-        cache_kv = layer_weight.kv_proj.mm(
-            input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
-        ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         seq_len, _ = q.shape
         q = q.view(1, seq_len, -1, self.head_dim_).transpose(1, 2)
         self.axis_map = self.axis_map.to(q.device)
@@ -32,3 +30,7 @@ class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
         cache_kv[:, : self.tp_k_head_num_, :] = new_k.squeeze(0).permute(1, 0, 2)
 
         return new_q, cache_kv
+
+    def _tpsp_get_qkv(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
+        # TODO
+        raise Exception("not impl")

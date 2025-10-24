@@ -7,6 +7,7 @@ from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.distributed import all_reduce
 from typing import Tuple
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
@@ -29,16 +30,6 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
     def _ffn_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
-
-    def _pre_cache_kv(self, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
-        cache_kv = self.alloc_tensor(
-            shape=infer_state.kv_buffer_shapedtype[0],
-            dtype=infer_state.kv_buffer_shapedtype[1],
-            device="cuda",
-            is_graph_out=False,
-            microbatch_index=infer_state.microbatch_index,
-        )
-        return cache_kv
 
     def _get_qkv(self, input, infer_state: InferStateInfo, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
         raise Exception("need to impl")
