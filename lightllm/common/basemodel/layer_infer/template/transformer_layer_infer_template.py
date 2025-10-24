@@ -31,22 +31,6 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _ffn_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
-    def _pre_cache_kv(self, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
-        if infer_state.is_prefill and get_env_start_args().enable_dp_prefill_balance:
-            shape = infer_state.kv_buffer_shapedtype[0]
-            shape = (len(infer_state.position_ids), *shape[1:])
-        else:
-            shape = infer_state.kv_buffer_shapedtype[0]
-
-        cache_kv = self.alloc_tensor(
-            shape=shape,
-            dtype=infer_state.kv_buffer_shapedtype[1],
-            device="cuda",
-            is_graph_out=False,
-            microbatch_index=infer_state.microbatch_index,
-        )
-        return cache_kv
-
     def _get_qkv(self, input, infer_state: InferStateInfo, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
         raise Exception("need to impl")
 

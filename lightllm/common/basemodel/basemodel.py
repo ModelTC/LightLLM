@@ -290,10 +290,6 @@ class TpPartBaseModel:
         infer_state.req_manager = self.req_manager
 
         infer_state.mem_index = model_input.mem_indexes
-        infer_state.kv_buffer_shapedtype = (
-            (model_input.input_ids.shape[0], self.tp_k_head_num_ + self.tp_v_head_num_, self.head_dim_),
-            self.data_type,
-        )
         infer_state.microbatch_index = microbatch_index
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
 

@@ -40,7 +40,6 @@ class InferStateInfo:
         self.req_manager: ReqManager = None
 
         self.mem_index: torch.Tensor = None
-        self.kv_buffer_shapedtype: Tuple[Any, Any] = None
 
         self.is_token_healing: bool = False
         self.return_all_prompt_logics: bool = False

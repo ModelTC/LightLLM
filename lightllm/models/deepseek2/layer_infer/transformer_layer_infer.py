@@ -143,14 +143,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                     Deepseek2TransformerLayerInfer._context_attention_kernel_origin, self
                 )
 
-    def _pre_cache_kv(
-        self, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
-    ) -> torch.Tensor:
-        # q_lora_rank 不是None的时候，融合 q_a_proj 和 kv_a_proj_with_mqa
-        if self.q_lora_rank is None:
-            return super()._pre_cache_kv(infer_state, layer_weight)
-        return None
-
     def _get_qkv(
         self,
         input: torch.Tensor,
@@ -161,8 +153,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         if self.q_lora_rank is None:
             q = layer_weight.q_weight_.mm(input)
-            cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-            layer_weight.kv_a_proj_with_mqa_.mm(input, out=cache_kv.view(-1, self.kv_lora_rank + self.qk_rope_head_dim))
+            cache_kv = layer_weight.kv_a_proj_with_mqa_.mm(input).view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
         else:
             q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
@@ -203,8 +194,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
             input = input.view(-1, self.embed_dim_)
             q = layer_weight.q_weight_.mm(input)
-            cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-            layer_weight.kv_a_proj_with_mqa_.mm(input, out=cache_kv.view(-1, self.kv_lora_rank + self.qk_rope_head_dim))
+            cache_kv = layer_weight.kv_a_proj_with_mqa_.mm(input).view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
         else:
             input = input.view(-1, self.embed_dim_)
             qkv = layer_weight.qkv_a_proj_with_mqa_.mm(input)
