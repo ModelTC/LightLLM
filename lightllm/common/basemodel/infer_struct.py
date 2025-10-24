@@ -217,66 +217,43 @@ class InferStateInfo:
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
 
-        if len(data.shape) == 1:
-            assert data.shape[0] == self.dp_origin_lens[0]
-            handle_len = self.dp_handle_lens[dp_rank]
-            dest_data = torch.empty((handle_len,), dtype=data.dtype, device="cuda")
-            dist.all_to_all_single(
-                output=dest_data,
-                input=data,
-                output_split_sizes=self.dp_output_split_sizes[dp_rank],
-                input_split_sizes=self.dp_input_split_sizes[dp_rank],
-                group=self.dist_group.dp_prefill_balance_group,
-                async_op=False,
-            )
-            return dest_data
-        elif len(data.shape) == 2:
-            assert data.shape[0] == self.dp_origin_lens[0]
-            handle_len = self.dp_handle_lens[dp_rank]
-            emb_dim = data.shape[1]
-            dest_data = torch.empty((handle_len, emb_dim), dtype=data.dtype, device="cuda")
-            dist.all_to_all_single(
-                output=dest_data.view(-1),
-                input=data.view(-1),
-                output_split_sizes=[e * emb_dim for e in self.dp_output_split_sizes[dp_rank]],
-                input_split_sizes=[e * emb_dim for e in self.dp_input_split_sizes[dp_rank]],
-                group=self.dist_group.dp_prefill_balance_group,
-                async_op=False,
-            )
-            return dest_data
-        else:
-            assert False, "dead code"
+        old_shape = data.shape
+        data = data.view(-1)
+
+        origin_len = self.dp_origin_lens[dp_rank]
+        assert data.shape[0] % origin_len == 0
+        scale_size = data.shape[0] // origin_len
+        handle_len = self.dp_handle_lens[dp_rank]
+
+        dest_data = torch.empty((handle_len * scale_size), dtype=data.dtype, device="cuda")
+        dist.all_to_all_single(
+            output=dest_data.view(-1),
+            input=data.view(-1),
+            output_split_sizes=[e * scale_size for e in self.dp_output_split_sizes[dp_rank]],
+            input_split_sizes=[e * scale_size for e in self.dp_input_split_sizes[dp_rank]],
+            group=self.dist_group.dp_prefill_balance_group,
+            async_op=False,
+        )
+        return dest_data.view(-1, *old_shape[1:])
 
     def _all_to_all_unbalance_get(self, data: torch.Tensor):
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
 
-        if len(data.shape) == 1:
-            assert data.shape[0] == self.dp_handle_lens[0]
-            origin_len = self.dp_origin_lens[dp_rank]
-            origin_data = torch.empty((origin_len,), dtype=data.dtype, device="cuda")
-            dist.all_to_all_single(
-                output=origin_data,
-                input=data,
-                output_split_sizes=self.dp_input_split_sizes[dp_rank],
-                input_split_sizes=self.dp_output_split_sizes[dp_rank],
-                group=self.dist_group.dp_prefill_balance_group,
-                async_op=False,
-            )
-            return origin_data
-        elif len(data.shape) == 2:
-            assert data.shape[0] == self.dp_handle_lens[0]
-            origin_len = self.dp_origin_lens[dp_rank]
-            emb_dim = data.shape[1]
-            origin_data = torch.empty((origin_len, emb_dim), dtype=data.dtype, device="cuda")
-            dist.all_to_all_single(
-                output=origin_data.view(-1),
-                input=data.view(-1),
-                output_split_sizes=[e * emb_dim for e in self.dp_input_split_sizes[dp_rank]],
-                input_split_sizes=[e * emb_dim for e in self.dp_output_split_sizes[dp_rank]],
-                group=self.dist_group.dp_prefill_balance_group,
-                async_op=False,
-            )
-            return origin_data
-        else:
-            assert False, "dead code"
+        old_shape = data.shape
+        data = data.view(-1)
+
+        handle_len = self.dp_handle_lens[dp_rank]
+        scale_size = data.shape[0] // handle_len
+        assert data.shape[0] % handle_len == 0
+        origin_len = self.dp_origin_lens[dp_rank]
+        origin_data = torch.empty((origin_len * scale_size,), dtype=data.dtype, device="cuda")
+        dist.all_to_all_single(
+            output=origin_data.view(-1),
+            input=data,
+            output_split_sizes=[e * scale_size for e in self.dp_input_split_sizes[dp_rank]],
+            input_split_sizes=[e * scale_size for e in self.dp_output_split_sizes[dp_rank]],
+            group=self.dist_group.dp_prefill_balance_group,
+            async_op=False,
+        )
+        return origin_data.view(-1, *old_shape[1:])
