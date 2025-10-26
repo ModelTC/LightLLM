@@ -167,39 +167,46 @@ class InferStateInfo:
         for i in range(sum_input_len % args.dp):
             dp_handle_lens[i] += 1
 
-        self.dp_handle_lens = dp_handle_lens
+        self.dp_handle_lens = dp_handle_lens.copy()
+
+        dest_dp_inputs = [[] for _ in range(args.dp)]
         # 分配每个dp 的原始输入和分配后的原始输入
         origin_datas = collections.deque()
         for origin_dp_index, origin_dp_input_len in enumerate(dp_input_lens.numpy()):
-            origin_datas.append((origin_dp_index, 0, origin_dp_input_len))
+            handle_len = dp_handle_lens[origin_dp_index]
+            if origin_dp_input_len > handle_len:
+                origin_datas.append((origin_dp_index, handle_len, origin_dp_input_len))
+                dp_handle_lens[origin_dp_index] = 0
+                dest_dp_inputs[origin_dp_index].append((origin_dp_index, 0, handle_len))
+            else:
+                dp_handle_lens[origin_dp_index] -= origin_dp_input_len
+                dest_dp_inputs[origin_dp_index].append((origin_dp_index, 0, origin_dp_input_len))
 
-        dest_dp_inputs = []
         for dest_dp_index in range(args.dp):
-            dest_dp_data = []
             need_size = dp_handle_lens[dest_dp_index]
+            if need_size == 0:
+                continue
             while len(origin_datas) != 0:
                 origin_data = origin_datas.popleft()
                 origin_dp_index, start, end = origin_data
                 if end - start > need_size:
-                    dest_dp_data.append((origin_dp_index, start, start + need_size))
+                    dest_dp_inputs[dest_dp_index].append((origin_dp_index, start, start + need_size))
                     origin_datas.appendleft((origin_dp_index, start + need_size, end))
                     break
                 else:
-                    dest_dp_data.append((origin_dp_index, start, end))
+                    dest_dp_inputs[dest_dp_index].append((origin_dp_index, start, end))
                     need_size -= end - start
                     if need_size == 0:
                         break
 
-            dest_dp_inputs.append(dest_dp_data)
-
         dp_output_split_sizes = [[0 for _ in range(args.dp)] for _ in range(args.dp)]
         for dest_dp_index, dest_dp_data in enumerate(dest_dp_inputs):
             for origin_dp_index, start, end in dest_dp_data:
-                dp_output_split_sizes[dest_dp_index][origin_dp_index] = end - start
+                dp_output_split_sizes[dest_dp_index][origin_dp_index] += end - start
         dp_input_split_sizes = [[0 for _ in range(args.dp)] for _ in range(args.dp)]
         for dest_dp_index, dest_dp_data in enumerate(dest_dp_inputs):
             for origin_dp_index, start, end in dest_dp_data:
-                dp_input_split_sizes[origin_dp_index][dest_dp_index] = end - start
+                dp_input_split_sizes[origin_dp_index][dest_dp_index] += end - start
 
         self.dp_input_split_sizes = dp_input_split_sizes
         self.dp_output_split_sizes = dp_output_split_sizes
