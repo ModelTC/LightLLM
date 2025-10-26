@@ -228,7 +228,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.position_sin,
         )
 
-        if infer_state.is_prefill and get_env_start_args().enable_dp_prefill_balance:
+        if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)
             cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
 
@@ -401,7 +401,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _tpsp_get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
-        if infer_state.is_prefill and get_env_start_args().enable_dp_prefill_balance:
+        if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
 
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)

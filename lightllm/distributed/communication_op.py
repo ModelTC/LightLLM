@@ -63,7 +63,7 @@ class CustomProcessGroup:
         self.custom_gather = None
         self.dp_world_size = get_dp_world_size()
         self.device_group = create_new_group_for_current_dp("nccl")
-        if get_env_start_args().dp > 1 and get_env_start_args().enable_dp_prefill_balance:
+        if get_env_start_args().enable_dp_prefill_balance:
             self.dp_prefill_balance_group = create_dp_special_inter_group("nccl")
         else:
             self.dp_prefill_balance_group = None

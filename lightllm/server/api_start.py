@@ -140,7 +140,7 @@ def normal_or_p_d_start(args):
         assert args.router_token_ratio == 0.0
 
     if args.enable_dp_prefill_balance:
-        assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly"
+        assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     # mtp params check
     if args.mtp_mode is not None:

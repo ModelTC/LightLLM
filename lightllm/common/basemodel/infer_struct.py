@@ -147,6 +147,8 @@ class InferStateInfo:
         assert self.is_prefill
         import torch.distributed as dist
 
+        self.need_dp_prefill_balance = True
+
         args = get_env_start_args()
 
         dp_input_lens = torch.empty(size=(args.dp,), device="cuda", dtype=torch.int32)
