@@ -225,6 +225,11 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.position_cos,
             infer_state.position_sin,
         )
+
+        if infer_state.need_dp_prefill_balance:
+            q = infer_state._all_to_all_unbalance_get(data=q)
+            cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
+
         return q, cache_kv
 
     def _get_o(
@@ -238,6 +243,9 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _tpsp_get_o(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
+        if infer_state.need_dp_prefill_balance:
+            input = infer_state._all_to_all_balance_get(data=input)
+
         if input.shape[2] == self.kv_lora_rank:
             input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
 
