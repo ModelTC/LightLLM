@@ -7,7 +7,6 @@ from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.distributed import all_reduce
 from typing import Tuple
-from lightllm.utils.envs_utils import get_env_start_args
 
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
