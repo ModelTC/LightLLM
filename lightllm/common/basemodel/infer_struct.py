@@ -213,10 +213,19 @@ class InferStateInfo:
 
         new_input_ids = self._all_to_all_balance_get(input_ids)
         if hasattr(self, "position_ids") and self.position_ids is not None:
+            # deepseekv2 mla 特殊模型需要保留原始的 position_ids, 用于减少通信量
+            self._unbalance_position_ids = self.position_ids
+
             self.position_ids = self._all_to_all_balance_get(self.position_ids)
         if hasattr(self, "position_cos") and self.position_cos is not None:
+            # deepseekv2 mla 特殊模型需要保留原始的 position_cos, 用于减少通信量
+            self._unbalance_position_cos = self.position_cos
+
             self.position_cos = self._all_to_all_balance_get(self.position_cos)
         if hasattr(self, "position_sin") and self.position_sin is not None:
+            # deepseekv2 mla 特殊模型需要保留原始的 position_sin, 用于减少通信量
+            self._unbalance_position_sin = self.position_sin
+
             self.position_sin = self._all_to_all_balance_get(self.position_sin)
 
         return new_input_ids
