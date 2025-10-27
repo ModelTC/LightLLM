@@ -124,7 +124,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)
             cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
-        
+
         return q, cache_kv
 
     def _moe_ffn(

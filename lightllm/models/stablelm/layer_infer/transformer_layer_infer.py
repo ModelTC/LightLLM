@@ -54,7 +54,6 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
         # TODO
         raise Exception("not impl")
 
-
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
     ) -> torch.Tensor:
