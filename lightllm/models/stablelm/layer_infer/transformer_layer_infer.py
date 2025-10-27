@@ -3,7 +3,7 @@ import torch.functional as F
 import torch.distributed as dist
 import numpy as np
 from functools import partial
-
+from typing import Tuple
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
 from lightllm.models.stablelm.layer_weights.transformer_layer_weight import StablelmTransformerLayerWeight
@@ -38,6 +38,10 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         return q, cache_kv
 
+    def _tpsp_get_qkv(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
+        # TODO
+        raise Exception("not impl")
+
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
     ) -> torch.Tensor:
@@ -45,6 +49,11 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
             input.view(-1, self.tp_o_head_num_ * self.head_dim_),
         )
         return o_tensor
+
+    def _tpsp_get_o(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
+        # TODO
+        raise Exception("not impl")
+
 
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight

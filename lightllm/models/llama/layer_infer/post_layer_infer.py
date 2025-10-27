@@ -12,7 +12,6 @@ from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel import PostLayerInferTpl
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.distributed.communication_op import all_gather
-from lightllm.utils.envs_utils import get_env_start_args
 
 
 class LlamaPostLayerInfer(PostLayerInferTpl):
