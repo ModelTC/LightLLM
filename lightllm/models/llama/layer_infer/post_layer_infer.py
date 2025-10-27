@@ -116,6 +116,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             # len(infer_state.position_sin) 获取真实输入长度
             input_embdings = gather_data[0 : len(infer_state.position_sin)]
 
+        if infer_state.need_dp_prefill_balance:
+            input_embdings = infer_state._all_to_all_unbalance_get(data=input_embdings)
+
         return self.token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
     def overlap_tpsp_token_forward(
@@ -130,11 +133,17 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             infer_state.hook()
             infer_state.hook = None
 
+        if infer_state.need_dp_prefill_balance:
+            input_embdings = infer_state._all_to_all_unbalance_get(data=input_embdings)
+
         logics = self.tpsp_token_forward(input_embdings, infer_state, layer_weight=layer_weight)
 
         if getattr(infer_state1, "hook", None) is not None:
             infer_state1.hook()
             infer_state1.hook = None
+
+        if infer_state1.need_dp_prefill_balance:
+            input_embdings1 = infer_state1._all_to_all_unbalance_get(data=input_embdings1)
 
         logics1 = self.tpsp_token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
 

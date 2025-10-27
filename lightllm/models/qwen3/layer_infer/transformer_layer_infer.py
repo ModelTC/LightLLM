@@ -31,10 +31,7 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
-        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-        cache_kv = layer_weight.kv_proj.mm(
-            input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
-        ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
         rmsnorm_forward(
             q.view(-1, self.head_dim_),
@@ -56,3 +53,7 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.position_sin,
         )
         return q, cache_kv
+
+    def _tpsp_get_qkv(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
+        # TODO
+        raise Exception("not impl")

@@ -87,9 +87,9 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         # kv = kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         k = layer_weight.k_proj.mm(input)
         v = layer_weight.v_proj.mm(input)
-        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-        cache_kv[:, 0 : self.tp_k_head_num_, :] = k.view(-1, self.tp_k_head_num_, self.head_dim_)
-        cache_kv[:, self.tp_k_head_num_ :, :] = v.view(-1, self.tp_v_head_num_, self.head_dim_)
+        cache_kv = torch.cat(
+            [k.view(-1, self.tp_k_head_num_, self.head_dim_), v.view(-1, self.tp_v_head_num_, self.head_dim_)], dim=1
+        )
 
         # gemma3 use qk norm
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)

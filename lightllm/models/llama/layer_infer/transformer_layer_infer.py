@@ -197,10 +197,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         q = layer_weight.q_proj.mm(input)
-        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-        cache_kv = layer_weight.kv_proj.mm(
-            input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
-        ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
@@ -222,10 +219,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             input = gather_input[0 : len(infer_state.position_cos), :]
 
         q = layer_weight.q_proj.mm(input)
-        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-        cache_kv = layer_weight.kv_proj.mm(
-            input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
-        ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
@@ -233,6 +227,11 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.position_cos,
             infer_state.position_sin,
         )
+
+        if infer_state.need_dp_prefill_balance:
+            q = infer_state._all_to_all_unbalance_get(data=q)
+            cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
+
         return q, cache_kv
 
     def _context_attention_flashinfer_kernel_fp8(
@@ -402,10 +401,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _tpsp_get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
+        if infer_state.need_dp_prefill_balance:
+            input = infer_state._all_to_all_balance_get(data=input)
+
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
         o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
         layer_weight.o_proj.mm(input, out=o_tensor[0 : len(infer_state.position_cos), :])
+        e_o_tensor = o_tensor[len(infer_state.position_cos) :, :]
+        if e_o_tensor.shape[0] > 0:
+            e_o_tensor.fill_(0)
 
         if self.tp_world_size_ > 1:
             sp_token_num = o_tensor.shape[0] // self.tp_world_size_

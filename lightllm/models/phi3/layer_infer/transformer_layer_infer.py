@@ -29,10 +29,8 @@ class Phi3TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _get_qkv(self, input_emb, infer_state: LlamaInferStateInfo, layer_weight: Phi3TransformerLayerWeight):
         q = layer_weight.q_proj.mm(input_emb.view(-1, self.embed_dim_))
-        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
         cache_kv = layer_weight.kv_proj.mm(
             input_emb.view(-1, self.embed_dim_),
-            out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_),
         ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),

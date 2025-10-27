@@ -310,7 +310,7 @@ class ChunkedPrefillReq(Req):
         # 就是通过模拟加长其输出token长度，来延长其在估计阶段的生命周期。max_waiting_token
         # 的计算是保守的，每次chuncked prefill 延迟的最大步数为两种模式之合，因为
         # 这个并不会导致预估的token占用量大幅增加，所以可以放心使用。
-        max_waiting_token = args.router_max_wait_tokens + args.dp_prefill_wait_step
+        max_waiting_token = args.router_max_wait_tokens
         has_out_len = self.shm_cur_output_len
         if self.sample_params.ignore_eos:
             cur_max_new_token_len = self.sample_params.max_new_tokens
