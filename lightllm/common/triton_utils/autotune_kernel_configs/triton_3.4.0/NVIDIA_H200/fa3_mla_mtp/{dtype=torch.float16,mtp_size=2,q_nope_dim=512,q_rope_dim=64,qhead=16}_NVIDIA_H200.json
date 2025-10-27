@@ -1,0 +1,9 @@
+{
+  "8223": {
+    "BLOCK_N": 64,
+    "flatten": true,
+    "num_stages": 2,
+    "num_warps": 8,
+    "warp_specialize": false
+  }
+}
