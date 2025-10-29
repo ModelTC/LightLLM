@@ -1,0 +1,145 @@
+INFO 09-16 10:45:22 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+All deep_gemm operations loaded successfully!
+INFO 09-16 10:45:25 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-16 10:45:28 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-16 10:45:28 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-16 10:45:28 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-16 10:45:28 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-16 10:45:28 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-16 10:45:28 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-16 10:45:28 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-16 10:45:28 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+INFO 09-16 10:45:37 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-16 10:45:37 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-16 10:45:37 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-16 10:45:37 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-16 10:45:37 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-16 10:45:37 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-16 10:45:37 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-16 10:45:37 [__init__.py:241] Automatically detected platform cuda.
+[Gloo] Rank 0 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 1 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 2 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 3 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 6 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 5 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 4 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 7 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 0 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 3 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 1 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 4 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 2 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 5 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 7 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 6 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[40]
+INFO 09-16 10:46:29 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-16 10:46:29 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-16 10:46:29 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-16 10:46:29 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-16 10:46:29 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-16 10:46:29 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-16 10:46:29 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-16 10:46:29 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+INFO 09-16 10:46:29 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-16 10:46:29 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+ERROR 09-16 10:46:44 [registry.py:76] CUDA out of memory. Tried to allocate 900.00 MiB. GPU 1 has a total capacity of 139.72 GiB of which 519.94 MiB is free. Process 2206779 has 62.06 MiB memory in use. Process 2707155 has 124.81 GiB memory in use. Process 2707701 has 12.88 GiB memory in use. Process 2714128 has 1.45 GiB memory in use. Of the allocated memory 10.84 GiB is allocated by PyTorch, and 13.27 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+ERROR 09-16 10:46:44 [registry.py:76] Traceback (most recent call last):
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/registry.py", line 73, in get_model
+ERROR 09-16 10:46:44 [registry.py:76]     model, is_multimodal = ModelRegistry.get_model(model_cfg, model_kvargs)
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/registry.py", line 63, in get_model
+ERROR 09-16 10:46:44 [registry.py:76]     model = matches[0].model_class(model_kvargs)
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/deepseek2/model.py", line 68, in __init__
+ERROR 09-16 10:46:44 [registry.py:76]     super().__init__(kvargs)
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/llama/model.py", line 65, in __init__
+ERROR 09-16 10:46:44 [registry.py:76]     super().__init__(kvargs)
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/basemodel.py", line 94, in __init__
+ERROR 09-16 10:46:44 [registry.py:76]     self._init_weights()
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/deepseek2/model.py", line 130, in _init_weights
+ERROR 09-16 10:46:44 [registry.py:76]     load_hf_weights(
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/hf_load_utils.py", line 69, in load_hf_weights
+ERROR 09-16 10:46:44 [registry.py:76]     for _ in iterator:
+ERROR 09-16 10:46:44 [registry.py:76]   File "/opt/conda/lib/python3.10/site-packages/tqdm/std.py", line 1178, in __iter__
+ERROR 09-16 10:46:44 [registry.py:76]     for obj in iterable:
+ERROR 09-16 10:46:44 [registry.py:76]   File "/opt/conda/lib/python3.10/multiprocessing/pool.py", line 873, in next
+ERROR 09-16 10:46:44 [registry.py:76]     raise value
+ERROR 09-16 10:46:44 [registry.py:76]   File "/opt/conda/lib/python3.10/multiprocessing/pool.py", line 125, in worker
+ERROR 09-16 10:46:44 [registry.py:76]     result = (True, func(*args, **kwds))
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/hf_load_utils.py", line 26, in load_func
+ERROR 09-16 10:46:44 [registry.py:76]     layer.load_hf_weights(weights)
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/deepseek2/layer_weights/transformer_layer_weight.py", line 140, in load_hf_weights
+ERROR 09-16 10:46:44 [registry.py:76]     return super().load_hf_weights(weights)
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/transformer_layer_weight.py", line 43, in load_hf_weights
+ERROR 09-16 10:46:44 [registry.py:76]     attr.load_hf_weights(weights)
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe_weight_tp.py", line 201, in load_hf_weights
+ERROR 09-16 10:46:44 [registry.py:76]     self._fuse()
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe_weight_tp.py", line 141, in _fuse
+ERROR 09-16 10:46:44 [registry.py:76]     self.w1[0] = self._cuda(w1)
+ERROR 09-16 10:46:44 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe_weight_tp.py", line 243, in _cuda
+ERROR 09-16 10:46:44 [registry.py:76]     return cpu_tensor.contiguous().cuda(device_id)
+ERROR 09-16 10:46:44 [registry.py:76] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 900.00 MiB. GPU 1 has a total capacity of 139.72 GiB of which 519.94 MiB is free. Process 2206779 has 62.06 MiB memory in use. Process 2707155 has 124.81 GiB memory in use. Process 2707701 has 12.88 GiB memory in use. Process 2714128 has 1.45 GiB memory in use. Of the allocated memory 10.84 GiB is allocated by PyTorch, and 13.27 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+ERROR 09-16 10:46:45 [registry.py:76] CUDA out of memory. Tried to allocate 900.00 MiB. GPU 3 has a total capacity of 139.72 GiB of which 568.31 MiB is free. Process 2206779 has 62.06 MiB memory in use. Process 2707703 has 12.83 GiB memory in use. Process 2708356 has 124.81 GiB memory in use. Process 2715435 has 1.45 GiB memory in use. Of the allocated memory 10.80 GiB is allocated by PyTorch, and 6.72 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+ERROR 09-16 10:46:45 [registry.py:76] Traceback (most recent call last):
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/registry.py", line 73, in get_model
+ERROR 09-16 10:46:45 [registry.py:76]     model, is_multimodal = ModelRegistry.get_model(model_cfg, model_kvargs)
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/registry.py", line 63, in get_model
+ERROR 09-16 10:46:45 [registry.py:76]     model = matches[0].model_class(model_kvargs)
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/deepseek2/model.py", line 68, in __init__
+ERROR 09-16 10:46:45 [registry.py:76]     super().__init__(kvargs)
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/llama/model.py", line 65, in __init__
+ERROR 09-16 10:46:45 [registry.py:76]     super().__init__(kvargs)
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/basemodel.py", line 94, in __init__
+ERROR 09-16 10:46:45 [registry.py:76]     self._init_weights()
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/deepseek2/model.py", line 130, in _init_weights
+ERROR 09-16 10:46:45 [registry.py:76]     load_hf_weights(
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/hf_load_utils.py", line 69, in load_hf_weights
+ERROR 09-16 10:46:45 [registry.py:76]     for _ in iterator:
+ERROR 09-16 10:46:45 [registry.py:76]   File "/opt/conda/lib/python3.10/site-packages/tqdm/std.py", line 1178, in __iter__
+ERROR 09-16 10:46:45 [registry.py:76]     for obj in iterable:
+ERROR 09-16 10:46:45 [registry.py:76]   File "/opt/conda/lib/python3.10/multiprocessing/pool.py", line 873, in next
+ERROR 09-16 10:46:45 [registry.py:76]     raise value
+ERROR 09-16 10:46:45 [registry.py:76]   File "/opt/conda/lib/python3.10/multiprocessing/pool.py", line 125, in worker
+ERROR 09-16 10:46:45 [registry.py:76]     result = (True, func(*args, **kwds))
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/hf_load_utils.py", line 26, in load_func
+ERROR 09-16 10:46:45 [registry.py:76]     layer.load_hf_weights(weights)
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/models/deepseek2/layer_weights/transformer_layer_weight.py", line 140, in load_hf_weights
+ERROR 09-16 10:46:45 [registry.py:76]     return super().load_hf_weights(weights)
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/transformer_layer_weight.py", line 43, in load_hf_weights
+ERROR 09-16 10:46:45 [registry.py:76]     attr.load_hf_weights(weights)
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe_weight_tp.py", line 201, in load_hf_weights
+ERROR 09-16 10:46:45 [registry.py:76]     self._fuse()
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe_weight_tp.py", line 141, in _fuse
+ERROR 09-16 10:46:45 [registry.py:76]     self.w1[0] = self._cuda(w1)
+ERROR 09-16 10:46:45 [registry.py:76]   File "/mtc/baishihao/lightllm/lightllm/common/basemodel/layer_weights/meta_weights/fused_moe_weight_tp.py", line 243, in _cuda
+ERROR 09-16 10:46:45 [registry.py:76]     return cpu_tensor.contiguous().cuda(device_id)
+ERROR 09-16 10:46:45 [registry.py:76] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 900.00 MiB. GPU 3 has a total capacity of 139.72 GiB of which 568.31 MiB is free. Process 2206779 has 62.06 MiB memory in use. Process 2707703 has 12.83 GiB memory in use. Process 2708356 has 124.81 GiB memory in use. Process 2715435 has 1.45 GiB memory in use. Of the allocated memory 10.80 GiB is allocated by PyTorch, and 6.72 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

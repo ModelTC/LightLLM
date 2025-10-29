@@ -1,0 +1,505 @@
+INFO 09-15 12:23:26 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+All deep_gemm operations loaded successfully!
+INFO 09-15 12:23:31 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-15 12:23:34 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-15 12:23:34 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-15 12:23:34 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-15 12:23:34 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-15 12:23:34 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-15 12:23:34 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-15 12:23:34 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 09-15 12:23:34 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+All deep_gemm operations loaded successfully!
+INFO 09-15 12:23:41 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-15 12:23:41 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-15 12:23:41 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-15 12:23:41 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-15 12:23:41 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-15 12:23:41 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-15 12:23:41 [__init__.py:241] Automatically detected platform cuda.
+INFO 09-15 12:23:41 [__init__.py:241] Automatically detected platform cuda.
+[Gloo] Rank 0 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 1 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 2 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 3 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 4 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 5 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 6 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 7 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 2 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 6 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 4 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 0 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 1 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 5 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 3 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 7 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[40]
+INFO 09-15 12:24:20 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-15 12:24:20 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-15 12:24:20 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-15 12:24:20 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-15 12:24:20 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-15 12:24:20 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-15 12:24:20 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+[40]
+INFO 09-15 12:24:20 [communication_op.py:75] Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.
+INFO 09-15 12:24:20 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [__init__.py:45] select fp8w8a8-b128 quant way: deepgemm-fp8w8a8-b128
+INFO 09-15 12:24:20 [basemodel.py:141] Initial quantization. The default quantization method is deepgemm-fp8w8a8-b128
+INFO 09-15 12:25:42 [mem_manager.py:76] 44.0406494140625 GB space is available after load the model weight
+INFO 09-15 12:25:42 [mem_manager.py:76] 0.0670166015625 MB is the size of one token kv cache
+INFO 09-15 12:25:42 [mem_manager.py:76] 672932 is the profiled max_total_token_num with the mem_fraction 0.9
+INFO 09-15 12:25:42 [mem_manager.py:76] 
+INFO 09-15 12:25:42 [mem_manager.py:76] 44.0406494140625 GB space is available after load the model weight
+INFO 09-15 12:25:42 [mem_manager.py:76] 0.0670166015625 MB is the size of one token kv cache
+INFO 09-15 12:25:42 [mem_manager.py:76] 672932 is the profiled max_total_token_num with the mem_fraction 0.9
+INFO 09-15 12:25:42 [mem_manager.py:76] 
+INFO 09-15 12:25:42 [mem_manager.py:76] 44.0406494140625 GB space is available after load the model weight
+INFO 09-15 12:25:42 [mem_manager.py:76] 0.0670166015625 MB is the size of one token kv cache
+INFO 09-15 12:25:42 [mem_manager.py:76] 672932 is the profiled max_total_token_num with the mem_fraction 0.9
+INFO 09-15 12:25:42 [mem_manager.py:76] 
+INFO 09-15 12:25:42 [mem_manager.py:76] 44.0406494140625 GB space is available after load the model weight
+INFO 09-15 12:25:42 [mem_manager.py:76] 0.0670166015625 MB is the size of one token kv cache
+INFO 09-15 12:25:42 [mem_manager.py:76] 672932 is the profiled max_total_token_num with the mem_fraction 0.9
+INFO 09-15 12:25:42 [mem_manager.py:76] 
+INFO 09-15 12:25:42 [mem_manager.py:76] 44.0406494140625 GB space is available after load the model weight
+INFO 09-15 12:25:42 [mem_manager.py:76] 0.0670166015625 MB is the size of one token kv cache
+INFO 09-15 12:25:42 [mem_manager.py:76] 672932 is the profiled max_total_token_num with the mem_fraction 0.9
+INFO 09-15 12:25:42 [mem_manager.py:76] 
+INFO 09-15 12:25:42 [mem_manager.py:76] 44.0406494140625 GB space is available after load the model weight
+INFO 09-15 12:25:42 [mem_manager.py:76] 0.0670166015625 MB is the size of one token kv cache
+INFO 09-15 12:25:42 [mem_manager.py:76] 672932 is the profiled max_total_token_num with the mem_fraction 0.9
+INFO 09-15 12:25:42 [mem_manager.py:76] 
+INFO 09-15 12:25:42 [mem_manager.py:76] 44.0406494140625 GB space is available after load the model weight
+INFO 09-15 12:25:42 [mem_manager.py:76] 0.0670166015625 MB is the size of one token kv cache
+INFO 09-15 12:25:42 [mem_manager.py:76] 672932 is the profiled max_total_token_num with the mem_fraction 0.9
+INFO 09-15 12:25:42 [mem_manager.py:76] 
+INFO 09-15 12:25:42 [mem_manager.py:76] 44.0406494140625 GB space is available after load the model weight
+INFO 09-15 12:25:42 [mem_manager.py:76] 0.0670166015625 MB is the size of one token kv cache
+INFO 09-15 12:25:42 [mem_manager.py:76] 672932 is the profiled max_total_token_num with the mem_fraction 0.9
+INFO 09-15 12:25:42 [mem_manager.py:76] 
+INFO 09-15 12:25:42 [shared_arr.py:17] create shm None_mem_manger_can_use_token_num_1
+INFO 09-15 12:25:42 [shared_arr.py:17] create shm None_mem_manger_can_use_token_num_4
+INFO 09-15 12:25:42 [shared_arr.py:17] create shm None_mem_manger_can_use_token_num_3
+INFO 09-15 12:25:42 [shared_arr.py:17] create shm None_mem_manger_can_use_token_num_2
+INFO 09-15 12:25:42 [shared_arr.py:17] create shm None_mem_manger_can_use_token_num_5
+INFO 09-15 12:25:42 [shared_arr.py:17] create shm None_mem_manger_can_use_token_num_7
+INFO 09-15 12:25:42 [shared_arr.py:17] create shm None_mem_manger_can_use_token_num_6
+INFO 09-15 12:25:42 [shared_arr.py:17] create shm None_mem_manger_can_use_token_num_0
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for rotary_emb_fwd:v1 - frozendict.frozendict({'Q_HEAD_NUM': 16, 'K_HEAD_NUM': 1, 'HEAD_DIM': 64, 'dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for rotary_emb_fwd:v1 - frozendict.frozendict({'Q_HEAD_NUM': 16, 'K_HEAD_NUM': 1, 'HEAD_DIM': 64, 'dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for rotary_emb_fwd:v1 - frozendict.frozendict({'Q_HEAD_NUM': 16, 'K_HEAD_NUM': 1, 'HEAD_DIM': 64, 'dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for rotary_emb_fwd:v1 - frozendict.frozendict({'Q_HEAD_NUM': 16, 'K_HEAD_NUM': 1, 'HEAD_DIM': 64, 'dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for rotary_emb_fwd:v1 - frozendict.frozendict({'Q_HEAD_NUM': 16, 'K_HEAD_NUM': 1, 'HEAD_DIM': 64, 'dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for rotary_emb_fwd:v1 - frozendict.frozendict({'Q_HEAD_NUM': 16, 'K_HEAD_NUM': 1, 'HEAD_DIM': 64, 'dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for rotary_emb_fwd:v1 - frozendict.frozendict({'Q_HEAD_NUM': 16, 'K_HEAD_NUM': 1, 'HEAD_DIM': 64, 'dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for rotary_emb_fwd:v1 - frozendict.frozendict({'Q_HEAD_NUM': 16, 'K_HEAD_NUM': 1, 'HEAD_DIM': 64, 'dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 2304, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 2304, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 2304, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 2304, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 2304, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 2304, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 2304, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 2304, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 512, 'K': 7168, 'topk_num': 9, 'expert_num': 257, 'mul_routed_weight': False, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 512, 'K': 7168, 'topk_num': 9, 'expert_num': 257, 'mul_routed_weight': False, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 512, 'K': 7168, 'topk_num': 9, 'expert_num': 257, 'mul_routed_weight': False, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 512, 'K': 7168, 'topk_num': 9, 'expert_num': 257, 'mul_routed_weight': False, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 512, 'K': 7168, 'topk_num': 9, 'expert_num': 257, 'mul_routed_weight': False, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 512, 'K': 7168, 'topk_num': 9, 'expert_num': 257, 'mul_routed_weight': False, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 512, 'K': 7168, 'topk_num': 9, 'expert_num': 257, 'mul_routed_weight': False, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 512, 'K': 7168, 'topk_num': 9, 'expert_num': 257, 'mul_routed_weight': False, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 256, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 256, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 256, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 256, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 256, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 256, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 256, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for silu_and_mul_fwd:v1 - frozendict.frozendict({'N': 256, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 7168, 'K': 256, 'topk_num': 1, 'expert_num': 257, 'mul_routed_weight': True, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 7168, 'K': 256, 'topk_num': 1, 'expert_num': 257, 'mul_routed_weight': True, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 7168, 'K': 256, 'topk_num': 1, 'expert_num': 257, 'mul_routed_weight': True, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 7168, 'K': 256, 'topk_num': 1, 'expert_num': 257, 'mul_routed_weight': True, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 7168, 'K': 256, 'topk_num': 1, 'expert_num': 257, 'mul_routed_weight': True, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 7168, 'K': 256, 'topk_num': 1, 'expert_num': 257, 'mul_routed_weight': True, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 7168, 'K': 256, 'topk_num': 1, 'expert_num': 257, 'mul_routed_weight': True, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for grouped_matmul:v1 - frozendict.frozendict({'N': 7168, 'K': 256, 'topk_num': 1, 'expert_num': 257, 'mul_routed_weight': True, 'use_fp8_w8a8': True, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for moe_sum_reduce:v1 - frozendict.frozendict({'topk_num': 9, 'hidden_dim': 7168, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for moe_sum_reduce:v1 - frozendict.frozendict({'topk_num': 9, 'hidden_dim': 7168, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for moe_sum_reduce:v1 - frozendict.frozendict({'topk_num': 9, 'hidden_dim': 7168, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for moe_sum_reduce:v1 - frozendict.frozendict({'topk_num': 9, 'hidden_dim': 7168, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for moe_sum_reduce:v1 - frozendict.frozendict({'topk_num': 9, 'hidden_dim': 7168, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for moe_sum_reduce:v1 - frozendict.frozendict({'topk_num': 9, 'hidden_dim': 7168, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for moe_sum_reduce:v1 - frozendict.frozendict({'topk_num': 9, 'hidden_dim': 7168, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:44 [autotuner.py:218] Loading cached configs for moe_sum_reduce:v1 - frozendict.frozendict({'topk_num': 9, 'hidden_dim': 7168, 'out_dtype': 'torch.bfloat16'})
+INFO 09-15 12:25:47 [cuda_graph.py:45] cuda graph batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48]
+INFO 09-15 12:25:47 [cuda_graph.py:187] Begin capture cudagraph, use the --disable_cudagraph to disable it.
+INFO 09-15 12:25:47 [cuda_graph.py:45] cuda graph batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48]
+INFO 09-15 12:25:47 [cuda_graph.py:45] cuda graph batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48]
+INFO 09-15 12:25:47 [cuda_graph.py:187] Begin capture cudagraph, use the --disable_cudagraph to disable it.
+INFO 09-15 12:25:47 [cuda_graph.py:187] Begin capture cudagraph, use the --disable_cudagraph to disable it.
+INFO 09-15 12:25:47 [cuda_graph.py:45] cuda graph batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48]
+INFO 09-15 12:25:47 [cuda_graph.py:187] Begin capture cudagraph, use the --disable_cudagraph to disable it.
+INFO 09-15 12:25:47 [cuda_graph.py:45] cuda graph batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48]
+INFO 09-15 12:25:47 [cuda_graph.py:187] Begin capture cudagraph, use the --disable_cudagraph to disable it.
+INFO 09-15 12:25:47 [cuda_graph.py:45] cuda graph batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48]
+INFO 09-15 12:25:47 [cuda_graph.py:45] cuda graph batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48]
+INFO 09-15 12:25:47 [cuda_graph.py:187] Begin capture cudagraph, use the --disable_cudagraph to disable it.
+INFO 09-15 12:25:47 [cuda_graph.py:187] Begin capture cudagraph, use the --disable_cudagraph to disable it.
+INFO 09-15 12:25:47 [cuda_graph.py:45] cuda graph batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 48]
+INFO 09-15 12:25:47 [cuda_graph.py:187] Begin capture cudagraph, use the --disable_cudagraph to disable it.
+INFO 09-15 12:25:47 [cache_tensor_manager.py:75] pid 1164158 cuda graph alloc graph out mem (48, 129280) torch.float32 6205440 6205440
+INFO 09-15 12:25:47 [cache_tensor_manager.py:75] pid 1164162 cuda graph alloc graph out mem (48, 129280) torch.float32 6205440 6205440
+INFO 09-15 12:25:47 [cache_tensor_manager.py:75] pid 1164160 cuda graph alloc graph out mem (48, 129280) torch.float32 6205440 6205440
+INFO 09-15 12:25:47 [cache_tensor_manager.py:75] pid 1164157 cuda graph alloc graph out mem (48, 129280) torch.float32 6205440 6205440
+INFO 09-15 12:25:47 [cache_tensor_manager.py:75] pid 1164163 cuda graph alloc graph out mem (48, 129280) torch.float32 6205440 6205440
+INFO 09-15 12:25:47 [cache_tensor_manager.py:75] pid 1164156 cuda graph alloc graph out mem (48, 129280) torch.float32 6205440 6205440
+INFO 09-15 12:25:47 [cache_tensor_manager.py:75] pid 1164159 cuda graph alloc graph out mem (48, 129280) torch.float32 6205440 6205440
+INFO 09-15 12:25:47 [cache_tensor_manager.py:77] cuda graph managed_total_tensor_bytes: 24821760
+INFO 09-15 12:25:47 [cache_tensor_manager.py:77] cuda graph managed_total_tensor_bytes: 24821760
+INFO 09-15 12:25:47 [cache_tensor_manager.py:77] cuda graph managed_total_tensor_bytes: 24821760
+INFO 09-15 12:25:47 [cache_tensor_manager.py:77] cuda graph managed_total_tensor_bytes: 24821760
+INFO 09-15 12:25:47 [cache_tensor_manager.py:77] cuda graph managed_total_tensor_bytes: 24821760
+INFO 09-15 12:25:47 [cache_tensor_manager.py:77] cuda graph managed_total_tensor_bytes: 24821760
+INFO 09-15 12:25:47 [cache_tensor_manager.py:77] cuda graph managed_total_tensor_bytes: 24821760
+INFO 09-15 12:25:47 [cache_tensor_manager.py:75] pid 1164161 cuda graph alloc graph out mem (48, 129280) torch.float32 6205440 6205440
+INFO 09-15 12:25:47 [cache_tensor_manager.py:77] cuda graph managed_total_tensor_bytes: 24821760
+INFO 09-15 12:26:04 [cuda_graph.py:236] Capture cudagraph success, batch_size <=48 and max_len_in_batch <= 16384 will infer with cudagraph.
+INFO 09-15 12:26:04 [cuda_graph.py:236] Capture cudagraph success, batch_size <=48 and max_len_in_batch <= 16384 will infer with cudagraph.
+INFO 09-15 12:26:04 [cuda_graph.py:236] Capture cudagraph success, batch_size <=48 and max_len_in_batch <= 16384 will infer with cudagraph.
+INFO 09-15 12:26:04 [cuda_graph.py:236] Capture cudagraph success, batch_size <=48 and max_len_in_batch <= 16384 will infer with cudagraph.
+INFO 09-15 12:26:04 [cuda_graph.py:236] Capture cudagraph success, batch_size <=48 and max_len_in_batch <= 16384 will infer with cudagraph.
+INFO 09-15 12:26:04 [cuda_graph.py:236] Capture cudagraph success, batch_size <=48 and max_len_in_batch <= 16384 will infer with cudagraph.
+INFO 09-15 12:26:04 [cuda_graph.py:236] Capture cudagraph success, batch_size <=48 and max_len_in_batch <= 16384 will infer with cudagraph.
+INFO 09-15 12:26:04 [cuda_graph.py:236] Capture cudagraph success, batch_size <=48 and max_len_in_batch <= 16384 will infer with cudagraph.
+INFO 09-15 12:26:04 [basemodel.py:684] begin check max_len infer
+INFO 09-15 12:26:04 [basemodel.py:684] begin check max_len infer
+INFO 09-15 12:26:04 [basemodel.py:684] begin check max_len infer
+INFO 09-15 12:26:04 [basemodel.py:684] begin check max_len infer
+INFO 09-15 12:26:04 [basemodel.py:684] begin check max_len infer
+INFO 09-15 12:26:04 [basemodel.py:684] begin check max_len infer
+INFO 09-15 12:26:04 [basemodel.py:684] begin check max_len infer
+INFO 09-15 12:26:04 [basemodel.py:684] begin check max_len infer
+INFO 09-15 12:26:04 [basemodel.py:714] check max_len 1024 infer ok
+INFO 09-15 12:26:04 [basemodel.py:714] check max_len 1024 infer ok
+INFO 09-15 12:26:04 [basemodel.py:714] check max_len 1024 infer ok
+INFO 09-15 12:26:04 [basemodel.py:714] check max_len 1024 infer ok
+INFO 09-15 12:26:04 [basemodel.py:714] check max_len 1024 infer ok
+INFO 09-15 12:26:04 [basemodel.py:714] check max_len 1024 infer ok
+INFO 09-15 12:26:04 [basemodel.py:714] check max_len 1024 infer ok
+INFO 09-15 12:26:04 [basemodel.py:714] check max_len 1024 infer ok
+Testing batch size 40
+prefill time cost: 413.1443500518799, prefill throughput: 24784.968111111368 tokens/s
+i: 0, step cost time: 21.49224281311035 ms, throughput: 1860.8269742679681 tokens/s
+i: 9, step cost time: 21.68560028076172 ms, throughput: 1844.2378340350222 tokens/s
+prefill time cost: 394.52219009399414, prefill throughput: 25955.133813481785 tokens/s
+Profile Prefill
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                   lightllm::inplace_fused_experts_impl        10.47%      34.222ms        18.55%      60.624ms       1.045ms     169.639ms        43.67%     446.063ms       7.691ms            58  
+                                       cuLaunchKernelEx         1.85%       6.030ms         5.70%      18.623ms      13.992us       8.452ms         2.18%     266.014ms     199.860us          1331  
+                                    Command Buffer Full        24.86%      81.237ms        24.90%      81.382ms     260.840us     263.055ms        67.72%     263.055ms     843.127us           312  
+                                  grouped_matmul_kernel         0.00%       0.000us         0.00%       0.000us       0.000us     142.537ms        36.69%     142.537ms       1.229ms           116  
+                                     record_param_comms         1.92%       6.282ms         3.01%       9.823ms      79.219us      83.898ms        21.60%      83.944ms     676.972us           124  
+                                       c10d::allreduce_         0.82%       2.688ms         3.54%      11.566ms      94.030us       0.000us         0.00%      83.850ms     681.709us           123  
+ncclDevKernel_AllReduce_Sum_bf16_RING_LL(ncclDevKern...         0.00%       0.000us         0.00%       0.000us       0.000us      83.850ms        21.59%      83.850ms     681.709us           123  
+                                        nccl:all_reduce         0.00%       0.000us         0.00%       0.000us       0.000us      83.850ms        21.59%      83.850ms     681.709us           123  
+              sgl_kernel::sgl_per_token_group_quant_fp8         0.30%     967.433us         1.72%       5.615ms      13.150us      42.112ms        10.84%      46.209ms     108.219us           427  
+                                 deep_gemm::fp8_gemm_nt         1.65%       5.407ms         2.54%       8.300ms      26.687us      41.764ms        10.75%      42.012ms     135.086us           311  
+void per_token_group_quant_8bit_kernel<__nv_bfloat16...         0.00%       0.000us         0.00%       0.000us       0.000us      28.765ms         7.41%      28.765ms      92.492us           311  
+                                 _moe_sum_reduce_kernel         0.00%       0.000us         0.00%       0.000us       0.000us      19.642ms         5.06%      19.642ms     338.647us            58  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 7168u, 2...         0.00%       0.000us         0.00%       0.000us       0.000us      15.612ms         4.02%      15.612ms     255.933us            61  
+void per_token_group_quant_8bit_kernel<__nv_bfloat16...         0.00%       0.000us         0.00%       0.000us       0.000us      13.347ms         3.44%      13.347ms     115.058us           116  
+                                             aten::add_         0.35%       1.128ms         0.53%       1.738ms      10.792us      12.421ms         3.20%      12.421ms      77.150us           161  
+void at::native::vectorized_elementwise_kernel<8, at...         0.00%       0.000us         0.00%       0.000us       0.000us      12.421ms         3.20%      12.421ms     101.813us           122  
+                                    _rms_norm_fwd_fused         0.00%       0.000us         0.00%       0.000us       0.000us      12.336ms         3.18%      12.336ms      50.350us           245  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 1536u, 7...         0.00%       0.000us         0.00%       0.000us       0.000us      10.887ms         2.80%      10.887ms     178.475us            61  
+                                              aten::cat         0.52%       1.684ms        11.64%      38.029ms     214.856us       7.068ms         1.82%       7.202ms      40.689us           177  
+void at::native::(anonymous namespace)::CatArrayBatc...         0.00%       0.000us         0.00%       0.000us       0.000us       6.715ms         1.73%       6.715ms     110.086us            61  
+                                       cudaLaunchKernel         1.66%       5.422ms        22.71%      74.217ms      60.983us       0.000us         0.00%       5.494ms       4.514us          1217  
+                                    grouped_topk_kernel         0.00%       0.000us         0.00%       0.000us       0.000us       5.465ms         1.41%       5.465ms      94.222us            58  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 3072u, 1...         0.00%       0.000us         0.00%       0.000us       0.000us       5.457ms         1.40%       5.457ms      89.465us            61  
+                                      moe_align1_kernel         0.00%       0.000us         0.00%       0.000us       0.000us       5.166ms         1.33%       5.166ms      89.075us            58  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 576u, 71...         0.00%       0.000us         0.00%       0.000us       0.000us       4.423ms         1.14%       4.423ms      72.504us            61  
+                                        sgl_kernel::fwd         0.38%       1.246ms         0.78%       2.535ms      41.550us       4.142ms         1.07%       4.142ms      67.908us            61  
+void cutlass::device_kernel<flash::enable_sm90_or_la...         0.00%       0.000us         0.00%       0.000us       0.000us       3.976ms         1.02%       3.976ms      65.177us            61  
+                                            aten::copy_         0.48%       1.555ms         2.07%       6.761ms      28.287us       2.416ms         0.62%       3.161ms      13.225us           239  
+                                               aten::mm         0.66%       2.164ms         0.76%       2.479ms      42.010us       3.108ms         0.80%       3.108ms      52.673us            59  
+                    nvjet_tst_128x160_64x5_2x1_v_bz_TNT         0.00%       0.000us         0.00%       0.000us       0.000us       3.044ms         0.78%       3.044ms      52.474us            58  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 4096u, 5...         0.00%       0.000us         0.00%       0.000us       0.000us       3.035ms         0.78%       3.035ms      49.760us            61  
+                                            aten::clone         0.09%     300.020us         1.43%       4.664ms      38.233us       0.000us         0.00%       2.898ms      23.750us           122  
+void at::native::elementwise_kernel<128, 4, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us       2.220ms         0.57%       2.220ms      17.074us           130  
+                              _silu_and_mul_kernel_fast         0.00%       0.000us         0.00%       0.000us       0.000us       2.033ms         0.52%       2.033ms      33.334us            61  
+                                         _rotary_kernel         0.00%       0.000us         0.00%       0.000us       0.000us       1.932ms         0.50%       1.932ms      31.669us            61  
+                                aten::repeat_interleave         0.08%     247.352us         0.81%       2.639ms      43.257us       0.000us         0.00%       1.926ms      31.579us            61  
+                                            aten::fill_         0.16%     516.399us         4.00%      13.069ms     110.753us       1.316ms         0.34%       1.815ms      15.377us           118  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 4608u, 7...         0.00%       0.000us         0.00%       0.000us       0.000us       1.525ms         0.39%       1.525ms     508.332us             3  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.248ms         0.32%       1.248ms      21.510us            58  
+                                       aten::contiguous         0.02%      81.614us         0.87%       2.848ms      46.693us       0.000us         0.00%     971.209us      15.921us            61  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 7168u, 2...         0.00%       0.000us         0.00%       0.000us       0.000us     825.124us         0.21%     825.124us     275.041us             3  
+                    cudaThreadExchangeStreamCaptureMode         0.03%      92.841us         0.03%      92.841us       0.198us     726.883us         0.19%     726.883us       1.553us           468  
+                                         cudaEventQuery         0.24%     787.149us         0.24%     790.825us       1.712us     710.305us         0.18%     710.305us       1.537us           462  
+                          _fwd_kernel_destindex_copy_kv         0.00%       0.000us         0.00%       0.000us       0.000us     485.470us         0.12%     485.470us       7.959us            61  
+                                       moe_align_kernel         0.00%       0.000us         0.00%       0.000us       0.000us     216.320us         0.06%     216.320us       3.730us            58  
+void at::native::(anonymous namespace)::CatArrayBatc...         0.00%       0.000us         0.00%       0.000us       0.000us     183.616us         0.05%     183.616us       3.166us            58  
+                                           aten::arange         0.13%     418.515us        10.14%      33.126ms     285.571us      65.826us         0.02%     179.264us       1.545us           116  
+                                          aten::squeeze         0.18%     582.290us         0.21%     687.780us       2.212us       0.000us         0.00%     175.104us       0.563us           311  
+void at::native::(anonymous namespace)::CatArrayBatc...         0.00%       0.000us         0.00%       0.000us       0.000us     169.476us         0.04%     169.476us       2.922us            58  
+flash::prepare_varlen_num_blocks_kernel(int, int, in...         0.00%       0.000us         0.00%       0.000us       0.000us     166.593us         0.04%     166.593us       2.731us            61  
+                                      moe_align2_kernel         0.00%       0.000us         0.00%       0.000us       0.000us     142.401us         0.04%     142.401us       2.455us            58  
+                                           aten::repeat         0.14%     444.729us         0.55%       1.788ms      30.820us       0.000us         0.00%     136.254us       2.349us            58  
+void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us     119.613us         0.03%     119.613us       2.062us            58  
+                                       c10d::allgather_         0.01%      24.888us         0.30%     980.883us     980.883us       0.000us         0.00%      94.337us      94.337us             1  
+                                             aten::full         0.04%     132.148us         0.47%       1.532ms      26.408us       0.000us         0.00%      93.635us       1.614us            58  
+                                        nccl:all_gather         0.00%       0.000us         0.00%       0.000us       0.000us      90.849us         0.02%      90.849us      90.849us             1  
+                                             aten::mul_         0.17%     571.609us         0.26%     843.000us      14.534us      87.934us         0.02%      87.934us       1.516us            58  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us      87.934us         0.02%      87.934us       1.516us            58  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us      68.931us         0.02%      68.931us       1.188us            58  
+                                       embedding_kernel         0.00%       0.000us         0.00%       0.000us       0.000us      66.689us         0.02%      66.689us      66.689us             1  
+void (anonymous namespace)::elementwise_kernel_with_...         0.00%       0.000us         0.00%       0.000us       0.000us      65.826us         0.02%      65.826us       1.135us            58  
+                    nvjet_tst_128x40_64x10_2x1_v_bz_TNT         0.00%       0.000us         0.00%       0.000us       0.000us      64.193us         0.02%      64.193us      64.193us             1  
+                         Memcpy DtoD (Device -> Device)         0.00%       0.000us         0.00%       0.000us       0.000us      49.283us         0.01%      49.283us       1.202us            41  
+ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsSto...         0.00%       0.000us         0.00%       0.000us       0.000us      48.065us         0.01%      48.065us      48.065us             1  
+                                               aten::to         0.01%      23.386us         0.51%       1.671ms     167.101us       0.000us         0.00%      18.209us       1.821us            10  
+                                         aten::_to_copy         0.01%      24.173us         0.50%       1.648ms     183.069us       0.000us         0.00%      18.209us       2.023us             9  
+                                     aten::index_select         0.01%      23.853us         0.02%      64.033us      32.016us       0.000us         0.00%      15.969us       7.985us             2  
+                                           aten::gather         0.00%      13.691us         0.01%      25.405us      12.702us      15.969us         0.00%      15.969us       7.985us             2  
+void at::native::vectorized_gather_kernel<16, int>(c...         0.00%       0.000us         0.00%       0.000us       0.000us      15.969us         0.00%      15.969us       7.985us             2  
+void at::native::unrolled_elementwise_kernel<at::nat...         0.00%       0.000us         0.00%       0.000us       0.000us      13.248us         0.00%      13.248us      13.248us             1  
+                         Memcpy HtoD (Pinned -> Device)         0.00%       0.000us         0.00%       0.000us       0.000us       7.457us         0.00%       7.457us       1.864us             4  
+                                              aten::sub         0.04%     131.852us         0.05%     152.721us       1.818us       5.120us         0.00%       5.120us       0.061us            84  
+                       Memcpy HtoD (Pageable -> Device)         0.00%       0.000us         0.00%       0.000us       0.000us       4.992us         0.00%       4.992us       2.496us             2  
+                                           aten::cumsum         0.01%      18.335us         0.02%      52.613us      52.613us       3.136us         0.00%       4.704us       4.704us             1  
+                                Activity Buffer Request         0.45%       1.482ms         0.45%       1.482ms       1.482ms       4.192us         0.00%       4.192us       4.192us             1  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us       3.680us         0.00%       3.680us       1.840us             2  
+                                            aten::index         0.00%      15.083us         0.01%      22.656us      22.656us       2.592us         0.00%       2.592us       2.592us             1  
+void at::native::vectorized_gather_kernel<16, long>(...         0.00%       0.000us         0.00%       0.000us       0.000us       2.592us         0.00%       2.592us       2.592us             1  
+                                _gen_cumsum_pad0_kernel         0.00%       0.000us         0.00%       0.000us       0.000us       2.496us         0.00%       2.496us       2.496us             1  
+void at_cuda_detail::cub::DeviceScanKernel<at_cuda_d...         0.00%       0.000us         0.00%       0.000us       0.000us       1.984us         0.00%       1.984us       1.984us             1  
+void at::native::unrolled_elementwise_kernel<at::nat...         0.00%       0.000us         0.00%       0.000us       0.000us       1.568us         0.00%       1.568us       1.568us             1  
+                                  _gen_prefill_position         0.00%       0.000us         0.00%       0.000us       0.000us       1.568us         0.00%       1.568us       1.568us             1  
+void at::native::vectorized_elementwise_kernel<2, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.440us         0.00%       1.440us       1.440us             1  
+void at_cuda_detail::cub::DeviceScanInitKernel<at_cu...         0.00%       0.000us         0.00%       0.000us       0.000us       1.152us         0.00%       1.152us       1.152us             1  
+                                            aten::zeros         0.00%      10.726us         0.01%      16.484us      16.484us       0.000us         0.00%       0.000us       0.000us             1  
+                                            aten::empty         1.46%       4.760ms         1.46%       4.760ms       3.595us       0.000us         0.00%       0.000us       0.000us          1324  
+                                            aten::zero_         0.00%       0.495us         0.00%       0.495us       0.495us       0.000us         0.00%       0.000us       0.000us             1  
+                                    aten::empty_strided         0.01%      35.003us         0.01%      35.003us       3.500us       0.000us         0.00%       0.000us       0.000us            10  
+                                        cudaMemcpyAsync         0.08%     268.019us         0.08%     268.019us       5.703us       0.000us         0.00%       0.000us       0.000us            47  
+                                           aten::select         0.14%     462.297us         0.16%     534.836us       1.844us       0.000us         0.00%       0.000us       0.000us           290  
+                                       aten::as_strided         0.57%       1.872ms         0.57%       1.872ms       0.391us       0.000us         0.00%       0.000us       0.000us          4789  
+                                              aten::add         0.02%      63.306us         0.02%      73.208us       1.786us       0.000us         0.00%       0.000us       0.000us            41  
+                                             aten::item         0.06%     207.704us         0.09%     291.765us       0.909us       0.000us         0.00%       0.000us       0.000us           321  
+                              aten::_local_scalar_dense         0.03%      84.061us         0.03%      84.061us       0.262us       0.000us         0.00%       0.000us       0.000us           321  
+                                            aten::slice         0.99%       3.234ms         1.22%       3.999ms       1.804us       0.000us         0.00%       0.000us       0.000us          2216  
+                                              aten::max         0.00%       9.592us         0.00%      11.752us       5.876us       0.000us         0.00%       0.000us       0.000us             2  
+                                           aten::detach         0.00%       2.749us         0.00%       5.440us       5.440us       0.000us         0.00%       0.000us       0.000us             1  
+                                                 detach         0.00%       2.691us         0.00%       2.691us       2.691us       0.000us         0.00%       0.000us       0.000us             1  
+                                     aten::resolve_conj         0.00%       0.278us         0.00%       0.278us       0.278us       0.000us         0.00%       0.000us       0.000us             1  
+                                      aten::resolve_neg         0.00%       0.177us         0.00%       0.177us       0.177us       0.000us         0.00%       0.000us       0.000us             1  
+                                          aten::resize_         0.05%     168.798us         0.05%     168.798us       2.813us       0.000us         0.00%       0.000us       0.000us            60  
+                                             aten::view         0.54%       1.778ms         0.54%       1.778ms       0.861us       0.000us         0.00%       0.000us       0.000us          2066  
+                                           aten::expand         0.09%     307.252us         0.13%     416.938us       2.329us       0.000us         0.00%       0.000us       0.000us           179  
+                                  cudaStreamIsCapturing         0.05%     176.760us         0.05%     177.019us       0.714us       0.000us         0.00%       0.000us       0.000us           248  
+                                        nccl:all_reduce         0.00%       0.000us             0       6.912ms      56.198us       0.000us         0.00%       0.000us       0.000us           123  
+                            cudaStreamGetCaptureInfo_v2         0.04%     119.333us         0.04%     119.523us       0.964us       0.000us         0.00%       0.000us       0.000us           124  
+                                    cudaStreamWaitEvent         0.15%     488.055us         0.15%     488.420us       1.313us       0.000us         0.00%       0.000us       0.000us           372  
+                                        cudaEventRecord         0.14%     446.898us         0.14%     446.898us       0.901us       0.000us         0.00%       0.000us       0.000us           496  
+                                    cudaGetFuncBySymbol         0.02%      52.315us         0.02%      52.315us       0.422us       0.000us         0.00%       0.000us       0.000us           124  
+                               cudaEventRecordWithFlags         0.04%     136.239us         0.04%     136.239us       1.099us       0.000us         0.00%       0.000us       0.000us           124  
+                                          aten::permute         0.19%     629.098us         0.25%     802.336us       2.580us       0.000us         0.00%       0.000us       0.000us           311  
+                                                aten::t         0.26%     848.749us         0.48%       1.570ms       2.520us       0.000us         0.00%       0.000us       0.000us           623  
+                                        aten::transpose         0.15%     493.317us         0.22%     721.269us       1.158us       0.000us         0.00%       0.000us       0.000us           623  
+                                        aten::unsqueeze         0.20%     649.021us         0.26%     857.222us       2.304us       0.000us         0.00%       0.000us       0.000us           372  
+                                 aten::split_with_sizes         0.15%     486.096us         0.19%     630.644us       3.446us       0.000us         0.00%       0.000us       0.000us           183  
+                                       aten::empty_like         0.07%     228.794us         0.29%     957.249us       7.783us       0.000us         0.00%       0.000us       0.000us           123  
+                                          aten::reshape         0.07%     226.224us         0.10%     321.602us       2.615us       0.000us         0.00%       0.000us       0.000us           123  
+                                          aten::flatten         0.04%     138.809us         0.06%     195.965us       3.213us       0.000us         0.00%       0.000us       0.000us            61  
+                                cudaGetDriverEntryPoint         0.03%      86.429us         0.03%      86.429us       0.283us       0.000us         0.00%       0.000us       0.000us           305  
+                                   cudaFuncSetAttribute         0.02%      51.761us         0.02%      51.761us       0.849us       0.000us         0.00%       0.000us       0.000us            61  
+                                    cudaLaunchKernelExC         0.10%     313.285us         0.10%     313.285us       5.136us       0.000us         0.00%       0.000us       0.000us            61  
+                                            aten::alias         0.02%      66.084us         0.02%      66.084us       1.139us       0.000us         0.00%       0.000us       0.000us            58  
+                                           aten::unfold         0.03%     109.225us         0.05%     174.900us       1.508us       0.000us         0.00%       0.000us       0.000us           116  
+                                        aten::expand_as         0.01%      35.724us         0.03%     113.522us       1.957us       0.000us         0.00%       0.000us       0.000us            58  
+                                    cudaPeekAtLastError         0.00%       0.267us         0.00%       0.267us       0.067us       0.000us         0.00%       0.000us       0.000us             4  
+cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFla...         0.00%       1.420us         0.00%       1.420us       1.420us       0.000us         0.00%       0.000us       0.000us             1  
+                                 cudaDeviceGetAttribute         0.00%       0.739us         0.00%       0.739us       0.739us       0.000us         0.00%       0.000us       0.000us             1  
+                                     aten::is_same_size         0.00%       1.411us         0.00%       1.411us       0.176us       0.000us         0.00%       0.000us       0.000us             8  
+                                        nccl:all_gather         0.00%       0.000us             0     925.617us     925.617us       0.000us         0.00%       0.000us       0.000us             1  
+                                  cudaDeviceSynchronize        46.44%     151.770ms        46.48%     151.903ms     151.903ms       0.000us         0.00%       0.000us       0.000us             1  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 326.786ms
+Self CUDA time total: 388.452ms
+
+i: 0, step cost time: 22.65763282775879 ms, throughput: 1765.130881238953 tokens/s
+i: 100, step cost time: 28.830766677856445 ms, throughput: 1387.0626265966682 tokens/s
+i: 200, step cost time: 23.58102798461914 ms, throughput: 1695.4732044505977 tokens/s
+i: 300, step cost time: 24.584054946899414 ms, throughput: 1626.5503267213464 tokens/s
+i: 400, step cost time: 26.17502212524414 ms, throughput: 1527.8404516892815 tokens/s
+i: 500, step cost time: 23.7274169921875 ms, throughput: 1684.831589306875 tokens/s
+i: 600, step cost time: 26.619434356689453 ms, throughput: 1502.3385926894352 tokens/s
+i: 700, step cost time: 23.545265197753906 ms, throughput: 1698.4082120224332 tokens/s
+i: 800, step cost time: 23.65732192993164 ms, throughput: 1689.9909341821624 tokens/s
+i: 900, step cost time: 23.699045181274414 ms, throughput: 1687.254588424599 tokens/s
+i: 1000, step cost time: 23.804903030395508 ms, throughput: 1679.9559414020648 tokens/s
+i: 1100, step cost time: 23.8955020904541 ms, throughput: 1671.00416326368 tokens/s
+i: 1200, step cost time: 24.00493621826172 ms, throughput: 1665.0340406105477 tokens/s
+i: 1300, step cost time: 23.992061614990234 ms, throughput: 1666.8702745129208 tokens/s
+i: 1400, step cost time: 24.67823028564453 ms, throughput: 1620.4390785724634 tokens/s
+i: 1500, step cost time: 24.337053298950195 ms, throughput: 1642.667084418509 tokens/s
+i: 1600, step cost time: 24.236202239990234 ms, throughput: 1650.0178011192086 tokens/s
+i: 1700, step cost time: 24.422168731689453 ms, throughput: 1637.1209992193599 tokens/s
+i: 1800, step cost time: 24.334430694580078 ms, throughput: 1643.1497296873777 tokens/s
+i: 1900, step cost time: 24.82295036315918 ms, throughput: 1611.1334543324404 tokens/s
+i: 2000, step cost time: 24.953603744506836 ms, throughput: 1602.3931003524322 tokens/s
+i: 2100, step cost time: 24.74188804626465 ms, throughput: 1616.426699552952 tokens/s
+i: 2200, step cost time: 24.5819091796875 ms, throughput: 1626.9288803553072 tokens/s
+i: 2300, step cost time: 24.80912208557129 ms, throughput: 1612.031323564737 tokens/s
+i: 2400, step cost time: 24.777650833129883 ms, throughput: 1613.643804522415 tokens/s
+i: 2500, step cost time: 27.32706069946289 ms, throughput: 1463.5334758145418 tokens/s
+i: 2600, step cost time: 24.547576904296875 ms, throughput: 1629.203907630756 tokens/s
+i: 2700, step cost time: 24.86729621887207 ms, throughput: 1608.2762322897295 tokens/s
+i: 2800, step cost time: 24.790048599243164 ms, throughput: 1613.2869203992539 tokens/s
+i: 2900, step cost time: 24.962663650512695 ms, throughput: 1602.1329666341985 tokens/s
+i: 3000, step cost time: 25.017261505126953 ms, throughput: 1598.271522611007 tokens/s
+i: 3100, step cost time: 25.366544723510742 ms, throughput: 1576.3911752546323 tokens/s
+i: 3200, step cost time: 25.078296661376953 ms, throughput: 1594.7317592486977 tokens/s
+i: 3300, step cost time: 25.360584259033203 ms, throughput: 1576.9986934493877 tokens/s
+i: 3400, step cost time: 25.40898323059082 ms, throughput: 1574.0100760866505 tokens/s
+i: 3500, step cost time: 25.624513626098633 ms, throughput: 1560.7583679089066 tokens/s
+i: 3600, step cost time: 25.600194931030273 ms, throughput: 1562.1680307643603 tokens/s
+i: 3700, step cost time: 25.546789169311523 ms, throughput: 1565.5207293289911 tokens/s
+i: 3800, step cost time: 25.757312774658203 ms, throughput: 1552.698330433495 tokens/s
+i: 3900, step cost time: 25.739192962646484 ms, throughput: 1553.3740104624785 tokens/s
+i: 4000, step cost time: 25.55251121520996 ms, throughput: 1565.1702101855567 tokens/s
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+void sglang::cross_device_reduce_2stage<__nv_bfloat1...         0.00%       0.000us         0.00%       0.000us       0.000us      26.817ms        55.24%      26.817ms     218.025us           123  
+                                  grouped_matmul_kernel         0.00%       0.000us         0.00%       0.000us       0.000us      10.852ms        22.35%      10.852ms      93.552us           116  
+void cutlass::device_kernel<flash::enable_sm90_or_la...         0.00%       0.000us         0.00%       0.000us       0.000us       3.711ms         7.64%       3.711ms      60.841us            61  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 1536u, 7...         0.00%       0.000us         0.00%       0.000us       0.000us     646.210us         1.33%     646.210us      10.594us            61  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 576u, 71...         0.00%       0.000us         0.00%       0.000us       0.000us     620.871us         1.28%     620.871us      10.178us            61  
+                                    _rms_norm_fwd_fused         0.00%       0.000us         0.00%       0.000us       0.000us     593.355us         1.22%     593.355us       2.422us           245  
+void per_token_group_quant_8bit_kernel<__nv_bfloat16...         0.00%       0.000us         0.00%       0.000us       0.000us     583.729us         1.20%     583.729us       2.335us           250  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 7168u, 2...         0.00%       0.000us         0.00%       0.000us       0.000us     481.476us         0.99%     481.476us       7.893us            61  
+                                    grouped_topk_kernel         0.00%       0.000us         0.00%       0.000us       0.000us     332.578us         0.69%     332.578us       5.734us            58  
+              nvjet_tst_64x16_64x16_2x4_v_bz_splitK_TNT         0.00%       0.000us         0.00%       0.000us       0.000us     318.524us         0.66%     318.524us       5.492us            58  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 3072u, 1...         0.00%       0.000us         0.00%       0.000us       0.000us     295.077us         0.61%     295.077us       4.837us            61  
+void cutlass::device_kernel<flash::FlashAttnFwdCombi...         0.00%       0.000us         0.00%       0.000us       0.000us     250.084us         0.52%     250.084us       4.100us            61  
+                     nvjet_tst_64x16_64x16_2x1_v_bz_NNT         0.00%       0.000us         0.00%       0.000us       0.000us     246.303us         0.51%     246.303us       4.038us            61  
+void per_token_group_quant_8bit_kernel<__nv_bfloat16...         0.00%       0.000us         0.00%       0.000us       0.000us     243.647us         0.50%     243.647us       2.100us           116  
+                     nvjet_tst_64x48_64x15_2x1_v_bz_NNT         0.00%       0.000us         0.00%       0.000us       0.000us     236.286us         0.49%     236.286us       3.874us            61  
+void at::native::vectorized_elementwise_kernel<8, at...         0.00%       0.000us         0.00%       0.000us       0.000us     234.148us         0.48%     234.148us       1.919us           122  
+                                 _moe_sum_reduce_kernel         0.00%       0.000us         0.00%       0.000us       0.000us     212.325us         0.44%     212.325us       3.661us            58  
+void at::native::elementwise_kernel<128, 4, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us     191.902us         0.40%     191.902us       2.781us            69  
+                                      moe_align1_kernel         0.00%       0.000us         0.00%       0.000us       0.000us     148.769us         0.31%     148.769us       2.565us            58  
+flash::prepare_varlen_num_blocks_kernel(int, int, in...         0.00%       0.000us         0.00%       0.000us       0.000us     143.072us         0.29%     143.072us       2.345us            61  
+                              _silu_and_mul_kernel_fast         0.00%       0.000us         0.00%       0.000us       0.000us     123.137us         0.25%     123.137us       2.019us            61  
+                                      moe_align2_kernel         0.00%       0.000us         0.00%       0.000us       0.000us     117.123us         0.24%     117.123us       2.019us            58  
+                                         _rotary_kernel         0.00%       0.000us         0.00%       0.000us       0.000us     116.164us         0.24%     116.164us       1.904us            61  
+void cublasLt::splitKreduce_kernel<32, 16, int, floa...         0.00%       0.000us         0.00%       0.000us       0.000us     111.650us         0.23%     111.650us       1.925us            58  
+void at::native::(anonymous namespace)::CatArrayBatc...         0.00%       0.000us         0.00%       0.000us       0.000us      86.111us         0.18%      86.111us       1.485us            58  
+                          _fwd_kernel_destindex_copy_kv         0.00%       0.000us         0.00%       0.000us       0.000us      81.382us         0.17%      81.382us       1.334us            61  
+                                       moe_align_kernel         0.00%       0.000us         0.00%       0.000us       0.000us      80.251us         0.17%      80.251us       1.384us            58  
+void at::native::(anonymous namespace)::CatArrayBatc...         0.00%       0.000us         0.00%       0.000us       0.000us      78.047us         0.16%      78.047us       1.346us            58  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us      72.704us         0.15%      72.704us       1.254us            58  
+void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us      72.255us         0.15%      72.255us       1.246us            58  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us      69.954us         0.14%      69.954us       1.186us            59  
+                     nvjet_tst_128x48_64x9_2x1_v_bz_TNT         0.00%       0.000us         0.00%       0.000us       0.000us      58.944us         0.12%      58.944us      58.944us             1  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us      58.625us         0.12%      58.625us       1.011us            58  
+void (anonymous namespace)::elementwise_kernel_with_...         0.00%       0.000us         0.00%       0.000us       0.000us      56.256us         0.12%      56.256us       0.970us            58  
+ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsSto...         0.00%       0.000us         0.00%       0.000us       0.000us      53.569us         0.11%      53.569us      53.569us             1  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 4608u, 7...         0.00%       0.000us         0.00%       0.000us       0.000us      41.633us         0.09%      41.633us      13.878us             3  
+                                       embedding_kernel         0.00%       0.000us         0.00%       0.000us       0.000us      34.593us         0.07%      34.593us      34.593us             1  
+void deep_gemm::sm90_fp8_gemm_1d2d_impl<0u, 7168u, 2...         0.00%       0.000us         0.00%       0.000us       0.000us      25.825us         0.05%      25.825us       8.608us             3  
+                                            aten::copy_         0.14%      85.395us         3.85%       2.303ms      92.101us      22.654us         0.05%      22.654us       0.906us            25  
+                         Memcpy DtoD (Device -> Device)         0.00%       0.000us         0.00%       0.000us       0.000us      17.183us         0.04%      17.183us       1.146us            15  
+void at::native::unrolled_elementwise_kernel<at::nat...         0.00%       0.000us         0.00%       0.000us       0.000us      15.872us         0.03%      15.872us      15.872us             1  
+                                            aten::index         0.03%      16.915us         0.07%      40.560us      40.560us       2.592us         0.01%       4.096us       4.096us             1  
+                                            aten::fill_         0.03%      20.247us         0.13%      77.531us      12.922us       4.001us         0.01%       4.001us       0.667us             6  
+                                     aten::index_select         0.03%      18.340us         0.10%      58.601us      29.301us       0.000us         0.00%       3.232us       1.616us             2  
+                                           aten::gather         0.02%      12.671us         0.04%      25.590us      12.795us       3.232us         0.01%       3.232us       1.616us             2  
+void at::native::vectorized_gather_kernel<16, int>(c...         0.00%       0.000us         0.00%       0.000us       0.000us       3.232us         0.01%       3.232us       1.616us             2  
+void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us       3.073us         0.01%       3.073us       3.073us             1  
+void at::native::elementwise_kernel<128, 2, at::nati...         0.00%       0.000us         0.00%       0.000us       0.000us       2.720us         0.01%       2.720us       2.720us             1  
+void at::native::vectorized_gather_kernel<16, long>(...         0.00%       0.000us         0.00%       0.000us       0.000us       2.592us         0.01%       2.592us       2.592us             1  
+                                _gen_cumsum_pad0_kernel         0.00%       0.000us         0.00%       0.000us       0.000us       2.528us         0.01%       2.528us       2.528us             1  
+                                              aten::pad         0.01%       6.350us         0.26%     156.279us      39.070us       0.000us         0.00%       1.664us       0.416us             4  
+                                  aten::constant_pad_nd         0.03%      19.787us         0.25%     149.929us      37.482us       0.000us         0.00%       1.664us       0.416us             4  
+                       _fwd_kernel_copy_kv_index_to_req         0.00%       0.000us         0.00%       0.000us       0.000us       1.600us         0.00%       1.600us       1.600us             1  
+                                               aten::to         0.02%      14.134us         3.67%       2.198ms     366.304us       0.000us         0.00%       1.504us       0.251us             6  
+                                         aten::_to_copy         0.03%      17.594us         3.65%       2.184ms     436.738us       0.000us         0.00%       1.504us       0.301us             5  
+void at::native::unrolled_elementwise_kernel<at::nat...         0.00%       0.000us         0.00%       0.000us       0.000us       1.504us         0.00%       1.504us       1.504us             1  
+void at::native::unrolled_elementwise_kernel<at::nat...         0.00%       0.000us         0.00%       0.000us       0.000us       1.247us         0.00%       1.247us       1.247us             1  
+                                              aten::sub         0.02%      12.161us         0.22%     130.798us     130.798us       1.120us         0.00%       1.120us       1.120us             1  
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us       1.120us         0.00%       1.120us       1.120us             1  
+                                        aten::ones_like         0.01%       3.434us         0.02%      14.932us      14.932us       0.000us         0.00%       0.928us       0.928us             1  
+                                             aten::view         0.02%      11.457us         0.02%      11.457us       1.637us       0.000us         0.00%       0.000us       0.000us             7  
+                                    aten::empty_strided         0.04%      26.488us         0.04%      26.488us       4.415us       0.000us         0.00%       0.000us       0.000us             6  
+                                Activity Buffer Request         3.43%       2.052ms         3.43%       2.052ms       2.052ms       0.000us         0.00%       0.000us       0.000us             1  
+                                        cudaMemcpyAsync         0.24%     145.804us         0.24%     145.804us       6.627us       0.000us         0.00%       0.000us       0.000us            22  
+                                            aten::empty         0.04%      22.052us         0.04%      22.052us       2.757us       0.000us         0.00%       0.000us       0.000us             8  
+                                       cudaLaunchKernel         0.35%     210.438us         0.35%     210.438us      16.188us       0.000us         0.00%       0.000us       0.000us            13  
+                                           aten::narrow         0.02%       9.026us         0.03%      19.153us       4.788us       0.000us         0.00%       0.000us       0.000us             4  
+                                            aten::slice         0.04%      24.749us         0.05%      31.191us       2.599us       0.000us         0.00%       0.000us       0.000us            12  
+                                       aten::as_strided         0.02%      10.335us         0.02%      10.335us       0.544us       0.000us         0.00%       0.000us       0.000us            19  
+                                       cuLaunchKernelEx         0.02%      13.555us         0.02%      13.555us       6.777us       0.000us         0.00%       0.000us       0.000us             2  
+                                       aten::empty_like         0.00%       1.689us         0.01%       5.027us       5.027us       0.000us         0.00%       0.000us       0.000us             1  
+                                          aten::resize_         0.01%       5.376us         0.01%       5.376us       2.688us       0.000us         0.00%       0.000us       0.000us             2  
+                                           aten::expand         0.00%       2.492us         0.01%       3.808us       1.904us       0.000us         0.00%       0.000us       0.000us             2  
+                                          aten::reshape         0.00%       2.774us         0.01%       4.495us       2.247us       0.000us         0.00%       0.000us       0.000us             2  
+                                  cudaStreamIsCapturing         0.00%       0.837us         0.00%       0.837us       0.837us       0.000us         0.00%       0.000us       0.000us             1  
+                                        cudaGraphLaunch        12.49%       7.473ms        12.49%       7.473ms       7.473ms       0.000us         0.00%       0.000us       0.000us             1  
+                                   cudaDriverGetVersion         0.00%       0.264us         0.00%       0.264us       0.264us       0.000us         0.00%       0.000us       0.000us             1  
+                                  cudaDeviceSynchronize        82.88%      49.571ms        82.88%      49.571ms      49.571ms       0.000us         0.00%       0.000us       0.000us             1  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 59.810ms
+Self CUDA time total: 48.550ms
+Profile Prefill
+Warning: please use at least NVCC 12.9 for the best DeepGEMM performance
+Profile Prefill
+Warning: please use at least NVCC 12.9 for the best DeepGEMM performance
+Profile Prefill
+Warning: please use at least NVCC 12.9 for the best DeepGEMM performance
+Profile Prefill
+Warning: please use at least NVCC 12.9 for the best DeepGEMM performance
+Profile Prefill
+Warning: please use at least NVCC 12.9 for the best DeepGEMM performance
+Profile Prefill
+Warning: please use at least NVCC 12.9 for the best DeepGEMM performance
+Profile Prefill
+Warning: please use at least NVCC 12.9 for the best DeepGEMM performance
+
+i: 4095, step cost time: 285.92443466186523 ms, throughput: 139.89593617418683 tokens/s
+==================================================
+Warning: please use at least NVCC 12.9 for the best DeepGEMM performance
