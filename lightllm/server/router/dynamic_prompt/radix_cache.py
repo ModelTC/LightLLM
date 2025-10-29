@@ -342,7 +342,7 @@ class RadixCache:
 
         return
 
-    def _try_merge(self, child_node: TreeNode):
+    def _try_merge(self, child_node: TreeNode) -> Optional[TreeNode]:
         """
         合并条件:
         1. 父节点不是根节点。
@@ -352,52 +352,54 @@ class RadixCache:
         """
         parent_node = child_node.parent
         # 条件检查
-        if parent_node is None or parent_node == self.root_node:
-            return False
-        
-        if parent_node.ref_counter == 0 and \
-           child_node.ref_counter == 0 and \
-           len(parent_node.children) == 1:
-            
-            if child_node.is_leaf():
-                self.evict_tree_set.discard(child_node)
+        if (
+            parent_node is None
+            or parent_node == self.root_node
+            or parent_node.ref_counter != 0
+            or len(parent_node.children) != 1
+            or child_node.ref_counter != 0
+        ):
+            return None
 
-            new_key = torch.cat([parent_node.token_id_key, child_node.token_id_key])
-            new_value = torch.cat([parent_node.token_mem_index_value, child_node.token_mem_index_value])
+        if child_node.is_leaf():
+            self.evict_tree_set.discard(child_node)
 
-            parent_node.token_id_key = new_key
-            parent_node.token_mem_index_value = new_value
-            parent_node.children = child_node.children
-            for grandchild in parent_node.children.values():
-                grandchild.parent = parent_node
+        child_node.token_id_key = torch.cat([parent_node.token_id_key, child_node.token_id_key])
+        child_node.token_mem_index_value = torch.cat(
+            [parent_node.token_mem_index_value, child_node.token_mem_index_value]
+        )
+        child_node.node_value_len = len(child_node.token_mem_index_value)
+        child_node.time_id = max(parent_node.time_id, child_node.time_id)
 
-            parent_node.node_value_len = len(parent_node.token_mem_index_value)
-            parent_node.time_id = max(parent_node.time_id, child_node.time_id)
+        grandparent_node = parent_node.parent
+        key_in_grandparent = parent_node.token_id_key[0].item()
+        grandparent_node.children[key_in_grandparent] = child_node
+        child_node.parent = grandparent_node
 
-            if parent_node.is_leaf():
-                self.evict_tree_set.add(parent_node)
-            
-            child_node.parent = None
-            return True
+        parent_node.parent = None
 
-        return False
+        if child_node.is_leaf():
+            self.evict_tree_set.add(child_node)
+
+        return child_node
 
     def merge_unreferenced_nodes(self):
-        if not self.root_node.children:
-            return
-        nodes_to_process = []
-        traversal_stack = list(self.root_node.children.values())
+        worklist = collections.deque(
+            [
+                node
+                for node in self.evict_tree_set
+                if node.ref_counter == 0 and node.parent is not None and node.parent != self.root_node
+            ]
+        )
 
-        while traversal_stack:
-            node = traversal_stack.pop()
-            nodes_to_process.append(node)
-            traversal_stack.extend(list(node.children.values()))
+        while worklist:
+            node = worklist.popleft()
+            if node.parent is None:
+                continue
+            merged_node = self._try_merge(node)
+            if merged_node:
+                worklist.append(merged_node)
 
-        nodes_to_process.reverse()
-        for node in nodes_to_process:
-            if node.parent is not None:
-                self._try_merge(node)
-    
     def assert_leafs_is_right(self):
         for node in self.evict_tree_set:
             if node.is_leaf() and node.ref_counter == 0:

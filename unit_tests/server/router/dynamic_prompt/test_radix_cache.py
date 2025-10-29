@@ -97,7 +97,7 @@ def test_case5():
     """
     print("\nTest Case 5: Merging simple parent-child nodes when ref_counter is 0\n")
     tree = RadixCache("unique_name", 100, 0)
-    
+
     _, node_a = tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
     tree.print_self()
@@ -114,10 +114,11 @@ def test_case5():
     tree.merge_unreferenced_nodes()
     tree.print_self()
 
-    assert torch.equal(node_a.token_id_key, torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
-    assert node_a.is_leaf()
+    assert torch.equal(node_b.token_id_key, torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
+    assert node_b.is_leaf()
     assert tree.get_tree_total_tokens_num() == 5
-    assert tree.root_node.children[1] is node_a
+    assert tree.root_node.children[1] is node_b
+
 
 def test_case6():
     """
@@ -137,10 +138,11 @@ def test_case6():
     tree.print_self()
 
     assert len(tree.root_node.children) == 1
-    # 节点 A 的 key 应该是完整的 [1, 2, 3, 4]
-    assert torch.equal(node_a.token_id_key, torch.tensor([1, 2, 3, 4], dtype=torch.int64))
-    assert node_a.is_leaf()
+    # 节点 C 的 key 应该是完整的 [1, 2, 3, 4]
+    assert torch.equal(node_c.token_id_key, torch.tensor([1, 2, 3, 4], dtype=torch.int64))
+    assert node_c.is_leaf()
     assert tree.get_tree_total_tokens_num() == 4
+
 
 def test_case7():
     """
@@ -148,7 +150,7 @@ def test_case7():
     """
     print("\nTest Case 7: Merging when parent or child ref_counter > 0\n")
     tree = RadixCache("unique_name", 100, 0)
-    
+
     _, node_a = tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
     tree.print_self()
@@ -157,13 +159,14 @@ def test_case7():
     assert matched_node is node_a
     assert node_a.ref_counter == 1
     assert node_b.ref_counter == 0
-    
+
     tree.merge_unreferenced_nodes()
     tree.print_self()
 
     assert torch.equal(node_a.token_id_key, torch.tensor([1, 2, 3], dtype=torch.int64))
     assert not node_a.is_leaf()
     assert node_b.parent is node_a
+
 
 def test_case8():
     """
@@ -184,11 +187,12 @@ def test_case8():
 
     tree.merge_unreferenced_nodes()
     tree.print_self()
-    
+
     assert len(node_a.children) == 2
     assert torch.equal(node_a.token_id_key, torch.tensor([1, 2], dtype=torch.int64))
     assert tree.root_node.children[1].children[3] is node_b
     assert tree.root_node.children[1].children[4] is node_c
+
 
 def test_case9():
     """
@@ -204,7 +208,7 @@ def test_case9():
     # 分支2: 不可合并的链 C -> D (因为 C 被引用)
     _, node_c = tree.insert(torch.tensor([4, 5], dtype=torch.int64))
     _, node_d = tree.insert(torch.tensor([4, 5, 6], dtype=torch.int64))
-    
+
     # 增加 C 的引用计数
     tree.match_prefix(torch.tensor([4, 5], dtype=torch.int64), update_refs=True)
     assert node_c.ref_counter == 1
@@ -213,15 +217,15 @@ def test_case9():
     tree.merge_unreferenced_nodes()
     tree.print_self()
 
-    merged_node_a = tree.root_node.children[1]
-    assert torch.equal(merged_node_a.token_id_key, torch.tensor([1, 2, 3], dtype=torch.int64))
-    assert merged_node_a.is_leaf()
-    
+    merged_node_b = tree.root_node.children[1]
+    assert torch.equal(merged_node_b.token_id_key, torch.tensor([1, 2, 3], dtype=torch.int64))
+    assert merged_node_b.is_leaf()
+
     unmerged_node_c = tree.root_node.children[4]
     assert torch.equal(unmerged_node_c.token_id_key, torch.tensor([4, 5], dtype=torch.int64))
     assert not unmerged_node_c.is_leaf()
     assert len(unmerged_node_c.children) == 1
-    
+
     unmerged_node_d = unmerged_node_c.children[6]
     assert torch.equal(unmerged_node_d.token_id_key, torch.tensor([6], dtype=torch.int64))
 
