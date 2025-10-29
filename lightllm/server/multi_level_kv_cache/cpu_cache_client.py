@@ -112,7 +112,10 @@ class CpuKvCacheClient(object):
         return page_list, ready_list
 
     def update_pages_status_to_ready(
-        self, page_list: List[int], deref: bool = True, disk_offload_enable: bool = False
+        self,
+        page_list: List[int],
+        deref: bool = True,
+        disk_offload_enable: bool = False,
     ):
         offload_candidates: List[int] = []
         for page_index in page_list:
@@ -132,6 +135,15 @@ class CpuKvCacheClient(object):
                 else:
                     encoded = page_index
                 self.offload_page_indexes.add_item(value=encoded)
+        return
+
+    def mark_pages_ready_recycle(self, page_list: List[int]):
+        for page_index in page_list:
+            if page_index == -1:
+                continue
+            cur_page: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
+            if cur_page.status >= cur_page.READY:
+                cur_page.status = cur_page.READY_RECYCLE
         return
 
     def query_one_page(self, hash_key: int) -> Tuple[Optional[int], bool]:
@@ -158,6 +170,7 @@ class CpuKvCacheClient(object):
                 continue
             page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
             if not page_item.is_data_ready():
+                logger.info("cpu cache page %d not ready, status %d", page_index, page_item.status)
                 return False
         return True
 

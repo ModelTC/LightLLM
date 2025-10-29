@@ -589,11 +589,9 @@ class HttpServerManager:
                         self.per_token_costs.add(mean_per_token_cost_time_ms)
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
                         x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
-                        prompt_cache_ratio = prompt_cache_len / prompt_tokens if prompt_tokens > 0 else 0.0
-                        disk_prompt_cache_ratio = (
-                            disk_prompt_cache_len / prompt_tokens if prompt_tokens > 0 else 0.0
-                        )
-                        used_cpu_prompt_cache_len = max(0, cpu_prompt_cache_len - prompt_cache_len)
+                        prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                        cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
+                        disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
 
                         mtp_avg_token_per_step = out_token_counter / max(
                             (out_token_counter - metadata["mtp_accepted_token_num"]), 1
@@ -609,7 +607,7 @@ class HttpServerManager:
                             f"prompt_cache_len:{prompt_cache_len} "
                             f"prompt_cache_ratio:{prompt_cache_ratio} "
                             f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
-                            f"used_cpu_prompt_cache_len:{used_cpu_prompt_cache_len} "
+                            f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
                             f"disk_prompt_cache_len:{disk_prompt_cache_len} "
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
@@ -618,7 +616,7 @@ class HttpServerManager:
                             logger.info(
                                 f"blueswhen "
                                 f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
-                                f"prompt_cache_ratio:{prompt_cache_ratio} "
+                                f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
                             )
                         if disk_prompt_cache_len > 0:
                             logger.info(

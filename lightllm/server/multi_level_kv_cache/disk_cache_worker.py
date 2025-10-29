@@ -28,6 +28,8 @@ class DiskCacheWriter:
         self.enabled = bool(getattr(args, "enable_disk_cache", False))
         self._idle_sleep = float(os.getenv("LIGHTLLM_DISK_CACHE_IDLE_SLEEP", "0.02"))
         self._stop = False
+        self._last_all_idle = False
+        self._last_locked_count = -1
 
         self.service: Optional[PyLocalCacheService] = None
         self._page_major_tensor: Optional[torch.Tensor] = None
@@ -80,6 +82,7 @@ class DiskCacheWriter:
 
         while not self._stop:
             payload_groups = self._claim_ready_pages()
+            self._log_idle_once()
             if not payload_groups:
                 time.sleep(self._idle_sleep)
                 continue
@@ -94,6 +97,38 @@ class DiskCacheWriter:
                     if payloads:
                         self._restore_pages(payloads)
                 time.sleep(self._idle_sleep)
+
+    def _log_idle_once(self) -> int:
+        locked_pages = 0
+        self.cpu_cache_client.lock.acquire_sleep1ms()
+        try:
+            for page_idx in range(self.cpu_cache_client.page_num):
+                page_item = self.cpu_cache_client.page_items.get_item_by_index(page_idx)
+                if not page_item.is_ready_recycle() or page_item.ref_count != 0:
+                    locked_pages += 1
+        finally:
+            self.cpu_cache_client.lock.release()
+
+        if locked_pages == 0:
+            if not self._last_all_idle:
+                self.logger.info("blueswhen all cpu cache pages are idle and ready to reuse")
+            self._last_all_idle = True
+        else:
+            self._last_all_idle = False
+        return locked_pages
+
+    def _log_locked_pages_count(self, locked_pages: int) -> None:
+        if locked_pages < 0:
+            return
+        if locked_pages == 0:
+            self._last_locked_count = 0
+            self._last_all_idle = True
+        else:
+            if locked_pages != self._last_locked_count:
+                # self.logger.info("blueswhen %d cpu cache pages still locked", locked_pages)
+                self._last_locked_count = locked_pages
+            else:
+                self._last_locked_count = locked_pages
 
     def _claim_ready_pages(self) -> List[List[_PagePayload]]:
         self.cpu_cache_client.lock.acquire_sleep1ms()
@@ -132,6 +167,13 @@ class DiskCacheWriter:
             self.cpu_cache_client.update_pages_status_to_ready_recycle(page_list=page_indexes, deref=True)
         finally:
             self.cpu_cache_client.lock.release()
+
+        # After completing a flush, re-check idle state immediately and
+        # emit diagnostic info if not all pages are idle. This helps
+        # distinguish between a timing/log-order issue (log checked
+        # before flush) and real leftover references.
+        locked_pages = self._log_idle_once()
+        self._log_locked_pages_count(locked_pages)
 
     def _restore_pages(self, payloads: List[_PagePayload]) -> None:
         if not payloads:

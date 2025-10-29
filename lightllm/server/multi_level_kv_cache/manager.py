@@ -194,8 +194,12 @@ class MultiLevelKVCacheManager:
                     self.cpu_cache_client.lock.acquire_sleep1ms()
                     try:
                         self.cpu_cache_client.update_pages_status_to_ready(
-                            page_list=block_pages, deref=False, disk_offload_enable=False
+                            page_list=block_pages,
+                            deref=False,
+                            disk_offload_enable=False,
                         )
+                        if self.args.enable_disk_cache and pages_to_load:
+                            self.cpu_cache_client.mark_pages_ready_recycle(pages_to_load)
                     finally:
                         self.cpu_cache_client.lock.release()
 
