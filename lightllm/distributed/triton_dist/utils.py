@@ -59,6 +59,7 @@ def get_ifname():
 
 
 def setup_env():
+    # This function is used to setup the environment for the Triton distributed inference
     script_dir = pathlib.Path.cwd().resolve()
     nvshmem_home = find_nvshmem_home()
     assert nvshmem_home, "NVSHMEM_HOME not found"

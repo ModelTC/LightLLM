@@ -57,21 +57,14 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
         self._ffn_norm_bias_name = None
 
     def _init_qkv(self):
-        self.q_proj = ROWMMWeight(
-            weight_name=self._q_weight_name,
+
+        self.qkv_proj = MultiROWMMWeight(
+            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
             data_type=self.data_type_,
-            bias_name=self._q_bias_name,
+            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
-            name="q_proj",
-        )
-        self.kv_proj = MultiROWMMWeight(
-            weight_names=[self._k_weight_name, self._v_weight_name],
-            data_type=self.data_type_,
-            bias_names=[self._k_bias_name, self._v_bias_name],
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="kv_proj",
+            name="qkv_proj",
         )
 
     def _init_o(self):
