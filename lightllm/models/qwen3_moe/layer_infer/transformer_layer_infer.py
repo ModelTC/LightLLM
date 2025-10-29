@@ -99,22 +99,22 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             input = gather_input[0 : len(infer_state.position_cos), :]
 
         input = input.view(-1, self.embed_dim_)
-        q = layer_weight.q_proj.mm(input)
-        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-
-        rmsnorm_forward(
-            q.view(-1, self.head_dim_),
-            weight=layer_weight.q_norm_weight_.weight,
-            eps=self.eps_,
-            out=q.view(-1, self.head_dim_),
+        qkv = layer_weight.qkv_proj.mm(input)
+        q, cache_kv = qkv.split(
+            [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
         )
 
-        cache_kv[:, : self.tp_k_head_num_, :] = rmsnorm_forward(
-            cache_kv[:, : self.tp_k_head_num_, :].reshape(-1, cache_kv.shape[-1]),
+        qk_rmsnorm_forward(
+            q,
+            weight=layer_weight.q_norm_weight_.weight,
+            eps=self.eps_,
+        )
+        qk_rmsnorm_forward(
+            cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
             weight=layer_weight.k_norm_weight_.weight,
             eps=self.eps_,
-        ).view(-1, self.tp_k_head_num_, cache_kv.shape[-1])
-
+        )
+        cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
