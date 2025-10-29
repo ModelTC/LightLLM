@@ -2,6 +2,7 @@ import os
 import math
 import ctypes
 import numpy as np
+import time
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
@@ -11,6 +12,9 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class FinishStatus(ctypes.Structure):
@@ -68,6 +72,7 @@ class Req(ctypes.Structure):
     _fields_ = [
         ("index_in_shm_mem", ctypes.c_int),
         ("ref_count", ctypes.c_int),  # 个人不要操作这个计数  # 个人不要操作这个引用计数
+        ("recv_time", ctypes.c_double),  # 用于记录请求到达服务的时间，主要用于调试
         ("request_id", ctypes.c_int64),  # 引用计数
         ("group_req_id", ctypes.c_int64),
         ("input_len", ctypes.c_int),
@@ -137,6 +142,7 @@ class Req(ctypes.Structure):
         # 只是为了有更好的编码辅助类型提示
         self.index_in_shm_mem: int = self.index_in_shm_mem
         self.ref_count: int = self.ref_count
+        self.recv_time: float = time.time()
 
         self.request_id = request_id
         self.group_req_id = convert_sub_id_to_group_id(request_id)
@@ -289,6 +295,10 @@ class Req(ctypes.Structure):
             return True
         else:
             return False
+
+    def print_time_log(self, log_info: str):
+        logger.info(f"req_id: {self.request_id} cost_time {time.time() - self.recv_time} s log_info: {log_info}")
+        return
 
 
 # 由于目前加入了很多异步调度的方法，为了缓解异步调度带来的很多

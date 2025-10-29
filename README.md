@@ -47,14 +47,15 @@ Please refer to the [FAQ](https://lightllm-en.readthedocs.io/en/latest/faq.html)
 We welcome any coopoeration and contribution. If there is a project requires LightLLM's support, please contact us via email or create a pull request.
 
 Projects based on LightLLM or referenced LightLLM components:
-- [LazyLLM](https://github.com/LazyAGI/LazyLLM)
 - [LoongServe, Peking University](https://github.com/LoongServe/LoongServe)
-- [OmniKV, Ant Group](https://github.com/antgroup/OmniKV)
 - [vLLM](https://github.com/vllm-project/vllm) (some LightLLM's kernel used)
 - [SGLang](https://github.com/sgl-project/sglang) (some LightLLM's kernel used)
 - [ParrotServe](https://github.com/microsoft/ParrotServe), Microsoft
 - [Aphrodite](https://github.com/aphrodite-engine/aphrodite-engine) (some LightLLM's kernel used)
 - [S-LoRA](https://github.com/S-LoRA/S-LoRA)
+- [OmniKV, Ant Group](https://github.com/antgroup/OmniKV)
+- [Lab4AI LightLLM+LlamaIndex](https://www.lab4ai.cn/project/detail?utm_source=LLM1&id=b417085ae8cd4dd0bef7161c3d583b15&type=project), [Lab4AI LightLLM+Qwen3-8B](https://www.lab4ai.cn/project/detail?utm_source=lightllmcapp&id=c98ff5d09528423d8dd06f5a063cb2a6&type=project)
+- [LazyLLM](https://github.com/LazyAGI/LazyLLM)
 
 Also, LightLLM's pure-python design and token-level KC Cache management make it easy to use as the basis for research projects.
 
