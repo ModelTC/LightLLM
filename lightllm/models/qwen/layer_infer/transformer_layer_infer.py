@@ -17,9 +17,9 @@ class QwenTransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _get_qkv(self, input_emb, infer_state: QwenInferStateInfo, layer_weight: QwenTransformerLayerWeight):
-        q = layer_weight.q_proj.mm(input_emb)
-        cache_kv = layer_weight.kv_proj.mm(input_emb).view(
-            -1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_
+        qkv = layer_weight.qkv_proj.mm(input)
+        q, cache_kv = qkv.split(
+            [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
         )
 
         rotary_emb_fwd(
