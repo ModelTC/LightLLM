@@ -3,6 +3,7 @@ import os
 import torch
 import torch.distributed as dist
 from typing import List, Union
+from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
@@ -400,6 +401,40 @@ class MemoryManager:
 
     def load_index_kv_buffer(self, index, load_tensor_dict):
         self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
+
+    def copy_kv_from_other_dp_ranks(
+        self,
+        mem_managers: List["MemoryManager"],
+        move_token_indexes: torch.Tensor,
+        token_dp_indexes: torch.Tensor,
+        mem_indexes: torch.Tensor,
+        dp_size_in_node: int,
+        rank_in_dp: int,
+    ):
+        if not hasattr(self, "mem_ptrs_dict"):
+            self.mem_ptrs_dict = {}
+            for layer_index in range(self.layer_num):
+                mems_ptr = []
+                for i in range(0, len(mem_managers)):
+                    mems_ptr.append(mem_managers[i].kv_buffer[layer_index, :, :, :].data_ptr())
+                mems_ptr = torch.tensor(mems_ptr, dtype=torch.uint64, device="cuda")
+                self.mem_ptrs_dict[layer_index] = mems_ptr
+
+        input_mems = []
+        for i in range(len(self.mem_managers)):
+            input_mems.append(self.mem_managers[i].kv_buffer.data_ptr())
+        input_mems = torch.tensor(input_mems, dtype=torch.uint64, device="cuda")
+
+        for layer_index in range(self.layer_num):
+            kv_trans_for_dp(
+                input_mems=input_mems[layer_index],
+                input_idx=move_token_indexes,
+                input_dp_idx=token_dp_indexes,
+                output=self.kv_buffer[layer_index],
+                output_idx=mem_indexes,
+                dp_size_in_node=dp_size_in_node,
+                rank_in_dp=rank_in_dp,
+            )
 
 
 class ReadOnlyStaticsMemoryManager:
