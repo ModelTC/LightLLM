@@ -44,9 +44,14 @@ class BaseWeightTpl(BaseWeight):
         # load quantization scale
         pass
 
+    def _load_zero_points(self, weights: Dict[str, torch.Tensor]) -> None:
+        # load quantization zero points
+        pass
+
     def load_hf_weights(self, weights):
         self._load_weights(weights)
         self._load_scales(weights)
+        self._load_zero_points(weights)
         return
 
     def verify_load(self):
