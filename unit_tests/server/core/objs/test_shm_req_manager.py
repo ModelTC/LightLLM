@@ -1,13 +1,34 @@
+import os
 import pytest
 import time
-from lightllm.utils.envs_utils import set_env_start_args
+from easydict import EasyDict
+from lightllm.utils.envs_utils import set_env_start_args, get_env_start_args
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_env():
-    set_env_start_args({"running_max_req_size": 10, "disable_chunked_prefill": True, "token_healing_mode": False})
+    original = os.environ.get("LIGHTLLM_START_ARGS")
+    set_env_start_args(
+        EasyDict(
+            running_max_req_size=10,
+            disable_chunked_prefill=True,
+            token_healing_mode=False,
+            enable_flashinfer_prefill=False,
+            enable_flashinfer_decode=False,
+        )
+    )
+    # clear the lru_cache if used
+    if hasattr(get_env_start_args, "cache_clear"):
+        get_env_start_args.cache_clear()
+
     yield
+    if original is not None:
+        os.environ["LIGHTLLM_START_ARGS"] = original
+    else:
+        os.environ.pop("LIGHTLLM_START_ARGS", None)
+    if hasattr(get_env_start_args, "cache_clear"):
+        get_env_start_args.cache_clear()
 
 
 @pytest.fixture(scope="module")

@@ -18,13 +18,13 @@ def benchmark(M, N, K, renorm, runs):
     sgl_vals = torch.empty((M, K), dtype=torch.float32, device="cuda")
     sgl_ids = torch.empty((M, K), dtype=torch.int32, device="cuda")
     # Warm-up
-    sgl_ops.topk_softmax(sgl_vals, sgl_ids, torch.empty_like(sgl_ids), gating)
+    sgl_ops.topk_softmax(sgl_vals, sgl_ids, gating)
     torch.cuda.synchronize()
     start = torch.cuda.Event(True)
     end = torch.cuda.Event(True)
     start.record()
     for _ in range(runs):
-        sgl_ops.topk_softmax(sgl_vals, sgl_ids, torch.empty_like(sgl_ids), gating)
+        sgl_ops.topk_softmax(sgl_vals, sgl_ids, gating)
         if renorm:
             sgl_vals.div_(sgl_vals.sum(-1, keepdim=True).clamp_min(1e-8))
 
