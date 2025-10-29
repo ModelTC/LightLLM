@@ -342,6 +342,62 @@ class RadixCache:
 
         return
 
+    def _try_merge(self, child_node: TreeNode):
+        """
+        合并条件:
+        1. 父节点不是根节点。
+        2. 父节点的引用计数为 0。
+        3. 子节点的引用计数为 0。
+        4. 父节点只有一个子节点 (即 child_node)。
+        """
+        parent_node = child_node.parent
+        # 条件检查
+        if parent_node is None or parent_node == self.root_node:
+            return False
+        
+        if parent_node.ref_counter == 0 and \
+           child_node.ref_counter == 0 and \
+           len(parent_node.children) == 1:
+            
+            if child_node.is_leaf():
+                self.evict_tree_set.discard(child_node)
+
+            new_key = torch.cat([parent_node.token_id_key, child_node.token_id_key])
+            new_value = torch.cat([parent_node.token_mem_index_value, child_node.token_mem_index_value])
+
+            parent_node.token_id_key = new_key
+            parent_node.token_mem_index_value = new_value
+            parent_node.children = child_node.children
+            for grandchild in parent_node.children.values():
+                grandchild.parent = parent_node
+
+            parent_node.node_value_len = len(parent_node.token_mem_index_value)
+            parent_node.time_id = max(parent_node.time_id, child_node.time_id)
+
+            if parent_node.is_leaf():
+                self.evict_tree_set.add(parent_node)
+            
+            child_node.parent = None
+            return True
+
+        return False
+
+    def merge_unreferenced_nodes(self):
+        if not self.root_node.children:
+            return
+        nodes_to_process = []
+        traversal_stack = list(self.root_node.children.values())
+
+        while traversal_stack:
+            node = traversal_stack.pop()
+            nodes_to_process.append(node)
+            traversal_stack.extend(list(node.children.values()))
+
+        nodes_to_process.reverse()
+        for node in nodes_to_process:
+            if node.parent is not None:
+                self._try_merge(node)
+    
     def assert_leafs_is_right(self):
         for node in self.evict_tree_set:
             if node.is_leaf() and node.ref_counter == 0:
