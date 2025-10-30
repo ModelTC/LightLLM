@@ -62,6 +62,9 @@ class MemoryManager:
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
+    def get_kv_buffer(self, layer_index):
+        return self.kv_buffer[layer_index]
+
     def profile_size(self, mem_fraction):
         if self.size is not None:
             return
