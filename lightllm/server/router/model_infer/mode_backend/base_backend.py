@@ -458,7 +458,9 @@ class ModeBackend:
             g_infer_state_lock.acquire()
             start = time.time()
             self.radix_cache.merge_unreferenced_nodes()
-            self.logger.info(f"radix tree merge_unreferenced_nodes cost time {time.time() - start} s")
+            self.logger.info(
+                f"radix tree merge_unreferenced_nodes cost time {time.time() - start} s in rank {self.global_rank}"
+            )
             g_infer_state_lock.release()
         return
 
