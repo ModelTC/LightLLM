@@ -1,0 +1,25 @@
+[project]
+name = "kvcache"
+version = "0.1.0"
+description = "KV-Cache for tensors"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    'numpy>=2'
+]
+
+[build-system]
+requires = ["py-build-cmake~=0.4.3"]
+build-backend = "py_build_cmake.build"
+
+[tool.py-build-cmake.module]
+name = "cache"
+directory = "python"
+
+[tool.py-build-cmake.sdist]
+include = ["CMakeLists.txt", "cmake", "src", "tools", "third_party"]
+
+[tool.py-build-cmake.cmake]
+minimum_version = "3.24"
+build_type = "Release"
+build_args = ["-j"]

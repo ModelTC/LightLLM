@@ -1,0 +1,55 @@
+---
+Checks: '
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -bugprone-signed-char-misuse,
+  clang-analyzer-*,
+  clang-diagnostic-*,
+  cppcoreguidelines-*,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-macro-usage,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-static-cast-downcast,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-special-member-functions,
+  google-*,
+  -google-*googletest*,
+  -google-objc-function-naming,
+  -google-objc-global-variable-declaration,
+  -google-readability-todo,
+  hicpp-avoid-goto,
+  hicpp-exception-baseclass,
+  misc-header-include-cycle,
+  misc-static-assert,
+  misc-unused-alias-decls,
+  misc-unused-using-decls,
+  modernize-*,
+  -modernize-use-nodiscard,
+  -modernize-use-trailing-return-type,
+  performance-*,
+  -performance-enum-size,
+  readability-*,
+  -readability-identifier-length,
+  -readability-identifier-naming,
+  -readability-magic-numbers,
+  -readability-qualified-auto,
+  -readability-static-accessed-through-instance'
+HeaderFilterRegex: '.*'
+CheckOptions:
+  - key:   cppcoreguidelines-avoid-do-while.IgnoreMacros
+    value: true
+  - key:   cppcoreguidelines-narrowing-conversions.IgnoreConversionFromTypes
+    value: 'size_t;ptrdiff_t;size_type;difference_type'
+  - key:   performance-unnecessary-value-param.AllowedTypes
+    value: 'c10::SymInt'
+  - key:   readability-function-cognitive-complexity.IgnoreMacros
+    value: true
+  - key:   readability-simplify-boolean-expr.SimplifyDeMorgan
+    value: false

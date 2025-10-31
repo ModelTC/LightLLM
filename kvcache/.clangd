@@ -1,0 +1,11 @@
+CompileFlags:
+  # Compiler: clang++
+  Add:
+    - -Wno-unknown-warning-option
+    # - --cuda-gpu-arch=sm_70
+  Remove:
+    - --diag_suppress=*
+    - --expt-relaxed-constexpr
+    - --expt-extended-lambda
+    - -forward-unknown-to-host-compiler
+    - -gencode
