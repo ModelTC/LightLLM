@@ -69,6 +69,10 @@ class ChunkedPrefillBackend(ModeBackend):
 
                 run_way = self.control_state_machine.select_run_way(prefill_reqs=prefill_reqs, decode_reqs=decode_reqs)
 
+                # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
+                # 防止后续的推理流程读取到显存中可能存在错误的数据。
+                torch.cuda.current_stream().synchronize()
+
                 if run_way.is_prefill():
                     self.prefill(
                         event_pack=event_pack,

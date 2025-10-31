@@ -100,7 +100,6 @@ class InferenceContext:
                     slave_req: InferReq = slave_req
                     slave_req.related_master_req = master_req
 
-        torch.cuda.current_stream().synchronize()
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
