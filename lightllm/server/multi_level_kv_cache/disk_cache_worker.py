@@ -18,7 +18,7 @@ class _PagePayload:
     hash_key: int
 
 
-class DiskCacheWriter:
+class DiskCacheWorker:
     """Background worker that offloads CPU KV pages to disk using kvcache."""
 
     def __init__(self, args, cpu_cache_client):
@@ -60,7 +60,7 @@ class DiskCacheWriter:
         self._page_major_tensor = page_major_tensor
 
         self.logger.info(
-            "disk cache writer initialized: dir=%s size_bytes=%d shards=%d workers=%d pages_per_block=%d",
+            "disk cache worker initialized: dir=%s size_bytes=%d shards=%d workers=%d pages_per_block=%d",
             cache_dir,
             storage_size,
             num_shard,

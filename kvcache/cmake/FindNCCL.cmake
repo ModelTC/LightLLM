@@ -4,6 +4,8 @@ find_path(NCCL_INCLUDE_DIR NAMES nccl.h PATH_SUFFIXES include)
 find_library(NCCL_LIBRARY NAMES libnccl.so.2 nccl PATH_SUFFIXES lib lib64)
 
 if(NCCL_LIBRARY AND NCCL_INCLUDE_DIR)
+    message(STATUS "Found NCCL include directory: ${NCCL_INCLUDE_DIR}")
+    message(STATUS "Found NCCL library: ${NCCL_LIBRARY}")
     include(FindPackageHandleStandardArgs)
     find_package_handle_standard_args(NCCL
         DEFAULT_MSG

@@ -249,28 +249,17 @@ class MultiLevelKvCacheModule(object):
             trans_ok_tasks: List[TransTask] = [self.cpu_cache_handle_queue.popleft() for _ in range(item_size)]
 
         if item_size > 0:
-            page_list_per_task = [task.page_indexes.tolist() for task in trans_ok_tasks]
+            page_array_list = [task.page_indexes.tolist() for task in trans_ok_tasks]
             if self.backend.is_master_in_dp:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
-                total_pages = 0
-                for pages in page_list_per_task:
+                for pages in page_array_list:
                     if not pages:
                         continue
-                    # Keep per-request grouping so disk cache hashes stay aligned with request prefixes.
-                    total_pages += len(pages)
+                    # Keep per-req grouping so disk cache hashes stay aligned with req prefixes.
                     self.cpu_cache_client.update_pages_status_to_ready(
                         page_list=pages, deref=True, disk_offload_enable=self.args.enable_disk_cache
                     )
                 self.cpu_cache_client.lock.release()
-
-            # page_array_list = [task.page_indexes for task in trans_ok_tasks]
-            # page_list = torch.cat(page_array_list, dim=0).tolist()
-            # if self.backend.is_master_in_dp:
-            #     self.cpu_cache_client.lock.acquire_sleep1ms()
-            #     self.cpu_cache_client.update_pages_status_to_ready(
-            #         page_list=page_list, deref=True, disk_offload_enable=self.args.enable_disk_cache
-            #     )
-            #     self.cpu_cache_client.lock.release()
             for task in trans_ok_tasks:
                 task.req_obj.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
         return

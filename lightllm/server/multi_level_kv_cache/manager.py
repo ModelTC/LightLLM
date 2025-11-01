@@ -14,7 +14,7 @@ from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from .cpu_cache_client import CpuKvCacheClient
-from .disk_cache_worker import DiskCacheWriter
+from .disk_cache_worker import DiskCacheWorker
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -37,22 +37,17 @@ class MultiLevelKVCacheManager:
         self.shm_req_manager = ShmReqManager()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1000)
         # 控制进行 cpu cache 页面匹配的时间，超过时间则不再匹配，直接转发。
-        self.cpu_cache_time_out = 1.0
+        self.cpu_cache_time_out = 0.5
         self.recv_queue = Queue(maxsize=1024)
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
 
-        self.disk_cache_writer = None
+        self.disk_cache_worker = None
         self.disk_cache_thread = None
         if self.args.enable_disk_cache:
-            try:
-                self.disk_cache_writer = DiskCacheWriter(args=self.args, cpu_cache_client=self.cpu_cache_client)
-                if self.disk_cache_writer.service is not None:
-                    self.disk_cache_thread = threading.Thread(target=self.disk_cache_writer.run, daemon=True)
-                    self.disk_cache_thread.start()
-            except Exception:
-                logger.exception("failed to initialize disk cache writer")
-                self.disk_cache_writer = None
+            self.disk_cache_worker = DiskCacheWorker(args=self.args, cpu_cache_client=self.cpu_cache_client)
+            self.disk_cache_thread = threading.Thread(target=self.disk_cache_worker.run, daemon=True)
+            self.disk_cache_thread.start()
         return
 
     def cpu_cache_hanle_loop(self):
@@ -63,7 +58,6 @@ class MultiLevelKVCacheManager:
                 self.executor.submit(self._handle_group_req_cpu_cache_match, current_group_req, time.time())
             except BaseException as e:
                 logger.exception(str(e))
-        return
 
     def _handle_group_req_cpu_cache_match(self, group_req_indexes: GroupReqIndexes, start_time: float):
         """
@@ -97,8 +91,8 @@ class MultiLevelKVCacheManager:
 
             req.disk_prompt_cache_len = 0
             finded_page_indexes: List[int] = []
-            disk_service = self.disk_cache_writer.service if (
-                self.disk_cache_writer is not None and self.disk_cache_writer.service is not None
+            disk_service = self.disk_cache_worker.service if (
+                self.disk_cache_worker is not None and self.disk_cache_worker.service is not None
             ) else None
             block_span = disk_service._n if disk_service is not None else 1
             if block_span <= 0:
@@ -151,7 +145,7 @@ class MultiLevelKVCacheManager:
                 prefix_tokens = token_hash_list[:prefix_len]
                 prefix_pages = finded_page_indexes + block_pages
 
-                if not self.disk_cache_writer.blocks_exist(tokens=prefix_tokens, start_pos=idx):
+                if not self.disk_cache_worker.blocks_exist(tokens=prefix_tokens, start_pos=idx):
                     break
 
                 self.cpu_cache_client.lock.acquire_sleep1ms()
@@ -183,7 +177,7 @@ class MultiLevelKVCacheManager:
                     prefix_tokens = token_hash_list[:prefix_len]
                     prefix_pages = finded_page_indexes + block_pages
 
-                    if not self.disk_cache_writer.load_pages(
+                    if not self.disk_cache_worker.load_pages(
                         tokens=prefix_tokens, page_indexes=prefix_pages, start_pos=idx
                     ):
                         self.cpu_cache_client.lock.acquire_sleep1ms()
