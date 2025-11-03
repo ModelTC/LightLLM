@@ -76,7 +76,10 @@ class DPChunkedPrefillBackend(ModeBackend):
         return
 
     def init_custom(self):
-        if not self.disable_dp_prompt_cache_fetch and self.dp_size_in_node > 1 and self.mem_queues is not None:
+        self.enable_dp_prompt_cache_fetch = (
+            not self.disable_dp_prompt_cache_fetch and self.dp_size_in_node > 1 and self.mem_queues is not None
+        )
+        if self.enable_dp_prompt_cache_fetch:
             torch.cuda.set_device(get_current_device_id())
 
             from .p2p_fix import reduce_tensor
@@ -107,8 +110,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             other_reqs = [req for req in reqs if req[3] != dp_rank_in_node]
 
         g_infer_state_lock.acquire()
-        infer_reqs = g_infer_context.add_reqs(my_reqs, init_prefix_cache=False)
-        if self.dp_size_in_node != 1 and not self.disable_dp_prompt_cache_fetch:
+        infer_reqs = g_infer_context.add_reqs(my_reqs, init_prefix_cache=not self.enable_dp_prompt_cache_fetch)
+        if self.enable_dp_prompt_cache_fetch:
             self._post_init_reqs(infer_reqs, other_reqs=other_reqs)
             for r in infer_reqs:
                 r._match_radix_cache()
@@ -209,6 +212,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             dp_size_in_node=self.dp_size_in_node,
             rank_in_dp=self.rank_in_dp,
         )
+        self.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {alloc_size}")
 
         # 更新radix cache
         start_index = 0
