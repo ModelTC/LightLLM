@@ -10,9 +10,8 @@ logger = init_logger(__name__)
 
 class DPForDecodeNode(DPChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
-        super().__init__()
+        super().__init__(mem_queue=mem_queue)
         self.info_queue: mp.Queue = info_queue
-        self.mem_queue: mp.Queue = mem_queue
         self.classed_req_strict_prefill = False
         return
 

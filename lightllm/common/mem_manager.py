@@ -420,14 +420,9 @@ class MemoryManager:
                 mems_ptr = torch.tensor(mems_ptr, dtype=torch.uint64, device="cuda")
                 self.mem_ptrs_dict[layer_index] = mems_ptr
 
-        input_mems = []
-        for i in range(len(self.mem_managers)):
-            input_mems.append(self.mem_managers[i].kv_buffer.data_ptr())
-        input_mems = torch.tensor(input_mems, dtype=torch.uint64, device="cuda")
-
         for layer_index in range(self.layer_num):
             kv_trans_for_dp(
-                input_mems=input_mems[layer_index],
+                input_mems=self.mem_ptrs_dict[layer_index],
                 input_idx=move_token_indexes,
                 input_dp_idx=token_dp_indexes,
                 output=self.kv_buffer[layer_index],

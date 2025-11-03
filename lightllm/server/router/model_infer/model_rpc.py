@@ -151,7 +151,7 @@ class ModelRpcServer:
                 self.backend = NIXLDecodeNode(self.info_queue, self.mem_queue)
 
         elif self.args.dp > 1:
-            self.backend = DPChunkedPrefillBackend(mem_queues=self.mem_queues)
+            self.backend = DPChunkedPrefillBackend(mem_queue=self.mem_queue, mem_queues=self.mem_queues)
         elif use_reward_model:
             self.backend = RewardModelBackend()
         elif return_all_prompt_logprobs:
