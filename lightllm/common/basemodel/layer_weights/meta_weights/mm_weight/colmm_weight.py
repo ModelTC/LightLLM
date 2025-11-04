@@ -1,5 +1,6 @@
 import torch
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import (
+    MMType,
     MMWeight,
     MMWeightTpl,
     generate_scale_name,
@@ -14,9 +15,11 @@ class COLMMWeight(MMWeight):
     @classmethod
     def _get_mmcls(cls, quant_method: QuantizationMethod, quantized_weight: bool):
         if quant_method is None or not quantized_weight:
-            return UnquantizedCOLMMWeight
+            cls = UnquantizedCOLMMWeight
         else:
-            return W8A8B128COLMMWeight
+            cls = W8A8B128COLMMWeight
+        cls.mm_type = MMType.COL
+        return cls
 
 
 class UnquantizedCOLMMWeight(MMWeightTpl):

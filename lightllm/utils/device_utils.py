@@ -15,6 +15,11 @@ def is_tesla():
 
 
 @lru_cache(maxsize=None)
+def is_ge_sm90():
+    return torch.cuda.get_device_capability(0) >= (9, 0)
+
+
+@lru_cache(maxsize=None)
 def is_hopper():
     return (
         "H100" in torch.cuda.get_device_name(0)

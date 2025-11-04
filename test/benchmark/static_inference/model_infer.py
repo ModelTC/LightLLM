@@ -5,6 +5,7 @@ from multiprocessing import Queue
 import multiprocessing
 from transformers import PretrainedConfig
 from lightllm.utils.dist_utils import init_distributed_env, get_current_rank_in_dp
+from lightllm.distributed.triton_dist.utils import init_triton_dist
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models import get_model
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
@@ -404,7 +405,8 @@ def tppart_model_infer(args, model_kvargs, batch_size, input_len, output_len, an
     dist_group_manager.create_groups(group_size=group_size)
     model_cfg, _ = PretrainedConfig.get_config_dict(model_kvargs["weight_dir"])
     dist.barrier()
-
+    if args.overlap_type is not None and "triton_dist" in args.overlap_type:
+        init_triton_dist(world_size=model_kvargs["world_size"])
     torch.cuda.empty_cache()
     enable_overlap = args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap
 

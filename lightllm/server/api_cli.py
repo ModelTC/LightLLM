@@ -285,6 +285,24 @@ def make_argument_parser() -> argparse.ArgumentParser:
         only llama and deepseek v3 model supported now.""",
     )
     parser.add_argument(
+        "--overlap_type",
+        type=str,
+        choices=[
+            "gemm_rs_triton_dist",
+            "ag_gemm_triton_dist",
+            "gemm_ag_triton_dist",
+            "auto_triton_dist",
+            "gemm_ag_flashinfer",
+        ],
+        default=None,
+        help="""The type of gemm-communication overlap kernel to use.
+        gemm_rs_triton_dist: use gemm_rs implemented in triton_dist.
+        ag_gemm_triton_dist: use ag_gemm implemented in triton_dist.
+        gemm_ag_triton_dist: use gemm_ag implemented in triton_dist.
+        auto_triton_dist: automatically select the best gemm-communication overlap kernel.
+        gemm_ag_flashinfer: use gemm_ag implemented in flashinfer.""",
+    )
+    parser.add_argument(
         "--enable_dp_prefill_balance",
         action="store_true",
         help="inference backend will use dp balance, need set --enable_tpsp_mix_mode first",

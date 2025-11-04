@@ -30,6 +30,7 @@ from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
+from lightllm.distributed.overlap_ctx import create_overlap_ctx
 
 logger = init_logger(__name__)
 
@@ -110,6 +111,7 @@ class TpPartBaseModel:
         self._init_some_value()
         self._init_custom()
         self._init_inferstate_cls()
+        self._init_overlap_wrapper()
         self._autotune_warmup()
         self._init_padded_req()
         # wait必须在init cudagraph 之前，避免错误捕获
@@ -138,6 +140,15 @@ class TpPartBaseModel:
 
     def _init_inferstate_cls(self):
         pass
+
+    def _init_overlap_wrapper(self):
+        self.overlap_wrapper = create_overlap_ctx(self.config, self.data_type)
+        if not self.overlap_wrapper.is_empty():
+            assert (
+                not get_env_start_args().enable_decode_microbatch_overlap
+                and not get_env_start_args().enable_dp_prefill_balance
+            ), "overlap_ctx is not supported in microbatch_overlap or dp_prefill_balance mode"
+        return
 
     @final
     def _verify_must(self):
@@ -295,6 +306,7 @@ class TpPartBaseModel:
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.deepseekv3_mtp_draft_input_hiddens = model_input.deepseekv3_mtp_draft_input_hiddens
+        infer_state.overlap_wrapper = self.overlap_wrapper
 
         return infer_state
 

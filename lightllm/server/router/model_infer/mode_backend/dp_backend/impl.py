@@ -119,6 +119,7 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
         run_reqs_num = len(run_reqs)
+        g_infer_context.get_overlap_stream().wait_stream(event_pack.overlap_event)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             if run_reqs_num > 0:

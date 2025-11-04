@@ -1,11 +1,14 @@
 import os
+from sqlite3 import Row
 import torch
 from abc import abstractmethod
+from enum import Enum
 from typing import Optional, Tuple, List, Dict, Union, Type
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization import Quantcfg
+from lightllm.distributed.overlap_ctx import OverlapCTX
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.log_utils import init_logger
 
@@ -20,6 +23,17 @@ def generate_scale_name(name, weight_scale_suffix, act_scale_suffix):
     if act_scale_suffix is not None:
         act_scale_name = ".".join(name.split(".")[:-1] + [act_scale_suffix])
     return weight_scale_name, act_scale_name
+
+
+class MMType(Enum):
+    ROW = 0
+    COL = 1
+
+    def is_row(self) -> bool:
+        return self == MMType.ROW
+
+    def is_col(self) -> bool:
+        return self == MMType.COL
 
 
 class MMWeightTpl(BaseWeightTpl):
@@ -39,14 +53,23 @@ class MMWeightTpl(BaseWeightTpl):
         self.quantized_weight: bool = False
         # 标记是否存在 bias， 由子类初始化
         self.has_bias: bool = None
+        self.mm_type: MMType = None
 
     def mm(
-        self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
+        self,
+        input_tensor: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        overlap_ctx: Optional[OverlapCTX] = None,
+        use_custom_tensor_mananger: bool = True,
     ) -> torch.Tensor:
         if self.quant_method is not None:
+            assert overlap_ctx is None, "quantized gemm overlap is not supported now."
+            # TODO: support quantized gemm overlap
             return self.quant_method.apply(
                 input_tensor, self.weight, self.bias, out, use_custom_tensor_mananger=use_custom_tensor_mananger
             )
+        if overlap_ctx is not None:
+            return overlap_ctx.forward(input=input_tensor, weight=self.weight, out=out)
         if out is None:
             shape = (input_tensor.shape[0], self.weight.shape[1])
             dtype = input_tensor.dtype
@@ -138,12 +161,20 @@ class MultiMMWeightTpl(MMWeightTpl):
 
 class BMMWeightTpl(MMWeightTpl):
     def mm(
-        self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
+        self,
+        input_tensor: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        overlap_ctx: Optional[OverlapCTX] = None,
+        use_custom_tensor_mananger: bool = True,
     ) -> torch.Tensor:
         raise RuntimeError("use bmm not mm")
 
     def bmm(
-        self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
+        self,
+        input_tensor: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        overlap_ctx: Optional[OverlapCTX] = None,
+        use_custom_tensor_mananger: bool = True,
     ) -> torch.Tensor:
         # 目前 bmm 不支持量化运算操作
         fpweight = self.weight

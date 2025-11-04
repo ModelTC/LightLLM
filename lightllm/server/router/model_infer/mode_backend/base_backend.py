@@ -34,6 +34,7 @@ from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
+from lightllm.distributed.triton_dist.utils import init_triton_dist
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 
 
@@ -98,6 +99,8 @@ class ModeBackend:
 
         init_distributed_env(kvargs)
         self.init_rank_infos()
+        if self.args.overlap_type is not None and "triton_dist" in self.args.overlap_type:
+            init_triton_dist(world_size=kvargs["world_size"])
         group_size = (
             2 if (self.args.enable_decode_microbatch_overlap or self.args.enable_prefill_microbatch_overlap) else 1
         )

@@ -409,13 +409,20 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
-        o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
-        layer_weight.o_proj.mm(input, out=o_tensor[0 : len(infer_state.position_cos), :])
-        e_o_tensor = o_tensor[len(infer_state.position_cos) :, :]
-        if e_o_tensor.shape[0] > 0:
-            e_o_tensor.fill_(0)
+        if infer_state.overlap_wrapper.col_ctx is not None and infer_state.overlap_wrapper.col_ctx.can_run(input):
+            sp_token_num = dest_size // self.tp_world_size_
+            o_tensor = self.alloc_tensor((sp_token_num, self.embed_dim_), dtype=input.dtype, device=input.device)
+            layer_weight.o_proj.mm(input, out=o_tensor, overlap_ctx=infer_state.overlap_wrapper.col_ctx)
+        else:
+            o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
+            layer_weight.o_proj.mm(input, out=o_tensor[0 : len(infer_state.position_cos), :])
+            e_o_tensor = o_tensor[len(infer_state.position_cos) :, :]
+            if e_o_tensor.shape[0] > 0:
+                e_o_tensor.fill_(0)
 
-        if self.tp_world_size_ > 1:
+        if self.tp_world_size_ > 1 and (
+            infer_state.overlap_wrapper.col_ctx is None or not infer_state.overlap_wrapper.col_ctx.can_run(input)
+        ):
             sp_token_num = o_tensor.shape[0] // self.tp_world_size_
             reduce_o_tensor = self.alloc_tensor((sp_token_num, self.embed_dim_), dtype=input.dtype, device=input.device)
             reduce_scatter_tensor(

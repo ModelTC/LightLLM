@@ -1,5 +1,6 @@
 import torch
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import (
+    MMType,
     MMWeight,
     MMWeightTpl,
     BMMWeightTpl,
@@ -16,33 +17,33 @@ class ROWMMWeight(MMWeight):
     @classmethod
     def _get_mmcls(cls, quant_method: QuantizationMethod, quantized_weight: bool):
         if quant_method is None or not quantized_weight:
-            return UnquantizedROWMMWeight
+            cls = UnquantizedROWMMWeight
         else:
-            return W8A8B128ROWMMWeight
-        # TODO: Implement more quantization weight
-        return None
+            cls = W8A8B128ROWMMWeight
+        cls.mm_type = MMType.ROW
+        return cls
 
 
 class MultiROWMMWeight(MMWeight):
     @classmethod
     def _get_mmcls(cls, quant_method: QuantizationMethod, quantized_weight: bool):
         if quant_method is None or not quantized_weight:
-            return UnquantizedMultiROWMMWeight
+            cls = UnquantizedMultiROWMMWeight
         else:
-            return W8A8B128MultiROWMMWeight
-        # TODO: Implement more quantization weight
-        return None
+            cls = W8A8B128MultiROWMMWeight
+        cls.mm_type = MMType.ROW
+        return cls
 
 
 class ROWBMMWeight(MMWeight):
     @classmethod
     def _get_mmcls(cls, quant_method: QuantizationMethod, quantized_weight: bool):
         if quant_method is None or not quantized_weight:
-            return UnquantizedROWBMMWeight
+            cls = UnquantizedROWBMMWeight
         else:
-            return W8A8B128ROWBMMWeight
-        # TODO: Implement more quantization weight
-        return None
+            cls = W8A8B128ROWBMMWeight
+        cls.mm_type = MMType.ROW
+        return cls
 
 
 class UnquantizedROWMMWeight(MMWeightTpl):
