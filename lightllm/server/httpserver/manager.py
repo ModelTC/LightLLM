@@ -4,6 +4,7 @@ import zmq.asyncio
 import asyncio
 import uvloop
 import rpyc
+import socket
 import time
 import copy
 import hashlib
@@ -79,6 +80,7 @@ class HttpServerManager:
         self.enable_multimodal = args.enable_multimodal
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+            self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.send_to_visual = context.socket(zmq.PUSH)
             self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
         if args.enable_cpu_cache and not self.args.enable_multimodal:
