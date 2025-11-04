@@ -41,14 +41,14 @@ class Phi3TransformerLayerInfer(LlamaTransformerLayerInfer):
         return q, cache_kv
 
     def _copy_kv_to_mem_cache_normal(self, buffer, mem_index, mem_manager):
-        destindex_copy_kv(buffer, mem_index, mem_manager.kv_buffer[self.layer_num_])
+        destindex_copy_kv(buffer, mem_index, mem_manager.get_kv_buffer(self.layer_num_))
         return
 
     def _context_attention_kernel(
         self, q, kv, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
         o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)
         context_attention_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             kv[:, 0 : self.tp_k_head_num_, :],
@@ -66,8 +66,8 @@ class Phi3TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _token_decode_attention_flashdecoding(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
         from lightllm.models.phi3.triton_kernel.flash_decoding import token_decode_attention_flash_decoding
 
-        cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
-        cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
+        cache_k = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[:, 0 : self.tp_k_head_num_, :]
+        cache_v = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ]
         return token_decode_attention_flash_decoding(

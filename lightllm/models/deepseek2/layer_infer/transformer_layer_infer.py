@@ -306,11 +306,11 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         if not skip_sample:
             if is_fp8:
-                kv = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, :-2].view(torch.float8_e4m3fn)
-                kv_scale = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, -2:].view(torch.bfloat16)
+                kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[:, :, :-2].view(torch.float8_e4m3fn)
+                kv_scale = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[:, :, -2:].view(torch.bfloat16)
                 k_scale = self.alloc_tensor([total_token_num, 1], dtype=kv_scale.dtype)
             else:
-                kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+                kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)
                 kv_scale = None
                 k_scale = None
 
@@ -549,7 +549,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)
         context_attention_fwd(
             q_nope,
             q_rope,
@@ -577,8 +577,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, :-2].view(torch.float8_e4m3fn)
-        kv_scale = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, -2:].view(torch.bfloat16)
+        kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[:, :, :-2].view(torch.float8_e4m3fn)
+        kv_scale = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[:, :, -2:].view(torch.bfloat16)
         context_attention_fwd_fp8(
             q_nope,
             q_rope,
@@ -601,7 +601,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)
         k_rope = kv[:, :, -self.qk_rope_head_dim :].reshape(-1, 1, 1, self.qk_rope_head_dim)
         kv_nope = kv[:, :, : -self.qk_rope_head_dim].reshape(-1, 1, 1, self.kv_lora_rank)
         k_descale, v_descale = None, None
@@ -631,7 +631,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)
         o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype)
 
         infer_state.decode_wrapper.run(
@@ -649,7 +649,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)
         out = gqa_token_decode_attention_flash_decoding(
             q_nope,
             q_rope,
@@ -671,8 +671,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, :-2].view(torch.float8_e4m3fn)
-        kv_scale = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, -2:].view(torch.bfloat16)
+        kv = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[:, :, :-2].view(torch.float8_e4m3fn)
+        kv_scale = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[:, :, -2:].view(torch.bfloat16)
         return gqa_token_decode_attention_flash_decoding_fp8(
             q_nope,
             q_rope,
@@ -693,8 +693,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             buffer[:, :, : self.kv_lora_rank],
             buffer[:, :, self.kv_lora_rank :],
             mem_index,
-            mem_manager.kv_buffer[self.layer_num_][:, :, : self.kv_lora_rank],
-            mem_manager.kv_buffer[self.layer_num_][:, :, self.kv_lora_rank :],
+            mem_manager.get_kv_buffer(self.layer_num_)[:, :, : self.kv_lora_rank],
+            mem_manager.get_kv_buffer(self.layer_num_)[:, :, self.kv_lora_rank :],
         )
         return
 
@@ -703,9 +703,9 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             buffer[:, :, : self.kv_lora_rank],
             buffer[:, :, self.kv_lora_rank :],
             mem_index,
-            mem_manager.kv_buffer[self.layer_num_][:, :, : self.kv_lora_rank].view(torch.float8_e4m3fn),
-            mem_manager.kv_buffer[self.layer_num_][:, :, self.kv_lora_rank : -2].view(torch.float8_e4m3fn),
-            mem_manager.kv_buffer[self.layer_num_][:, :, -2:].view(buffer.dtype),
+            mem_manager.get_kv_buffer(self.layer_num_)[:, :, : self.kv_lora_rank].view(torch.float8_e4m3fn),
+            mem_manager.get_kv_buffer(self.layer_num_)[:, :, self.kv_lora_rank : -2].view(torch.float8_e4m3fn),
+            mem_manager.get_kv_buffer(self.layer_num_)[:, :, -2:].view(buffer.dtype),
         )
         return
 

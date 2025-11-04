@@ -89,6 +89,9 @@ class MemoryManager:
         # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
         self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
 
+    def get_kv_buffer(self, layer_num: int):
+        return self.kv_buffer[layer_num]
+        
     def alloc_kv_move_buffer(self, max_req_total_len):
         """
         pd 分离模式使用的特殊接口
