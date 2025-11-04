@@ -18,6 +18,7 @@ class NIXLDPChunkedForPrefillNode(DPChunkedPrefillBackend):
 
     def init_custom(self):
         NIXLChunckedPrefillForPrefillNode.init_custom(self)
+        super().init_custom()
         return
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
