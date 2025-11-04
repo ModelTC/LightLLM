@@ -129,12 +129,12 @@ class ModelRpcServer:
 
         if is_prefill_node:
             if self.args.dp > 1:
-                self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue)
+                self.backend = DPChunkedForPrefillNode(self.info_queue, self.mem_queue, self.mem_queues)
             else:
                 self.backend = ChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
         elif is_nixl_prefill_node:
             if self.args.dp > 1:
-                self.backend = NIXLDPChunkedForPrefillNode(self.info_queue, self.mem_queue)
+                self.backend = NIXLDPChunkedForPrefillNode(self.info_queue, self.mem_queue, self.mem_queues)
             else:
                 self.backend = NIXLChunckedPrefillForPrefillNode(self.info_queue, self.mem_queue)
 
