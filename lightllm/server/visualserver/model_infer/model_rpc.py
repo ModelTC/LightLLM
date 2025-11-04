@@ -163,13 +163,9 @@ def _init_env(port, device_id):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
-    auth = lambda sock: (sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) or (sock, None))
-    t = ThreadedServer(
-        VisualModelRpcServer(),
-        port=port,
-        protocol_config={"allow_pickle": True},
-        authenticator=auth,
-    )
+    import lightllm.utils.rpyc_fix_utils as _
+
+    t = ThreadedServer(VisualModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
     t.start()
     return
 
