@@ -570,7 +570,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--disable_dp_prompt_cache_fetch",
         action="store_true",
         default=False,
-        help="""Disable prefix prompt cache fetch for data parallel inference.
-        Enabled by default, but currently not supported for pd separated mode""",
+        help="""Disable prefix prompt cache fetch for data parallel inference, enabled by default.""",
     )
     return parser
