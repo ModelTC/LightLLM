@@ -29,7 +29,7 @@ from .control_state import DPControlState
 from lightllm.common.mem_manager import MemoryManager
 import torch.multiprocessing as mp
 
-min_trans_token_num = os.getenv("MIN_TRANS_TOKEN_NUM", 1)
+min_trans_token_num = os.getenv("MIN_TRANS_TOKEN_NUM", 128)
 
 
 class DPChunkedPrefillBackend(ModeBackend):
@@ -193,12 +193,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         if alloc_size < self.min_trans_token_num:
             return
 
-        # Exit if alloc fails
-        try:
-            mem_indexes = self.model.mem_manager.alloc(alloc_size).cuda()
-        except Exception as e:
-            self.logger.error(f"dp_i {self.dp_rank_in_node} error alloc mem manager: {str(e)}")
-            return
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_size)
+        mem_indexes = self.model.mem_manager.alloc(alloc_size).cuda()
 
         move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
         token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device="cuda")
