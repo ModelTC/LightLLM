@@ -172,4 +172,3 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
-

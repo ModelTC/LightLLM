@@ -18,7 +18,7 @@ def _gemma_rmsnorm_fwd_kernel(
     y_stride1,
     N: tl.constexpr,
     EPS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
     row = tl.program_id(0)
     x_ptr = x_ptr + row * x_stride0
@@ -26,7 +26,7 @@ def _gemma_rmsnorm_fwd_kernel(
 
     _sum = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
     for off in range(0, N, BLOCK_SIZE):
-        cols = off + tl.arange(0, BLOCK_SIZE) 
+        cols = off + tl.arange(0, BLOCK_SIZE)
         x = tl.load(x_ptr + cols * x_stride1, mask=cols < N, other=0.0).to(tl.float32)
         _sum += x * x
 
@@ -49,7 +49,7 @@ def _get_gemma_rmsnorm_configs():
     """Generate configurations for autotuning gemma RMSNorm kernel."""
     configs = []
     # Different BLOCK_SIZE values (powers of 2)
-    for block_size in [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 65536*2]:
+    for block_size in [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 65536 * 2]:
         # Different number of warps
         for num_warps in [1, 2, 4, 8]:
             for num_stages in [1, 2, 3, 4, 5]:
@@ -71,7 +71,7 @@ def _get_gemma_rmsnorm_static_key(x: torch.Tensor, w: torch.Tensor):
     kernel_name="gemma_rmsnorm_forward:v1",
     configs_gen_func=_get_gemma_rmsnorm_configs,
     static_key_func=_get_gemma_rmsnorm_static_key,
-    run_key_func=lambda x: x.shape[-1]
+    run_key_func=lambda x: x.shape[-1],
 )
 def gemma_rmsnorm_forward(x, w, eps, out=None, run_config: dict = None):
     # Inplace gemma RMS Norm
@@ -111,11 +111,10 @@ def gemma_rmsnorm_forward(x, w, eps, out=None, run_config: dict = None):
         EPS=eps,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
-        num_stages=num_stages
+        num_stages=num_stages,
     )
 
     return y
-    
 
 
 def _gemma_rmsnorm_fwd_torch(x, weight, eps):
@@ -124,6 +123,7 @@ def _gemma_rmsnorm_fwd_torch(x, weight, eps):
     x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
     x = x * (1.0 + weight.float())
     return x.to(original_dtype)
+
 
 def test_rms_norm(M, N, dtype, eps=1e-5, device="cuda"):
     # create data
@@ -142,4 +142,3 @@ def test_rms_norm(M, N, dtype, eps=1e-5, device="cuda"):
     atol = 1e-2 if dtype == torch.float32 else 5e-2
     assert torch.allclose(y_tri, y_ref, atol=atol, rtol=0)
     return
-

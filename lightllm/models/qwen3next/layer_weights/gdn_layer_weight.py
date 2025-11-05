@@ -8,7 +8,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     COLMMWeight,
     NormWeight,
     ROWBMMWeight,
-    TpParameterWeight
+    TpParameterWeight,
 )
 
 
@@ -19,9 +19,7 @@ class Qwen3NextGatedDeltaNetWeight(TransformerLayerWeight):
 
     def load_hf_weights(self, weights):
         if self.conv1d.weight_name in weights:
-            weights[self.conv1d.weight_name] = self._parse_conv1d(
-                weights[self.conv1d.weight_name].squeeze(1)
-            )
+            weights[self.conv1d.weight_name] = self._parse_conv1d(weights[self.conv1d.weight_name].squeeze(1))
         if self.conv1d.bias_name in weights:
             weights[self.conv1d.bias_name] = self._parse_conv1d(weights[self.conv1d.bias_name])
         super().load_hf_weights(weights)

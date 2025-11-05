@@ -19,6 +19,7 @@ from typing_extensions import override
 from lightllm.common.basemodel.layer_weights.meta_weights import TpParameterWeight
 from lightllm.models.qwen3next.layer_weights.gdn_layer_weight import Qwen3NextGatedDeltaNetWeight
 
+
 class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
         super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
@@ -44,7 +45,9 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         )
 
         if self.is_gdn:
-            self.gdn_layer_weight = Qwen3NextGatedDeltaNetWeight(self.layer_num_, self.data_type_, self.network_config_, self.mode,self.quant_cfg)
+            self.gdn_layer_weight = Qwen3NextGatedDeltaNetWeight(
+                self.layer_num_, self.data_type_, self.network_config_, self.mode, self.quant_cfg
+            )
         else:
             self._init_qkv()
             self._init_o()
@@ -109,4 +112,3 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             tp_rank=0,
             tp_world_size=1,
         )
-
