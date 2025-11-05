@@ -160,9 +160,6 @@ PD 分离模式参数
 .. option:: --dp
 
     数据并行大小，默认为 ``1``
-    
-    这是 deepseekv2 的有用参数。使用 deepseekv2 模型时，将 dp 设置为等于 tp 参数。
-    其他情况下请不要设置，保持默认值 1。
 
 .. option:: --nccl_host
 
