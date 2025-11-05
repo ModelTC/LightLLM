@@ -102,9 +102,8 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
 
     @override
     def _get_o(
-        self, input, gate, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ) -> torch.Tensor:
-        input = input * gate
         o_tensor = layer_weight.o_proj.mm(input)
         return o_tensor
 
@@ -117,7 +116,8 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
-        o = self._get_o(o, gate, infer_state, layer_weight)
+        o = o * gate
+        o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o
@@ -148,7 +148,8 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
-        o = self._get_o(o, gate, infer_state, layer_weight)
+        o = o * gate
+        o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o
