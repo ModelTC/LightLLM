@@ -31,8 +31,6 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
             head_num=1,
             head_dim=self.config["kv_lora_rank"] + self.config["qk_rope_head_dim"],
             layer_num=self.config["num_hidden_layers"] + added_mtp_layer_num,
-            index_head_dim = self.config["index_head_dim"],
-            index_quant_block_size = self.config["index_quant_block_size"],
             mem_fraction=self.mem_fraction,
         )
         return

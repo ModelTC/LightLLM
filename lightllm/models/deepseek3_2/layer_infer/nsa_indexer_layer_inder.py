@@ -28,7 +28,7 @@ class NSAIndexerInfer(BaseLayerInfer):
         self.scale_fmt = network_config["quantization_config"]["scale_fmt"]
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
         self.index_n_heads = network_config["index_n_heads"]
-        self.index_n_heads_scale = self.index_n_heads ** -0.5
+        self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
 
         self.q_lora = None
         self.hidden_states = None
@@ -67,8 +67,13 @@ class NSAIndexerInfer(BaseLayerInfer):
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
+        # write
+        # infer_state.mem_manager.
+
+        # read
+
         weights = layer_weight.weights_proj_.mm(self.hidden_states) * self.index_n_heads_scale
-        weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
+        weights = weights.unsqueeze(-1) * q_scale 
 
         logits = fp8_paged_mqa_logits_torch(
             q_fp8, k_fp8, weights, 
