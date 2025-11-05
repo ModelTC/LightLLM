@@ -18,5 +18,6 @@ class QuantizationMethod(ABC):
     def apply(self, input_tensor, weight, bias=None, out=None, use_custom_tensor_mananger=True):
         pass
 
+    @abstractmethod
     def get_name(self):
-        return self.__class__.__name__
+        pass

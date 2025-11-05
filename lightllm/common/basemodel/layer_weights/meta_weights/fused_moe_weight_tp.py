@@ -8,14 +8,54 @@ from lightllm.common.quantization import Quantcfg
 
 
 class FusedMoeWeightTP:
-    def __new__(cls, **kwargs):
-        quant_cfg = kwargs.get("quant_cfg", None)
-        layer_num = kwargs.get("layer_num", None)
+    def __new__(
+        cls,
+        gate_proj_name: str,
+        down_proj_name: str,
+        up_proj_name: str,
+        e_score_correction_bias_name: str,
+        weight_prefix: str,
+        n_routed_experts: int,
+        num_fused_shared_experts: int,
+        split_inter_size: int,
+        data_type: torch.dtype,
+        network_config: Dict[str, Any],
+        layer_num: int,
+        quant_cfg: Quantcfg = None,
+    ):
         quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
+        if quant_method is None:
+            return FusedBaseMoeWeightTP(
+                gate_proj_name=gate_proj_name,
+                down_proj_name=down_proj_name,
+                up_proj_name=up_proj_name,
+                e_score_correction_bias_name=e_score_correction_bias_name,
+                weight_prefix=weight_prefix,
+                n_routed_experts=n_routed_experts,
+                num_fused_shared_experts=num_fused_shared_experts,
+                split_inter_size=split_inter_size,
+                data_type=data_type,
+                network_config=network_config,
+                layer_num=layer_num,
+                quant_cfg=quant_cfg,
+            )
         if quant_method.get_name() == "awq_marlin":
-            return FusedAWQMARLINMoeWeightTP(**kwargs)
+            return FusedAWQMARLINMoeWeightTP(
+                gate_proj_name=gate_proj_name,
+                down_proj_name=down_proj_name,
+                up_proj_name=up_proj_name,
+                e_score_correction_bias_name=e_score_correction_bias_name,
+                weight_prefix=weight_prefix,
+                n_routed_experts=n_routed_experts,
+                num_fused_shared_experts=num_fused_shared_experts,
+                split_inter_size=split_inter_size,
+                data_type=data_type,
+                network_config=network_config,
+                layer_num=layer_num,
+                quant_cfg=quant_cfg,
+            )
         else:
-            return FusedBaseMoeWeightTP(**kwargs)
+            raise ValueError(f"Unsupported quant method: {quant_method.get_name()}")
 
 
 class FusedBaseMoeWeightTP(BaseWeight):
@@ -50,7 +90,7 @@ class FusedBaseMoeWeightTP(BaseWeight):
         self.n_routed_experts = n_routed_experts + num_fused_shared_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
-        self.split_inter_size = split_inter_size // self.pack_factor
+        self.split_inter_size = split_inter_size
         self.data_type_ = data_type
         self.tp_rank_ = get_current_rank_in_dp()
         self.experts_up_projs = [None] * self.n_routed_experts
