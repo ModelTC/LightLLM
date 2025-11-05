@@ -4,6 +4,7 @@ import zmq.asyncio
 import asyncio
 import uvloop
 import rpyc
+import socket
 import inspect
 import setproctitle
 from typing import List
@@ -39,6 +40,7 @@ class AudioManager:
         self.zmq_recv_socket = context.socket(zmq.PULL)
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.cache_port = args.cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir

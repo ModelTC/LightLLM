@@ -63,6 +63,10 @@ def setup_signal_handlers(http_server_process, process_manager):
 
 
 def check_and_set_args(args):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    args: StartArgs = args
+
     set_unique_server_name(args)
 
     if not args.disable_shm_warning:
@@ -136,6 +140,9 @@ def check_and_set_args(args):
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
+
+    if args.enable_dp_prefill_balance:
+        assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     # mtp params check
     if args.mtp_mode is not None:

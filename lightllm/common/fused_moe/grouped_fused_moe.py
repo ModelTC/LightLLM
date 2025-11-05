@@ -1000,13 +1000,13 @@ def outplace_fused_experts_impl_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    # optional bias for w1 and w2
-    w1_bias: Optional[torch.Tensor],
-    w2_bias: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
+    # optional bias for w1 and w2
+    w1_bias: Optional[torch.Tensor] = None,
+    w2_bias: Optional[torch.Tensor] = None,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,

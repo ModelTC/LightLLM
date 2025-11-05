@@ -9,6 +9,7 @@ from lightllm.common.basemodel import PreLayerInferTpl
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.models.llama.triton_kernel.embedding import embedding
 from lightllm.distributed.communication_op import all_reduce
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class LlamaPreLayerInfer(PreLayerInferTpl):
@@ -42,6 +43,9 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
     def tpsp_context_forward(
         self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
+        if get_env_start_args().enable_dp_prefill_balance:
+            input_ids = infer_state.prefill_dp_balance(input_ids=input_ids)
+
         input_embdings = self.context_forward(input_ids=input_ids, infer_state=infer_state, layer_weight=layer_weight)
         from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
 
@@ -86,11 +90,16 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: LlamaPreAndPostLayerWeight,
     ):
+        if get_env_start_args().enable_dp_prefill_balance:
+            input_ids = infer_state.prefill_dp_balance(input_ids=input_ids)
 
         input_embdings = self.context_forward(input_ids=input_ids, infer_state=infer_state, layer_weight=layer_weight)
         from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
 
         padded_input_embdings = sp_pad_copy(input_embdings, sp_rank_id=self.tp_rank_, sp_world_size=self.tp_world_size_)
+
+        if get_env_start_args().enable_dp_prefill_balance:
+            input_ids1 = infer_state1.prefill_dp_balance(input_ids=input_ids1)
 
         input_embdings1 = self.context_forward(
             input_ids=input_ids1, infer_state=infer_state1, layer_weight=layer_weight

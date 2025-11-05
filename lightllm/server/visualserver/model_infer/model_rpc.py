@@ -2,7 +2,7 @@ import asyncio
 import numpy as np
 import rpyc
 import torch
-import time
+import socket
 import inspect
 from datetime import timedelta
 from typing import Dict, List, Tuple
@@ -33,7 +33,6 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 import pickle
-import socket
 
 logger = init_logger(__name__)
 
@@ -131,7 +130,6 @@ class VisualModelRpcServer(rpyc.Service):
                     create_afs(get_shm_name_embed(uid), cur_embed_bytes, self.image_embed_dir)
                 else:
                     create_shm(get_shm_name_embed(uid), cur_embed_bytes)
-                    print(f"create shm for image embed, uid: {uid}")
                 ids_to_set.append(uid)
             if ids_to_set:
                 self.cache_client.root.set_items_embed(ids_to_set)
@@ -186,13 +184,9 @@ def _init_env(port, device_id):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
-    auth = lambda sock: (sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) or (sock, None))
-    t = ThreadedServer(
-        VisualModelRpcServer(),
-        port=port,
-        protocol_config={"allow_pickle": True},
-        authenticator=auth,
-    )
+    import lightllm.utils.rpyc_fix_utils as _
+
+    t = ThreadedServer(VisualModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
     t.start()
     return
 

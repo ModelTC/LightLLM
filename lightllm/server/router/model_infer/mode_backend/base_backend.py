@@ -26,7 +26,11 @@ from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, ge
 from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
 from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    enable_radix_tree_timer_merge,
+    get_radix_tree_merge_update_delta,
+)
 from lightllm.distributed import dist_group_manager
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
@@ -61,6 +65,11 @@ class ModeBackend:
 
         # nixl pd mode callback func
         self.nixl_prefill_chuncked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None
+
+        # counter
+        self._radix_tree_merge_counter: int = 0
+        self._enable_radix_tree_timer_merge: bool = enable_radix_tree_timer_merge()
+        self._radix_tree_merge_update_delta: int = get_radix_tree_merge_update_delta()
         pass
 
     def init_model(self, kvargs):
@@ -439,6 +448,22 @@ class ModeBackend:
         """
         return [g_infer_context.requests_mapping[request_id] for request_id in req_ids]
 
+    def _timer_merge_radix_tree(self):
+        self._radix_tree_merge_counter += 1
+        if (
+            self._enable_radix_tree_timer_merge
+            and (self._radix_tree_merge_counter % self._radix_tree_merge_update_delta == 0)
+            and self.radix_cache is not None
+        ):
+            g_infer_state_lock.acquire()
+            start = time.time()
+            self.radix_cache.merge_unreferenced_nodes()
+            self.logger.info(
+                f"radix tree merge_unreferenced_nodes cost time {time.time() - start} s in rank {self.global_rank}"
+            )
+            g_infer_state_lock.release()
+        return
+
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(
         self,
@@ -465,6 +490,9 @@ class ModeBackend:
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
         """
+        # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
+        self._timer_merge_radix_tree()
+
         if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
             self.multi_level_cache_module.update_cpu_cache_task_states()
 

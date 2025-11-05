@@ -224,6 +224,28 @@ def create_new_group_for_current_node(backend):
     return ans_group
 
 
+def create_dp_special_inter_group(backend):
+    """
+    创建一种特殊的通信组
+    假设全局通信组为 [0, 1, 2, 3, 4, 5, 6, 7], 其中
+    0,1,2,3 为一个dp, 4,5,6,7 为另一个 dp, 则在[0,4],
+    [1,5], [2,6], [3,7] 间建立通信组
+    """
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    args = get_env_start_args()
+    ans_group = None
+    dp_size = args.dp
+    dp_world_size = get_dp_world_size()
+    rank = get_global_rank()
+    for iter_tp_rank in range(dp_world_size):
+        ranks = list(iter_tp_rank + i * dp_world_size for i in range(dp_size))
+        device_group = dist.new_group(ranks, backend=backend)
+        if rank in ranks:
+            ans_group = device_group
+    return ans_group
+
+
 def _init_nccl_env():
     from lightllm.utils.envs_utils import get_env_start_args
 
