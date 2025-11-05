@@ -61,7 +61,6 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
                 layer_num=self.layer_num_,
                 name="o_gate_proj",
             )
-            self._gate = None
         return
 
     @override

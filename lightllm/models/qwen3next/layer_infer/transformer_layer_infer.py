@@ -102,22 +102,22 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
 
     @override
     def _get_o(
-        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+        self, input, gate, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ) -> torch.Tensor:
-        input = input * layer_weight._gate
-        layer_weight._gate = None
+        input = input * gate
         o_tensor = layer_weight.o_proj.mm(input)
         return o_tensor
 
     def _context_full_attn(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
+        gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input))
         q, cache_kv = self._get_qkv(input, infer_state, layer_weight)
         input = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
-        o = self._get_o(o, infer_state, layer_weight)
+        o = self._get_o(o, gate, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o
@@ -129,7 +129,6 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         if self.is_gdn:
             o = self.gdn_infer.forward(input1, infer_state, layer_weight.gdn_layer_weight)
         else:
-            layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
             o = self._context_full_attn(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
@@ -143,12 +142,13 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         return input_embdings
 
     def _token_full_attn(self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight):
+        gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input))
         q, cache_kv = self._get_qkv(input, infer_state, layer_weight)
         input = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
-        o = self._get_o(o, infer_state, layer_weight)
+        o = self._get_o(o, gate, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o
@@ -160,7 +160,6 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         if self.is_gdn:
             o = self.gdn_infer.forward(input1, infer_state, layer_weight.gdn_layer_weight)
         else:
-            layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
             o = self._token_full_attn(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
