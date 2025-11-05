@@ -16,7 +16,7 @@ class COLMMWeight(MMWeight):
     def _get_mmcls(cls, quant_method: QuantizationMethod, quantized_weight: bool):
         if quant_method is None or not quantized_weight:
             return UnquantizedCOLMMWeight
-        return COLBMM_WEIGHT_CLS_MAP[quant_method.get_name()]
+        return COLBMM_WEIGHT_CLS_MAP[quant_method.method_name]
 
 
 class UnquantizedCOLMMWeight(MMWeightTpl):
@@ -168,7 +168,7 @@ class AWQMARLINCOLMMWeight(AWQCOLMMWeight):
 
 
 COLBMM_WEIGHT_CLS_MAP = {
-    "fp8w8a8b128": W8A8B128COLMMWeight,
+    "deepgemm-fp8w8a8-b128": W8A8B128COLMMWeight,
     "awq": AWQCOLMMWeight,
     "awq_marlin": AWQMARLINCOLMMWeight,
 }

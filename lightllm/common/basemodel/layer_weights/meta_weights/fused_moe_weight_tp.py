@@ -24,22 +24,7 @@ class FusedMoeWeightTP:
         quant_cfg: Quantcfg = None,
     ):
         quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
-        if quant_method is None:
-            return FusedBaseMoeWeightTP(
-                gate_proj_name=gate_proj_name,
-                down_proj_name=down_proj_name,
-                up_proj_name=up_proj_name,
-                e_score_correction_bias_name=e_score_correction_bias_name,
-                weight_prefix=weight_prefix,
-                n_routed_experts=n_routed_experts,
-                num_fused_shared_experts=num_fused_shared_experts,
-                split_inter_size=split_inter_size,
-                data_type=data_type,
-                network_config=network_config,
-                layer_num=layer_num,
-                quant_cfg=quant_cfg,
-            )
-        if quant_method.get_name() == "awq_marlin":
+        if quant_method is not None and quant_method.method_name == "awq_marlin":
             return FusedAWQMARLINMoeWeightTP(
                 gate_proj_name=gate_proj_name,
                 down_proj_name=down_proj_name,
@@ -55,7 +40,20 @@ class FusedMoeWeightTP:
                 quant_cfg=quant_cfg,
             )
         else:
-            raise ValueError(f"Unsupported quant method: {quant_method.get_name()}")
+            return FusedBaseMoeWeightTP(
+                gate_proj_name=gate_proj_name,
+                down_proj_name=down_proj_name,
+                up_proj_name=up_proj_name,
+                e_score_correction_bias_name=e_score_correction_bias_name,
+                weight_prefix=weight_prefix,
+                n_routed_experts=n_routed_experts,
+                num_fused_shared_experts=num_fused_shared_experts,
+                split_inter_size=split_inter_size,
+                data_type=data_type,
+                network_config=network_config,
+                layer_num=layer_num,
+                quant_cfg=quant_cfg,
+            )
 
 
 class FusedBaseMoeWeightTP(BaseWeight):
@@ -326,7 +324,7 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
         self.group_size = hf_quantization_config.get("group_size", 128)
         self.pack_factor = 32 // self.num_bits
         self.has_processed_weight = False
-        assert self.quant_method.get_name() == "awq_marlin"
+        assert self.quant_method.method_name == "awq_marlin"
 
         self.w1_weight_name = gate_proj_name
         self.w2_weight_name = down_proj_name

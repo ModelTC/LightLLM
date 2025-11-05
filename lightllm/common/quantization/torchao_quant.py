@@ -43,6 +43,10 @@ class AOBaseQuantizationMethod(QuantizationMethod):
     def apply(self, input_tensor, weights, bias=None, out=None, use_custom_tensor_mananger=True):
         return F.linear(input_tensor, weights, bias)
 
+    @property
+    def method_name(self):
+        return "ao-base"
+
 
 @QUANTMETHODS.register(["ao-w4a16-256"])
 class AOW4A16QuantizationMethodGroup256(AOBaseQuantizationMethod):
@@ -50,6 +54,10 @@ class AOW4A16QuantizationMethodGroup256(AOBaseQuantizationMethod):
         super().__init__()
         self.group_size = 256
         self.quant_func = int4_weight_only(group_size=self.group_size)
+
+    @property
+    def method_name(self):
+        return "ao-w4a16-256"
 
 
 @QUANTMETHODS.register(["ao-w4a16-128"])
@@ -59,6 +67,10 @@ class AOW4A16QuantizationMethodGroup128(AOBaseQuantizationMethod):
         self.group_size = 128
         self.quant_func = int4_weight_only(group_size=self.group_size)
 
+    @property
+    def method_name(self):
+        return "ao-w4a16-128"
+
 
 @QUANTMETHODS.register(["ao-w4a16-64"])
 class AOW4A16QuantizationMethodGroup64(AOBaseQuantizationMethod):
@@ -66,6 +78,10 @@ class AOW4A16QuantizationMethodGroup64(AOBaseQuantizationMethod):
         super().__init__()
         self.group_size = 64
         self.quant_func = int4_weight_only(group_size=self.group_size)
+
+    @property
+    def method_name(self):
+        return "ao-w4a16-64"
 
 
 @QUANTMETHODS.register(["ao-w4a16-32"])
@@ -75,6 +91,10 @@ class AOW4A16QuantizationMethodGroup32(AOBaseQuantizationMethod):
         self.group_size = 32
         self.quant_func = int4_weight_only(group_size=self.group_size)
 
+    @property
+    def method_name(self):
+        return "ao-w4a16-32"
+
 
 @QUANTMETHODS.register("ao-w8a8")
 class AOW8A8QuantizationMethod(AOBaseQuantizationMethod):
@@ -82,12 +102,20 @@ class AOW8A8QuantizationMethod(AOBaseQuantizationMethod):
         super().__init__()
         self.quant_func = int8_dynamic_activation_int8_weight()
 
+    @property
+    def method_name(self):
+        return "ao-w8a8"
+
 
 @QUANTMETHODS.register("ao-w8a16")
 class AOW8A16QuantizationMethod(AOBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.quant_func = int8_weight_only()
+
+    @property
+    def method_name(self):
+        return "ao-w8a16"
 
 
 @QUANTMETHODS.register("ao-fp8w8a16")
@@ -98,6 +126,10 @@ class AOFP8W8A16QuantizationMethod(AOBaseQuantizationMethod):
         assert is_cuda_8_9, "FP8 requires GPU with compute capability >= 8.9"
         self.quant_func = float8_weight_only()
 
+    @property
+    def method_name(self):
+        return "ao-fp8w8a16"
+
 
 @QUANTMETHODS.register("ao-fp6w6a16")
 class AOFP6W6A16QuantizationMethod(AOBaseQuantizationMethod):
@@ -105,3 +137,7 @@ class AOFP6W6A16QuantizationMethod(AOBaseQuantizationMethod):
         super().__init__()
         assert TORCH_VERSION_AT_LEAST_2_5, "torchao fp6 requires torch >=2.5"
         self.quant_func = fpx_weight_only(3, 2)
+
+    @property
+    def method_name(self):
+        return "ao-fp6w6a16"

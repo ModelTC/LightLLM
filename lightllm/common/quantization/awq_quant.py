@@ -42,6 +42,10 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
         """ """
         pass
 
+    @property
+    def method_name(self):
+        return "awq-base"
+
 
 @QUANTMETHODS.register("awq")
 class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
@@ -52,7 +56,8 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         self.weight_zero_point_suffix = "qzeros"
         self.weight_suffix = "qweight"
 
-    def get_name(self):
+    @property
+    def method_name(self):
         return "awq"
 
     def quantize(self, weight: torch.Tensor):
@@ -87,7 +92,8 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         self.workspace = marlin_make_workspace_new(torch.device("cuda"))
         self.vllm_quant_type = TYPE_MAP[self.nbits]
 
-    def get_name(self):
+    @property
+    def method_name(self):
         return "awq_marlin"
 
     def quantize(self, weight: torch.Tensor):

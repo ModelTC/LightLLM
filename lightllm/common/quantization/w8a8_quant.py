@@ -34,6 +34,10 @@ class BaseQuantizationMethod(QuantizationMethod):
         """ """
         pass
 
+    @property
+    def method_name(self):
+        return "w8a8-base"
+
 
 @QUANTMETHODS.register(["vllm-w8a8", "w8a8"])
 class w8a8QuantizationMethod(BaseQuantizationMethod):
@@ -70,6 +74,10 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
         return out
+
+    @property
+    def method_name(self):
+        return "vllm-w8a8"
 
 
 @QUANTMETHODS.register(["vllm-fp8w8a8", "fp8w8a8"])
@@ -114,6 +122,10 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         cutlass_scaled_mm(out, x_q, weights[0], x_scale, weights[1], bias)
         return out
 
+    @property
+    def method_name(self):
+        return "vllm-fp8w8a8"
+
 
 @QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128"])
 class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
@@ -152,3 +164,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
             input_scale = input_scale.t().contiguous().t()
             cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
         return out
+
+    @property
+    def method_name(self):
+        return "vllm-fp8w8a8-b128"

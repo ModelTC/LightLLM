@@ -20,7 +20,7 @@ class ROWMMWeight(MMWeight):
         if quant_method is None or not quantized_weight:
             return UnquantizedROWMMWeight
 
-        return ROWBMM_WEIGHT_CLS_MAP[quant_method.get_name()]
+        return ROWBMM_WEIGHT_CLS_MAP[quant_method.method_name]
 
 
 class MultiROWMMWeight(MMWeight):
@@ -29,7 +29,7 @@ class MultiROWMMWeight(MMWeight):
         if quant_method is None or not quantized_weight:
             return UnquantizedMultiROWMMWeight
 
-        return MULTI_ROWBMM_WEIGHT_CLS_MAP[quant_method.get_name()]
+        return MULTI_ROWBMM_WEIGHT_CLS_MAP[quant_method.method_name]
 
 
 class ROWBMMWeight(MMWeight):
@@ -369,13 +369,13 @@ class AWQMARLINMultiROWMMWeight(AWQMultiROWMMWeight):
 
 
 ROWBMM_WEIGHT_CLS_MAP = {
-    "fp8w8a8b128": W8A8B128ROWMMWeight,
+    "deepgemm-fp8w8a8-b128": W8A8B128ROWMMWeight,
     "awq": AWQROWMMWeight,
     "awq_marlin": AWQMARLINROWMMWeight,
 }
 
 MULTI_ROWBMM_WEIGHT_CLS_MAP = {
-    "fp8w8a8b128": W8A8B128MultiROWMMWeight,
+    "deepgemm-fp8w8a8-b128": W8A8B128MultiROWMMWeight,
     "awq": AWQMultiROWMMWeight,
     "awq_marlin": AWQMARLINMultiROWMMWeight,
 }
