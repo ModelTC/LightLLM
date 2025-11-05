@@ -36,8 +36,17 @@ class TransformerLayerWeight(BaseLayerWeight):
         """
         for attr_name in dir(self):
             attr = getattr(self, attr_name, None)
-            if isinstance(attr, MultiMMWeightTpl):
+            if isinstance(attr, TransformerLayerWeight):
+                attr.load_hf_weights(weights)
+            elif isinstance(attr, MultiMMWeightTpl):
                 with self.lock:
                     attr.load_hf_weights(weights)
             elif isinstance(attr, BaseWeight):
                 attr.load_hf_weights(weights)
+
+    def verify_load(self):
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name, None)
+            if isinstance(attr, TransformerLayerWeight):
+                attr.verify_load()
+        super().verify_load()

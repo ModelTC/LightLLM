@@ -76,10 +76,10 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         else:
             window_size = (-1, -1)
 
-        cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :].reshape(
+        cache_k = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[:, 0 : self.tp_k_head_num_, :].reshape(
             -1, 1, self.tp_k_head_num_, self.head_dim_
         )
-        cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
+        cache_v = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ].reshape(-1, 1, self.tp_v_head_num_, self.head_dim_)
         q = q.reshape(-1, self.tp_q_head_num_, self.head_dim_)
@@ -112,10 +112,10 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         else:
             window_size = (-1, -1)
 
-        cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :].reshape(
+        cache_k = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[:, 0 : self.tp_k_head_num_, :].reshape(
             -1, 1, self.tp_k_head_num_, self.head_dim_
         )
-        cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
+        cache_v = infer_state.mem_manager.get_kv_buffer(self.layer_num_)[
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ].reshape(-1, 1, self.tp_v_head_num_, self.head_dim_)
         q = q.reshape(-1, self.tp_q_head_num_, self.head_dim_)

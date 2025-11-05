@@ -89,11 +89,14 @@ class MemoryManager:
         # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
         self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
 
+    def get_kv_buffer(self, layer_num: int):
+        return self.kv_buffer[layer_num]
+
     def alloc_kv_move_buffer(self, max_req_total_len):
         """
         pd 分离模式使用的特殊接口
         """
-        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
         self.kv_move_buffer = torch.empty(
             (1, max_req_total_len + 8, 2 * self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
@@ -103,7 +106,7 @@ class MemoryManager:
         return
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
 
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
