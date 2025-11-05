@@ -69,7 +69,7 @@ class MMWeightTpl(BaseWeightTpl):
                 input_tensor, self.weight, self.bias, out, use_custom_tensor_mananger=use_custom_tensor_mananger
             )
         if overlap_ctx is not None:
-            return overlap_ctx.forward(input=input_tensor, weight=self.weight, out=out)
+            return overlap_ctx.forward(input=input_tensor, weight=self.weight.t(), out=out)
         if out is None:
             shape = (input_tensor.shape[0], self.weight.shape[1])
             dtype = input_tensor.dtype

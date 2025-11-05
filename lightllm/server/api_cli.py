@@ -290,17 +290,17 @@ def make_argument_parser() -> argparse.ArgumentParser:
         choices=[
             "gemm_rs_triton_dist",
             "ag_gemm_triton_dist",
-            "gemm_ag_triton_dist",
+            "gemm_ar_triton_dist",
             "auto_triton_dist",
-            "gemm_ag_flashinfer",
+            "gemm_ar_flashinfer",
         ],
         default=None,
         help="""The type of gemm-communication overlap kernel to use.
         gemm_rs_triton_dist: use gemm_rs implemented in triton_dist.
         ag_gemm_triton_dist: use ag_gemm implemented in triton_dist.
-        gemm_ag_triton_dist: use gemm_ag implemented in triton_dist.
+        gemm_ar_triton_dist: use gemm_ar implemented in triton_dist.
         auto_triton_dist: automatically select the best gemm-communication overlap kernel.
-        gemm_ag_flashinfer: use gemm_ag implemented in flashinfer.""",
+        gemm_ar_flashinfer: use gemm_ar implemented in flashinfer.""",
     )
     parser.add_argument(
         "--enable_dp_prefill_balance",

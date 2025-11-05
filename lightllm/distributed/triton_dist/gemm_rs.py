@@ -44,7 +44,7 @@ class TritonDistGemmRSCTX(OverlapCTX):
             self.rs_stream = torch.cuda.Stream()
         self.is_persistent = is_ge_sm90()
         # The default value is True, which means the scatter and gather will be fused into a single kernel.
-        self.fuse_scatter = True
+        self.fuse_scatter = False
         self.gemm_rs_ctx = create_gemm_rs_context(
             max_M=self.batch_max_tokens,
             N=N,
@@ -81,7 +81,6 @@ def gemm_rs_op(
     fuse_scatter: bool = False,
     output: Optional[torch.Tensor] = None,
 ):
-    weight = weight.t()
     if fuse_scatter:
         assert ctx.rs_ctx.nnodes == 1, "`fuse_scatter` does not support multi node`"
     world_size = ctx.rs_ctx.world_size
