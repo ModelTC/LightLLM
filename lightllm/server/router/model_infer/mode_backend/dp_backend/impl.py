@@ -29,7 +29,7 @@ from .control_state import DPControlState
 from lightllm.common.mem_manager import MemoryManager
 import torch.multiprocessing as mp
 
-min_trans_token_num = os.getenv("MIN_TRANS_TOKEN_NUM", 128)
+min_trans_token_num = os.getenv("MIN_TRANS_TOKEN_NUM", 512)
 
 
 class DPChunkedPrefillBackend(ModeBackend):
@@ -82,12 +82,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         if self.enable_dp_prompt_cache_fetch:
             torch.cuda.set_device(get_current_device_id())
 
-            from .p2p_fix import reduce_tensor
+            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import reduce_tensor
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
-
-            # 必须先设置 CUDA 设备上下文，因为序列化和反序列化 CUDA tensor 时
-            # reduce_tensor 和 p2p_fix_rebuild_cuda_tensor 都会调用 torch.cuda.current_device()
 
             for _ in range(self.node_world_size - 1):
                 self.mem_queue.put(self.model.mem_manager)
@@ -100,7 +97,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                     self.mem_managers.append(self.model.mem_manager)
             return
 
-    # 一些可以复用的通用功能函数
     def _init_reqs(self, reqs: List[Tuple]):
         my_reqs = reqs
         other_reqs = []
@@ -124,8 +120,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         input_token_ids = shm_req.shm_prompt_ids.arr[0 : shm_req.input_len]
         key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
         key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-        share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
-        return share_node, kv_len, value_tensor
+        _, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+        return kv_len, value_tensor
 
     def _post_init_reqs(self, infer_reqs: List[InferReq], other_reqs: List[Tuple] = []):
         my_match = []
@@ -136,7 +132,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 continue
             shm_req = r.shm_req
 
-            _, kv_len, value_tensor = self._match_radix_cache(shm_req)
+            kv_len, value_tensor = self._match_radix_cache(shm_req)
             # only the first rank is ok
             if self.rank_in_dp == 0:
                 with g_infer_context.shm_req_manager.get_req_lock_by_index(shm_req.index_in_shm_mem):
@@ -156,7 +152,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 shm_req.link_prompt_ids_shm_array()
                 shm_req.link_kv_indexes_shm_array()
 
-                _, kv_len, value_tensor = self._match_radix_cache(shm_req)
+                kv_len, value_tensor = self._match_radix_cache(shm_req)
                 with g_infer_context.shm_req_manager.get_req_lock_by_index(shm_req.index_in_shm_mem):
                     if kv_len > shm_req.dp_max_kv_len:
                         shm_req.dp_max_kv_len = kv_len
