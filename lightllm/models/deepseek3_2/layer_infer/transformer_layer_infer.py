@@ -76,7 +76,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         self,
         q: torch.Tensor,
         kv,
-        infer_state: Deepseek3_2FlashInferStateInfo,
+        infer_state: Deepseek3_2FlashAttentionInferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
