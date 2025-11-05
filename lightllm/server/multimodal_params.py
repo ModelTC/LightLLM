@@ -48,7 +48,7 @@ class AudioItem:
             return
 
         except Exception as e:
-            raise ValueError(f"Failed to read image type={self._type}, data[:100]={self._data[:100]}: {e}!")
+            raise ValueError(f"Failed to read audio type={self._type}, data[:100]={self._data[:100]}: {e}!")
 
     def read(self):
         assert self._preload_data is not None
