@@ -50,7 +50,7 @@ class MultiLevelKvCacheModule(object):
             match_tokens = len(page_list) * token_page_size
             # 更新命中的 cpu kv cache 长度.
             if is_master_in_dp:
-                req.shm_req.cpu_prompt_cache_len = match_tokens
+                req.shm_req.cpu_prompt_cache_len = match_tokens - req.shm_req.disk_prompt_cache_len
 
             need_token_num = match_tokens - req.cur_kv_len
             # 多匹配了一定数量的token同时请求长度大于一定的长度，才进行复制操作，不然操作效率不高，代价过高
@@ -249,13 +249,16 @@ class MultiLevelKvCacheModule(object):
             trans_ok_tasks: List[TransTask] = [self.cpu_cache_handle_queue.popleft() for _ in range(item_size)]
 
         if item_size > 0:
-            page_array_list = [task.page_indexes for task in trans_ok_tasks]
-            page_list = torch.cat(page_array_list, dim=0).tolist()
+            page_array_list = [task.page_indexes.tolist() for task in trans_ok_tasks]
             if self.backend.is_master_in_dp:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
-                self.cpu_cache_client.update_pages_status_to_ready(
-                    page_list=page_list, deref=True, disk_offload_enable=self.args.enable_disk_cache
-                )
+                for pages in page_array_list:
+                    if not pages:
+                        continue
+                    # Keep per-req grouping so disk cache hashes stay aligned with req prefixes.
+                    self.cpu_cache_client.update_pages_status_to_ready(
+                        page_list=pages, deref=True, disk_offload_enable=self.args.enable_disk_cache
+                    )
                 self.cpu_cache_client.lock.release()
             for task in trans_ok_tasks:
                 task.req_obj.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
