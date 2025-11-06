@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
+    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, is_sub_mem_manager=False):
         self.size = size
         self.head_num = head_num
         self.head_dim = head_dim
@@ -47,15 +47,16 @@ class MemoryManager:
 
         self.can_use_mem_size = self.size
 
-        # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
-        from lightllm.utils.envs_utils import get_unique_server_name
+        if not is_sub_mem_manager:
+            # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
+            from lightllm.utils.envs_utils import get_unique_server_name
 
-        rank_in_node = get_current_rank_in_node()
-        self.shared_can_use_token_num = SharedInt(
-            f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
-        )
+            rank_in_node = get_current_rank_in_node()
+            self.shared_can_use_token_num = SharedInt(
+                f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
+            )
 
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+            self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._init_buffers(
             self.size,
             dtype,
