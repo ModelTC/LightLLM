@@ -24,12 +24,7 @@ import triton.language as tl
 from typing import Any, Callable, Dict, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.vllm_utils import vllm_ops
-from lightllm.utils.device_utils import (
-    get_device_sm_count,
-    get_device_sm_regs_num,
-    get_device_sm_shared_mem_num,
-    get_device_warp_size,
-)
+from lightllm.utils.device_utils import triton_support_tensor_descriptor
 from .moe_kernel_configs import MoeGroupedGemmKernelConfig
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
@@ -307,8 +302,8 @@ def moe_align_fused(
 @triton.jit
 def moe_align2_kernel(
     experts_token_num_ptr,  # [expert_num,]
-    mblocks_to_expert_id,  # [max_num_m_blocks,]
-    mblocks_to_m_index,  # [max_num_m_blocks,]
+    mblocks_to_tuple_info,  # [max_num_m_blocks, 3], tuple for (expert_id, m_index, token_start_index)
+    mblocks_to_tuple_info_stride_0,
     expert_num,
     max_num_m_blocks,
     BLOCK_M: tl.constexpr,
@@ -318,6 +313,10 @@ def moe_align2_kernel(
     expert_id = tl.program_id(axis=0)
     off_expert = tl.arange(0, BLOCK_EXPERT)
     expert_to_token_num = tl.load(experts_token_num_ptr + off_expert, mask=off_expert < expert_num, other=0)
+    token_start_index = tl.sum(
+        tl.where(off_expert == expert_id, tl.cumsum(expert_to_token_num) - expert_to_token_num, 0)
+    )
+
     expert_to_block_num = tl.cdiv(expert_to_token_num, BLOCK_M)
     block_starts = tl.cumsum(expert_to_block_num) - expert_to_block_num
     block_start = tl.sum(tl.where(off_expert == expert_id, block_starts, 0))
@@ -328,20 +327,25 @@ def moe_align2_kernel(
     block_off = tl.arange(0, 128)
     for start_loc in range(0, cur_block_num, 128):
         tl.store(
-            mblocks_to_expert_id + block_start + start_loc + block_off,
+            mblocks_to_tuple_info + (block_start + start_loc + block_off) * mblocks_to_tuple_info_stride_0 + 0,
             expert_id,
             mask=start_loc + block_off < cur_block_num,
         )
         tl.store(
-            mblocks_to_m_index + block_start + start_loc + block_off,
+            mblocks_to_tuple_info + (block_start + start_loc + block_off) * mblocks_to_tuple_info_stride_0 + 1,
             start_loc + block_off,
+            mask=start_loc + block_off < cur_block_num,
+        )
+        tl.store(
+            mblocks_to_tuple_info + (block_start + start_loc + block_off) * mblocks_to_tuple_info_stride_0 + 2,
+            token_start_index + (start_loc + block_off) * BLOCK_M,
             mask=start_loc + block_off < cur_block_num,
         )
 
     if expert_id == expert_num - 1:
         for extra_fill_start in range(block_start + cur_block_num, max_num_m_blocks, 128):
             tl.store(
-                mblocks_to_expert_id + extra_fill_start + block_off,
+                mblocks_to_tuple_info + (extra_fill_start + block_off) * mblocks_to_tuple_info_stride_0 + 0,
                 -1,
                 mask=extra_fill_start + block_off < max_num_m_blocks,
             )
@@ -355,24 +359,25 @@ def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, blo
     """
     max_num_tokens_padded = token_num_mul_topk_num + exports_token_num.shape[0] * (block_m - 1)
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_m)
-    mblocks_to_expert_id = torch.empty((max_num_m_blocks,), dtype=torch.int32, device="cuda")
-    mblocks_to_m_index = torch.empty((max_num_m_blocks,), dtype=torch.int32, device="cuda")
+    # first is expert, second is m_index, third is token_start_index
+    mblocks_to_tuple_info = torch.empty((max_num_m_blocks, 3), dtype=torch.int32, device="cuda")
+
     expert_num = exports_token_num.shape[0]
 
     grid = (expert_num,)
     moe_align2_kernel[grid](
-        exports_token_num,
-        mblocks_to_expert_id,
-        mblocks_to_m_index,
-        expert_num,
-        max_num_m_blocks,
+        experts_token_num_ptr=exports_token_num,
+        mblocks_to_tuple_info=mblocks_to_tuple_info,
+        mblocks_to_tuple_info_stride_0=mblocks_to_tuple_info.stride(0),
+        expert_num=expert_num,
+        max_num_m_blocks=max_num_m_blocks,
         BLOCK_M=block_m,
         BLOCK_EXPERT=triton.next_power_of_2(expert_num),
         num_warps=4,
         num_stages=1,
     )
 
-    return mblocks_to_expert_id, mblocks_to_m_index
+    return mblocks_to_tuple_info
 
 
 @triton.jit

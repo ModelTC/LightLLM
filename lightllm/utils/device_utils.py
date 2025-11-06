@@ -230,7 +230,7 @@ def set_sm_limit(percent: int, gpu_index=0):
 
 
 @lru_cache(maxsize=None)
-def triton_support_tensor_descriptor():
+def triton_support_tensor_descriptor() -> bool:
     try:
         from triton.tools.tensor_descriptor import TensorDescriptor
 
