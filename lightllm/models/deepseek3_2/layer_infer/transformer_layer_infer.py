@@ -8,7 +8,7 @@ from sgl_kernel.flash_attn import flash_attn_with_kvcache
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_infer.nsa_indexer_layer_inder import NSAIndexerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
-from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2FlashAttentionInferStateInfo
+from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2FlashAttentionStateInfo
 from lightllm.models.deepseek3_2.triton_kernel.token_group_quant import per_token_group_quant_mla_deep_gemm_masked_fp8
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -30,7 +30,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
     def _get_qkv(
         self,
         input: torch.Tensor,
-        infer_state: Deepseek3_2FlashAttentionInferStateInfo,
+        infer_state: Deepseek3_2FlashAttentionStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
@@ -68,6 +68,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
     @override
     def _bind_attention(self):
+        super()._bind_attention()
         self._context_attention_kernel = partial(Deepseek3_2TransformerLayerInfer._context_attention_flashmla_kernel_with_indexer, self)
         self._token_attention_kernel = partial(Deepseek3_2TransformerLayerInfer._token_attention_flashmla_kernel_with_indexer, self)
         pass
@@ -76,7 +77,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         self,
         q: torch.Tensor,
         kv,
-        infer_state: Deepseek3_2FlashAttentionInferStateInfo,
+        infer_state: Deepseek3_2FlashAttentionStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
@@ -87,18 +88,19 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         topk_indices = self.indexer.get_indices(
             infer_state,
             layer_weight.indexer_layer_weight,
-        )
+        ).unsqueeze(1)
+
         mla_out, _, _ = flash_mla_sparse_fwd(
             q=q_all,
             kv=infer_state.mem_manager.kv_buffer[self.layer_num_],
-            indices=topk_indices.unsqueeze(1),
+            indices=topk_indices,
             sm_scale=self.softmax_scale,
             d_v=self.kv_lora_rank,
         )
         return mla_out
 
     def _token_attention_flashmla_kernel_with_indexer(
-        self, q, infer_state: Deepseek3_2FlashAttentionInferStateInfo, layer_weight: Deepseek3_2TransformerLayerWeight, out=None
+        self, q, infer_state: Deepseek3_2FlashAttentionStateInfo, layer_weight: Deepseek3_2TransformerLayerWeight, out=None
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
@@ -125,3 +127,4 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             return_softmax_lse=False,
             num_splits=0, # TODO enable_deterministic_inference
         )
+        return o
