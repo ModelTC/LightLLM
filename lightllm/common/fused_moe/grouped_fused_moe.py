@@ -478,7 +478,13 @@ def grouped_matmul_kernel(
 
     if use_fp8_w8a8:
         if block_size_k > 0 and block_size_n > 0:
-            a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num) * (token_stride_0 // block_size_k)
+            token_scale_stride0 = token_stride_0 // block_size_k
+            if TOKEN_INPUT_USE_TMA:
+                assert MUL_ROUTED_WEIGHT is True
+                a_scale_ptrs = token_scale_ptr + (token_start_index + tl.arange(0, BLOCK_SIZE_M)) * token_scale_stride0
+            else:
+                a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num) * token_scale_stride0
+
             offs_bsn = offs_bn // block_size_n
             b_scale_ptrs = weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bsn * weight_scale_stride1
         else:
@@ -509,7 +515,9 @@ def grouped_matmul_kernel(
                 a = tl.load(a_ptrs, mask=(token_mask[None, :]), other=0.0)
 
             if WEIGHT_USE_TMA:
-                weight_desc.load([expert_id, tile_n_idx * BLOCK_SIZE_N, k_start]).reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
+                b = weight_desc.load([expert_id, tile_n_idx * BLOCK_SIZE_N, k_start]).reshape(
+                    BLOCK_SIZE_N, BLOCK_SIZE_K
+                )
             elif NEED_K_MASK:
                 b = tl.load(b_ptrs, mask=(offs_k[None, :] < k - k_start), other=0.0)
             else:
@@ -524,7 +532,11 @@ def grouped_matmul_kernel(
                 a = tl.load(a_ptrs, mask=(token_mask[:, None]), other=0.0)
 
             if WEIGHT_USE_TMA:
-                weight_desc.load([expert_id, tile_n_idx * BLOCK_SIZE_N, k_start]).reshape(BLOCK_SIZE_N, BLOCK_SIZE_K).T
+                b = (
+                    weight_desc.load([expert_id, tile_n_idx * BLOCK_SIZE_N, k_start])
+                    .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
+                    .T
+                )
             elif NEED_K_MASK:
                 b = tl.load(b_ptrs, mask=(offs_k[:, None] < k - k_start), other=0.0)
             else:
@@ -727,6 +739,45 @@ def grouped_matmul(
         if reused_block_size_m != BLOCK_SIZE_M:
             mblocks_to_tuple_info = moe_align2(token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M)
 
+    support_tma = triton_support_tensor_descriptor()
+
+    if support_tma:
+        # TMA descriptors require a global memory allocation
+        def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+            return torch.empty(size, device="cuda", dtype=torch.int8)
+
+        triton.set_allocator(alloc_fn)
+
+    # moe 分为 up 和 down 两次计算，当 mul_routed_weight 为 False 的时候为 up
+    is_up_moe = not mul_routed_weight
+
+    if is_up_moe:
+        TOKEN_INPUT_USE_TMA = False
+        WEIGHT_USE_TMA = support_tma
+        OUT_SORTED = support_tma
+    else:
+        TOKEN_INPUT_USE_TMA = support_tma
+        WEIGHT_USE_TMA = support_tma
+        OUT_SORTED = False
+
+    if TOKEN_INPUT_USE_TMA:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        token_desc = TensorDescriptor(
+            token_inputs, token_inputs.shape, token_inputs.stride(), [BLOCK_SIZE_M, BLOCK_SIZE_K]
+        )
+    else:
+        token_desc = None
+
+    if WEIGHT_USE_TMA:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        weight_desc = TensorDescriptor(
+            expert_weights, expert_weights.shape, expert_weights.stride(), [1, BLOCK_SIZE_N, BLOCK_SIZE_K]
+        )
+    else:
+        weight_desc = None
+
     block_num = triton.cdiv(n, BLOCK_SIZE_N) * mblocks_to_tuple_info.shape[0]
 
     grid = (block_num,)
@@ -751,11 +802,11 @@ def grouped_matmul(
         if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 3
         else 0,
         token_ptr=token_inputs,
-        token_desc=None,
+        token_desc=token_desc,
         token_stride_0=token_inputs.stride(0),
         token_stride_1=token_inputs.stride(1),
         weights_ptr=expert_weights,
-        weight_desc=None,
+        weight_desc=weight_desc,
         weight_stride_0=expert_weights.stride(0),
         weight_stride_1=expert_weights.stride(1),
         weight_stride_2=expert_weights.stride(2),
@@ -787,6 +838,9 @@ def grouped_matmul(
         num_warps=num_warps,
         num_stages=num_stages,
         ADD_BIAS=bias is not None,
+        OUT_SORTED=OUT_SORTED,
+        TOKEN_INPUT_USE_TMA=TOKEN_INPUT_USE_TMA,
+        WEIGHT_USE_TMA=WEIGHT_USE_TMA,
     )
     return (mblocks_to_tuple_info, BLOCK_SIZE_M)
 
