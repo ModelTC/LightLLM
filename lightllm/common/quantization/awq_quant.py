@@ -6,6 +6,10 @@ import torch.nn.functional as F
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 from typing import Any
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
 
 if HAS_VLLM:
     awq_dequantize = vllm_ops.awq_dequantize
@@ -35,12 +39,17 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
         self.cache_manager = g_cache_manager
 
     def quantize(self, weight: torch.Tensor):
-        """ """
-        pass
+        raise NotImplementedError("AWQ online quantization is not supported yet.")
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None):
-        """ """
-        pass
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
+        raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     @property
     def method_name(self):
@@ -63,8 +72,18 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def quantize(self, weight: torch.Tensor):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
-        qweight, weight_scale, qzeros = weights
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
+        qweight = weight_pack.weight
+        weight_scale = weight_pack.weight_scale
+        qzeros = weight_pack.weight_zero_point
+        bias = weight_pack.bias
 
         NEED_DEQUANT_WEIGHT = input_tensor.shape[:-1].numel() >= 256
         if NEED_DEQUANT_WEIGHT:
@@ -128,8 +147,18 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             num_bits=self.hf_quantization_config["bits"],
         )
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
-        qweight, weight_scale, qzeros = weights
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
+        qweight = weight_pack.weight
+        weight_scale = weight_pack.weight_scale
+        qzeros = weight_pack.weight_zero_point
+        bias = weight_pack.bias
         reshaped_x = input_tensor.reshape(-1, input_tensor.shape[-1])
 
         use_atomic_add = should_use_atomic_add_reduce(

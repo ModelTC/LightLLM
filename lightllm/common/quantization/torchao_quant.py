@@ -3,12 +3,13 @@ import torch
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
 import torch.nn.functional as F
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
 
 try:
     HAS_TORCH_AO = True
-    from torchao.dtypes import to_affine_quantized_intx, AffineQuantizedTensor
-    from torchao.dtypes import TensorCoreTiledLayoutType
-    from torchao.quantization.quant_primitives import MappingType, ZeroPointDomain
     from torchao.quantization import (
         int4_weight_only,
         int8_weight_only,
@@ -38,9 +39,18 @@ class AOBaseQuantizationMethod(QuantizationMethod):
         dummy_linear = torch.nn.Linear(weight.shape[1], weight.shape[0], bias=False)
         dummy_linear.weight = torch.nn.Parameter(weight.cuda(self.device_id_))
         quantize_(dummy_linear, self.quant_func)
-        return dummy_linear.weight
+        return dummy_linear.weight, None, None
 
-    def apply(self, input_tensor, weights, bias=None, out=None, use_custom_tensor_mananger=True):
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
+        weights = weight_pack.weight
+        bias = weight_pack.bias
         return F.linear(input_tensor, weights, bias)
 
     @property
