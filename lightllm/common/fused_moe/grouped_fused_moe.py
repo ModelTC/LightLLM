@@ -393,9 +393,11 @@ def grouped_matmul_kernel(
     weight_scale_stride1,
     weight_scale_stride2,
     token_ptr,  # [token_num, hidden_dim]
+    token_desc,  # triton tensor describdescriptor
     token_stride_0,
     token_stride_1,
     weights_ptr,  # [expert_num, N, K]
+    weight_desc,  # triton tensor describdescriptor
     weight_stride_0,
     weight_stride_1,
     weight_stride_2,
@@ -428,6 +430,8 @@ def grouped_matmul_kernel(
     NEED_TRANS: tl.constexpr = False,
     ADD_BIAS: tl.constexpr = False,
     OUT_SORTED: tl.constexpr = False,
+    TOKEN_INPUT_USE_TMA: tl.constexpr = False,
+    WEIGHT_USE_TMA: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
 
@@ -453,7 +457,8 @@ def grouped_matmul_kernel(
     tile_m_idx = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 1)
     tile_n_idx = pid_n
 
-    if OUT_SORTED:
+    if OUT_SORTED or TOKEN_INPUT_USE_TMA:
+        assert OUT_SORTED and TOKEN_INPUT_USE_TMA is False
         # get token start index in inputs
         token_start_index = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 2)
 
@@ -490,33 +495,44 @@ def grouped_matmul_kernel(
         b_ptrs = weights_ptr + weight_stride_0 * expert_id + offs_k[:, None] + offs_bn[None, :] * weight_stride_1
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    for step_k in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
+    for k_start in range(0, k, BLOCK_SIZE_K):
         # hint to Triton compiler to do proper loop pipelining
         # tl.multiple_of(a_ptrs, [16, 16])
         # tl.multiple_of(b_ptrs, [16, 16])
 
         if NEED_TRANS:
-            if NEED_K_MASK:
-                a = tl.load(
-                    a_ptrs, mask=(token_mask[None, :]) & (offs_k[:, None] < k - step_k * BLOCK_SIZE_K), other=0.0
-                )
-                b = tl.load(b_ptrs, mask=(offs_k[None, :] < k), other=0.0)
+            if TOKEN_INPUT_USE_TMA:
+                a = token_desc.load([token_start_index, k_start]).T
+            elif NEED_K_MASK:
+                a = tl.load(a_ptrs, mask=(token_mask[None, :]) & (offs_k[:, None] < k - k_start), other=0.0)
             else:
                 a = tl.load(a_ptrs, mask=(token_mask[None, :]), other=0.0)
+
+            if WEIGHT_USE_TMA:
+                weight_desc.load([expert_id, tile_n_idx * BLOCK_SIZE_N, k_start]).reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
+            elif NEED_K_MASK:
+                b = tl.load(b_ptrs, mask=(offs_k[None, :] < k - k_start), other=0.0)
+            else:
                 b = tl.load(b_ptrs)
+
         else:
-            if NEED_K_MASK:
-                a = tl.load(
-                    a_ptrs, mask=(token_mask[:, None]) & (offs_k[None, :] < k - step_k * BLOCK_SIZE_K), other=0.0
-                )
-                b = tl.load(b_ptrs, mask=(offs_k[:, None] < k), other=0.0)
+            if TOKEN_INPUT_USE_TMA:
+                a = token_desc.load([token_start_index, k_start])
+            elif NEED_K_MASK:
+                a = tl.load(a_ptrs, mask=(token_mask[:, None]) & (offs_k[None, :] < k - k_start), other=0.0)
             else:
                 a = tl.load(a_ptrs, mask=(token_mask[:, None]), other=0.0)
+
+            if WEIGHT_USE_TMA:
+                weight_desc.load([expert_id, tile_n_idx * BLOCK_SIZE_N, k_start]).reshape(BLOCK_SIZE_N, BLOCK_SIZE_K).T
+            elif NEED_K_MASK:
+                b = tl.load(b_ptrs, mask=(offs_k[:, None] < k - k_start), other=0.0)
+            else:
                 b = tl.load(b_ptrs)
 
         if use_fp8_w8a8:
             if block_size_k > 0 and block_size_n > 0:
-                offs_ks = step_k * BLOCK_SIZE_K // block_size_k
+                offs_ks = k_start // block_size_k
                 a_scale = tl.load(a_scale_ptrs + offs_ks, mask=token_mask, other=0.0)
                 b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
                 if NEED_TRANS:
@@ -735,9 +751,11 @@ def grouped_matmul(
         if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 3
         else 0,
         token_ptr=token_inputs,
+        token_desc=None,
         token_stride_0=token_inputs.stride(0),
         token_stride_1=token_inputs.stride(1),
         weights_ptr=expert_weights,
+        weight_desc=None,
         weight_stride_0=expert_weights.stride(0),
         weight_stride_1=expert_weights.stride(1),
         weight_stride_2=expert_weights.stride(2),
