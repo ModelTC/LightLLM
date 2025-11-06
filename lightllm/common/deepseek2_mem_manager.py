@@ -14,8 +14,8 @@ logger = init_logger(__name__)
 
 
 class Deepseek2MemoryManager(MemoryManager):
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
-        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
+    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, is_sub_mem_manager=False):
+        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction, is_sub_mem_manager)
 
     def get_cell_size(self):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
