@@ -186,7 +186,7 @@ class MultiMMWeightTpl(MMWeightTpl):
             has_weight_zero_point=has_weight_zero_point,
         )
         self.weight_names = weight_names
-        self.bias_names = bias_names
+        self.bias_names = bias_names if bias_names is not None else []
         self.mm_params: List[MMWeightPack] = [
             MMWeightPack(
                 weight=None,
@@ -303,7 +303,7 @@ class SingleQuantizedMMWeightTpl(SingleMMWeightTpl):
             self._process_weight_scale(weight_scale)
 
     def _load_weight_zero_point(self, weights: Dict[str, torch.Tensor]) -> None:
-        if self.weight_zero_point_name is not None and self.weight_zero_point_name in weights:
+        if self.mm_param.has_weight_zero_point and self.weight_zero_point_name in weights:
             weight_zero_point = weights[self.weight_zero_point_name]
             weight_zero_point = self.param_slicer._slice_weight_zero_point(weight_zero_point)
             self._process_weight_zero_point(weight_zero_point)
@@ -380,7 +380,7 @@ class MultiQuantizedMMWeightTpl(MultiMMWeightTpl):
 
     def _load_weight_zero_point(self, weights: Dict[str, torch.Tensor]) -> None:
         for i in range(len(self.weight_names)):
-            if self.weight_zero_point_names[i] is not None and self.weight_zero_point_names[i] in weights:
+            if self.mm_params[i].has_weight_zero_point and self.weight_zero_point_names[i] in weights:
                 weight_zero_point = weights[self.weight_zero_point_names[i]]
                 weight_zero_point = self.param_slicer._slice_weight_zero_point(weight_zero_point)
                 self.mm_params[i].weight_zero_point = weight_zero_point
@@ -474,7 +474,7 @@ class DeepGemmFP8W8A8B128MultiMMWeight(MultiQuantizedMMWeightTpl):
         )
 
     def _process_weight_scale(self, weight_scale) -> None:
-        self.mm_param.weight_scale = weight_scale.cuda(get_current_device_id()).transpose(0, 1)
+        self.mm_param.weight_scale = weight_scale.to(torch.float).cuda(get_current_device_id()).transpose(0, 1)
         return
 
     def _process_weight(self, weight) -> None:

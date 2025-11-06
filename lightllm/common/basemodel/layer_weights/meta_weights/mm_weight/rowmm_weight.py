@@ -178,17 +178,23 @@ class AWQMARLINROWMMWeight(AWQROWMMWeight):
         super().__init__(weight_name, data_type, bias_name, quant_method, tp_rank, tp_world_size)
 
     def _process_weight(self, weight: torch.Tensor) -> torch.Tensor:
-        return self.quant_method._process_weight_after_loading(weight.cuda(get_current_device_id()))
+        new_weight = self.quant_method._process_weight_after_loading(weight.cuda(get_current_device_id()))
+        self.mm_param.weight = new_weight
+        return
 
     def _process_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
-        return self.quant_method._process_weight_scale_after_loading(
+        new_weight_scale = self.quant_method._process_weight_scale_after_loading(
             weight_scale.cuda(get_current_device_id()).to(self.data_type_)
         )
+        self.mm_param.weight_scale = new_weight_scale
+        return
 
     def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
-        return self.quant_method._process_weight_zero_point_after_loading(
+        new_weight_zero_point = self.quant_method._process_weight_zero_point_after_loading(
             weight_zero_point.cuda(get_current_device_id())
         )
+        self.mm_param.weight_zero_point = new_weight_zero_point
+        return
 
 
 class AWQMARLINMultiROWMMWeight(AWQMultiROWMMWeight):
@@ -204,17 +210,23 @@ class AWQMARLINMultiROWMMWeight(AWQMultiROWMMWeight):
         super().__init__(weight_names, data_type, bias_names, quant_method, tp_rank, tp_world_size)
 
     def _process_weight(self, weight: torch.Tensor) -> torch.Tensor:
-        return self.quant_method._process_weight_after_loading(weight.cuda(get_current_device_id()))
+        new_weight = self.quant_method._process_weight_after_loading(weight.cuda(get_current_device_id()))
+        self.mm_param.weight = new_weight
+        return
 
     def _process_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
-        return self.quant_method._process_weight_scale_after_loading(
+        new_weight_scale = self.quant_method._process_weight_scale_after_loading(
             weight_scale.cuda(get_current_device_id()).to(self.data_type_)
         )
+        self.mm_param.weight_scale = new_weight_scale
+        return
 
     def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
-        return self.quant_method._process_weight_zero_point_after_loading(
+        new_weight_zero_point = self.quant_method._process_weight_zero_point_after_loading(
             weight_zero_point.cuda(get_current_device_id())
         )
+        self.mm_param.weight_zero_point = new_weight_zero_point
+        return
 
 
 ROWMM_WEIGHT_CLS_MAP = {

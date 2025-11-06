@@ -1,5 +1,6 @@
 from .base_weight import BaseWeight
 from .mm_weight import (
+    MMWeightPack,
     MMWeightTpl,
     MultiMMWeightTpl,
     ROWMMWeight,

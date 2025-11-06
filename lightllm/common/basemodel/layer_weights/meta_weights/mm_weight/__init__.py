@@ -1,4 +1,5 @@
 from .mm_weight import (
+    MMWeightPack,
     MMWeightTpl,
     MultiMMWeightTpl,
     AWQMultiMMWeightTpl,

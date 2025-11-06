@@ -15,7 +15,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.rowmm_weight
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.colmm_weight import (
     UnquantizedCOLMMWeight,
-    COLBMM_WEIGHT_CLS_MAP,
+    COLMM_WEIGHT_CLS_MAP,
 )
 
 
@@ -80,4 +80,4 @@ class COLMMWeight(MMWeight):
     def _get_mmcls(cls, quant_method: QuantizationMethod, quantized_weight: bool):
         if quant_method is None or not quantized_weight:
             return UnquantizedCOLMMWeight
-        return COLBMM_WEIGHT_CLS_MAP[quant_method.method_name]
+        return COLMM_WEIGHT_CLS_MAP[quant_method.method_name]
