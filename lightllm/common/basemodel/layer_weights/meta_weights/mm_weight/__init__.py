@@ -3,15 +3,10 @@ from .mm_weight import (
     MultiMMWeightTpl,
     AWQMultiMMWeightTpl,
 )
-from .rowmm_weight import (
+from .mm_factory import (
+    MMWeight,
     ROWMMWeight,
-    ROWBMMWeight,
     MultiROWMMWeight,
-    W8A8B128ROWMMWeight,
-    W8A8B128ROWBMMWeight,
-    W8A8B128MultiROWMMWeight,
-)
-from .colmm_weight import (
+    ROWBMMWeight,
     COLMMWeight,
-    W8A8B128COLMMWeight,
 )

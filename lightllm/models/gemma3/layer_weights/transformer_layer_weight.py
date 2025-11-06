@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.rowmm_weight import ROWMMWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMMWeight
 from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import NormWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
