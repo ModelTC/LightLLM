@@ -427,6 +427,7 @@ def grouped_matmul_kernel(
     NEED_K_MASK: tl.constexpr = True,
     NEED_TRANS: tl.constexpr = False,
     ADD_BIAS: tl.constexpr = False,
+    OUT_SORTED: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
 
@@ -452,8 +453,9 @@ def grouped_matmul_kernel(
     tile_m_idx = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 1)
     tile_n_idx = pid_n
 
-    # get token start index in inputs
-    # token_start_index = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 2)
+    if OUT_SORTED:
+        # get token start index in inputs
+        token_start_index = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 2)
 
     # get the gemm size of the current problem
     cur_m = tl.load(expert_to_token_num + expert_id)
@@ -557,8 +559,13 @@ def grouped_matmul_kernel(
     c = accumulator.to(compute_type)
 
     offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = out_ptr + a_m_index[:, None] * out_stride_0 + offs_cn[None, :]
-    tl.store(c_ptrs, c, mask=(token_mask[:, None]) & (offs_cn[None, :] < n))
+
+    if OUT_SORTED:
+        c_ptrs = out_ptr + (token_start_index + tl.arange(0, BLOCK_SIZE_M))[:, None] * out_stride_0 + offs_cn[None, :]
+        tl.store(c_ptrs, c, mask=(token_mask[:, None]) & (offs_cn[None, :] < n))
+    else:
+        c_ptrs = out_ptr + a_m_index[:, None] * out_stride_0 + offs_cn[None, :]
+        tl.store(c_ptrs, c, mask=(token_mask[:, None]) & (offs_cn[None, :] < n))
 
     return
 
