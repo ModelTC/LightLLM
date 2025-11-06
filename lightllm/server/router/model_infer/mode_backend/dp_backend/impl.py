@@ -79,10 +79,10 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 
-            # 每个rank创建自己的共享内存并写入mem_manager
             self.model.mem_manager.create_shm()
 
-            # 读取所有rank的mem_manager
+            dist.barrier(group=self.node_nccl_group)
+
             self.mem_managers = []
             for rank_idx in range(self.node_world_size):
                 if rank_idx != self.rank_in_node:
@@ -154,7 +154,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     other_match.append((shm_req, kv_len, value_tensor))
 
         # wait all the ranks to finish the match
-        dist.barrier()
+        dist.barrier(group=self.node_nccl_group)
 
         # Copy the kv_indexes of this dp rank to other required req
         for match in other_match:
@@ -165,7 +165,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         self.release_all_shm_reqs([match[0] for match in other_match])
 
         # wait all the ranks to finish the copy
-        dist.barrier()
+        dist.barrier(group=self.node_nccl_group)
 
         # Perform a kv transfer, get all indexes and the corresponding dp_rank
         move_token_indexes = []
