@@ -9,8 +9,8 @@ logger = init_logger(__name__)
 
 
 class NIXLDPForDecodeNode(DPChunkedPrefillBackend):
-    def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
-        super().__init__(mem_queue=mem_queue)
+    def __init__(self, info_queue: mp.Queue) -> None:
+        super().__init__()
         self.info_queue: mp.Queue = info_queue
         self.classed_req_strict_prefill = False
         return

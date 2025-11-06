@@ -15,8 +15,11 @@ from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
+from lightllm.utils.shm_utils import create_or_link_shm
+from multiprocessing.reduction import ForkingPickler
 
 logger = init_logger(__name__)
+LIGHTLLM_MEM_MANAGER_SHM_SIZE = int(os.getenv("LIGHTLLM_MEM_MANAGER_SHM_SIZE", 1024 * 1024))
 
 
 class MemoryManager:
@@ -430,6 +433,23 @@ class MemoryManager:
                 dp_size_in_node=dp_size_in_node,
                 rank_in_dp=rank_in_dp,
             )
+
+    def create_shm(self):
+        obj_bytes = ForkingPickler.dumps(self)
+        shm = create_or_link_shm(
+            f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}", LIGHTLLM_MEM_MANAGER_SHM_SIZE
+        )
+        logger.info(f"create shm {shm.name} size {shm.size} obj size {len(obj_bytes)}")
+        shm.buf[0:4] = len(obj_bytes).to_bytes(4, "little")
+        shm.buf[4 : 4 + len(obj_bytes)] = obj_bytes
+
+    @staticmethod
+    def from_shm(rank_in_node):
+        shm = create_or_link_shm(
+            f"{get_unique_server_name()}_mem_manager_{rank_in_node}", LIGHTLLM_MEM_MANAGER_SHM_SIZE
+        )
+        bytes_len = int.from_bytes(shm.buf[0:4], "little")
+        return ForkingPickler.loads(shm.buf[4 : 4 + bytes_len])
 
 
 class ReadOnlyStaticsMemoryManager:

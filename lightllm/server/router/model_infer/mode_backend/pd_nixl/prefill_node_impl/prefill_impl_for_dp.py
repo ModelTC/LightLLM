@@ -9,8 +9,8 @@ logger = init_logger(__name__)
 
 
 class NIXLDPChunkedForPrefillNode(DPChunkedPrefillBackend):
-    def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue, mem_queues: List[mp.Queue]) -> None:
-        super().__init__(mem_queue=mem_queue, mem_queues=mem_queues)
+    def __init__(self, info_queue: mp.Queue) -> None:
+        super().__init__()
         self.support_overlap = False
         self.info_queue: mp.Queue = info_queue
         self.classed_req_no_decode = True
