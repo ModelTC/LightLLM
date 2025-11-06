@@ -382,8 +382,8 @@ def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, blo
 
 @triton.jit
 def grouped_matmul_kernel(
-    mblocks_to_expert_id,  # [max_m_block_size]
-    mblocks_to_m_index,  # [max_m_block_size]
+    mblocks_to_tuple_info,  # [max_m_block_size, 3] tuple for (expert_id, m_index, token_start_index)
+    mblocks_to_tuple_info_stride_0,  # int
     k,  # int
     n,  # int
     topk_num,  # int
@@ -444,13 +444,16 @@ def grouped_matmul_kernel(
     pid_m = first_pid_m + back_mark * (group_size_m - 1) + back_mark1 * (in_group_index % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    expert_id = tl.load(mblocks_to_expert_id + pid_m)
+    expert_id = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 0)
 
     if expert_id == -1:
         return
 
-    tile_m_idx = tl.load(mblocks_to_m_index + pid_m)
+    tile_m_idx = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 1)
     tile_n_idx = pid_n
+
+    # get token start index in inputs
+    # token_start_index = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 2)
 
     # get the gemm size of the current problem
     cur_m = tl.load(expert_to_token_num + expert_id)
@@ -693,59 +696,57 @@ def grouped_matmul(
             )
 
     if reused_mblock_infos is None:
-        mblocks_to_expert_id, mblocks_to_m_index = moe_align2(token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M)
+        mblocks_to_tuple_info = moe_align2(token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M)
     else:
         # when up group gemm and down group gemm use same BLOCK_SIZE_M,
         # can reuse (mblocks_to_expert_id, mblocks_to_m_index) created by moe_align2 kernel.
-        mblocks_to_expert_id, mblocks_to_m_index, reused_block_size_m = reused_mblock_infos
+        mblocks_to_tuple_info, reused_block_size_m = reused_mblock_infos
         if reused_block_size_m != BLOCK_SIZE_M:
-            mblocks_to_expert_id, mblocks_to_m_index = moe_align2(
-                token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M
-            )
+            mblocks_to_tuple_info = moe_align2(token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M)
 
-    block_num = triton.cdiv(n, BLOCK_SIZE_N) * mblocks_to_expert_id.shape[0]
+    block_num = triton.cdiv(n, BLOCK_SIZE_N) * mblocks_to_tuple_info.shape[0]
 
     grid = (block_num,)
 
     NEED_K_MASK = (k % BLOCK_SIZE_K) != 0
 
     grouped_matmul_kernel[grid](
-        mblocks_to_expert_id,
-        mblocks_to_m_index,
-        k,
-        n,
-        topk_num,
-        token_input_scale,
-        expert_to_weights_scale,
-        expert_to_weights_scale.stride(0)
+        mblocks_to_tuple_info=mblocks_to_tuple_info,
+        mblocks_to_tuple_info_stride_0=mblocks_to_tuple_info.stride(0),
+        k=k,
+        n=n,
+        topk_num=topk_num,
+        token_scale_ptr=token_input_scale,
+        weight_scale_ptr=expert_to_weights_scale,
+        weight_scale_stride0=expert_to_weights_scale.stride(0)
         if expert_to_weights_scale is not None and expert_to_weights_scale.ndim >= 1
         else 0,
-        expert_to_weights_scale.stride(1)
+        weight_scale_stride1=expert_to_weights_scale.stride(1)
         if expert_to_weights_scale is not None and expert_to_weights_scale.ndim >= 2
         else 0,
-        expert_to_weights_scale.stride(2)
+        weight_scale_stride2=expert_to_weights_scale.stride(2)
         if expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 3
         else 0,
-        token_inputs,
-        token_inputs.stride(0),
-        token_inputs.stride(1),
-        expert_weights,
-        expert_weights.stride(0),
-        expert_weights.stride(1),
-        expert_weights.stride(2),
-        bias,
-        bias.stride(0) if bias is not None else 0,
-        bias.stride(1) if bias is not None and bias.ndim >= 2 else 0,
-        expert_to_weights,
-        expert_to_weights.stride(0),
-        expert_to_weights.stride(1),
-        expert_to_token_num,
-        expert_to_token_index,
-        expert_to_token_index.stride(0),
-        out,
-        out.stride(0),
-        out.stride(1),
-        m_block_num=mblocks_to_expert_id.shape[0],
+        token_ptr=token_inputs,
+        token_stride_0=token_inputs.stride(0),
+        token_stride_1=token_inputs.stride(1),
+        weights_ptr=expert_weights,
+        weight_stride_0=expert_weights.stride(0),
+        weight_stride_1=expert_weights.stride(1),
+        weight_stride_2=expert_weights.stride(2),
+        bias_ptr=bias,
+        bias_stride_0=bias.stride(0) if bias is not None else 0,
+        bias_stride_1=bias.stride(1) if bias is not None and bias.ndim >= 2 else 0,
+        expert_to_weights_ptr=expert_to_weights,
+        expert_to_weights_stride0=expert_to_weights.stride(0),
+        expert_to_weights_stride1=expert_to_weights.stride(1),
+        expert_to_token_num=expert_to_token_num,
+        expert_to_token_index=expert_to_token_index,
+        expert_to_token_index_stride_0=expert_to_token_index.stride(0),
+        out_ptr=out,
+        out_stride_0=out.stride(0),
+        out_stride_1=out.stride(1),
+        m_block_num=mblocks_to_tuple_info.shape[0],
         n_block_num=triton.cdiv(n, BLOCK_SIZE_N),
         compute_type=compute_type,
         use_fp8_w8a8=use_fp8_w8a8,
@@ -762,7 +763,7 @@ def grouped_matmul(
         num_stages=num_stages,
         ADD_BIAS=bias is not None,
     )
-    return (mblocks_to_expert_id, mblocks_to_m_index, BLOCK_SIZE_M)
+    return (mblocks_to_tuple_info, BLOCK_SIZE_M)
 
 
 def fused_experts_impl(
