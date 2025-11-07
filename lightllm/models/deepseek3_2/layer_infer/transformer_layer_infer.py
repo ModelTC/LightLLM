@@ -86,7 +86,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         mla_out, _, _ = flash_mla_sparse_fwd(
             q=q_all,
             kv=infer_state.mem_manager.kv_buffer[self.layer_num_],
-            indices=self.topk_indices,
+            indices=self.topk_indices.unsqueeze(1),
             sm_scale=self.softmax_scale,
             d_v=self.kv_lora_rank,
         )
@@ -100,23 +100,17 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
         k_rope = kv[:, :, -self.qk_rope_head_dim :].reshape(-1, 1, 1, self.qk_rope_head_dim)
         kv_nope = kv[:, :, : -self.qk_rope_head_dim].reshape(-1, 1, 1, self.kv_lora_rank)
-        k_descale, v_descale = None, None
         o_tensor = flash_attn_with_kvcache(
             q=q_rope,
             k_cache=k_rope,
             v_cache=kv_nope,
             qv=q_nope,
             page_table=self.topk_indices,
-            cache_seqlens=infer_state.b_att_seq_len,
+            cache_seqlens=infer_state.nsa_cache_seqlens,
             cu_seqlens_q=infer_state.cu_seqlens_q,
-            cu_seqlens_k_new=infer_state.cu_seqlens_k,
+            cu_seqlens_k_new=infer_state.nsa_cu_seqlens_k,
             max_seqlen_q=infer_state.max_q_seq_len,
             softmax_scale=self.softmax_scale,
             causal=True,
-            window_size=(-1, -1),
-            softcap=0.0,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            return_softmax_lse=False,
         )
         return o_tensor

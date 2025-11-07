@@ -16,6 +16,11 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
     # infer state class
     infer_state_class = Deepseek3_2FlashAttentionStateInfo
 
+    def __init__(self, kvargs):
+        super().__init__(kvargs)
+        self.index_topk = self.config["index_topk"]
+        return
+
     def _init_mem_manager(self):
         manager_class = Deepseek3_2MemoryManager
         if "triton_fp8kv" in self.mode:
