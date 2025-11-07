@@ -29,7 +29,8 @@ from .control_state import DPControlState
 from lightllm.common.mem_manager import MemoryManager
 import torch.multiprocessing as mp
 
-min_trans_token_num = os.getenv("MIN_TRANS_TOKEN_NUM", 512)
+min_trans_token_num = os.getenv("LIGHTLLM_MIN_TRANS_TOKEN_NUM", 512)
+dp_kv_transfer_req_num = os.getenv("LIGHTLLM_DP_KV_TRANSFER_REQ_NUM", 16)
 
 
 class DPChunkedPrefillBackend(ModeBackend):
@@ -76,19 +77,39 @@ class DPChunkedPrefillBackend(ModeBackend):
             torch.cuda.set_device(get_current_device_id())
 
             from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import reduce_tensor
+            from lightllm.server.core.objs.shm_array import ShmArray
+            from lightllm.utils.envs_utils import get_unique_server_name
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 
+            # Create shared memory for mem_manager
             self.model.mem_manager.create_shm()
+
+            # Create shared ShmArray for kv_indexes transfer
+            # Use a small buffer to save shared memory
+            self.dp_kv_transfer_req_num = dp_kv_transfer_req_num
+            max_len = get_env_start_args().max_req_total_len + 8
+            self.shared_kv_indexes_name = f"{get_unique_server_name()}_shared_kv_indexes_global"
+            self.shared_kv_indexes = ShmArray(
+                self.shared_kv_indexes_name, (self.dp_kv_transfer_req_num, max_len), dtype=np.int64
+            )
+            # Only rank_in_node == 0 creates the shared memory
+            if self.rank_in_node == 0:
+                self.shared_kv_indexes.create_shm()
 
             dist.barrier(group=self.node_nccl_group)
 
+            # Collect mem_managers from all ranks
             self.mem_managers = []
             for rank_idx in range(self.node_world_size):
                 if rank_idx != self.rank_in_node:
                     self.mem_managers.append(MemoryManager.from_shm(rank_idx))
                 else:
                     self.mem_managers.append(self.model.mem_manager)
+
+            # Other ranks link to the shared memory
+            if self.rank_in_node != 0:
+                self.shared_kv_indexes.link_shm()
             return
 
     def _init_reqs(self, reqs: List[Tuple]):
@@ -102,7 +123,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         g_infer_state_lock.acquire()
         infer_reqs = g_infer_context.add_reqs(my_reqs, init_prefix_cache=not self.enable_dp_prompt_cache_fetch)
         if self.enable_dp_prompt_cache_fetch:
-            self._fetch_dp_prompt_cache(infer_reqs, other_reqs=other_reqs)
+            self._fetch_dp_prompt_cache(infer_reqs, other_reqs=other_reqs, origin_reqs=reqs)
             for r in infer_reqs:
                 r._match_radix_cache()
 
@@ -117,7 +138,10 @@ class DPChunkedPrefillBackend(ModeBackend):
         _, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=False)
         return kv_len, value_tensor
 
-    def _fetch_dp_prompt_cache(self, infer_reqs: List[InferReq], other_reqs: List[Tuple] = []):
+    def _fetch_dp_prompt_cache(
+        self, infer_reqs: List[InferReq], other_reqs: List[Tuple] = [], origin_reqs: List[Tuple] = []
+    ):
+        # shm_index_2_index = {r[1]: i for i, r in enumerate(origin_reqs)}
         my_match = []
         other_match = []
         # match all the reqs in this dp rank.
@@ -130,6 +154,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             # only the first rank is ok
             if self.rank_in_dp == 0:
                 with g_infer_context.shm_req_manager.get_req_lock_by_index(shm_req.index_in_shm_mem):
+                    shm_req.dp_origin_kv_len = kv_len
                     if kv_len > shm_req.dp_max_kv_len:
                         shm_req.dp_max_kv_len = kv_len
                         shm_req.dp_max_kv_rank = self.dp_rank_in_node  # 单机
@@ -156,29 +181,61 @@ class DPChunkedPrefillBackend(ModeBackend):
         # wait all the ranks to finish the match
         dist.barrier(group=self.node_nccl_group)
 
-        # Copy the kv_indexes of this dp rank to other required req
-        for match in other_match:
-            shm_req, kv_len, value_tensor = match
-            if shm_req.dp_max_kv_rank == self.dp_rank_in_node:
-                shm_req.shm_kv_indexes.arr[0:kv_len] = value_tensor
-        # release other dp_rank's shm_req
-        self.release_all_shm_reqs([match[0] for match in other_match])
+        # 创建 shm_index 到匹配结果的映射
+        shm_index_to_match = {match[0].index_in_shm_mem: match for match in my_match}
+        shm_index_to_match.update({match[0].index_in_shm_mem: match for match in other_match})
 
-        # wait all the ranks to finish the copy
+        my_trans_match = []
+        other_trans_match = []
+        transfer_count = 0
+        for r in origin_reqs:
+            _, shm_index, _, suggested_dp_index = r
+            shm_req, kv_len, value_tensor = shm_index_to_match[shm_index]
+            match = (shm_req, kv_len, value_tensor, suggested_dp_index)
+
+            if suggested_dp_index != shm_req.dp_max_kv_rank:
+                if suggested_dp_index == self.dp_rank_in_node:
+                    my_trans_match.append((match, transfer_count))
+                else:
+                    other_trans_match.append((match, transfer_count))
+                transfer_count += 1
+
+                if transfer_count == self.dp_kv_transfer_req_num:
+                    self._transfer_dp_kv_cache(my_trans_match, other_trans_match)
+                    my_trans_match = []
+                    other_trans_match = []
+                    transfer_count = 0
+
+        if transfer_count > 0:
+            self._transfer_dp_kv_cache(my_trans_match, other_trans_match)
+
+    def _transfer_dp_kv_cache(self, my_match: List[Tuple], other_match: List[Tuple]):
+        other_shm_reqs = []
+        for match, index in other_match:
+            shm_req, kv_len, value_tensor = match
+            trans_len = kv_len - shm_req.dp_origin_kv_len
+            if shm_req.dp_max_kv_rank == self.dp_rank_in_node:
+                self.shared_kv_indexes.arr[index, 0:trans_len] = value_tensor[shm_req.dp_origin_kv_len : kv_len]
+            other_shm_reqs.append(shm_req)
+
+        self.release_all_shm_reqs(other_shm_reqs)
         dist.barrier(group=self.node_nccl_group)
 
-        # Perform a kv transfer, get all indexes and the corresponding dp_rank
+        if not my_match:
+            return
+
         move_token_indexes = []
         token_dp_indexes = []
+        trans_info = []
         alloc_size = 0
-        for r in my_match:
-            shm_req, kv_len, value_tensor = r
+        for match, index in my_match:
+            shm_req, kv_len, value_tensor = match
             trans_len = shm_req.dp_max_kv_len - kv_len
             if trans_len > 0 and shm_req.dp_max_kv_rank != self.dp_rank_in_node:
-                # Only copy kv_indexes that are not in this dp rank.
-                move_token_indexes.extend(shm_req.shm_kv_indexes.arr[kv_len : shm_req.dp_max_kv_len])
-                token_dp_indexes.extend([shm_req.dp_max_kv_rank for _ in range(trans_len)])
-            alloc_size += trans_len
+                move_token_indexes.extend(self.shared_kv_indexes.arr[index, 0:trans_len])
+                token_dp_indexes.extend([shm_req.dp_max_kv_rank] * trans_len)
+                trans_info.append((shm_req, kv_len, value_tensor, trans_len))
+                alloc_size += trans_len
 
         if alloc_size < self.min_trans_token_num:
             return
@@ -189,7 +246,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
         token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device="cuda")
 
-        # transfer kv
         self.model.mem_manager.copy_kv_from_other_dp_ranks(
             mem_managers=self.mem_managers,
             move_token_indexes=move_token_indexes,
@@ -200,22 +256,15 @@ class DPChunkedPrefillBackend(ModeBackend):
         )
         self.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {alloc_size}")
 
-        # 更新radix cache
         start_index = 0
-        for r in my_match:
-            shm_req, kv_len, value_tensor = r
-            trans_len = shm_req.dp_max_kv_len - kv_len
-            if trans_len > 0 and shm_req.dp_max_kv_rank != self.dp_rank_in_node:
-                new_value_tensor = mem_indexes[start_index : start_index + trans_len].cpu()
-                start_index += trans_len
-                key = torch.tensor(
-                    shm_req.shm_prompt_ids.arr[0 : shm_req.dp_max_kv_len], dtype=torch.int64, device="cpu"
-                )
-                if value_tensor is not None:
-                    value_tensor = torch.cat((value_tensor, new_value_tensor), dim=0)
-                else:
-                    value_tensor = new_value_tensor
-                g_infer_context.radix_cache.insert(key, value_tensor)
+        for shm_req, kv_len, value_tensor, trans_len in trans_info:
+            new_value_tensor = mem_indexes[start_index : start_index + trans_len].cpu()
+            start_index += trans_len
+            key = torch.tensor(shm_req.shm_prompt_ids.arr[0 : shm_req.dp_max_kv_len], dtype=torch.int64, device="cpu")
+            value_tensor = (
+                torch.cat((value_tensor, new_value_tensor), dim=0) if value_tensor is not None else new_value_tensor
+            )
+            g_infer_context.radix_cache.insert(key, value_tensor)
 
     def release_all_shm_reqs(self, shm_reqs):
         for shm_req in shm_reqs:

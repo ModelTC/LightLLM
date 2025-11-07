@@ -19,7 +19,7 @@ from lightllm.utils.shm_utils import create_or_link_shm
 from multiprocessing.reduction import ForkingPickler
 
 logger = init_logger(__name__)
-LIGHTLLM_MEM_MANAGER_SHM_SIZE = int(os.getenv("LIGHTLLM_MEM_MANAGER_SHM_SIZE", 1024 * 1024))
+LIGHTLLM_MEM_MANAGER_SHM_SIZE = int(os.getenv("LIGHTLLM_MEM_MANAGER_SHM_SIZE", 16 * 1024))
 
 
 class MemoryManager:
