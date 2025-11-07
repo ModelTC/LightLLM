@@ -481,6 +481,7 @@ def grouped_matmul_kernel(
 
     if use_fp8_w8a8:
         if block_size_k > 0 and block_size_n > 0:
+            assert BLOCK_SIZE_K <= block_size_k
             token_scale_stride0 = token_stride_0 // block_size_k
             if TOKEN_INPUT_USE_TMA:
                 assert MUL_ROUTED_WEIGHT is True
@@ -488,7 +489,12 @@ def grouped_matmul_kernel(
             else:
                 a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num) * token_scale_stride0
 
-            offs_bsn = offs_bn // block_size_n
+            if BLOCK_SIZE_N > block_size_n:
+                offs_bsn = offs_bn // block_size_n
+            else:
+                # single b scale
+                offs_bsn = (tile_n_idx * BLOCK_SIZE_N) // block_size_n
+
             b_scale_ptrs = weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bsn * weight_scale_stride1
         else:
             a_scale = tl.load(token_scale_ptr, eviction_policy="evict_last")
@@ -556,9 +562,16 @@ def grouped_matmul_kernel(
                 a_scale = tl.load(a_scale_ptrs + offs_ks, mask=token_mask, other=0.0)
                 b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
                 if NEED_TRANS:
-                    accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+                    if BLOCK_SIZE_N > block_size_n:
+                        accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+                    else:
+                        # single b scale
+                        accumulator += tl.dot(b, a) * (a_scale[None, :] * b_scale)
                 else:
-                    accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+                    if BLOCK_SIZE_N > block_size_n:
+                        accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+                    else:
+                        accumulator += tl.dot(a, b) * (a_scale[:, None] * b_scale)
             else:
                 if NEED_TRANS:
                     accumulator = tl.dot(b, a, acc=accumulator)
