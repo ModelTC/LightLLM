@@ -59,17 +59,16 @@ class NSAIndexerInfer(BaseLayerInfer):
         cost = mask.sum()
         return logits, cost
 
-    def get_indices(self, infer_state: Deepseek3_2FlashAttentionStateInfo, layer_weight: NSAIndexerWeight) -> torch.Tensor:
-        assert self.hidden_states is not None
-        assert self.q_lora is not None
+    def get_indices(self, hidden_states: torch.Tensor, q_lora: torch.Tensor,
+                    infer_state: Deepseek3_2FlashAttentionStateInfo, layer_weight: NSAIndexerWeight) -> torch.Tensor:
 
-        q, k = self._get_q_k_bf16(infer_state, layer_weight)
+        q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
         self._copy_ks_to_mem_cache(k_fp8, k_scale, infer_state.mem_index, infer_state.mem_manager)
 
-        weights = layer_weight.weights_proj_.mm(self.hidden_states) * self.index_n_heads_scale
+        weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
         weights = weights.unsqueeze(-1) * q_scale
 
         ks_buffer = infer_state.mem_manager.indexer_ks_mem_manager.kv_buffer[self.layer_idx_]
@@ -150,11 +149,11 @@ class NSAIndexerInfer(BaseLayerInfer):
         ) == 0, "Hidden size must be a power of 2 for Hadamard transform."
         return hadamard_transform(x, scale=hidden_size**-0.5)
 
-    def _get_q_k_bf16(self, infer_state: Deepseek3_2FlashAttentionStateInfo, layer_weight: NSAIndexerWeight):
-        q = layer_weight.wq_b_proj_.mm(self.q_lora).view(-1, self.index_n_heads, self.index_head_dim)
-        self.q_lora = None
+    def _get_q_k_bf16(self, hidden_states: torch.Tensor, q_lora: torch.Tensor,
+                     infer_state: Deepseek3_2FlashAttentionStateInfo, layer_weight: NSAIndexerWeight):
+        q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
 
-        k = layer_weight.wk_proj_.mm(self.hidden_states)
+        k = layer_weight.wk_proj_.mm(hidden_states)
         k = F.layer_norm(
             k.float(), (self.index_head_dim,), layer_weight.k_norm_.weight, layer_weight.k_norm_.bias, self.eps
         ).type_as(k)
