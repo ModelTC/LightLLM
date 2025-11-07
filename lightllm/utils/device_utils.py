@@ -234,8 +234,12 @@ def triton_support_tensor_descriptor() -> bool:
     try:
         from triton.tools.tensor_descriptor import TensorDescriptor
 
-        logger.info("triton support tensor_descriptor")
-        return True
+        support_tma = torch.cuda.get_device_capability() >= (9, 0)
+        if support_tma:
+            logger.info("triton support tensor_descriptor")
+            return True
+        else:
+            assert False
     except:
         logger.info("triton not support tensor_descriptor")
         return False
