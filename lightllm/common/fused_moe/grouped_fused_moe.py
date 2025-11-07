@@ -467,6 +467,8 @@ def grouped_matmul_kernel(
     offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     token_mask = offs_am < cur_m
 
+    assert (OUT_SORTED and TOKEN_INPUT_USE_TMA) is False
+
     if not OUT_SORTED or not TOKEN_INPUT_USE_TMA:
         a_m_index = tl.load(
             expert_to_token_index + expert_id * expert_to_token_index_stride_0 + offs_am,
