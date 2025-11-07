@@ -457,10 +457,8 @@ def grouped_matmul_kernel(
     tile_m_idx = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 1)
     tile_n_idx = pid_n
 
-    if OUT_SORTED or TOKEN_INPUT_USE_TMA:
-        assert OUT_SORTED and TOKEN_INPUT_USE_TMA is False
-        # get token start index in inputs
-        token_start_index = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 2)
+    # get token start index in inputs
+    token_start_index = tl.load(mblocks_to_tuple_info + pid_m * mblocks_to_tuple_info_stride_0 + 2)
 
     # get the gemm size of the current problem
     cur_m = tl.load(expert_to_token_num + expert_id)
@@ -468,11 +466,14 @@ def grouped_matmul_kernel(
     # do regular gemm here
     offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     token_mask = offs_am < cur_m
-    a_m_index = tl.load(
-        expert_to_token_index + expert_id * expert_to_token_index_stride_0 + offs_am,
-        mask=token_mask,
-        other=0,
-    )
+
+    if not OUT_SORTED or not TOKEN_INPUT_USE_TMA:
+        a_m_index = tl.load(
+            expert_to_token_index + expert_id * expert_to_token_index_stride_0 + offs_am,
+            mask=token_mask,
+            other=0,
+        )
+
     offs_bn = (tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % n
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
@@ -493,12 +494,17 @@ def grouped_matmul_kernel(
             ab_scale = a_scale * b_scale
 
     if NEED_TRANS:
-        a_ptrs = token_ptr + (a_m_index // topk_num)[None, :] * token_stride_0 + offs_k[:, None]
-        b_ptrs = weights_ptr + weight_stride_0 * expert_id + offs_k[None, :] + offs_bn[:, None] * weight_stride_1
+        if not TOKEN_INPUT_USE_TMA:
+            a_ptrs = token_ptr + (a_m_index // topk_num)[None, :] * token_stride_0 + offs_k[:, None]
+        if not WEIGHT_USE_TMA:
+            b_ptrs = weights_ptr + weight_stride_0 * expert_id + offs_k[None, :] + offs_bn[:, None] * weight_stride_1
         accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
     else:
-        a_ptrs = token_ptr + (a_m_index // topk_num)[:, None] * token_stride_0 + offs_k[None, :]
-        b_ptrs = weights_ptr + weight_stride_0 * expert_id + offs_k[:, None] + offs_bn[None, :] * weight_stride_1
+        if not TOKEN_INPUT_USE_TMA:
+            a_ptrs = token_ptr + (a_m_index // topk_num)[:, None] * token_stride_0 + offs_k[None, :]
+        if not WEIGHT_USE_TMA:
+            b_ptrs = weights_ptr + weight_stride_0 * expert_id + offs_k[:, None] + offs_bn[None, :] * weight_stride_1
+
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     for k_start in range(0, k, BLOCK_SIZE_K):
@@ -559,8 +565,10 @@ def grouped_matmul_kernel(
         else:
             accumulator += tl.dot(a, b)
 
-        a_ptrs += BLOCK_SIZE_K
-        b_ptrs += BLOCK_SIZE_K
+        if not TOKEN_INPUT_USE_TMA:
+            a_ptrs += BLOCK_SIZE_K
+        if not WEIGHT_USE_TMA:
+            b_ptrs += BLOCK_SIZE_K
 
     if NEED_TRANS:
         accumulator = accumulator.T
