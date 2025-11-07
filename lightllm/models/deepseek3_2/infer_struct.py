@@ -9,8 +9,8 @@ class Deepseek3_2FlashAttentionStateInfo(Deepseek2FlashAttentionStateInfo):
         self.page_table_size_1 = None
         self.ks = None
         self.ke = None
-
-        self.topk_indices = None
+        self.nsa_cu_seqlens_k = None
+        self.index_topk = 2048
         return
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
@@ -24,3 +24,9 @@ class Deepseek3_2FlashAttentionStateInfo(Deepseek2FlashAttentionStateInfo):
             # since b_q_seq_len represents the new tokens being processed
             if self.b_ready_cache_len is None:
                 self.b_ready_cache_len = self.b_seq_len - self.b_q_seq_len
+        
+            self.nsa_cache_seqlens = self.b_att_seq_len.clamp(max=model.index_topk)
+            assert self.nsa_cache_seqlens.dtype == torch.int32
+            self.nsa_cu_seqlens_k =  torch.nn.functional.pad(
+                torch.cumsum(self.nsa_cache_seqlens, dim=0, dtype=torch.int32), (1, 0)
+            )   
