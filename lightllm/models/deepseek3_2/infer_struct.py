@@ -9,6 +9,8 @@ class Deepseek3_2FlashAttentionStateInfo(Deepseek2FlashAttentionStateInfo):
         self.page_table_size_1 = None
         self.ks = None
         self.ke = None
+
+        self.topk_indices = None
         return
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
