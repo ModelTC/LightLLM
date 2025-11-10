@@ -71,8 +71,8 @@ class NSAIndexerInfer(BaseLayerInfer):
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
         destindex_copy_indexer_ks(
-            k_fp8.unsqueeze(1), 
-            k_scale.unsqueeze(1), 
+            k_fp8, 
+            k_scale, 
             infer_state.mem_index,
             infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_]
         )
@@ -80,13 +80,16 @@ class NSAIndexerInfer(BaseLayerInfer):
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
         weights = weights.unsqueeze(-1) * q_scale
 
-        mem_index = infer_state.mem_index
         ks = infer_state.ks
         ke = infer_state.ke
         lengths = infer_state.lengths
         page_table_1 = infer_state.page_table_size_1
 
-        k_fp8_, k_scale_ = extract_indexer_ks(infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_], mem_index)
+        # Use efficient Triton kernel to extract FP8 keys and scales from buffer
+        k_fp8_, k_scale_ = extract_indexer_ks(
+            infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_],
+            infer_state.req_all_mem_index
+        )
 
         logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke) 
         
@@ -98,12 +101,6 @@ class NSAIndexerInfer(BaseLayerInfer):
             topk=self.index_topk,
         )
 
-
-    def get_k_float32_from_buffer(self, buffer: torch.Tensor):
-        k_fp8 = buffer[:, :, :128].view(torch.float8_e4m3fn)
-        k_scale = buffer[:, :, 128:].view(torch.float32)[:, :, :1]
-        k_float32 = k_fp8.float() * k_scale
-        return k_float32
 
     @staticmethod
     def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
@@ -121,8 +118,11 @@ class NSAIndexerInfer(BaseLayerInfer):
         q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
         k = layer_weight.wk_proj_.mm(hidden_states)
 
-        k = layernorm_forward(k, layer_weight.k_norm_.weight, layer_weight.k_norm_.bias, self.eps)
-        
+        # TODO
+        k = F.layer_norm(
+            k.float(), (self.index_head_dim,), layer_weight.k_norm_.weight, layer_weight.k_norm_.bias, self.eps
+        ).type_as(k)
+
         rotary_emb_fwd(
             q[:, :, : self.qk_rope_head_dim],
             k[:, None, : self.qk_rope_head_dim],

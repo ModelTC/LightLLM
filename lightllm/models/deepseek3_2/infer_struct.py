@@ -40,7 +40,7 @@ class Deepseek3_2FlashAttentionStateInfo(Deepseek2FlashAttentionStateInfo):
 
     def _init_nsa_indexing_structures(self):
         """Pre-compute ks, ke, lengths, and page_table_size_1 for NSA indexer"""
-        mem_index_list = []
+        req_all_mem_index_list = []
         ks_list = []
         ke_list = []
         lengths_list = []
@@ -52,7 +52,7 @@ class Deepseek3_2FlashAttentionStateInfo(Deepseek2FlashAttentionStateInfo):
             seq_len = self.b_seq_len[i]
             q_seq_len = self.b_q_seq_len[i]
             mem_index = self.req_manager.req_to_token_indexs[i, :seq_len]
-            mem_index_list.append(mem_index)
+            req_all_mem_index_list.append(mem_index)
             self.page_table_size_1[i, :seq_len] = mem_index
             ks = torch.zeros(q_seq_len, dtype=torch.int, device='cuda') + offset
             ke = torch.arange(q_seq_len, dtype=torch.int, device='cuda') + offset + 1
@@ -61,7 +61,7 @@ class Deepseek3_2FlashAttentionStateInfo(Deepseek2FlashAttentionStateInfo):
             lengths_list.append(torch.arange(seq_len - q_seq_len + 1, seq_len + 1, dtype=torch.int, device='cuda'))
             offset += seq_len
 
-        self.mem_index = torch.cat(mem_index_list, dim=0)
+        self.req_all_mem_index = torch.cat(req_all_mem_index_list, dim=0)
         self.ks = torch.cat(ks_list, dim=0)
         self.ke = torch.cat(ke_list, dim=0)
         self.lengths = torch.cat(lengths_list, dim=0)
