@@ -10,7 +10,9 @@ from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.mem_manager import Deepseek3_2MemoryManager
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
-# from lightllm.models.deepseek3_2.triton_kernel.fp8_mqa_logits import fp8_mqa_logits
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 class NSAIndexerInfer(BaseLayerInfer):
     def __init__(self, layer_idx, network_config, mode=[]):
@@ -66,70 +68,37 @@ class NSAIndexerInfer(BaseLayerInfer):
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
-        self._copy_ks_to_mem_cache(k_fp8, k_scale, infer_state.mem_index, infer_state.mem_manager)
+        destindex_copy_indexer_ks(
+            k_fp8.unsqueeze(1), 
+            k_scale.unsqueeze(1), 
+            infer_state.mem_index,
+            infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_]
+        )
 
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
         weights = weights.unsqueeze(-1) * q_scale
 
-        ks_buffer = infer_state.mem_manager.indexer_ks_mem_manager.kv_buffer[self.layer_idx_]
+        # Use pre-computed indexing structures from infer_state
+        mem_index = infer_state.mem_index
+        ks = infer_state.ks
+        ke = infer_state.ke
+        lengths = infer_state.lengths
+        page_table_1 = infer_state.page_table_size_1
 
-        k_fp8_list = []
-        k_scale_list = []
-        ks_list = []
-        ke_list = []
-        offset = 0
-        for i in range(infer_state.batch_size):
-            q_len = infer_state.b_q_seq_len[i]
-            cache_len = infer_state.b_ready_cache_len[i]
-            mem_indexes = infer_state.req_manager.req_to_token_indexs[infer_state.b_req_idx[i], :cache_len+q_len]
-            k_fp8 = ks_buffer[mem_indexes, 0, :128].view(torch.float8_e4m3fn).contiguous()
-            k_scale = ks_buffer[mem_indexes, 0, 128:].view(torch.float32).contiguous()
-            ks = torch.full((q_len,), offset, dtype=torch.int32, device="cuda")
-            ke = ks + torch.arange(q_len, dtype=torch.int32, device="cuda") + 1
-            k_fp8_list.append(k_fp8)
-            k_scale_list.append(k_scale)
-            ks_list.append(ks)
-            ke_list.append(ke)
-            offset += q_len 
+        # TODO
+        k_fp8_ = infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_][mem_index, :, :128].view(torch.float8_e4m3fn).squeeze(1).contiguous()
+        k_scale_ = infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_][mem_index, :, 128:].view(torch.float32)[:, 0, 0].contiguous()
 
-        k_fp8 = torch.cat(k_fp8_list, dim=0).view(torch.float8_e4m3fn)
-        k_scale = torch.cat(k_scale_list, dim=0).view(torch.float32).squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale)
-        ks = torch.cat(ks_list, dim=0)
-        ke = torch.cat(ke_list, dim=0)
-
-        logits = deep_gemm.fp8_mqa_logits(
-            q_fp8,
-            kv_fp8,
-            weights.squeeze(-1),
-            ks,
-            ke,
-            clean_logits=False,
+        logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke) 
+        
+        # 返回 ： [seq_q_len, topk] 无效的位置使用-1填充
+        return fast_topk_transform_fused(
+            score=logits, # [seq_len_q, seq_len_kv]
+            lengths=lengths, # [seq_len_q]
+            page_table_size_1=page_table_1, # [seq_len_q, max(lengths)] 无效的使用0填充
+            cu_seqlens_q=infer_state.cu_seqlens_q, # [seq_len_q + 1]
+            topk=self.index_topk,
         )
-
-        return self.get_topk(logits, infer_state)
-
-    def get_topk(self, logits, infer_state: Deepseek3_2FlashAttentionStateInfo):
-        topk_indices_list = []
-        offset = 0
-
-        for i in range(infer_state.batch_size):
-            q_len = infer_state.b_q_seq_len[i]
-            cache_len = infer_state.b_ready_cache_len[i]
-            end_pos = q_len + cache_len
-            # Slice logits for this batch (both query and sequence dimensions)
-            batch_logits = logits[offset:offset + q_len, :end_pos]
-            topk_indices = batch_logits.topk(min(self.index_topk, end_pos), dim=-1)[1]
-            mem_indexes = infer_state.req_manager.req_to_token_indexs[infer_state.b_req_idx[i], :cache_len+q_len]
-            indices = torch.full((q_len, self.index_topk), -1, dtype=torch.int32, device="cuda")
-            for j in range(q_len):
-                indices[j, :topk_indices[j].shape[0]] = mem_indexes[topk_indices[j]]
-            topk_indices_list.append(indices)
-            offset += q_len
-
-        topk_indices_ = torch.cat(topk_indices_list, dim=0)
-
-        return topk_indices_
 
 
     def get_k_float32_from_buffer(self, buffer: torch.Tensor):
@@ -152,8 +121,9 @@ class NSAIndexerInfer(BaseLayerInfer):
     def _get_q_k_bf16(self, hidden_states: torch.Tensor, q_lora: torch.Tensor,
                      infer_state: Deepseek3_2FlashAttentionStateInfo, layer_weight: NSAIndexerWeight):
         q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
-
         k = layer_weight.wk_proj_.mm(hidden_states)
+
+        # TODO
         k = F.layer_norm(
             k.float(), (self.index_head_dim,), layer_weight.k_norm_.weight, layer_weight.k_norm_.bias, self.eps
         ).type_as(k)
@@ -168,17 +138,3 @@ class NSAIndexerInfer(BaseLayerInfer):
         q = self._rotate_activation(q)
         k = self._rotate_activation(k)
         return q, k
-
-    def _copy_ks_to_mem_cache(self, k_fp8, k_scale, mem_index, mem_manager: Deepseek3_2MemoryManager):
-        # k_fp8 : [seq_len, 128] torch.fp8_e4m3
-        # k_scale : [seq_len, 1] torch.float32
-        # mem_index : [seq_len] torch.int32
-        # buffer : [10000000, 1, 132] torch.uint8
-        buffer = mem_manager.indexer_ks_mem_manager.kv_buffer[self.layer_idx_]
-        destindex_copy_indexer_ks(
-            k_fp8.unsqueeze(1),  # Add head dimension: [seq_len, 1, 128]
-            k_scale.unsqueeze(1),  # Add head dimension: [seq_len, 1, 1]
-            mem_index,
-            buffer
-        )
-        return
