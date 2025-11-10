@@ -82,10 +82,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         q_all = torch.cat([q_nope, q_rope], dim=-1)
-
         mla_out, _, _ = flash_mla_sparse_fwd(
-            q=q_all,
-            kv=infer_state.mem_manager.kv_buffer[self.layer_num_],
+            q=q_all, # [seq_len_q, q_num_head, qk_dim]
+            kv=infer_state.mem_manager.kv_buffer[self.layer_num_], # [size, 1, qk_dim]
             indices=self.topk_indices.unsqueeze(1),
             sm_scale=self.softmax_scale,
             d_v=self.kv_lora_rank,
@@ -100,15 +99,16 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
         k_rope = kv[:, :, -self.qk_rope_head_dim :].reshape(-1, 1, 1, self.qk_rope_head_dim)
         kv_nope = kv[:, :, : -self.qk_rope_head_dim].reshape(-1, 1, 1, self.kv_lora_rank)
+
         o_tensor = flash_attn_with_kvcache(
-            q=q_rope,
-            k_cache=k_rope,
-            v_cache=kv_nope,
-            qv=q_nope,
-            page_table=self.topk_indices,
-            cache_seqlens=infer_state.nsa_cache_seqlens,
-            cu_seqlens_q=infer_state.cu_seqlens_q,
-            cu_seqlens_k_new=infer_state.nsa_cu_seqlens_k,
+            q=q_rope, # (q_seqlen, nheads, qk_headdim)
+            k_cache=k_rope, # (kv_size, 1, 1, qk_head_dim)
+            v_cache=kv_nope, # (kv_size, 1, 1, kv_lora_rank)
+            qv=q_nope, # (q_seqlen, nheads, kv_lora_rank)
+            page_table=self.topk_indices, # (q_seqlen, max_seq_len) 
+            cache_seqlens=infer_state.nsa_cache_seqlens, # (q_seqlen) # 表示当前kv长度，用于读取page_table.
+            cu_seqlens_q=infer_state.cu_seqlens_q, # (batch_size+1) [0,1]
+            cu_seqlens_k_new=infer_state.nsa_cu_seqlens_k, #(batch_size+1) [0,9]
             max_seqlen_q=infer_state.max_q_seq_len,
             softmax_scale=self.softmax_scale,
             causal=True,
