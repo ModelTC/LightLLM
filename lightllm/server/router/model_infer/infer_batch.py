@@ -361,7 +361,6 @@ class InferReq:
         self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
         self.shm_req.link_prompt_ids_shm_array()
         self.shm_req.link_logprobs_shm_array()
-        self.shm_req.link_kv_indexes_shm_array()
         self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
 
         # 更新 nixl pd 分离模式下， prefill 节点需要开始传输的起始位置

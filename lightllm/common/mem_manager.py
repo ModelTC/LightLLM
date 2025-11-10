@@ -9,7 +9,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
-from lightllm.utils.dist_utils import get_current_rank_in_node
+from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
@@ -433,18 +433,21 @@ class MemoryManager:
         )
 
     def create_shm(self):
-        obj_bytes = ForkingPickler.dumps(self)
-        shm = create_or_link_shm(
-            f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}", LIGHTLLM_MEM_MANAGER_SHM_SIZE
-        )
-        logger.info(f"create shm {shm.name} size {shm.size} obj size {len(obj_bytes)}")
-        shm.buf[0:4] = len(obj_bytes).to_bytes(4, "little")
-        shm.buf[4 : 4 + len(obj_bytes)] = obj_bytes
+        for rank_in_node in range(0, get_node_world_size()):
+            obj_bytes = ForkingPickler.dumps(self)
+            shm = create_or_link_shm(
+                f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}_{rank_in_node}",
+                LIGHTLLM_MEM_MANAGER_SHM_SIZE,
+            )
+            logger.info(f"create shm {shm.name} size {shm.size} obj size {len(obj_bytes)}")
+            shm.buf[0:4] = len(obj_bytes).to_bytes(4, "little")
+            shm.buf[4 : 4 + len(obj_bytes)] = obj_bytes
 
     @staticmethod
-    def from_shm(rank_in_node):
+    def from_shm(mem_manager_rank_in_node, rank_in_node):
         shm = create_or_link_shm(
-            f"{get_unique_server_name()}_mem_manager_{rank_in_node}", LIGHTLLM_MEM_MANAGER_SHM_SIZE
+            f"{get_unique_server_name()}_mem_manager_{mem_manager_rank_in_node}_{rank_in_node}",
+            LIGHTLLM_MEM_MANAGER_SHM_SIZE,
         )
         bytes_len = int.from_bytes(shm.buf[0:4], "little")
         obj_bytes = shm.buf[4 : 4 + bytes_len].tobytes()
