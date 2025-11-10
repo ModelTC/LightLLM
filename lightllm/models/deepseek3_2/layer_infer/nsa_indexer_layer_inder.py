@@ -90,12 +90,11 @@ class NSAIndexerInfer(BaseLayerInfer):
 
         logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke) 
         
-        # 返回 ： [seq_q_len, topk] 无效的位置使用-1填充
         return fast_topk_transform_fused(
-            score=logits, # [seq_len_q, seq_len_kv]
-            lengths=lengths, # [seq_len_q]
-            page_table_size_1=page_table_1, # [seq_len_q, max(lengths)] 无效的使用0填充
-            cu_seqlens_q=infer_state.cu_seqlens_q, # [seq_len_q + 1]
+            score=logits, 
+            lengths=lengths, 
+            page_table_size_1=page_table_1, 
+            cu_seqlens_q=infer_state.cu_seqlens_q, 
             topk=self.index_topk,
         )
 

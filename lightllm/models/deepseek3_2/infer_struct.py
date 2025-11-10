@@ -62,8 +62,6 @@ class Deepseek3_2FlashAttentionStateInfo(Deepseek2FlashAttentionStateInfo):
             offset += seq_len
 
         self.mem_index = torch.cat(mem_index_list, dim=0)
-        # ks : [seq_len_q] 标志kv的起始位置
-        # ke : [seq_len_q] 标志kv的结束位置
         self.ks = torch.cat(ks_list, dim=0)
         self.ke = torch.cat(ke_list, dim=0)
         self.lengths = torch.cat(lengths_list, dim=0)
