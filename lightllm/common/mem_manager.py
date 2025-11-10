@@ -414,25 +414,23 @@ class MemoryManager:
         dp_size_in_node: int,
         rank_in_dp: int,
     ):
-        if not hasattr(self, "mem_ptrs_dict"):
-            self.mem_ptrs_dict = {}
-            for layer_index in range(self.layer_num):
-                mems_ptr = []
-                for i in range(0, len(mem_managers)):
-                    mems_ptr.append(mem_managers[i].kv_buffer[layer_index, :, :, :].data_ptr())
-                mems_ptr = torch.tensor(mems_ptr, dtype=torch.uint64, device="cuda")
-                self.mem_ptrs_dict[layer_index] = mems_ptr
+        if not hasattr(self, "mem_ptrs_tensor"):
+            # 构建一个2D tensor，shape为(layer_num, mem_num)
+            mems_ptr_list = []
+            for i in range(0, len(mem_managers)):
+                mems_ptr_list.append(mem_managers[i].kv_buffer.data_ptr())
+            self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cuda")
 
-        for layer_index in range(self.layer_num):
-            kv_trans_for_dp(
-                input_mems=self.mem_ptrs_dict[layer_index],
-                input_idx=move_token_indexes,
-                input_dp_idx=token_dp_indexes,
-                output=self.kv_buffer[layer_index],
-                output_idx=mem_indexes,
-                dp_size_in_node=dp_size_in_node,
-                rank_in_dp=rank_in_dp,
-            )
+        # 一次性传输所有层
+        kv_trans_for_dp(
+            input_mems=self.mem_ptrs_tensor,
+            input_idx=move_token_indexes,
+            input_dp_idx=token_dp_indexes,
+            output=self.kv_buffer,
+            output_idx=mem_indexes,
+            dp_size_in_node=dp_size_in_node,
+            rank_in_dp=rank_in_dp,
+        )
 
     def create_shm(self):
         obj_bytes = ForkingPickler.dumps(self)
@@ -449,7 +447,9 @@ class MemoryManager:
             f"{get_unique_server_name()}_mem_manager_{rank_in_node}", LIGHTLLM_MEM_MANAGER_SHM_SIZE
         )
         bytes_len = int.from_bytes(shm.buf[0:4], "little")
-        return ForkingPickler.loads(shm.buf[4 : 4 + bytes_len])
+        obj_bytes = shm.buf[4 : 4 + bytes_len].tobytes()
+        shm.close()
+        return ForkingPickler.loads(obj_bytes)
 
 
 class ReadOnlyStaticsMemoryManager:
