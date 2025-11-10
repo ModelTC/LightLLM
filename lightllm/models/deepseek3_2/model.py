@@ -5,7 +5,7 @@ from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deep
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2FlashAttentionStateInfo
 from lightllm.models.deepseek3_2.mem_manager import Deepseek3_2MemoryManager, Deepseek3_2FP8KVMemoryManager
-# @ModelRegistry(["deepseek_v32"])
+@ModelRegistry(["deepseek_v32"])
 class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
     # weight class
     transformer_weight_class = Deepseek3_2TransformerLayerWeight
