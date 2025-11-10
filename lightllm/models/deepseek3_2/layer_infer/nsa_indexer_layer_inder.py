@@ -10,6 +10,8 @@ from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.mem_manager import Deepseek3_2MemoryManager
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
+from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
+from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -78,16 +80,13 @@ class NSAIndexerInfer(BaseLayerInfer):
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
         weights = weights.unsqueeze(-1) * q_scale
 
-        # Use pre-computed indexing structures from infer_state
         mem_index = infer_state.mem_index
         ks = infer_state.ks
         ke = infer_state.ke
         lengths = infer_state.lengths
         page_table_1 = infer_state.page_table_size_1
 
-        # TODO
-        k_fp8_ = infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_][mem_index, :, :128].view(torch.float8_e4m3fn).squeeze(1).contiguous()
-        k_scale_ = infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_][mem_index, :, 128:].view(torch.float32)[:, 0, 0].contiguous()
+        k_fp8_, k_scale_ = extract_indexer_ks(infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_], mem_index)
 
         logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke) 
         
@@ -123,10 +122,7 @@ class NSAIndexerInfer(BaseLayerInfer):
         q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
         k = layer_weight.wk_proj_.mm(hidden_states)
 
-        # TODO
-        k = F.layer_norm(
-            k.float(), (self.index_head_dim,), layer_weight.k_norm_.weight, layer_weight.k_norm_.bias, self.eps
-        ).type_as(k)
+        k = layernorm_forward(k, layer_weight.k_norm_.weight, layer_weight.k_norm_.bias, self.eps)
         
         rotary_emb_fwd(
             q[:, :, : self.qk_rope_head_dim],
