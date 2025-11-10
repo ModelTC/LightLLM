@@ -199,13 +199,16 @@ def _kv_trans_for_dp_kernel(
     input_stride_0,
     input_stride_1,
     input_stride_2,
+    input_stride_3,
     input_token_idx_ptr,
     input_token_dp_index_ptr,
     output_ptr,
     output_stride_0,
     output_stride_1,
     output_stride_2,
+    output_stride_3,
     output_token_idx_ptr,
+    layer_num: tl.constexpr,
     token_num: int,
     head_num: int,
     head_dim: int,
@@ -229,11 +232,20 @@ def _kv_trans_for_dp_kernel(
         mem_index = RANK_IN_DP + dp_index * CARD_NUM_PER_D
         input_token_idx = tl.load(input_token_idx_ptr + tid)
         output_token_idx = tl.load(output_token_idx_ptr + tid)
-        for block_idx in tl.range(0, tl.cdiv(head_num_dim, BLOCK_SIZE), 1, num_stages=NUM_STAGES):
-            cur_offs = block_idx * BLOCK_SIZE + offs
-            input_ptr = tl.load(input_mems_ptr + mem_index).to(tl.pointer_type(output_ptr.dtype.element_ty))
-            in_datas = tl.load(input_ptr + input_stride_0 * input_token_idx + cur_offs, mask=cur_offs < head_num_dim)
-            tl.store(output_ptr + output_stride_0 * output_token_idx + cur_offs, in_datas, mask=cur_offs < head_num_dim)
+
+        input_ptr = tl.load(input_mems_ptr + mem_index).to(tl.pointer_type(output_ptr.dtype.element_ty))
+        for layer_idx in tl.range(0, layer_num, 1):
+            for block_idx in tl.range(0, tl.cdiv(head_num_dim, BLOCK_SIZE), 1, num_stages=NUM_STAGES):
+                cur_offs = block_idx * BLOCK_SIZE + offs
+                in_datas = tl.load(
+                    input_ptr + input_stride_0 * layer_idx + input_stride_1 * input_token_idx + cur_offs,
+                    mask=cur_offs < head_num_dim,
+                )
+                tl.store(
+                    output_ptr + output_stride_0 * layer_idx + output_stride_1 * output_token_idx + cur_offs,
+                    in_datas,
+                    mask=cur_offs < head_num_dim,
+                )
 
         tid += grid_count
 
@@ -250,19 +262,19 @@ def kv_trans_for_dp(
     rank_in_dp: int,
 ):
     """
-    input_mems 是一个 torch.uint64 的tensor, 其内部存储了当前使用的对应的mem_manager对象中kv cache的首指针。
+    input_mems 是一个 torch.uint64 的tensor, shape为(layer_num, mem_num)，其内部存储了当前使用的对应的mem_manager对象中kv cache的首指针。
     """
     assert input_mems.is_contiguous()
     assert output.is_contiguous()
     assert len(input_mems.shape) == 1
-    assert len(output.shape) == 3
+    assert len(output.shape) == 4
     assert len(input_idx) == len(output_idx)
     assert len(output_idx) == len(input_dp_idx)
     assert len(input_mems) % dp_size_in_node == 0
 
     card_num_per_d = len(input_mems) // dp_size_in_node
 
-    _, head_num, head_dim = output.shape
+    layer_num, _, head_num, head_dim = output.shape
     token_num = len(output_idx)
     # 用较少的资源来做数据传输，防止占用过多的 sm 计算单元
     grid_count = 20
@@ -278,6 +290,7 @@ def kv_trans_for_dp(
         output,
         *output.stride(),
         output_idx,
+        layer_num=layer_num,
         token_num=token_num,
         head_num=head_num,
         head_dim=head_dim,

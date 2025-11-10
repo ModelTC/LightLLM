@@ -7,7 +7,7 @@ import os
 import time
 from typing import Optional
 
-_FORMAT = "%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s"
+_FORMAT = "%(levelname)s %(asctime)s,%(msecs)03d [%(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 _LOG_LEVEL = os.environ.get("LIGHTLLM_LOG_LEVEL", "debug")

@@ -29,8 +29,8 @@ from .control_state import DPControlState
 from lightllm.common.mem_manager import MemoryManager
 import torch.multiprocessing as mp
 
-min_trans_token_num = os.getenv("LIGHTLLM_MIN_TRANS_TOKEN_NUM", 512)
-dp_kv_transfer_req_num = os.getenv("LIGHTLLM_DP_KV_TRANSFER_REQ_NUM", 16)
+min_trans_token_num = int(os.getenv("LIGHTLLM_MIN_TRANS_TOKEN_NUM", "512"))
+dp_kv_transfer_req_num = int(os.getenv("LIGHTLLM_DP_KV_TRANSFER_REQ_NUM", "16"))
 
 
 class DPChunkedPrefillBackend(ModeBackend):
@@ -169,7 +169,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 if sampling_param.disable_prompt_cache:
                     continue
                 shm_req.link_prompt_ids_shm_array()
-                shm_req.link_kv_indexes_shm_array()
 
                 kv_len, value_tensor = self._match_radix_cache(shm_req)
                 with g_infer_context.shm_req_manager.get_req_lock_by_index(shm_req.index_in_shm_mem):
@@ -212,7 +211,7 @@ class DPChunkedPrefillBackend(ModeBackend):
     def _transfer_dp_kv_cache(self, my_match: List[Tuple], other_match: List[Tuple]):
         other_shm_reqs = []
         for match, index in other_match:
-            shm_req, kv_len, value_tensor = match
+            shm_req, kv_len, value_tensor, _ = match
             trans_len = kv_len - shm_req.dp_origin_kv_len
             if shm_req.dp_max_kv_rank == self.dp_rank_in_node:
                 self.shared_kv_indexes.arr[index, 0:trans_len] = value_tensor[shm_req.dp_origin_kv_len : kv_len]
@@ -229,7 +228,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         trans_info = []
         alloc_size = 0
         for match, index in my_match:
-            shm_req, kv_len, value_tensor = match
+            shm_req, kv_len, value_tensor, _ = match
             trans_len = shm_req.dp_max_kv_len - kv_len
             if trans_len > 0 and shm_req.dp_max_kv_rank != self.dp_rank_in_node:
                 move_token_indexes.extend(self.shared_kv_indexes.arr[index, 0:trans_len])
