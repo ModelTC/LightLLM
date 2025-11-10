@@ -64,7 +64,11 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
     @override
     def _bind_attention(self):
-        super()._bind_attention()
+        if "triton_fp8kv" in self.mode:
+            self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_fp8, self)
+        else:
+            self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+
         self._context_attention_kernel = partial(Deepseek3_2TransformerLayerInfer._nsa_context_attention_kernel, self)
         self._token_attention_kernel = partial(Deepseek3_2TransformerLayerInfer._nsa_token_attention_kernel, self)
         pass
