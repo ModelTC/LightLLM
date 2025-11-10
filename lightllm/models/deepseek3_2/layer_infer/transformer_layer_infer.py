@@ -1,6 +1,5 @@
 from functools import partial
 from typing import override
-from venv import logger
 
 import torch
 from sgl_kernel.flash_mla import flash_mla_sparse_fwd
