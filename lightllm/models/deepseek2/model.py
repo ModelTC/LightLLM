@@ -49,7 +49,7 @@ class DeepSeek2FlashInferStateExtraInfo:
                 self.softmax_scale = self.softmax_scale * mscale * mscale
 
 
-@ModelRegistry(["deepseek_v2", "deepseek_v3", "deepseek_v32"])
+@ModelRegistry(["deepseek_v2", "deepseek_v3"])
 class Deepseek2TpPartModel(LlamaTpPartModel):
     # weight class
     transformer_weight_class = Deepseek2TransformerLayerWeight
