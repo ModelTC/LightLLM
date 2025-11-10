@@ -103,7 +103,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             self.mem_managers = []
             for rank_idx in range(self.node_world_size):
                 if rank_idx != self.rank_in_node:
-                    self.mem_managers.append(MemoryManager.from_shm(rank_idx))
+                    self.mem_managers.append(MemoryManager.from_shm(rank_idx, self.rank_in_node))
                 else:
                     self.mem_managers.append(self.model.mem_manager)
 

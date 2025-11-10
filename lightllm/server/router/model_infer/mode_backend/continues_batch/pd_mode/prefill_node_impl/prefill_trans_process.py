@@ -118,7 +118,7 @@ def _init_env(
 
         # 从共享内存读取所有rank的mem_manager
         node_world_size = args.tp // args.nnodes
-        mem_managers: List[MemoryManager] = [MemoryManager.from_shm(rank) for rank in range(node_world_size)]
+        mem_managers: List[MemoryManager] = [MemoryManager.from_shm(rank, device_id) for rank in range(node_world_size)]
         task_out_queue.put("get_mem_managers_ok")
         connect_id_to_comm: Dict[str, PyNcclCommunicator] = {}
 
