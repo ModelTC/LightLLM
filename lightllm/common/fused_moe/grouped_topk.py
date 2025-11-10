@@ -160,8 +160,10 @@ def grouped_topk_kernel(
     )
 
     if EXPERT_GROUP_NUM > 1:
-        group_value = tl.sort(group_value, descending=True)
-    group_topk_value = tl.sum(tl.where(offs_group == group_topk_num - 1, group_value, 0.0))
+        sorted_group_value = tl.sort(group_value, descending=True)
+    else:
+        sorted_group_value = group_value
+    group_topk_value = tl.sum(tl.where(offs_group == group_topk_num - 1, sorted_group_value, 0.0))
     mask_group_scores = tl.where(
         ((group_value >= group_topk_value)[:, None]) & ((offs_group_v < group_expert_num)[None, :]),
         group_scores,
