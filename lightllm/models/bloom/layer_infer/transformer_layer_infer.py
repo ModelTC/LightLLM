@@ -11,6 +11,7 @@ from lightllm.models.bloom.triton_kernel.token_flashattention_nopad import token
 from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
 from lightllm.common.basemodel import InferStateInfo
 from lightllm.utils.infer_utils import mark_cost_time
+from lightllm.distributed.communication_op import all_reduce
 
 
 class BloomTransformerLayerInfer(TransformerLayerInferTpl):
@@ -92,7 +93,12 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         return o_tensor
 
     def _get_o(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
-        o_tensor = layer_weight.o_proj.mm(input.view(-1, self.tp_o_head_num_ * self.head_dim_))
+        col_ctx = infer_state.overlap_wrapper.col_ctx
+        if col_ctx is not None and not col_ctx.can_run(input):
+            col_ctx = None
+        o_tensor = layer_weight.o_proj.mm(input.view(-1, self.tp_o_head_num_ * self.head_dim_), overlap_ctx=col_ctx)
+        if self.tp_world_size_ > 1 and col_ctx is None:
+            all_reduce(o_tensor, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o_tensor
 
     def _ffn(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:

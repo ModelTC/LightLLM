@@ -258,7 +258,13 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         if input.shape[2] == self.kv_lora_rank:
             input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
-        o_tensor = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.qk_nope_head_dim))
+        input = input.view(-1, self.tp_q_head_num_ * self.qk_nope_head_dim)
+        col_ctx = infer_state.overlap_wrapper.col_ctx
+        if col_ctx is not None and not col_ctx.can_run(input):
+            col_ctx = None
+        o_tensor = layer_weight.o_proj.mm(input, overlap_ctx=col_ctx)
+        if self.tp_world_size_ > 1 and col_ctx is None:
+            all_reduce(o_tensor, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o_tensor
 
     def _tpsp_get_o(

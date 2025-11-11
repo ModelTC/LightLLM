@@ -9,6 +9,7 @@ from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
 from lightllm.models.stablelm.layer_weights.transformer_layer_weight import StablelmTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.distributed.communication_op import all_reduce
 
 
 class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
@@ -45,9 +46,13 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
     ) -> torch.Tensor:
-        o_tensor = layer_weight.o_proj.mm(
-            input.view(-1, self.tp_o_head_num_ * self.head_dim_),
-        )
+        input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
+        col_ctx = infer_state.overlap_wrapper.col_ctx
+        if col_ctx is not None and not col_ctx.can_run(input):
+            col_ctx = None
+        o_tensor = layer_weight.o_proj.mm(input, overlap_ctx=col_ctx)
+        if self.tp_world_size_ > 1 and col_ctx is None:
+            all_reduce(o_tensor, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o_tensor
 
     def _tpsp_get_o(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:

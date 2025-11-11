@@ -1,6 +1,6 @@
 import torch
 from functools import partial
-
+import torch.distributed as dist
 from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_cohere_template import (
     TransformerLayerCohereInferTpl,
 )
@@ -10,6 +10,7 @@ from lightllm.models.cohere.triton_kernels.layernorm import layernorm_forward, t
 from lightllm.models.cohere.triton_kernels.rotary_emb import rotary_emb_fwd
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
+from lightllm.distributed.communication_op import all_reduce
 
 
 class CohereTransformerLayerInfer(TransformerLayerCohereInferTpl):
@@ -65,8 +66,12 @@ class CohereTransformerLayerInfer(TransformerLayerCohereInferTpl):
         self, input, infer_state: CohereInferStateInfo, layer_weight: CohereTransformerLayerWeight
     ) -> torch.Tensor:
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
-        # o_tensor = layer_weight.mm_op.apply(input, layer_weight.o_weight_)
-        o_tensor = layer_weight.o_proj.mm(input)
+        col_ctx = infer_state.overlap_wrapper.col_ctx
+        if col_ctx is not None and not col_ctx.can_run(input):
+            col_ctx = None
+        o_tensor = layer_weight.o_proj.mm(input, overlap_ctx=col_ctx)
+        if self.tp_world_size_ > 1 and col_ctx is None:
+            all_reduce(o_tensor, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o_tensor
 
     def _ffn(
