@@ -91,7 +91,7 @@ class MMWeightTpl(BaseWeightTpl):
                 has_weight_scale=has_weight_scale,
                 has_weight_zero_point=has_weight_zero_point,
             )
-            for _ in len(weight_names)
+            for _ in range(len(weight_names))
         ]
         self.mm_param: MMWeightPack = MMWeightPack(
             has_bias=has_bias,
