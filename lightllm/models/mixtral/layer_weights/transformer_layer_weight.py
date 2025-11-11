@@ -39,9 +39,9 @@ class MixtralTransformerLayerWeight(LlamaTransformerLayerWeight):
         split_inter_size = inter_size // self.tp_world_size_
 
         self.moe_gate = ROWMMWeight(
-            weight_name=self.moe_gate_weight_name,
+            weight_names=self.moe_gate_weight_name,
             data_type=self.data_type_,
-            bias_name=self.moe_gate_bias_name,
+            bias_names=self.moe_gate_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="moe_gate",

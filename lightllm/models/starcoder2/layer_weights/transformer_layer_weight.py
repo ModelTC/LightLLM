@@ -28,17 +28,17 @@ class Starcoder2TransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_ffn(self):
         self.up_proj = ROWMMWeight(
-            weight_name=self._up_weight_name,
+            weight_names=self._up_weight_name,
             data_type=self.data_type_,
-            bias_name=self._up_bias_name,
+            bias_names=self._up_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="up_proj",
         )
         self.down_proj = COLMMWeight(
-            weight_name=self._down_weight_name,
+            weight_names=self._down_weight_name,
             data_type=self.data_type_,
-            bias_name=self._down_bias_name,
+            bias_names=self._down_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="down_proj",

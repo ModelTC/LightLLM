@@ -6,7 +6,6 @@ from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTr
 from lightllm.models.qwen2.layer_weights.transformer_layer_weight import Qwen2TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
-    MultiROWMMWeight,
     COLMMWeight,
     NormWeight,
     FusedMoeWeightTP,

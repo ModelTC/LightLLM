@@ -2,7 +2,7 @@ import torch
 import math
 import numpy as np
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import GEMMANormWeight, ROWMMWeight, MultiROWMMWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import GEMMANormWeight, ROWMMWeight
 
 
 class Gemma_2bTransformerLayerWeight(LlamaTransformerLayerWeight):
@@ -12,14 +12,14 @@ class Gemma_2bTransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_qkv(self):
         self.q_proj = ROWMMWeight(
-            weight_name=self._q_weight_name,
+            weight_names=self._q_weight_name,
             data_type=self.data_type_,
-            bias_name=self._q_bias_name,
+            bias_names=self._q_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="q_proj",
         )
-        self.kv_proj = MultiROWMMWeight(
+        self.kv_proj = ROWMMWeight(
             weight_names=[self._k_weight_name, self._v_weight_name],
             data_type=self.data_type_,
             bias_names=[self._k_bias_name, self._v_bias_name],

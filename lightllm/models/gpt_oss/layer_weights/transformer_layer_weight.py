@@ -30,10 +30,10 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
         assert moe_mode in ["TP"], "For now, GPT-OSS type model only support MOE TP mode."
 
         self.moe_gate = ROWMMWeight(
-            weight_name=self._router_weight_name,
+            weight_names=self._router_weight_name,
             data_type=self.data_type_,
             layer_num=self.layer_num_,
-            bias_name=self._router_bias_name,
+            bias_names=self._router_bias_name,
             name="moe_gate",
             tp_rank=0,
             tp_world_size=1,

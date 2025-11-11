@@ -7,7 +7,6 @@ from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3Tr
 from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
-    MultiROWMMWeight,
     COLMMWeight,
     NormWeight,
     FusedMoeWeightTP,
@@ -67,7 +66,7 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
         self.moe_gate = ROWMMWeight(
-            weight_name=f"model.layers.{self.layer_num_}.mlp.gate.weight",
+            weight_names=f"model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
             layer_num=self.layer_num_,
             name="moe_gate",
