@@ -22,9 +22,9 @@ class UnquantizedCOLMMWeight(MMWeightTpl):
         tp_world_size: int = None,
     ) -> None:
         super().__init__(
-            weight_name=weight_names,
+            weight_names=weight_names,
             data_type=data_type,
-            bias_name=bias_names,
+            bias_names=bias_names,
             quant_method=quant_method,
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
