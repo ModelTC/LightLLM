@@ -191,6 +191,7 @@ class MMWeightTpl(BaseWeightTpl):
             and self.mm_param.weight is not None
             and self.quant_method.weight_need_quanted(self.mm_param.weight)
         ):
+            logger.info(f"online quant weight names: {self.weight_names}")
             quantized_weight, weight_scale, weight_zero_point = self.quant_method.quantize(
                 self.mm_param.weight.cuda(get_current_device_id())
             )
