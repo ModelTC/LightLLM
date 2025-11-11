@@ -1,4 +1,3 @@
-from multiprocessing import parent_process
 import torch
 from abc import ABC, abstractmethod
 from typing import Dict
@@ -14,8 +13,8 @@ class BaseWeight(ABC):
         pass
 
     @abstractmethod
-    def verify_load(self):
-        parent_process
+    def verify_load(self) -> bool:
+        pass
 
 
 class BaseWeightTpl(BaseWeight):

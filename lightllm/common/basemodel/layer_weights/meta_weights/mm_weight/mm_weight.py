@@ -33,26 +33,76 @@ class MMWeightPack:
             and (not self.has_weight_zero_point or (self.has_weight_zero_point and self.weight_zero_point is not None))
         )
 
+    def ready_for_fused_merge(self) -> bool:
+        """
+        判断权重是否满足可以和其他权重进行融合cat的条件，因为可能权重是量化和非量化后的权重，所以复杂一些。
+        """
+        weight_ready = self.weight is not None and self.weight.dtype in [
+            torch.bfloat16,
+            torch.float16,
+            torch.float32,
+            torch.float64,
+        ]
+        bias_ready = (self.has_bias and self.bias is not None) or (not self.has_bias)
+        if weight_ready and bias_ready:
+            return True
+        else:
+            return self.is_ready()
+
+    def is_load_finished(self):
+        return (
+            (self.is_ready() and self.weight.is_cuda)
+            and ((self.has_bias and self.bias.is_cuda) or (not self.has_bias))
+            and ((self.has_weight_scale and self.weight_scale.is_cuda) or (not self.has_weight_scale))
+            and ((self.has_weight_zero_point and self.weight_zero_point.is_cuda) or (not self.has_weight_zero_point))
+        )
+
 
 class MMWeightTpl(BaseWeightTpl):
     def __init__(
         self,
+        weight_names: Union[str, List[str]],
+        bias_names: Optional[Union[str, List[str]]],
         data_type: torch.dtype,
         quant_method: QuantizationMethod = None,
         tp_rank: int = None,
         tp_world_size: int = None,
-        has_bias: bool = False,
         has_weight_scale: bool = False,
         has_weight_zero_point: bool = False,
     ) -> None:
         super().__init__(tp_rank, tp_world_size, data_type)
+
+        if isinstance(weight_names, str):
+            weight_names = [weight_names]
+        if isinstance(bias_names, str):
+            bias_names = [bias_names]
+        # 同时存在 weight_names 和 quanted_weight_names 是为了兼容在线和离线两种加载方案
+        self.weight_names = weight_names
+        self.quanted_weight_names = None
+
+        self.bias_names = bias_names
+        has_bias = self.bias_names is not None
+
+        self.gen_weight_quant_param_names(quant_method=quant_method, has_weight_zero_point=has_weight_zero_point)
         self.quant_method = quant_method
+        self.sub_child_mm_params: List[MMWeightPack] = [
+            MMWeightPack(
+                has_bias=has_bias,
+                has_weight_scale=has_weight_scale,
+                has_weight_zero_point=has_weight_zero_point,
+            )
+            for _ in len(weight_names)
+        ]
         self.mm_param: MMWeightPack = MMWeightPack(
             has_bias=has_bias,
             has_weight_scale=has_weight_scale,
             has_weight_zero_point=has_weight_zero_point,
         )
         self.param_slicer: SliceMixinTpl = None
+
+        self.weight_fused_dim = 0
+        self.bias_fused_dim = 0
+        self.weight_scale_and_zero_point_fused_dim = 0
 
     def mm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
@@ -73,171 +123,216 @@ class MMWeightTpl(BaseWeightTpl):
             return torch.mm(input_tensor, self.mm_param.weight, out=out)
         return torch.addmm(self.mm_param.bias, input_tensor, self.mm_param.weight, out=out)
 
+    def gen_weight_quant_param_names(self, quant_method: QuantizationMethod, has_weight_zero_point: bool):
+        if quant_method is None:
+            self.weight_zero_point_names = None
+            self.weight_scale_names = None
+            return
+
+        quanted_weight_names = []
+        weight_scale_names = []
+        weight_zero_point_names = []
+
+        for weight_name in self.weight_names:
+            assert quant_method.weight_scale_suffix is not None, "weight_scale_suffix is not set"
+            weight_scale_name = weight_name.replace("weight", quant_method.weight_scale_suffix)
+            weight_scale_names.append(weight_scale_name)
+            if has_weight_zero_point:
+                assert quant_method.weight_zero_point_suffix is not None, "weight_zero_point_suffix is not set"
+                weight_zero_point_name = weight_name.replace("weight", quant_method.weight_zero_point_suffix)
+                weight_zero_point_names.append(weight_zero_point_name)
+            if quant_method.weight_suffix is not None:
+                weight_name = weight_name.replace("weight", quant_method.weight_suffix)
+                quanted_weight_names.append(weight_name)
+
+        if len(quanted_weight_names) != 0:
+            self.quanted_weight_names = quanted_weight_names
+
+        if len(weight_scale_names) != 0:
+            self.weight_scale_names = weight_scale_names
+        else:
+            self.weight_scale_names = None
+
+        if len(weight_zero_point_names) != 0:
+            self.weight_zero_point_names = weight_zero_point_names
+        else:
+            self.weight_zero_point_names = None
+        return
+
     def load_hf_weights(self, weights):
-        raise NotImplementedError("load_hf_weights must implement this method")
+        if self.mm_param.is_load_finished():
+            return
 
-    def verify_load(self) -> bool:
-        return self.mm_param.is_ready()
+        for sub_child_index, param_name in enumerate(self.weight_names):
+            self._load_weight(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
 
-    def _process_weight(self, weight: torch.Tensor) -> None:
-        # 由于所有的量化算法，都会产生一个scale，所以只要没有scale，就说明需要在线对weight进行量化
-        if self.quant_method is not None and not self.mm_param.has_weight_scale:
+        if self.quanted_weight_names is not None:
+            for sub_child_index, param_name in enumerate(self.quanted_weight_names):
+                self._load_weight(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
+
+        if self.bias_names is not None:
+            for sub_child_index, param_name in enumerate(self.bias_names):
+                self._load_bias(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
+        if self.weight_scale_names is not None:
+            for sub_child_index, param_name in enumerate(self.weight_scale_names):
+                self._load_weight_scale(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
+        if self.weight_zero_point_names is not None:
+            for sub_child_index, param_name in enumerate(self.weight_zero_point_names):
+                self._load_weight_zero_point(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
+
+        # 如果需要fused的请求，全部ok了以后进行merge操作。
+        if all(e.ready_for_fused_merge() for e in self.sub_child_mm_params):
+            self._fuse_weights()
+            self.sub_child_mm_params.clear()
+
+        # 在线量化操作
+        if (
+            self.quant_method is not None
+            and self.mm_param.weight is not None
+            and self.quant_method.weight_need_quanted(self.mm_param.weight)
+        ):
             quantized_weight, weight_scale, weight_zero_point = self.quant_method.quantize(
-                weight.to(self.data_type_).cuda(get_current_device_id())
+                self.mm_param.weight.cuda(get_current_device_id())
             )
             self.mm_param.weight = quantized_weight
             self.mm_param.weight_scale = weight_scale
             self.mm_param.weight_zero_point = weight_zero_point
-            return
-        # 让 k dim 更连续，大多数split k 算法的算子可能能更快
-        self.mm_param.weight = weight.to(self.data_type_).cuda(get_current_device_id()).transpose(0, 1)
-        return
 
-    def _process_bias(self, bias: torch.Tensor) -> None:
-        self.mm_param.bias = bias.to(self.data_type_).cuda(get_current_device_id())
-        return
-
-    def _process_weight_scale(self, weight_scale: torch.Tensor) -> None:
-        raise NotImplementedError("process_weight_scale must implement this method")
-
-    def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> None:
-        raise NotImplementedError("process_weight_zero_point must implement this method")
-
-    def _load_weight(self, weights: Dict[str, torch.Tensor]) -> None:
-        raise NotImplementedError("load_weight_scale must implement this method")
-
-    def _load_bias(self, weights: Dict[str, torch.Tensor]) -> None:
-        raise NotImplementedError("load_bias must implement this method")
-
-    def _load_weight_scale(self, weights: Dict[str, torch.Tensor]) -> None:
-        raise NotImplementedError("load_weight_scale must implement this method")
-
-    def _load_weight_zero_point(self, weights: Dict[str, torch.Tensor]) -> None:
-        raise NotImplementedError("load_weight_zero_point must implement this method")
-
-    def _fuse_weights(self, dim: int = 0) -> None:
-        raise NotImplementedError("fuse_weights must implement this method")
-
-
-class SingleMMWeightTpl(MMWeightTpl):
-    def __init__(
-        self,
-        weight_name: str,
-        bias_name: Optional[str] = None,
-        data_type: torch.dtype = None,
-        quant_method: QuantizationMethod = None,
-        tp_rank: int = None,
-        tp_world_size: int = None,
-        has_weight_scale: bool = False,
-        has_weight_zero_point: bool = False,
-    ) -> None:
-        super().__init__(
-            data_type=data_type,
-            quant_method=quant_method,
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-            has_bias=bias_name is not None,
-            has_weight_scale=has_weight_scale,
-            has_weight_zero_point=has_weight_zero_point,
-        )
-        self.weight_name = weight_name
-        self.bias_name = bias_name
-        return
-
-    def _load_weight(self, weights: Dict[str, torch.Tensor]) -> None:
-        if self.weight_name in weights:
-            weight = weights[self.weight_name]
-            weight = self.param_slicer._slice_weight(weight)
-            self._process_weight(weight)
-        return
-
-    def _load_bias(self, weights: Dict[str, torch.Tensor]) -> None:
-        if self.bias_name in weights:
-            bias = self.param_slicer._slice_bias(weights[self.bias_name])
-            self._process_bias(bias)
-        return
-
-    def load_hf_weights(self, weights):
-        self._load_weight(weights)
-        self._load_bias(weights)
-        return
-
-
-class MultiMMWeightTpl(MMWeightTpl):
-    def __init__(
-        self,
-        weight_names: List[str],
-        bias_names: Optional[List[str]] = None,
-        data_type: torch.dtype = None,
-        quant_method: QuantizationMethod = None,
-        tp_rank: int = None,
-        tp_world_size: int = None,
-        has_weight_scale: bool = False,
-        has_weight_zero_point: bool = False,
-    ) -> None:
-        has_bias = bias_names is not None and any(b is not None for b in bias_names)
-        super().__init__(
-            data_type=data_type,
-            quant_method=quant_method,
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-            has_bias=has_bias,
-            has_weight_scale=has_weight_scale,
-            has_weight_zero_point=has_weight_zero_point,
-        )
-        self.weight_names = weight_names
-        self.bias_names = bias_names if bias_names is not None else []
-        self.mm_params: List[MMWeightPack] = [
-            MMWeightPack(
-                weight=None,
-                bias=None,
-                weight_scale=None,
-                weight_zero_point=None,
-                has_bias=has_bias,
-                has_weight_scale=has_weight_scale,
-                has_weight_zero_point=has_weight_zero_point,
+        # repack 操作
+        if self.quant_method is not None and self.mm_param.is_ready() and self.quant_method.params_need_repack():
+            (
+                self.mm_param.weight,
+                self.mm_param.weight_scale,
+                self.mm_param.weight_zero_point,
+            ) = self.quant_method.params_repack(
+                weight=self.mm_param.weight,
+                weight_scale=self.mm_param.weight_scale,
+                weight_zero_point=self.mm_param.weight_zero_point,
+                dtype_type=self.data_type_,
             )
-            for _ in range(len(weight_names))
-        ]
 
-    def _load_weight(self, weights: Dict[str, torch.Tensor]) -> None:
-        for i in range(len(self.weight_names)):
-            if self.weight_names[i] in weights:
-                weight_i = weights[self.weight_names[i]]
-                weight_i = self.param_slicer._slice_weight(weight_i)
-                self.mm_params[i].weight = weight_i
+        if self.mm_param.is_ready():
+            self._to_gpu_device()
+
+    def verify_load(self) -> bool:
+        return self.mm_param.is_ready()
+
+    # 执行顺序
+    def _load_weight(
+        self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
+    ) -> None:
+        if param_name in weights:
+            weight = self.param_slicer._slice_weight(weights[param_name])
+            self.sub_child_mm_params[sub_child_index].weight = weight
         return
 
-    def _load_bias(self, weights: Dict[str, torch.Tensor]) -> None:
-        for i in range(len(self.bias_names)):
-            if self.bias_names[i] in weights:
-                bias_i = weights[self.bias_names[i]]
-                bias_i = self.param_slicer._slice_bias(bias_i)
-                self.mm_params[i].bias = bias_i.to(self.data_type_)
+    def _load_bias(
+        self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
+    ) -> None:
+        if param_name in weights:
+            bias = self.param_slicer._slice_bias(weights[param_name])
+            self.sub_child_mm_params[sub_child_index].bias = bias
         return
 
-    def _fuse_weights(self, dim: int = 0) -> None:
-        if self.mm_param.weight is None and all(p.weight is not None for p in self.mm_params):
-            weight = torch.cat([p.weight for p in self.mm_params], dim=dim)
-            self._process_weight(weight)
-            for p in self.mm_params:
+    def _load_weight_scale(
+        self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
+    ) -> None:
+        if param_name in weights:
+            weight_scale = self.param_slicer._slice_weight_scale(weights[param_name])
+            self.sub_child_mm_params[sub_child_index].weight_scale = weight_scale
+        return
+
+    def _load_weight_zero_point(
+        self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
+    ) -> None:
+        if param_name in weights:
+            weight_zero_point = self.param_slicer._slice_weight_zero_point(weights[param_name])
+            self.sub_child_mm_params[sub_child_index].weight_zero_point = weight_zero_point
+        return
+
+    # weight merge
+    def _fuse_weights(self) -> None:
+        need_merge = len(self.sub_child_mm_params) > 1
+        if self.mm_param.weight is None and all(p.weight is not None for p in self.sub_child_mm_params):
+            if need_merge:
+                weight = torch.cat([p.weight for p in self.sub_child_mm_params], dim=self.weight_fused_dim)
+            else:
+                weight = self.sub_child_mm_params[0].weight
+
+            # 快速删除，防止占用显存过久
+            for p in self.sub_child_mm_params:
                 p.weight = None
 
-        if self.mm_param.has_bias and self.mm_param.bias is None and all(p.bias is not None for p in self.mm_params):
-            bias = torch.cat([p.bias for p in self.mm_params], dim=dim)
-            self._process_bias(bias)
-            for p in self.mm_params:
+            self.mm_param.weight = weight
+
+        if (
+            self.mm_param.has_bias
+            and self.mm_param.bias is None
+            and all(p.bias is not None for p in self.sub_child_mm_params)
+        ):
+            if need_merge:
+                bias = torch.cat([p.bias for p in self.sub_child_mm_params], dim=self.bias_fused_dim)
+            else:
+                bias = self.sub_child_mm_params[0].bias
+
+            # 快速删除，防止占用显存过久
+            for p in self.sub_child_mm_params:
                 p.bias = None
+
+            self.mm_param.bias = bias
+
+        if self.mm_param.weight_scale is None and all(p.weight_scale is not None for p in self.sub_child_mm_params):
+            if need_merge:
+                weight_scale = torch.cat(
+                    [p.weight_scale for p in self.sub_child_mm_params], dim=self.weight_scale_and_zero_point_fused_dim
+                )
+            else:
+                weight_scale = self.sub_child_mm_params[0].weight_scale
+
+            # 快速删除，防止占用显存过久
+            for p in self.sub_child_mm_params:
+                p.weight_scale = None
+
+            self.mm_param.weight_scale = weight_scale
+
+        if self.mm_param.weight_zero_point is None and all(
+            p.weight_zero_point is not None for p in self.sub_child_mm_params
+        ):
+            if need_merge:
+                weight_zero_point = torch.cat(
+                    [p.weight_zero_point for p in self.sub_child_mm_params],
+                    dim=self.weight_scale_and_zero_point_fused_dim,
+                )
+            else:
+                weight_zero_point = self.sub_child_mm_params[0].weight_zero_point
+
+            # 快速删除，防止占用显存过久
+            for p in self.sub_child_mm_params:
+                p.weight_zero_point = None
+
+            self.mm_param.weight_zero_point = weight_zero_point
         return
 
-    def load_hf_weights(self, weights):
-        self._load_weight(weights)
-        self._load_bias(weights)
-        self._fuse_weights(dim=0)
+    def _to_gpu_device(self) -> None:
+        if self.mm_param.weight is not None:
+            if self.quant_method is not None:
+                self.mm_param.weight = self.mm_param.weight.cuda(get_current_device_id())
+            else:
+                # 让 k dim 更连续，大多数split k 算法的算子可能能更快
+                self.mm_param.weight = (
+                    self.mm_param.weight.to(self.data_type_).cuda(get_current_device_id()).transpose(0, 1)
+                )
+        if self.mm_param.weight_scale is not None:
+            self.mm_param.weight_scale = self.mm_param.weight_scale.cuda(get_current_device_id())
+        if self.mm_param.weight_zero_point is not None:
+            self.mm_param.weight_zero_point = self.mm_param.weight_zero_point.cuda(get_current_device_id())
+        if self.mm_param.bias is not None:
+            # TODO 是不是所有的bias都需要转换为全局设置的数据类型吗，会不会影响精度
+            self.mm_param.bias = self.mm_param.bias.to(self.data_type_).cuda(get_current_device_id())
         return
 
 
-class BMMWeightTpl(SingleMMWeightTpl):
+class BMMWeightTpl(MMWeightTpl):
     def mm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
     ) -> torch.Tensor:
@@ -260,204 +355,29 @@ class BMMWeightTpl(SingleMMWeightTpl):
             return torch.bmm(input_tensor, fpweight, out=out)
         return torch.addbmm(self.mm_param.bias, input_tensor, fpweight, out=out)
 
-    def _process_weight(self, weight) -> None:
-        self.mm_param.weight = weight.cuda(get_current_device_id())
+    def _to_gpu_device(self) -> None:
+        if self.mm_param.weight is not None:
+            if self.quant_method is not None:
+                self.mm_param.weight = self.mm_param.weight.cuda(get_current_device_id())
+            else:
+                # bmm 不需要 transpose 操作
+                self.mm_param.weight = self.mm_param.weight.to(self.data_type_).cuda(get_current_device_id())
+        if self.mm_param.weight_scale is not None:
+            self.mm_param.weight_scale = self.mm_param.weight_scale.cuda(get_current_device_id())
+        if self.mm_param.weight_zero_point is not None:
+            self.mm_param.weight_zero_point = self.mm_param.weight_zero_point.cuda(get_current_device_id())
+        if self.mm_param.bias is not None:
+            # TODO 是不是所有的bias都需要转换为全局设置的数据类型吗，会不会影响精度
+            self.mm_param.bias = self.mm_param.bias.to(self.data_type_).cuda(get_current_device_id())
+        return
 
 
-class SingleQuantizedMMWeightTpl(SingleMMWeightTpl):
+class DeepGemmFP8W8A8B128MMWeight(MMWeightTpl):
     def __init__(
         self,
-        weight_name: str,
-        bias_name: Optional[str] = None,
-        data_type: torch.dtype = None,
-        quant_method: QuantizationMethod = None,
-        tp_rank: int = None,
-        tp_world_size: int = None,
-        has_weight_scale: bool = True,
-        has_weight_zero_point: bool = False,  # 目前较多的是对称量化，所以默认没有zero_point
-    ) -> None:
-        super().__init__(
-            weight_name=weight_name,
-            bias_name=bias_name,
-            data_type=data_type,
-            quant_method=quant_method,
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-            has_weight_scale=has_weight_scale,
-            has_weight_zero_point=has_weight_zero_point,
-        )
-        assert quant_method is not None, "quant_method is not set"
-        assert quant_method.weight_scale_suffix is not None, "weight_scale_suffix is not set"
-        self.weight_scale_name = weight_name.replace("weight", quant_method.weight_scale_suffix)
-        if has_weight_zero_point:
-            assert quant_method.weight_zero_point_suffix is not None, "weight_zero_point_suffix is not set"
-            self.weight_zero_point_name = weight_name.replace("weight", quant_method.weight_zero_point_suffix)
-        if quant_method.weight_suffix is not None:
-            self.weight_name = weight_name.replace("weight", quant_method.weight_suffix)
-        return
-
-    def _load_weight_scale(self, weights: Dict[str, torch.Tensor]) -> None:
-        if self.weight_scale_name is not None and self.weight_scale_name in weights:
-            weight_scale = weights[self.weight_scale_name]
-            weight_scale = self.param_slicer._slice_weight_scale(weight_scale)
-            self._process_weight_scale(weight_scale)
-
-    def _load_weight_zero_point(self, weights: Dict[str, torch.Tensor]) -> None:
-        if self.mm_param.has_weight_zero_point and self.weight_zero_point_name in weights:
-            weight_zero_point = weights[self.weight_zero_point_name]
-            weight_zero_point = self.param_slicer._slice_weight_zero_point(weight_zero_point)
-            self._process_weight_zero_point(weight_zero_point)
-
-    def load_hf_weights(self, weights):
-        self._load_weight(weights)
-        self._load_bias(weights)
-        self._load_weight_scale(weights)
-        self._load_weight_zero_point(weights)
-        return
-
-    # 不同的量化算法，往往需要不同的处理方式，所以强制要求实现这些方法
-    def _process_weight(self, weight: torch.Tensor) -> None:
-        raise NotImplementedError("Quantized weight process_weight must implement this method")
-
-    def _process_weight_scale(self, weight_scale: torch.Tensor) -> None:
-        raise NotImplementedError("Quantized weight process_weight_scale must implement this method")
-
-    def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> None:
-        raise NotImplementedError("Quantized weight process_weight_zero_point must implement this method")
-
-
-class MultiQuantizedMMWeightTpl(MultiMMWeightTpl):
-    def __init__(
-        self,
-        weight_names: List[str],
-        bias_names: Optional[List[str]] = None,
-        data_type: torch.dtype = None,
-        quant_method: QuantizationMethod = None,
-        tp_rank: int = None,
-        tp_world_size: int = None,
-        has_weight_scale: bool = True,
-        has_weight_zero_point: bool = False,
-    ) -> None:
-        super().__init__(
-            weight_names=weight_names,
-            bias_names=bias_names,
-            data_type=data_type,
-            quant_method=quant_method,
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-            has_weight_scale=has_weight_scale,
-            has_weight_zero_point=has_weight_zero_point,
-        )
-        assert quant_method is not None, "quant_method is not set"
-        assert quant_method.weight_scale_suffix is not None, "weight_scale_suffix is not set"
-        self.weight_scale_names = [
-            weight_name.replace("weight", quant_method.weight_scale_suffix) for weight_name in weight_names
-        ]
-        if has_weight_zero_point:
-            assert quant_method.weight_zero_point_suffix is not None, "weight_zero_point_suffix is not set"
-            self.weight_zero_point_names = [
-                weight_name.replace("weight", quant_method.weight_zero_point_suffix) for weight_name in weight_names
-            ]
-        if quant_method.weight_suffix is not None:
-            self.weight_names = [
-                weight_name.replace("weight", quant_method.weight_suffix) for weight_name in weight_names
-            ]
-        return
-
-    def _load_weight(self, weights: Dict[str, torch.Tensor]) -> None:
-        for i in range(len(self.weight_names)):
-            if self.weight_names[i] in weights:
-                weight = weights[self.weight_names[i]]
-                weight = self.param_slicer._slice_weight(weight)
-                self.mm_params[i].weight = weight
-
-    def _load_weight_scale(self, weights: Dict[str, torch.Tensor]) -> None:
-        for i in range(len(self.weight_names)):
-            if self.weight_scale_names[i] is not None and self.weight_scale_names[i] in weights:
-                weight_scale = weights[self.weight_scale_names[i]]
-                weight_scale = self.param_slicer._slice_weight_scale(weight_scale)
-                self.mm_params[i].weight_scale = weight_scale.to(self.data_type_)
-
-    def _load_weight_zero_point(self, weights: Dict[str, torch.Tensor]) -> None:
-        for i in range(len(self.weight_names)):
-            if self.mm_params[i].has_weight_zero_point and self.weight_zero_point_names[i] in weights:
-                weight_zero_point = weights[self.weight_zero_point_names[i]]
-                weight_zero_point = self.param_slicer._slice_weight_zero_point(weight_zero_point)
-                self.mm_params[i].weight_zero_point = weight_zero_point
-        return
-
-    def _fuse_weights(self, dim: int = 0) -> None:
-        super()._fuse_weights(dim=dim)
-        if self.mm_param.weight_scale is None and (None not in [p.weight_scale for p in self.mm_params]):
-            # awq 保存的量化参数，weight shape 是 in x out。所以这里的cat dim 是 1
-            weight_scale = torch.cat([p.weight_scale for p in self.mm_params], dim=dim).cuda(get_current_device_id())
-            self._process_weight_scale(weight_scale)
-            for p in self.mm_params:
-                p.weight_scale = None
-
-        if self.mm_param.weight_zero_point is None and (None not in [p.weight_zero_point for p in self.mm_params]):
-            weight_zero_point = torch.cat([p.weight_zero_point for p in self.mm_params], dim=dim)
-            self._process_weight_zero_point(weight_zero_point)
-            for p in self.mm_params:
-                p.weight_zero_point = None
-        torch.cuda.empty_cache()
-        return
-
-    # 不同的量化算法，往往需要不同的处理方式，所以强制要求实现这些方法
-    def _process_weight(self, weight: torch.Tensor) -> None:
-        raise NotImplementedError("Quantized weight process_weight must implement this method")
-
-    def _process_weight_scale(self, weight_scale: torch.Tensor) -> None:
-        raise NotImplementedError("Quantized weight process_weight_scale must implement this method")
-
-    def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> None:
-        raise NotImplementedError("Quantized weight process_weight_zero_point must implement this method")
-
-    def load_hf_weights(self, weights: Dict[str, torch.Tensor]) -> None:
-        self._load_weight(weights)
-        self._load_bias(weights)
-        self._load_weight_scale(weights)
-        self._load_weight_zero_point(weights)
-        self._fuse_weights(dim=0)
-        return
-
-
-class DeepGemmFP8W8A8B128MMWeight(SingleQuantizedMMWeightTpl):
-    def __init__(
-        self,
-        weight_name: str,
+        weight_names: Union[str, List[str]],
         data_type: torch.dtype,
-        bias_name: Optional[str] = None,
-        quant_method: QuantizationMethod = None,
-        tp_rank: int = None,
-        tp_world_size: int = None,
-    ) -> None:
-        super().__init__(
-            weight_name=weight_name,
-            bias_name=bias_name,
-            data_type=data_type,
-            quant_method=quant_method,
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-            has_weight_scale=True,
-            has_weight_zero_point=False,
-        )
-
-    def _process_weight_scale(self, weight_scale) -> None:
-        self.mm_param.weight_scale = weight_scale.to(torch.float).cuda(get_current_device_id()).transpose(0, 1)
-        return
-
-    def _process_weight(self, weight) -> None:
-        self.mm_param.weight = weight.cuda(get_current_device_id()).transpose(0, 1)
-        return
-
-
-class DeepGemmFP8W8A8B128MultiMMWeight(MultiQuantizedMMWeightTpl):
-    def __init__(
-        self,
-        weight_names: str,
-        data_type: torch.dtype,
-        bias_names: Optional[str] = None,
+        bias_names: Optional[Union[str, List[str]]] = None,
         quant_method: QuantizationMethod = None,
         tp_rank: int = None,
         tp_world_size: int = None,
@@ -473,28 +393,33 @@ class DeepGemmFP8W8A8B128MultiMMWeight(MultiQuantizedMMWeightTpl):
             has_weight_zero_point=False,
         )
 
-    def _process_weight_scale(self, weight_scale) -> None:
-        self.mm_param.weight_scale = weight_scale.to(torch.float).cuda(get_current_device_id()).transpose(0, 1)
+    def _to_gpu_device(self) -> None:
+        if self.mm_param.weight is not None:
+            self.mm_param.weight = self.mm_param.weight.cuda(get_current_device_id()).transpose(0, 1)
+        if self.mm_param.weight_scale is not None:
+            self.mm_param.weight_scale = self.mm_param.weight_scale.cuda(get_current_device_id()).transpose(0, 1)
+
+        assert self.mm_param.has_weight_zero_point is False
+
+        if self.mm_param.bias is not None:
+            # TODO 是不是所有的bias都需要转换为全局设置的数据类型吗，会不会影响精度
+            self.mm_param.bias = self.mm_param.bias.to(self.data_type_).cuda(get_current_device_id())
         return
 
-    def _process_weight(self, weight) -> None:
-        self.mm_param.weight = weight.cuda(get_current_device_id()).transpose(0, 1)
-        return
 
-
-class AWQMMWeightTpl(SingleQuantizedMMWeightTpl):
+class AWQMMWeightTpl(MMWeightTpl):
     def __init__(
         self,
-        weight_name: str,
-        bias_name: Optional[str] = None,
+        weight_names: Union[str, List[str]],
+        bias_names: Optional[Union[str, List[str]]] = None,
         data_type: torch.dtype = None,
         quant_method: QuantizationMethod = None,
         tp_rank: int = None,
         tp_world_size: int = None,
     ) -> None:
         super().__init__(
-            weight_name=weight_name,
-            bias_name=bias_name,
+            weight_name=weight_names,
+            bias_name=bias_names,
             data_type=data_type,
             quant_method=quant_method,
             tp_rank=tp_rank,
@@ -502,58 +427,18 @@ class AWQMMWeightTpl(SingleQuantizedMMWeightTpl):
             has_weight_scale=True,
             has_weight_zero_point=True,
         )
+        self.weight_fused_dim = 1
+        self.bias_fused_dim = 0
+        self.weight_scale_and_zero_point_fused_dim = 1
 
-    def _process_weight(self, weight: torch.Tensor) -> None:
-        self.mm_param.weight = weight.cuda(get_current_device_id())
-        return
-
-    def _process_weight_scale(self, weight_scale: torch.Tensor) -> None:
-        self.mm_param.weight_scale = weight_scale.to(self.data_type_).cuda(get_current_device_id())
-        return
-
-    def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> None:
-        self.mm_param.weight_zero_point = weight_zero_point.cuda(get_current_device_id())
-        return
-
-
-class AWQMultiMMWeightTpl(MultiQuantizedMMWeightTpl):
-    def __init__(
-        self,
-        weight_names: List[str],
-        bias_names: Optional[List[str]] = None,
-        data_type: torch.dtype = None,
-        quant_method: QuantizationMethod = None,
-        tp_rank: int = None,
-        tp_world_size: int = None,
-    ) -> None:
-        super().__init__(
-            weight_names=weight_names,
-            bias_names=bias_names,
-            data_type=data_type,
-            quant_method=quant_method,
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-            has_weight_scale=True,
-            has_weight_zero_point=True,
-        )
-
-    def _process_weight(self, weight: torch.Tensor) -> None:
-        self.mm_param.weight = weight.cuda(get_current_device_id())
-        return
-
-    def _process_weight_scale(self, weight_scale: torch.Tensor) -> None:
-        self.mm_param.weight_scale = weight_scale.to(self.data_type_).cuda(get_current_device_id())
-        return
-
-    def _process_weight_zero_point(self, weight_zero_point: torch.Tensor) -> None:
-        self.mm_param.weight_zero_point = weight_zero_point.cuda(get_current_device_id())
-        return
-
-    def load_hf_weights(self, weights):
-        self._load_weight(weights)
-        self._load_bias(weights)
-        self._load_weight_scale(weights)
-        self._load_weight_zero_point(weights)
-        # 由于awq的储存格式是inxout，所以拼接dim是 1
-        self._fuse_weights(dim=1)
+    def _to_gpu_device(self) -> None:
+        if self.mm_param.weight is not None:
+            self.mm_param.weight = self.mm_param.weight.cuda(get_current_device_id())
+        if self.mm_param.weight_scale is not None:
+            self.mm_param.weight_scale = self.mm_param.weight_scale.to(self.data_type_).cuda(get_current_device_id())
+        if self.mm_param.weight_zero_point is not None:
+            self.mm_param.weight_zero_point = self.mm_param.weight_zero_point.cuda(get_current_device_id())
+        if self.mm_param.bias is not None:
+            # TODO 是不是所有的bias都需要转换为全局设置的数据类型吗，会不会影响精度
+            self.mm_param.bias = self.mm_param.bias.to(self.data_type_).cuda(get_current_device_id())
         return
