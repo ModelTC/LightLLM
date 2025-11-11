@@ -83,7 +83,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 
             # Create shared memory for mem_manager
-            self.model.mem_manager.create_shm()
+            self.model.mem_manager.create_shm(use_for_pd_trans=False)
 
             # Create shared ShmArray for kv_indexes transfer
             # Use a small buffer to save shared memory
@@ -103,7 +103,9 @@ class DPChunkedPrefillBackend(ModeBackend):
             self.mem_managers = []
             for rank_idx in range(self.node_world_size):
                 if rank_idx != self.rank_in_node:
-                    self.mem_managers.append(MemoryManager.from_shm(rank_idx, self.rank_in_node))
+                    self.mem_managers.append(
+                        MemoryManager.from_shm(rank_idx, self.rank_in_node, use_for_pd_trans=False)
+                    )
                 else:
                     self.mem_managers.append(self.model.mem_manager)
 

@@ -27,9 +27,8 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 
-        # 将当前的内存管理器放入到队列中，供kv传输进程获取后使用
-        for _ in range(self.node_world_size):
-            self.mem_queue.put(self.model.mem_manager)
+        # 将内存管理器写入共享内存，供kv传输进程获取后使用
+        self.model.mem_manager.create_shm()
         return
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
