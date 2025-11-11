@@ -111,6 +111,8 @@ class MMWeightTpl(BaseWeightTpl):
         self.bias_fused_dim = 0
         self.weight_scale_and_zero_point_fused_dim = 0
 
+        self.load_finished: bool = False
+
     def mm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
     ) -> torch.Tensor:
@@ -201,6 +203,7 @@ class MMWeightTpl(BaseWeightTpl):
                 self.quant_method is not None
                 and self.mm_param.weight is not None
                 and self.quant_method.weight_need_quanted(self.mm_param.weight)
+                and self.load_finished is False
             ):
                 logger.info(f"online quant weight names: {self.weight_names}")
                 quantized_weight, weight_scale, weight_zero_point = self.quant_method.quantize(
@@ -211,7 +214,12 @@ class MMWeightTpl(BaseWeightTpl):
                 self.mm_param.weight_zero_point = weight_zero_point
 
             # repack 操作
-            if self.quant_method is not None and self.mm_param.is_ready() and self.quant_method.params_need_repack():
+            if (
+                self.quant_method is not None
+                and self.mm_param.is_ready()
+                and self.quant_method.params_need_repack()
+                and self.load_finished is False
+            ):
                 (
                     self.mm_param.weight,
                     self.mm_param.weight_scale,
@@ -223,8 +231,9 @@ class MMWeightTpl(BaseWeightTpl):
                     dtype_type=self.data_type_,
                 )
 
-            if self.mm_param.is_ready():
+            if self.mm_param.is_ready() and self.load_finished is False:
                 self._to_gpu_device()
+                self.load_finished = True
 
     def verify_load(self) -> bool:
         return self.mm_param.is_ready()
