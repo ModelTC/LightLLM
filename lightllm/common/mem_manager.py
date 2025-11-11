@@ -432,11 +432,16 @@ class MemoryManager:
             rank_in_dp=rank_in_dp,
         )
 
-    def create_shm(self):
+    def create_shm(self, use_for_pd_trans: bool = True):
+        if use_for_pd_trans:
+            shm_name = f"{get_unique_server_name()}_mem_manager_for_pd_{get_current_rank_in_node()}"
+        else:
+            shm_name = f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}"
+
         for rank_in_node in range(0, get_node_world_size()):
             obj_bytes = ForkingPickler.dumps(self)
             shm = create_or_link_shm(
-                f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}_{rank_in_node}",
+                f"{shm_name}_{rank_in_node}",
                 LIGHTLLM_MEM_MANAGER_SHM_SIZE,
             )
             logger.info(f"create shm {shm.name} size {shm.size} obj size {len(obj_bytes)}")
@@ -444,11 +449,13 @@ class MemoryManager:
             shm.buf[4 : 4 + len(obj_bytes)] = obj_bytes
 
     @staticmethod
-    def from_shm(mem_manager_rank_in_node, rank_in_node):
-        shm = create_or_link_shm(
-            f"{get_unique_server_name()}_mem_manager_{mem_manager_rank_in_node}_{rank_in_node}",
-            LIGHTLLM_MEM_MANAGER_SHM_SIZE,
-        )
+    def from_shm(mem_manager_rank_in_node, rank_in_node, use_for_pd_trans: bool = True):
+        if use_for_pd_trans:
+            shm_name = f"{get_unique_server_name()}_mem_manager_for_pd_{mem_manager_rank_in_node}_{rank_in_node}"
+        else:
+            shm_name = f"{get_unique_server_name()}_mem_manager_{mem_manager_rank_in_node}_{rank_in_node}"
+        logger.info(f"from shm {shm_name}")
+        shm = create_or_link_shm(shm_name, LIGHTLLM_MEM_MANAGER_SHM_SIZE)
         bytes_len = int.from_bytes(shm.buf[0:4], "little")
         obj_bytes = shm.buf[4 : 4 + bytes_len].tobytes()
         shm.close()
