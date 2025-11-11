@@ -1,5 +1,6 @@
 import os
 import torch
+import threading
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict, Union, Type
@@ -71,14 +72,20 @@ class MMWeightTpl(BaseWeightTpl):
         has_weight_zero_point: bool = False,
     ) -> None:
         super().__init__(tp_rank, tp_world_size, data_type)
+        self.lock = threading.Lock()
 
         if isinstance(weight_names, str):
             weight_names = [weight_names]
         if isinstance(bias_names, str):
             bias_names = [bias_names]
+
+        # 过滤输入的bias_names 是list， 但是内容全是None的情况
+        if isinstance(bias_names, list):
+            if bias_names[0] is None:
+                bias_names = None
+
         # 同时存在 weight_names 和 quanted_weight_names 是为了兼容在线和离线两种加载方案
         self.weight_names = weight_names
-        self.quanted_weight_names = None
 
         self.bias_names = bias_names
         has_bias = self.bias_names is not None
@@ -125,6 +132,7 @@ class MMWeightTpl(BaseWeightTpl):
 
     def gen_weight_quant_param_names(self, quant_method: QuantizationMethod, has_weight_zero_point: bool):
         if quant_method is None:
+            self.quanted_weight_names = None
             self.weight_zero_point_names = None
             self.weight_scale_names = None
             return
@@ -147,6 +155,8 @@ class MMWeightTpl(BaseWeightTpl):
 
         if len(quanted_weight_names) != 0:
             self.quanted_weight_names = quanted_weight_names
+        else:
+            self.quanted_weight_names = None
 
         if len(weight_scale_names) != 0:
             self.weight_scale_names = weight_scale_names
@@ -180,40 +190,41 @@ class MMWeightTpl(BaseWeightTpl):
             for sub_child_index, param_name in enumerate(self.weight_zero_point_names):
                 self._load_weight_zero_point(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
 
-        # 如果需要fused的请求，全部ok了以后进行merge操作。
-        if all(e.ready_for_fused_merge() for e in self.sub_child_mm_params):
-            self._fuse_weights()
-            self.sub_child_mm_params.clear()
+        with self.lock:
+            # 如果需要fused的请求，全部ok了以后进行merge操作。, all([]) 竟然返回是True, 需要len(self.sub_child_mm_params) > 0 的额外判断。
+            if len(self.sub_child_mm_params) > 0 and all(e.ready_for_fused_merge() for e in self.sub_child_mm_params):
+                self._fuse_weights()
+                self.sub_child_mm_params.clear()
 
-        # 在线量化操作
-        if (
-            self.quant_method is not None
-            and self.mm_param.weight is not None
-            and self.quant_method.weight_need_quanted(self.mm_param.weight)
-        ):
-            logger.info(f"online quant weight names: {self.weight_names}")
-            quantized_weight, weight_scale, weight_zero_point = self.quant_method.quantize(
-                self.mm_param.weight.cuda(get_current_device_id())
-            )
-            self.mm_param.weight = quantized_weight
-            self.mm_param.weight_scale = weight_scale
-            self.mm_param.weight_zero_point = weight_zero_point
+            # 在线量化操作
+            if (
+                self.quant_method is not None
+                and self.mm_param.weight is not None
+                and self.quant_method.weight_need_quanted(self.mm_param.weight)
+            ):
+                logger.info(f"online quant weight names: {self.weight_names}")
+                quantized_weight, weight_scale, weight_zero_point = self.quant_method.quantize(
+                    self.mm_param.weight.cuda(get_current_device_id())
+                )
+                self.mm_param.weight = quantized_weight
+                self.mm_param.weight_scale = weight_scale
+                self.mm_param.weight_zero_point = weight_zero_point
 
-        # repack 操作
-        if self.quant_method is not None and self.mm_param.is_ready() and self.quant_method.params_need_repack():
-            (
-                self.mm_param.weight,
-                self.mm_param.weight_scale,
-                self.mm_param.weight_zero_point,
-            ) = self.quant_method.params_repack(
-                weight=self.mm_param.weight,
-                weight_scale=self.mm_param.weight_scale,
-                weight_zero_point=self.mm_param.weight_zero_point,
-                dtype_type=self.data_type_,
-            )
+            # repack 操作
+            if self.quant_method is not None and self.mm_param.is_ready() and self.quant_method.params_need_repack():
+                (
+                    self.mm_param.weight,
+                    self.mm_param.weight_scale,
+                    self.mm_param.weight_zero_point,
+                ) = self.quant_method.params_repack(
+                    weight=self.mm_param.weight,
+                    weight_scale=self.mm_param.weight_scale,
+                    weight_zero_point=self.mm_param.weight_zero_point,
+                    dtype_type=self.data_type_,
+                )
 
-        if self.mm_param.is_ready():
-            self._to_gpu_device()
+            if self.mm_param.is_ready():
+                self._to_gpu_device()
 
     def verify_load(self) -> bool:
         return self.mm_param.is_ready()

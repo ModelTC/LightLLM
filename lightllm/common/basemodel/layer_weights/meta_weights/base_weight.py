@@ -27,5 +27,5 @@ class BaseWeightTpl(BaseWeight):
     def load_hf_weights(self, weights):
         raise NotImplementedError("load_hf_weights must implement this method")
 
-    def verify_load(self):
+    def verify_load(self) -> bool:
         raise NotImplementedError("verify_load must implement this method")
