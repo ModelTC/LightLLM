@@ -161,10 +161,12 @@ class DPChunkedPrefillBackend(ModeBackend):
             my_match.append((shm_req, kv_len, value_tensor))
 
         # match all the reqs in other dp ranks.
+        other_shm_reqs = []
         if self.rank_in_dp == 0:
             for r in other_reqs:
                 _, shm_index, _, _ = r
                 shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(shm_index)
+                other_shm_reqs.append(shm_req)
                 sampling_param = InferSamplingParams(shm_req, g_infer_context.vocab_size)
                 if sampling_param.disable_prompt_cache:
                     continue
@@ -192,9 +194,12 @@ class DPChunkedPrefillBackend(ModeBackend):
             shm_req, kv_len, value_tensor = shm_index_to_match[shm_index]
             match = (shm_req, kv_len, value_tensor, suggested_dp_index)
 
+            # 需要传输的
             if suggested_dp_index != shm_req.dp_max_kv_rank:
+                # 需要获取的
                 if suggested_dp_index == self.dp_rank_in_node:
                     my_trans_match.append((match, transfer_count))
+                # 需要给其他dp的
                 else:
                     other_trans_match.append((match, transfer_count))
                 transfer_count += 1
@@ -208,16 +213,15 @@ class DPChunkedPrefillBackend(ModeBackend):
         if transfer_count > 0:
             self._transfer_dp_kv_cache(my_trans_match, other_trans_match)
 
+        self.release_all_shm_reqs(other_shm_reqs)
+
     def _transfer_dp_kv_cache(self, my_match: List[Tuple], other_match: List[Tuple]):
-        other_shm_reqs = []
         for match, index in other_match:
             shm_req, kv_len, value_tensor, _ = match
             trans_len = kv_len - shm_req.dp_origin_kv_len
             if shm_req.dp_max_kv_rank == self.dp_rank_in_node:
                 self.shared_kv_indexes.arr[index, 0:trans_len] = value_tensor[shm_req.dp_origin_kv_len : kv_len]
-            other_shm_reqs.append(shm_req)
 
-        self.release_all_shm_reqs(other_shm_reqs)
         dist.barrier(group=self.node_nccl_group)
 
         if not my_match:
