@@ -68,8 +68,6 @@ class MMWeightTpl(BaseWeightTpl):
             return self.quant_method.apply(
                 input_tensor, self.weight, self.bias, out, use_custom_tensor_mananger=use_custom_tensor_mananger
             )
-        if overlap_ctx is not None:
-            return overlap_ctx.forward(input=input_tensor, weight=self.weight.t(), out=out)
         if out is None:
             shape = (input_tensor.shape[0], self.weight.shape[1])
             dtype = input_tensor.dtype
@@ -78,6 +76,8 @@ class MMWeightTpl(BaseWeightTpl):
                 out = g_cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
             else:
                 out = torch.empty(shape, dtype=dtype, device=device)
+        if overlap_ctx is not None:
+            return overlap_ctx.forward(input=input_tensor, weight=self.weight, out=out)
         if self.bias is None:
             return torch.mm(input_tensor, self.weight, out=out)
         return torch.addmm(self.bias, input_tensor, self.weight, out=out)

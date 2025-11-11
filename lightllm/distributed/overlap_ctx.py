@@ -37,8 +37,11 @@ def create_overlap_ctx(network_config_: dict, dtype: torch.dtype) -> OverlapCTX:
     if args.overlap_type is None:
         return OverlapWrapper(row_ctx=None, col_ctx=None)
     from lightllm.distributed.triton_dist.gemm_rs import TritonDistGemmRSCTX
+    from lightllm.distributed.triton_dist.gemm_ar import TritonDistGemmARCTX
 
     if args.overlap_type == "gemm_rs_triton_dist":
         return OverlapWrapper(row_ctx=None, col_ctx=TritonDistGemmRSCTX(network_config_, dtype))
+    if args.overlap_type == "gemm_ar_triton_dist":
+        return OverlapWrapper(row_ctx=None, col_ctx=TritonDistGemmARCTX(network_config_, dtype))
     else:
         raise ValueError(f"Unsupported overlap type: {args.overlap_type}")

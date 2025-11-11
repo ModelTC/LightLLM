@@ -184,5 +184,5 @@ def gemm_rs(a, b, ctx, persistent=True, fuse_scatter=False, output: Optional[tor
     Returns:
         c (torch.Tensor<bfloat16/float16>): local matmul C matrix. shape: [M // world_size, N]
     """
-    c = gemm_rs_op(a, b, ctx, persistent, fuse_scatter, output)
+    c = gemm_rs_op(a, b.t(), ctx, persistent, fuse_scatter, output)
     return c

@@ -31,6 +31,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 from lightllm.common.basemodel.triton_kernel.q_per_head_fp8_quant import q_per_head_fp8_quant
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
+from lightllm.distributed import all_reduce
 
 if HAS_VLLM:
     scaled_fp8_quant = vllm_ops.scaled_fp8_quant
@@ -398,7 +399,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
-        o_tensor = layer_weight.o_proj.mm(input)
+        col_ctx = infer_state.overlap_wrapper.col_ctx
+        if not col_ctx.can_run(input):
+            col_ctx = None
+        o_tensor = layer_weight.o_proj.mm(input, overlap_ctx=col_ctx)
+        if self.tp_world_size_ > 1 and col_ctx is None:
+            all_reduce(o_tensor, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o_tensor
 
     def _tpsp_get_o(
@@ -445,6 +451,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         up_gate_out = None
         ffn2_out = layer_weight.down_proj.mm(ffn1_out)
         ffn1_out = None
+        if self.tp_world_size_ > 1:
+            all_reduce(ffn2_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return ffn2_out
 
     def _tpsp_ffn(

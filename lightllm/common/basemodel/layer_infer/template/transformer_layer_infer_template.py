@@ -71,16 +71,12 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
-        if self.tp_world_size_ > 1:
-            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
@@ -92,16 +88,12 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
-        if self.tp_world_size_ > 1:
-            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
