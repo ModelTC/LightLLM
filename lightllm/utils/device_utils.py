@@ -227,3 +227,19 @@ def set_sm_limit(percent: int, gpu_index=0):
     os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = str(percent)
     logger.info(f"Set CUDA_MPS_ACTIVE_THREAD_PERCENTAGE to {percent}% for GPU {gpu_index}.")
     return True
+
+
+@lru_cache(maxsize=None)
+def triton_support_tensor_descriptor() -> bool:
+    try:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        support_tma = torch.cuda.get_device_capability() >= (9, 0)
+        if support_tma:
+            logger.info("triton support tensor_descriptor")
+            return True
+        else:
+            assert False
+    except:
+        logger.info("triton not support tensor_descriptor")
+        return False
