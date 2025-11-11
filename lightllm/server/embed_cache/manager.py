@@ -60,6 +60,7 @@ def start_cache_manager(args: StartArgs, pipe_writer):
     manager = InMemoryCache(args)
     service = CacheServer(manager)
     from rpyc.utils.server import ThreadedServer
+    import lightllm.utils.rpyc_fix_utils as _
 
     t = ThreadedServer(service, port=args.cache_port, protocol_config={"allow_pickle": True})
     pipe_writer.send("init ok")

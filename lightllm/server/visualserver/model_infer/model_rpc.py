@@ -2,6 +2,7 @@ import asyncio
 import numpy as np
 import rpyc
 import torch
+import socket
 import inspect
 from datetime import timedelta
 from typing import Dict, List, Tuple
@@ -39,6 +40,7 @@ class VisualModelRpcServer(rpyc.Service):
         weight_dir = kvargs["weight_dir"]
         self.vit_rank_id = kvargs["vit_rank_id"]
         self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
+        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.data_type = kvargs["data_type"]
 
         init_vision_distributed_env(kvargs)
@@ -161,6 +163,8 @@ def _init_env(port, device_id):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
+    import lightllm.utils.rpyc_fix_utils as _
+
     t = ThreadedServer(VisualModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
     t.start()
     return
@@ -182,6 +186,7 @@ async def start_model_process(port, vit_tp, device_id):
     while repeat_count < 20:
         try:
             con = rpyc.connect("localhost", port, config={"allow_pickle": True})
+            con._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             break
         except BaseException:
             await asyncio.sleep(1)
