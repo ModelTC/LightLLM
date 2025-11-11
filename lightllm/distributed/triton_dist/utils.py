@@ -46,7 +46,6 @@ def setup_env():
             "NCCL_DEBUG": "ERROR",
             "NVSHMEM_HOME": nvshmem_home,
             "LD_LIBRARY_PATH": f"{nvshmem_home}/lib:{ompi_build}/lib:" + os.environ.get("LD_LIBRARY_PATH", ""),
-            "NVSHMEM_DISABLE_CUDA_VMM": os.environ.get("NVSHMEM_DISABLE_CUDA_VMM", "1"),
             "NVSHMEM_BOOTSTRAP": "UID",
             "NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME": ifname,
             "TRITON_CACHE_DIR": str(script_dir / "triton_cache"),

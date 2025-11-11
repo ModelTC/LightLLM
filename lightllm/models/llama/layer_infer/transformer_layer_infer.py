@@ -400,7 +400,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     ) -> torch.Tensor:
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         col_ctx = infer_state.overlap_wrapper.col_ctx
-        if not col_ctx.can_run(input):
+        if col_ctx is not None and not col_ctx.can_run(input):
             col_ctx = None
         o_tensor = layer_weight.o_proj.mm(input, overlap_ctx=col_ctx)
         if self.tp_world_size_ > 1 and col_ctx is None:

@@ -35,8 +35,9 @@ class TritonDistGemmARCTX(OverlapCTX):
         self.rank = get_current_rank_in_dp()
         self.local_world_size = self.world_size // args.nnodes
         self.ar_stream = None
-        self.copy_to_local = True
+        self.copy_to_local = False
         self.USE_MULTIMEM_ST = is_nvshmem_multimem_supported()
+        assert self.USE_MULTIMEM_ST, "The multimem-st is required for gemm-ar"
         self._create_context()
 
     def _create_context(self):
@@ -45,8 +46,10 @@ class TritonDistGemmARCTX(OverlapCTX):
             self.ar_stream = torch.cuda.Stream()
         self.is_persistent = is_ge_sm90()
         self.N = N
-        self.NUM_COMM_SMS = 16
-        self.NUM_GEMM_SMS = get_device_sm_count() - self.NUM_COMM_SMS
+        self.P_NUM_COMM_SMS = 4
+        self.D_NUM_COMM_SMS = 16
+        self.P_NUM_GEMM_SMS = get_device_sm_count() - self.P_NUM_COMM_SMS
+        self.D_NUM_GEMM_SMS = get_device_sm_count() - self.D_NUM_COMM_SMS
 
         # TODO: need to be optimized
         self.ll_gemm_config = triton.Config(
@@ -55,7 +58,7 @@ class TritonDistGemmARCTX(OverlapCTX):
                 "BLOCK_SIZE_N": 64,
                 "BLOCK_SIZE_K": 256,
                 "GROUP_SIZE_M": 1,
-                "NUM_GEMM_SMS": self.NUM_GEMM_SMS,
+                "NUM_GEMM_SMS": self.D_NUM_GEMM_SMS,
             },
             num_stages=5,
             num_warps=4,
@@ -66,7 +69,7 @@ class TritonDistGemmARCTX(OverlapCTX):
                 "BLOCK_SIZE_N": 256,
                 "BLOCK_SIZE_K": 64,
                 "GROUP_SIZE_M": 1,
-                "NUM_GEMM_SMS": self.NUM_GEMM_SMS,
+                "NUM_GEMM_SMS": self.P_NUM_GEMM_SMS,
             },
             num_stages=4,
             num_warps=8,
@@ -80,7 +83,7 @@ class TritonDistGemmARCTX(OverlapCTX):
             max_M=self.batch_max_tokens,
             N=N,
             dtype=self.dtype,
-            NUM_COMM_SMS=self.NUM_COMM_SMS,
+            NUM_COMM_SMS=self.P_NUM_COMM_SMS,
         )
         self.ll_gemm_ar_ctx = create_ll_gemm_ar_context(
             rank=self.rank,
@@ -89,7 +92,7 @@ class TritonDistGemmARCTX(OverlapCTX):
             max_M=self.batch_max_tokens,
             N=N,
             dtype=self.dtype,
-            NUM_COMM_SMS=self.NUM_COMM_SMS,
+            NUM_COMM_SMS=self.D_NUM_COMM_SMS,
         )
         return
 
@@ -97,7 +100,7 @@ class TritonDistGemmARCTX(OverlapCTX):
         weight = weight.t()
         assert input.shape[0] <= self.batch_max_tokens and weight.shape[0] == self.N
         #  batchsize <= 128 use low latency kernel
-        if input.shape[0] <= 128 or True:
+        if input.shape[0] <= 128:
             ar_out = low_latency_gemm_allreduce_op(
                 self.ll_gemm_ar_ctx,
                 input,
@@ -140,7 +143,7 @@ def create_gemm_ar_context(
     NUM_COMM_SMS=132,
 ):
     assert local_world_size == world_size
-    gemm_out_buf = nvshmem_create_tensor((max_M * 4, N), dtype)
+    gemm_out_buf = nvshmem_create_tensor((max_M, N), dtype)
     symm_ar_out_buf = nvshmem_create_tensor((max_M, N), dtype)
     gemm_barrier_buf = nvshmem_create_tensor(
         (world_size, triton.cdiv(max_M, MIN_BLOCK_SIZE_M), triton.cdiv(N, MIN_BLOCK_SIZE_N)), torch.int32
@@ -213,7 +216,6 @@ def low_latency_gemm_allreduce_op(
         ar_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
     else:
         ar_out = output
-    # print(f"M, N, K = {M, N, K}")
     grid = lambda META: (
         NUM_COMM_SMS
         + min(META["NUM_GEMM_SMS"], triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"])),
@@ -263,6 +265,7 @@ def gemm_allreduce_op(
     ar_stream.wait_stream(current_stream)
 
     M, N = a.shape[0], b.shape[0]
+
     # Check constraints.
     assert a.shape[1] == b.shape[1], "Incompatible dimensions"
     assert a.dtype == b.dtype, "Incompatible dtypes"

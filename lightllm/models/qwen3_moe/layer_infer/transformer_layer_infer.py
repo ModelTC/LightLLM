@@ -15,7 +15,7 @@ from lightllm.models.qwen3_moe.triton_kernel.rmsnorm import qk_rmsnorm_forward
 from functools import partial
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_global_world_size
-from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
+from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor, all_reduce
 
 logger = init_logger(__name__)
 
@@ -144,6 +144,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_group=None,
             num_expert_group=None,
         )
+        if self.tp_world_size_ > 1:
+            all_reduce(hidden_states, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return hidden_states.view(num_tokens, hidden_dim)
 
     def _moe_ffn_edp(
