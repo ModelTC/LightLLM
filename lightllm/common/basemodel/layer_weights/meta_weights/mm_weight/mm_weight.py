@@ -439,8 +439,8 @@ class AWQMMWeightTpl(MMWeightTpl):
         tp_world_size: int = None,
     ) -> None:
         super().__init__(
-            weight_name=weight_names,
-            bias_name=bias_names,
+            weight_names=weight_names,
+            bias_names=bias_names,
             data_type=data_type,
             quant_method=quant_method,
             tp_rank=tp_rank,
