@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.rowmm_weight import ROWMMWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMMWeight
 from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import NormWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
@@ -28,17 +28,17 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_ffn(self):
         self.gate_proj = ROWMMWeight(
-            weight_name=self._gate_weight_name,
+            weight_names=self._gate_weight_name,
             data_type=self.data_type_,
-            bias_name=self._gate_bias_name,
+            bias_names=self._gate_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="gate_proj",
         )
         self.up_proj = ROWMMWeight(
-            weight_name=self._up_weight_name,
+            weight_names=self._up_weight_name,
             data_type=self.data_type_,
-            bias_name=self._up_bias_name,
+            bias_names=self._up_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="up_proj",
@@ -47,17 +47,17 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_qkv(self):
         self.k_proj = ROWMMWeight(
-            weight_name=self._k_weight_name,
+            weight_names=self._k_weight_name,
             data_type=self.data_type_,
-            bias_name=self._k_bias_name,
+            bias_names=self._k_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="k_proj",
         )
         self.v_proj = ROWMMWeight(
-            weight_name=self._v_weight_name,
+            weight_names=self._v_weight_name,
             data_type=self.data_type_,
-            bias_name=self._v_bias_name,
+            bias_names=self._v_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="v_proj",

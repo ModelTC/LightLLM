@@ -3,10 +3,14 @@ import torch
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
 import torch.nn.functional as F
+from typing import Optional, TYPE_CHECKING
 from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
 
 if HAS_LIGHTLLM_KERNEL:
 
@@ -27,18 +31,29 @@ class BaseQuantizationMethod(QuantizationMethod):
         self.cache_manager = g_cache_manager
 
     def quantize(self, weight: torch.Tensor):
-        """ """
         pass
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None):
-        """ """
-        pass
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
+        raise NotImplementedError("Not implemented")
+
+    @property
+    def method_name(self):
+        return "w8a8-base"
 
 
 @QUANTMETHODS.register(["vllm-w8a8", "w8a8"])
 class w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor):
         if isinstance(weight, tuple):
@@ -47,17 +62,21 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         scale = weight.abs().max(dim=-1)[0] / 127
         weight = weight.transpose(0, 1) / scale.reshape(1, -1)
         weight = torch.round(weight.clamp(min=-128, max=127)).to(dtype=torch.int8)
-        return weight.cuda(self.device_id_), scale.cuda(self.device_id_)
+        return weight.cuda(self.device_id_), scale.cuda(self.device_id_), None
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
         input_scale = None
-        if len(weights) == 3:
-            qweight, weight_scale, input_scale = weights
-        elif len(weights) == 2:
-            qweight, weight_scale = weights
-        else:
-            raise ValueError("vllm-quant Weights must be a tuple of length 2 or 3.")
-
+        qweight = weight_pack.weight
+        weight_scale = weight_pack.weight_scale
+        bias = weight_pack.bias
+        input_scale = None  # dynamic quantization for input tensor
         x_q, x_scale, x_zp = vllm_ops.scaled_int8_quant(input_tensor, scale=input_scale, azp=None, symmetric=True)
         m = input_tensor.shape[0]
         n = qweight.shape[1]
@@ -71,12 +90,18 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
         return out
 
+    @property
+    def method_name(self):
+        return "vllm-w8a8"
+
 
 @QUANTMETHODS.register(["vllm-fp8w8a8", "fp8w8a8"])
 class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.is_moe = False
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor):
         if self.is_moe:
@@ -84,9 +109,9 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         qweight, weight_scale = scaled_fp8_quant(
             weight.contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
         )
-        return qweight.transpose(0, 1), weight_scale
+        return qweight.transpose(0, 1), weight_scale, None
 
-    def quantize_moe(self, weight):
+    def quantize_moe(self, weight: torch.Tensor):
         num_experts = weight.shape[0]
         qweights = []
         weight_scales = []
@@ -100,10 +125,20 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         weight_scale = torch.stack(weight_scales, dim=0).contiguous()
         return qweights, weight_scale
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
+        qweight = weight_pack.weight
+        weight_scale = weight_pack.weight_scale
+        bias = weight_pack.bias
         x_q, x_scale = scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
         m = input_tensor.shape[0]
-        n = weights[0].shape[1]
+        n = qweight.shape[1]
         if out is None:
             if use_custom_tensor_mananger:
                 out = self.cache_manager.alloc_tensor(
@@ -111,8 +146,12 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
                 )
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        cutlass_scaled_mm(out, x_q, weights[0], x_scale, weights[1], bias)
+        cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
         return out
+
+    @property
+    def method_name(self):
+        return "vllm-fp8w8a8"
 
 
 @QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128"])
@@ -121,16 +160,27 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         super().__init__()
         self.block_size = 128
         self.weight_scale_suffix = "weight_scale_inv"
-        self.act_scale_suffix = None  # no support for static input tensor scale for ds model.
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor):
 
         raise Exception("Not implemented")
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
-        qweight, weight_scale, input_scale = weights
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
+        qweight = weight_pack.weight
+        weight_scale = weight_pack.weight_scale
+        bias = weight_pack.bias
+        input_scale = None  # dynamic quantization for input tensor
         m, k = input_tensor.shape
-        n = weights[0].shape[1]
+        n = qweight.shape[1]
         alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         if input_scale is None:
             qinput_tensor, input_scale = per_token_group_quant_fp8(
@@ -152,3 +202,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
             input_scale = input_scale.t().contiguous().t()
             cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
         return out
+
+    @property
+    def method_name(self):
+        return "vllm-fp8w8a8-b128"

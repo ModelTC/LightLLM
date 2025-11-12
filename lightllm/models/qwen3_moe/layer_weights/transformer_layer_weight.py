@@ -1,20 +1,6 @@
 import os
-import torch
-import math
-import numpy as np
-from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
-from lightllm.utils.envs_utils import enable_env_vars
-from lightllm.common.basemodel.layer_weights.meta_weights import (
-    ROWMMWeight,
-    MultiROWMMWeight,
-    COLMMWeight,
-    NormWeight,
-    FusedMoeWeightTP,
-    FusedMoeWeightEP,
-    ROWBMMWeight,
-)
-from functools import partial
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, FusedMoeWeightEP, create_tp_moe_wegiht_obj
 
 
 class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
@@ -67,7 +53,7 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
         self.moe_gate = ROWMMWeight(
-            weight_name=f"model.layers.{self.layer_num_}.mlp.gate.weight",
+            weight_names=f"model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
             layer_num=self.layer_num_,
             name="moe_gate",
@@ -77,7 +63,7 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
         moe_mode = os.getenv("MOE_MODE", "TP")
         assert moe_mode in ["EP", "TP"]
         if moe_mode == "TP":
-            self.experts = FusedMoeWeightTP(
+            self.experts = create_tp_moe_wegiht_obj(
                 gate_proj_name="gate_proj",
                 down_proj_name="down_proj",
                 up_proj_name="up_proj",

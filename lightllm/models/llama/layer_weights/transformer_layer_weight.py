@@ -2,7 +2,7 @@ import torch
 import math
 import numpy as np
 from lightllm.common.basemodel import TransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight, NormWeight, MultiROWMMWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight, NormWeight
 
 
 class LlamaTransformerLayerWeight(TransformerLayerWeight):
@@ -58,14 +58,14 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
 
     def _init_qkv(self):
         self.q_proj = ROWMMWeight(
-            weight_name=self._q_weight_name,
+            weight_names=self._q_weight_name,
             data_type=self.data_type_,
-            bias_name=self._q_bias_name,
+            bias_names=self._q_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="q_proj",
         )
-        self.kv_proj = MultiROWMMWeight(
+        self.kv_proj = ROWMMWeight(
             weight_names=[self._k_weight_name, self._v_weight_name],
             data_type=self.data_type_,
             bias_names=[self._k_bias_name, self._v_bias_name],
@@ -76,16 +76,16 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
 
     def _init_o(self):
         self.o_proj = COLMMWeight(
-            weight_name=self._o_weight_name,
+            weight_names=self._o_weight_name,
             data_type=self.data_type_,
-            bias_name=self._o_bias_name,
+            bias_names=self._o_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="o_proj",
         )
 
     def _init_ffn(self):
-        self.gate_up_proj = MultiROWMMWeight(
+        self.gate_up_proj = ROWMMWeight(
             weight_names=[self._gate_weight_name, self._up_weight_name],
             data_type=self.data_type_,
             bias_names=[self._gate_bias_name, self._up_bias_name],
@@ -94,9 +94,9 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
             name="gate_up_proj",
         )
         self.down_proj = COLMMWeight(
-            weight_name=self._down_weight_name,
+            weight_names=self._down_weight_name,
             data_type=self.data_type_,
-            bias_name=self._down_bias_name,
+            bias_names=self._down_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="down_proj",

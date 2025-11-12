@@ -7,7 +7,10 @@ from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
     tma_align_input_scale,
 )
+from typing import TYPE_CHECKING, Optional
 
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
 try:
     HAS_DEEPGEMM = True
     import deep_gemm
@@ -27,9 +30,19 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         """ """
         pass
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None):
-        """ """
-        pass
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
+        raise NotImplementedError("Not implemented")
+
+    @property
+    def method_name(self):
+        return "deepgemm-base"
 
 
 @QUANTMETHODS.register(["deepgemm-fp8w8a8-b128"])
@@ -37,23 +50,35 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.block_size = 128
+        self.weight_suffix = None
+        self.weight_zero_point_suffix = None
         self.weight_scale_suffix = "weight_scale_inv"
-        self.act_scale_suffix = None  # no support for static input tensor scale for ds model.
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
+
+    @property
+    def method_name(self):
+        return "deepgemm-fp8w8a8-b128"
 
     def quantize(self, weight: torch.Tensor):
         from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_quant_kernel import weight_quant
 
         return weight_quant(weight, self.block_size)
 
-    def apply(self, input_tensor, weights, bias=None, out=None, workspace=None, use_custom_tensor_mananger=True):
-        if len(weights) == 3:
-            qweight, weight_scale, input_scale = weights
-        else:
-            qweight, weight_scale = weights
-            input_scale = None
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "MMWeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+    ) -> torch.Tensor:
+        qweight = weight_pack.weight
+        weight_scale = weight_pack.weight_scale
+        input_scale = None
         alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         m, k = input_tensor.shape
-        n = weights[0].shape[1]
+        n = qweight.shape[1]
         if input_scale is None:
             qinput_tensor, input_scale = per_token_group_quant_fp8(
                 input_tensor,

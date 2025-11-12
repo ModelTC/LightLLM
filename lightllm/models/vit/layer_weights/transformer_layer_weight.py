@@ -8,7 +8,6 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
     NormWeight,
-    MultiROWMMWeight,
     TpNormWeight,
 )
 from lightllm.utils.dist_utils import get_current_device_id
@@ -81,7 +80,7 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
         self._init_norm()
 
     def _init_qkv(self):
-        self.qkv_proj = MultiROWMMWeight(
+        self.qkv_proj = ROWMMWeight(
             weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
             data_type=self.data_type_,
             bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
@@ -92,9 +91,9 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
 
     def _init_o(self):
         self.o_proj = COLMMWeight(
-            weight_name=self._o_weight_name,
+            weight_names=self._o_weight_name,
             data_type=self.data_type_,
-            bias_name=self._o_bias_name,
+            bias_names=self._o_bias_name,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="o_proj",
@@ -102,18 +101,18 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
 
     def _init_ffn(self):
         self.ffn_1_proj_ = ROWMMWeight(
-            weight_name=self.fc1_weight_name_,
+            weight_names=self.fc1_weight_name_,
             data_type=self.data_type_,
-            bias_name=self.fc1_bias_name_,
+            bias_names=self.fc1_bias_name_,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="ffn_1_proj",
         )
 
         self.ffn_2_proj_ = COLMMWeight(
-            weight_name=self.fc2_weight_name_,
+            weight_names=self.fc2_weight_name_,
             data_type=self.data_type_,
-            bias_name=self.fc2_bias_name_,
+            bias_names=self.fc2_bias_name_,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
             name="ffn_2_proj",

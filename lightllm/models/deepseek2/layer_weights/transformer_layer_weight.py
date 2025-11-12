@@ -6,12 +6,11 @@ from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
-    MultiROWMMWeight,
     COLMMWeight,
     NormWeight,
-    FusedMoeWeightTP,
     FusedMoeWeightEP,
     ROWBMMWeight,
+    create_tp_moe_wegiht_obj,
 )
 from functools import partial
 from ..triton_kernel.weight_dequant import weight_dequant
@@ -142,14 +141,14 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
     def _init_qkvo(self):
         if self.q_lora_rank is None:
             self.q_weight_ = ROWMMWeight(
-                weight_name=f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
+                weight_names=f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
                 data_type=self.data_type_,
                 quant_cfg=self.quant_cfg,
                 layer_num=self.layer_num_,
                 name="q_weight",
             )
             self.kv_a_proj_with_mqa_ = ROWMMWeight(
-                weight_name=f"model.layers.{self.layer_num_}.self_attn.kv_a_proj_with_mqa.weight",
+                weight_names=f"model.layers.{self.layer_num_}.self_attn.kv_a_proj_with_mqa.weight",
                 data_type=self.data_type_,
                 quant_cfg=self.quant_cfg,
                 layer_num=self.layer_num_,
@@ -158,7 +157,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 tp_world_size=1,
             )
         else:
-            self.qkv_a_proj_with_mqa_ = MultiROWMMWeight(
+            self.qkv_a_proj_with_mqa_ = ROWMMWeight(
                 weight_names=[
                     f"model.layers.{self.layer_num_}.self_attn.q_a_proj.weight",
                     f"model.layers.{self.layer_num_}.self_attn.kv_a_proj_with_mqa.weight",
@@ -171,21 +170,21 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 tp_world_size=1,
             )
             self.q_b_proj_ = ROWMMWeight(
-                weight_name=f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
+                weight_names=f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
                 data_type=self.data_type_,
                 quant_cfg=self.quant_cfg,
                 layer_num=self.layer_num_,
                 name="q_b_proj",
             )
         self.k_b_proj_ = ROWBMMWeight(
-            weight_name=f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
+            weight_names=f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
             data_type=self.data_type_,
             quant_cfg=None,
             layer_num=self.layer_num_,
             name="k_b_proj",
         )
         self.v_b_proj_ = ROWBMMWeight(
-            weight_name=f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
+            weight_names=f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
             data_type=self.data_type_,
             quant_cfg=None,
             layer_num=self.layer_num_,
@@ -193,7 +192,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         )
         if self.enable_cc_method:
             self.cc_kv_b_proj_ = ROWMMWeight(
-                weight_name=f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight",
+                weight_names=f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight",
                 data_type=self.data_type_,
                 quant_cfg=self.quant_cfg,
                 layer_num=self.layer_num_,
@@ -201,7 +200,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             )
 
         self.o_weight_ = COLMMWeight(
-            weight_name=f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
+            weight_names=f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
             data_type=self.data_type_,
             quant_cfg=self.quant_cfg,
             layer_num=self.layer_num_,
@@ -211,7 +210,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
     def _load_mlp(self, mlp_prefix):
         moe_mode = os.getenv("MOE_MODE", "TP")
         if self.is_moe and moe_mode == "EP":
-            self.gate_up_proj = MultiROWMMWeight(
+            self.gate_up_proj = ROWMMWeight(
                 weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
                 data_type=self.data_type_,
                 quant_cfg=self.quant_cfg,
@@ -221,7 +220,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 tp_world_size=1,
             )
             self.down_proj = COLMMWeight(
-                weight_name=f"{mlp_prefix}.down_proj.weight",
+                weight_names=f"{mlp_prefix}.down_proj.weight",
                 data_type=self.data_type_,
                 quant_cfg=self.quant_cfg,
                 layer_num=self.layer_num_,
@@ -230,7 +229,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 tp_world_size=1,
             )
         else:
-            self.gate_up_proj = MultiROWMMWeight(
+            self.gate_up_proj = ROWMMWeight(
                 weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
                 data_type=self.data_type_,
                 quant_cfg=self.quant_cfg,
@@ -238,7 +237,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 name="gate_up_proj",
             )
             self.down_proj = COLMMWeight(
-                weight_name=f"{mlp_prefix}.down_proj.weight",
+                weight_names=f"{mlp_prefix}.down_proj.weight",
                 data_type=self.data_type_,
                 quant_cfg=self.quant_cfg,
                 layer_num=self.layer_num_,
@@ -248,7 +247,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
         self.moe_gate = ROWMMWeight(
-            weight_name=f"model.layers.{self.layer_num_}.mlp.gate.weight",
+            weight_names=f"model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
             layer_num=self.layer_num_,
             name="moe_gate",
@@ -266,7 +265,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         moe_mode = os.getenv("MOE_MODE", "TP")
         assert moe_mode in ["EP", "TP"]
         if moe_mode == "TP":
-            self.experts = FusedMoeWeightTP(
+            self.experts = create_tp_moe_wegiht_obj(
                 gate_proj_name="gate_proj",
                 down_proj_name="down_proj",
                 up_proj_name="up_proj",

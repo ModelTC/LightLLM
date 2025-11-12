@@ -1,3 +1,7 @@
+from .quantize_method import QuantizationMethod
+from typing import Type
+
+
 class QuantMethodFactory:
     def __init__(self):
         self._quant_methods = {}
@@ -13,7 +17,7 @@ class QuantMethodFactory:
 
         return decorator
 
-    def get(self, key, *args, **kwargs):
+    def get(self, key, *args, **kwargs) -> Type[QuantizationMethod]:
         if key == "none":
             return None
         quant_method_class = self._quant_methods.get(key)
