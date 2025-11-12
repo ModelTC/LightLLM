@@ -1,7 +1,7 @@
 import ctypes
 import torch
 import numpy as np
-from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
+from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name, get_disk_cache_prompt_limit_length
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from .shm_objs import ShmDict, ShmLinkedList, _LinkedListItem, IntList
@@ -38,10 +38,12 @@ class CpuKvCacheClient(object):
         return
 
     @staticmethod
+    # 负数编码，用于标记一个page index是一个offload group的第一个page
     def _encode_offload_head(page_index: int) -> int:
         return -(page_index + 1)
 
     @staticmethod
+    # 解码恢复page index，并返回该page index是否是一个offload group的第一个page
     def _decode_offload_value(value: int) -> Tuple[int, bool]:
         if value < 0:
             return -(value + 1), True
@@ -125,6 +127,19 @@ class CpuKvCacheClient(object):
                 if deref:
                     assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
+
+        # 控制prompt长度，较短的prompt不进行disk offload
+        limit_length = get_disk_cache_prompt_limit_length()
+        if (
+            disk_offload_enable
+            and offload_candidates
+            and len(page_list) * self.args.cpu_cache_token_page_size < limit_length
+        ):
+            logger.info(
+                f"skip disk offload for small page, " f"length = {len(page_list) * self.args.cpu_cache_token_page_size}"
+            )
+            self.mark_pages_recyclable(page_list=offload_candidates)
+            return
 
         if disk_offload_enable and offload_candidates:
             for idx, page_index in enumerate(offload_candidates):
@@ -225,11 +240,19 @@ class CpuKvCacheClient(object):
             if page_index == -1:
                 continue
             cur_page: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
-            cur_page.del_self_from_list()
-            if not cur_page.is_empty() and cur_page.hash_key != 0:
+
+            if cur_page.ref_count != 0:
+                if cur_page.status == cur_page.LOADING and cur_page.ref_count == 1:
+                    cur_page.ref_count = 0
+                else:
+                    continue
+
+            if cur_page.hash_key != 0:
                 existing_index = self.page_hash_dict.get(cur_page.hash_key)
-                if existing_index is not None:
+                if existing_index is not None and existing_index == cur_page.self_index:
                     self.page_hash_dict.remove(cur_page.hash_key)
+
+            cur_page.del_self_from_list()
             cur_page.hash_key = 0
             cur_page.status = cur_page.EMPTY
             cur_page.ref_count = 0
