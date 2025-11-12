@@ -68,8 +68,6 @@ class MMWeightTpl(BaseWeightTpl):
         quant_method: QuantizationMethod = None,
         tp_rank: int = None,
         tp_world_size: int = None,
-        has_weight_scale: bool = False,
-        has_weight_zero_point: bool = False,
     ) -> None:
         super().__init__(tp_rank, tp_world_size, data_type)
         self.lock = threading.Lock()
@@ -84,13 +82,20 @@ class MMWeightTpl(BaseWeightTpl):
             if bias_names[0] is None:
                 bias_names = None
 
+        if quant_method is not None:
+            has_weight_scale = quant_method.has_weight_scale
+            has_weight_zero_point = quant_method.has_weight_zero_point
+        else:
+            has_weight_scale = False
+            has_weight_zero_point = False
+
         # 同时存在 weight_names 和 quanted_weight_names 是为了兼容在线和离线两种加载方案
         self.weight_names = weight_names
 
         self.bias_names = bias_names
         has_bias = self.bias_names is not None
 
-        self.gen_weight_quant_param_names(quant_method=quant_method, has_weight_zero_point=has_weight_zero_point)
+        self.gen_weight_quant_param_names(quant_method=quant_method)
         self.quant_method = quant_method
         self.sub_child_mm_params: List[MMWeightPack] = [
             MMWeightPack(
@@ -132,7 +137,7 @@ class MMWeightTpl(BaseWeightTpl):
             return torch.mm(input_tensor, self.mm_param.weight, out=out)
         return torch.addmm(self.mm_param.bias, input_tensor, self.mm_param.weight, out=out)
 
-    def gen_weight_quant_param_names(self, quant_method: QuantizationMethod, has_weight_zero_point: bool):
+    def gen_weight_quant_param_names(self, quant_method: Optional[QuantizationMethod]):
         if quant_method is None:
             self.quanted_weight_names = None
             self.weight_zero_point_names = None
@@ -144,11 +149,10 @@ class MMWeightTpl(BaseWeightTpl):
         weight_zero_point_names = []
 
         for weight_name in self.weight_names:
-            assert quant_method.weight_scale_suffix is not None, "weight_scale_suffix is not set"
-            weight_scale_name = weight_name.replace("weight", quant_method.weight_scale_suffix)
-            weight_scale_names.append(weight_scale_name)
-            if has_weight_zero_point:
-                assert quant_method.weight_zero_point_suffix is not None, "weight_zero_point_suffix is not set"
+            if quant_method.weight_scale_suffix is not None:
+                weight_scale_name = weight_name.replace("weight", quant_method.weight_scale_suffix)
+                weight_scale_names.append(weight_scale_name)
+            if quant_method.weight_zero_point_suffix is not None:
                 weight_zero_point_name = weight_name.replace("weight", quant_method.weight_zero_point_suffix)
                 weight_zero_point_names.append(weight_zero_point_name)
             if quant_method.weight_suffix is not None:
@@ -410,8 +414,6 @@ class DeepGemmFP8W8A8B128MMWeight(MMWeightTpl):
             quant_method=quant_method,
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
-            has_weight_scale=True,
-            has_weight_zero_point=False,
         )
 
     def _to_gpu_device(self) -> None:
@@ -445,8 +447,6 @@ class AWQMMWeightTpl(MMWeightTpl):
             quant_method=quant_method,
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
-            has_weight_scale=True,
-            has_weight_zero_point=True,
         )
         self.weight_fused_dim = 1
         self.bias_fused_dim = 0

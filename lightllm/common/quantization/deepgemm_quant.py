@@ -53,6 +53,8 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         self.weight_suffix = None
         self.weight_zero_point_suffix = None
         self.weight_scale_suffix = "weight_scale_inv"
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
 
     @property
     def method_name(self):

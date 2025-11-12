@@ -52,6 +52,8 @@ class BaseQuantizationMethod(QuantizationMethod):
 class w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor):
         if isinstance(weight, tuple):
@@ -98,6 +100,8 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.is_moe = False
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor):
         if self.is_moe:
@@ -156,6 +160,8 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         super().__init__()
         self.block_size = 128
         self.weight_scale_suffix = "weight_scale_inv"
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor):
 

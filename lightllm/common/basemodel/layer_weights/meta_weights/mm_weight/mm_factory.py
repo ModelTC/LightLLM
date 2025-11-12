@@ -6,12 +6,12 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight im
     BMMWeightTpl,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.rowmm_weight import (
-    UnquantizedROWMMWeight,
+    StandardROWMMWeight,
     UnquantizedROWBMMWeight,
     ROWMM_WEIGHT_CLS_MAP,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.colmm_weight import (
-    UnquantizedCOLMMWeight,
+    StandardCOLMMWeight,
     COLMM_WEIGHT_CLS_MAP,
 )
 
@@ -61,9 +61,12 @@ class ROWMMWeight(MMWeight):
     @classmethod
     def _get_mmcls(cls, quant_method: QuantizationMethod):
         if quant_method is None:
-            return UnquantizedROWMMWeight
+            return StandardROWMMWeight
 
-        return ROWMM_WEIGHT_CLS_MAP[quant_method.method_name]
+        return ROWMM_WEIGHT_CLS_MAP.get(
+            quant_method.method_name,
+            StandardROWMMWeight,
+        )
 
 
 class ROWBMMWeight(MMWeight):
@@ -80,5 +83,8 @@ class COLMMWeight(MMWeight):
     @classmethod
     def _get_mmcls(cls, quant_method: QuantizationMethod):
         if quant_method is None:
-            return UnquantizedCOLMMWeight
-        return COLMM_WEIGHT_CLS_MAP[quant_method.method_name]
+            return StandardCOLMMWeight
+        return COLMM_WEIGHT_CLS_MAP.get(
+            quant_method.method_name,
+            StandardCOLMMWeight,
+        )

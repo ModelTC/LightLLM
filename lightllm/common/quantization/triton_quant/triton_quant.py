@@ -41,6 +41,8 @@ class TritonFP8w8a8QuantizationMethod(TritonBaseQuantizationMethod):
         self.weight_suffix = None
         self.weight_zero_point_suffix = None
         self.weight_scale_suffix = "weight_scale_inv"
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor):
         # TODO block-wise quant kernel

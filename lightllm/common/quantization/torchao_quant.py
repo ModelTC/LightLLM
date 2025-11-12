@@ -64,6 +64,8 @@ class AOW4A16QuantizationMethodGroup256(AOBaseQuantizationMethod):
         super().__init__()
         self.group_size = 256
         self.quant_func = int4_weight_only(group_size=self.group_size)
+        self.has_weight_scale = False
+        self.has_weight_zero_point = False
 
     @property
     def method_name(self):
@@ -76,6 +78,8 @@ class AOW4A16QuantizationMethodGroup128(AOBaseQuantizationMethod):
         super().__init__()
         self.group_size = 128
         self.quant_func = int4_weight_only(group_size=self.group_size)
+        self.has_weight_scale = False
+        self.has_weight_zero_point = False
 
     @property
     def method_name(self):
@@ -88,6 +92,8 @@ class AOW4A16QuantizationMethodGroup64(AOBaseQuantizationMethod):
         super().__init__()
         self.group_size = 64
         self.quant_func = int4_weight_only(group_size=self.group_size)
+        self.has_weight_scale = False
+        self.has_weight_zero_point = False
 
     @property
     def method_name(self):
@@ -100,6 +106,8 @@ class AOW4A16QuantizationMethodGroup32(AOBaseQuantizationMethod):
         super().__init__()
         self.group_size = 32
         self.quant_func = int4_weight_only(group_size=self.group_size)
+        self.has_weight_scale = False
+        self.has_weight_zero_point = False
 
     @property
     def method_name(self):
@@ -111,6 +119,8 @@ class AOW8A8QuantizationMethod(AOBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.quant_func = int8_dynamic_activation_int8_weight()
+        self.has_weight_scale = False
+        self.has_weight_zero_point = False
 
     @property
     def method_name(self):
@@ -122,6 +132,8 @@ class AOW8A16QuantizationMethod(AOBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.quant_func = int8_weight_only()
+        self.has_weight_scale = False
+        self.has_weight_zero_point = False
 
     @property
     def method_name(self):
@@ -135,6 +147,8 @@ class AOFP8W8A16QuantizationMethod(AOBaseQuantizationMethod):
         is_cuda_8_9 = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
         assert is_cuda_8_9, "FP8 requires GPU with compute capability >= 8.9"
         self.quant_func = float8_weight_only()
+        self.has_weight_scale = False
+        self.has_weight_zero_point = False
 
     @property
     def method_name(self):
@@ -147,6 +161,8 @@ class AOFP6W6A16QuantizationMethod(AOBaseQuantizationMethod):
         super().__init__()
         assert TORCH_VERSION_AT_LEAST_2_5, "torchao fp6 requires torch >=2.5"
         self.quant_func = fpx_weight_only(3, 2)
+        self.has_weight_scale = False
+        self.has_weight_zero_point = False
 
     @property
     def method_name(self):

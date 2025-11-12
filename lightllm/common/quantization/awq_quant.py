@@ -65,6 +65,8 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         self.weight_scale_suffix = "scales"
         self.weight_zero_point_suffix = "qzeros"
         self.weight_suffix = "qweight"
+        self.has_weight_scale = True
+        self.has_weight_zero_point = True
 
     @property
     def method_name(self):
@@ -111,6 +113,8 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         self.g_idx_sort_indices = marlin_make_empty_g_idx(torch.device("cuda"))
         self.workspace = marlin_make_workspace_new(torch.device("cuda"))
         self.vllm_quant_type = TYPE_MAP[self.nbits]
+        self.has_weight_scale = True
+        self.has_weight_zero_point = True
 
     @property
     def method_name(self):

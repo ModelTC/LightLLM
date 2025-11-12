@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Union
 from .mm_slicer import ColSliceMixin, QuantizedRowSliceMixin, QuantizedColSliceMixin
 
 
-class UnquantizedCOLMMWeight(MMWeightTpl):
+class StandardCOLMMWeight(MMWeightTpl):
     def __init__(
         self,
         weight_names: Union[str, List[str]],
@@ -72,7 +72,9 @@ class AWQCOLMMWeight(AWQMMWeightTpl):
             tp_world_size=tp_world_size,
         )
         # 注意这里不是错误，因为awq的weight是按inxout存的
-        self.param_slicer = QuantizedRowSliceMixin(tp_rank=tp_rank, tp_world_size=tp_world_size)
+        self.param_slicer = QuantizedRowSliceMixin(
+            tp_rank=tp_rank, tp_world_size=tp_world_size, bias_div_world_size=True
+        )
 
 
 class AWQMARLINCOLMMWeight(AWQCOLMMWeight):

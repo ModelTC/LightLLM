@@ -15,6 +15,8 @@ class QuantizationMethod(ABC):
         self.weight_scale_suffix = None
         self.weight_zero_point_suffix = None
         self.act_scale_suffix = None
+        self.has_weight_scale: bool = (None,)
+        self.has_weight_zero_point: bool = (None,)
         # 一些量化模式需要用到的额外量化参数，如awq量化
         self.hf_quantization_config = None
 
