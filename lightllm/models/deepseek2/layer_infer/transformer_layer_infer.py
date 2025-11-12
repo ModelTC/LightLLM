@@ -30,6 +30,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.sgl_utils import flash_attn_varlen_func, flash_attn_with_kvcache, merge_state_v2
+from lightllm.common.flash_attn import flash_attn_with_kvcache_mtp
 
 logger = init_logger(__name__)
 
@@ -70,6 +71,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         super().__init__(layer_num, network_config, mode)
         self.num_heads = network_config["num_attention_heads"]
         self.num_kv_heads = network_config["num_key_value_heads"]
+        self.mtp_step = get_env_start_args().mtp_step
+        self.mtp_size = self.mtp_step + 1
         return
 
     def _bind_func(self):
@@ -98,7 +101,11 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             )
         else:
             self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-            if get_env_start_args().enable_fa3:
+            if get_env_start_args().enable_fa3_mtp:
+                self._token_attention_kernel = partial(
+                    Deepseek2TransformerLayerInfer._token_gqa_decode_attention_mtp, self
+                )
+            elif get_env_start_args().enable_fa3:
                 self._token_attention_kernel = partial(
                     Deepseek2TransformerLayerInfer._token_gqa_decode_attention_flashattention, self
                 )
@@ -595,6 +602,35 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             self.softmax_scale,
         )
         return o_tensor
+
+    def _token_gqa_decode_attention_mtp(
+        self, q, infer_state: Deepseek2FlashAttentionStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
+    ):
+        q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
+        q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        k_rope = kv[:, :, -self.qk_rope_head_dim :].reshape(-1, 1, 1, self.qk_rope_head_dim)
+        kv_nope = kv[:, :, : -self.qk_rope_head_dim].reshape(-1, 1, 1, self.kv_lora_rank)
+        k_descale, v_descale = None, None
+        o_tensor = flash_attn_with_kvcache_mtp(
+            q=q_rope.reshape(-1, self.tp_q_head_num_ * self.mtp_size, self.qk_rope_head_dim),
+            k=k_rope,
+            v=kv_nope,
+            q_v=q_nope.reshape(-1, self.tp_q_head_num_ * self.mtp_size, self.kv_lora_rank),
+            page_table=infer_state.page_table[self.mtp_size - 1 :: self.mtp_size],
+            seqused_k=infer_state.b_seq_len[self.mtp_size - 1 :: self.mtp_size].contiguous(),
+            cu_seqlens_q=infer_state.cu_seqlens_q,
+            cu_seqlens_k_new=infer_state.cu_seqlens_k,
+            max_seqlen_q=1,
+            softmax_scale=self.softmax_scale,
+            is_causal=True,
+            window_size=(-1, -1),
+            softcap=0.0,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            mtp_step=self.mtp_step,
+        )
+        return o_tensor.view(-1, self.tp_q_head_num_, self.kv_lora_rank)
 
     def _token_gqa_decode_attention_flashattention(
         self, q, infer_state: Deepseek2FlashAttentionStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
