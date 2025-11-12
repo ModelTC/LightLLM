@@ -1,62 +1,60 @@
 import os
 import torch
 import threading
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List, Dict, Any, Union
 from .base_weight import BaseWeight
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
 from lightllm.common.quantization import Quantcfg
 
 
-class FusedMoeWeightTP:
-    def __new__(
-        cls,
-        gate_proj_name: str,
-        down_proj_name: str,
-        up_proj_name: str,
-        e_score_correction_bias_name: str,
-        weight_prefix: str,
-        n_routed_experts: int,
-        num_fused_shared_experts: int,
-        split_inter_size: int,
-        data_type: torch.dtype,
-        network_config: Dict[str, Any],
-        layer_num: int,
-        quant_cfg: Quantcfg = None,
-    ):
-        quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
-        if quant_method is not None and quant_method.method_name == "awq_marlin":
-            return FusedAWQMARLINMoeWeightTP(
-                gate_proj_name=gate_proj_name,
-                down_proj_name=down_proj_name,
-                up_proj_name=up_proj_name,
-                e_score_correction_bias_name=e_score_correction_bias_name,
-                weight_prefix=weight_prefix,
-                n_routed_experts=n_routed_experts,
-                num_fused_shared_experts=num_fused_shared_experts,
-                split_inter_size=split_inter_size,
-                data_type=data_type,
-                network_config=network_config,
-                layer_num=layer_num,
-                quant_cfg=quant_cfg,
-            )
-        else:
-            return FusedBaseMoeWeightTP(
-                gate_proj_name=gate_proj_name,
-                down_proj_name=down_proj_name,
-                up_proj_name=up_proj_name,
-                e_score_correction_bias_name=e_score_correction_bias_name,
-                weight_prefix=weight_prefix,
-                n_routed_experts=n_routed_experts,
-                num_fused_shared_experts=num_fused_shared_experts,
-                split_inter_size=split_inter_size,
-                data_type=data_type,
-                network_config=network_config,
-                layer_num=layer_num,
-                quant_cfg=quant_cfg,
-            )
+def create_tp_moe_wegiht_obj(
+    gate_proj_name: str,
+    down_proj_name: str,
+    up_proj_name: str,
+    e_score_correction_bias_name: str,
+    weight_prefix: str,
+    n_routed_experts: int,
+    num_fused_shared_experts: int,
+    split_inter_size: int,
+    data_type: torch.dtype,
+    network_config: Dict[str, Any],
+    layer_num: int,
+    quant_cfg: Quantcfg = None,
+) -> Union["FusedMoeWeightTP", "FusedAWQMARLINMoeWeightTP"]:
+    quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
+    if quant_method is not None and quant_method.method_name == "awq_marlin":
+        return FusedAWQMARLINMoeWeightTP(
+            gate_proj_name=gate_proj_name,
+            down_proj_name=down_proj_name,
+            up_proj_name=up_proj_name,
+            e_score_correction_bias_name=e_score_correction_bias_name,
+            weight_prefix=weight_prefix,
+            n_routed_experts=n_routed_experts,
+            num_fused_shared_experts=num_fused_shared_experts,
+            split_inter_size=split_inter_size,
+            data_type=data_type,
+            network_config=network_config,
+            layer_num=layer_num,
+            quant_cfg=quant_cfg,
+        )
+    else:
+        return FusedMoeWeightTP(
+            gate_proj_name=gate_proj_name,
+            down_proj_name=down_proj_name,
+            up_proj_name=up_proj_name,
+            e_score_correction_bias_name=e_score_correction_bias_name,
+            weight_prefix=weight_prefix,
+            n_routed_experts=n_routed_experts,
+            num_fused_shared_experts=num_fused_shared_experts,
+            split_inter_size=split_inter_size,
+            data_type=data_type,
+            network_config=network_config,
+            layer_num=layer_num,
+            quant_cfg=quant_cfg,
+        )
 
 
-class FusedBaseMoeWeightTP(BaseWeight):
+class FusedMoeWeightTP(BaseWeight):
     def __init__(
         self,
         gate_proj_name: str,

@@ -8,9 +8,9 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
     NormWeight,
-    FusedMoeWeightTP,
     FusedMoeWeightEP,
     ROWBMMWeight,
+    create_tp_moe_wegiht_obj,
 )
 from functools import partial
 from ..triton_kernel.weight_dequant import weight_dequant
@@ -265,7 +265,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         moe_mode = os.getenv("MOE_MODE", "TP")
         assert moe_mode in ["EP", "TP"]
         if moe_mode == "TP":
-            self.experts = FusedMoeWeightTP(
+            self.experts = create_tp_moe_wegiht_obj(
                 gate_proj_name="gate_proj",
                 down_proj_name="down_proj",
                 up_proj_name="up_proj",

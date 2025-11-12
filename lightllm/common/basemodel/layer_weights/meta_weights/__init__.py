@@ -7,5 +7,5 @@ from .mm_weight import (
     ROWBMMWeight,
 )
 from .norm_weight import NormWeight, GEMMANormWeight, TpNormWeight
-from .fused_moe_weight_tp import FusedMoeWeightTP
+from .fused_moe_weight_tp import create_tp_moe_wegiht_obj
 from .fused_moe_weight_ep import FusedMoeWeightEP

@@ -2,11 +2,7 @@ import os
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import (
-    ROWMMWeight,
-    FusedMoeWeightTP,
-    FusedMoeWeightEP,
-)
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, FusedMoeWeightEP, create_tp_moe_wegiht_obj
 
 logger = init_logger(__name__)
 
@@ -53,7 +49,7 @@ class MixtralTransformerLayerWeight(LlamaTransformerLayerWeight):
         assert moe_mode in ["TP"], f"Unsupported moe mode: {moe_mode}"
 
         if moe_mode == "TP":
-            self.experts = FusedMoeWeightTP(
+            self.experts = create_tp_moe_wegiht_obj(
                 gate_proj_name="w1",
                 down_proj_name="w2",
                 up_proj_name="w3",
