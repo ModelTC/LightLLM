@@ -821,8 +821,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_o = self._token_attention_kernel(_0_q, infer_state, layer_weight)
         _0_q = None
         _0_o = self._tpsp_get_o(_0_o, infer_state, layer_weight)
-        _0_input1 = _0_o.view(-1, self.embed_dim_)
         if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            _0_input1 = _0_o.view(-1, self.embed_dim_)
             flashinfer.norm.fused_add_rmsnorm(
                 _0_input1, input_embdings, layer_weight.ffn_norm_weight_.weight, eps=self.eps_
             )
@@ -952,8 +952,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_o = self._context_attention_kernel(_0_q, _0_cache_kv, infer_state, layer_weight)
         _0_q = None
         _0_o = self._tpsp_get_o(_0_o, infer_state, layer_weight)
-        _0_input1 = _0_o.view(-1, self.embed_dim_)
         if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            _0_input1 = _0_o.view(-1, self.embed_dim_)
             flashinfer.norm.fused_add_rmsnorm(
                 _0_input1, input_embdings, layer_weight.ffn_norm_weight_.weight, eps=self.eps_
             )
