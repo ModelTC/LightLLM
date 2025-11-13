@@ -14,6 +14,7 @@ class TransformerLayerWeight(BaseLayerWeight):
         self.layer_num_ = layer_num
         self.data_type_ = data_type
         self.network_config_ = network_config
+        self.norm_type = "rms_norm" if "rms_norm_eps" in self.network_config_ else "layer_norm"
         self.mode = mode
         self.quant_cfg = quant_cfg
         self._parse_config()
