@@ -9,7 +9,7 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from typing import Dict, List, Optional, Union
-from .mm_slicer import RowSliceMixin, QuantizedRowSliceMixin, QuantizedColSliceMixin
+from .mm_slicer import RowSliceMixin, QuantizedRowSliceMixin, AwqQuantizedRowSliceMixin
 
 
 class StandardROWMMWeight(MMWeightTpl):
@@ -94,10 +94,8 @@ class AWQROWMMWeight(AWQMMWeightTpl):
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
         )
-        # 注意这里不是错误，因为awq的weight是按inxout存的
-        self.param_slicer = QuantizedColSliceMixin(
-            tp_rank=tp_rank, tp_world_size=tp_world_size, bias_div_world_size=False
-        )
+
+        self.param_slicer = AwqQuantizedRowSliceMixin(tp_rank=tp_rank, tp_world_size=tp_world_size)
 
 
 class AWQMARLINROWMMWeight(AWQROWMMWeight):
