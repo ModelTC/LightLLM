@@ -17,6 +17,7 @@ from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 
 logger = init_logger(__name__)
+from lightllm.utils.flashinfer_utils import FLASHINFER_AVAILABLE, flashinfer
 
 
 class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
@@ -226,9 +227,15 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_o = self._token_attention_kernel(_0_q, infer_state, layer_weight)
         _0_q = None
         _0_o = self._tpsp_get_o(_0_o, infer_state, layer_weight)
-        input_embdings.add_(_0_o.view(-1, self.embed_dim_))
+        _0_input1 = _0_o.view(-1, self.embed_dim_)
+        if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            flashinfer.norm.fused_add_rmsnorm(
+                _0_input1, input_embdings, layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(_0_o.view(-1, self.embed_dim_))
+            _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         _0_o = None
-        _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         _0_router_logits = layer_weight.moe_gate.mm(_0_input1)
         # 1 hook
         if getattr(infer_state1, "hook", None) is not None:
@@ -254,9 +261,15 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         _1_o = self._token_attention_kernel(_1_q, infer_state1, layer_weight)
         _1_q = None
         _1_o = self._tpsp_get_o(_1_o, infer_state1, layer_weight)
-        input_embdings1.add_(_1_o.view(-1, self.embed_dim_))
+        _1_input1 = _1_o.view(-1, self.embed_dim_)
+        if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            flashinfer.norm.fused_add_rmsnorm(
+                _1_input1, input_embdings1, weight=layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(_1_o.view(-1, self.embed_dim_))
+            _1_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         _1_o = None
-        _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)
         # to do gate and disptatch
 
         _1_router_logits = layer_weight.moe_gate.mm(_1_input1)
@@ -338,9 +351,15 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_o = self._context_attention_kernel(_0_q, _0_cache_kv, infer_state, layer_weight)
         _0_q = None
         _0_o = self._tpsp_get_o(_0_o, infer_state, layer_weight)
-        input_embdings.add_(_0_o.view(-1, self.embed_dim_))
+        _0_input1 = _0_o.view(-1, self.embed_dim_)
+        if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            flashinfer.norm.fused_add_rmsnorm(
+                _0_input1, input_embdings, weight=layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(_0_o.view(-1, self.embed_dim_))
+            _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         _0_o = None
-        _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         _0_router_logits = layer_weight.moe_gate.mm(_0_input1)
 
         # wait last 1 combine
@@ -363,9 +382,15 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         _1_o = self._context_attention_kernel(_1_q, _1_cache_kv, infer_state1, layer_weight)
         _1_q = None
         _1_o = self._tpsp_get_o(_1_o, infer_state1, layer_weight)
-        input_embdings1.add_(_1_o.view(-1, self.embed_dim_))
+        if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            _1_input1 = _1_o.view(-1, self.embed_dim_)
+            flashinfer.norm.fused_add_rmsnorm(
+                _1_input1, input_embdings1, weight=layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(_1_o.view(-1, self.embed_dim_))
+            _1_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         _1_o = None
-        _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)
         # to do gate and disptatch
 
         _1_router_logits = layer_weight.moe_gate.mm(_1_input1)
