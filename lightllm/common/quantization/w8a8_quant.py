@@ -1,5 +1,7 @@
 import os
 import torch
+
+from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
 import torch.nn.functional as F
@@ -111,7 +113,8 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
                 )
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        cutlass_scaled_mm(out, x_q, weights[0], x_scale, weights[1], bias)
+
+        out = fp8_scaled_mm_per_token(x_q, weights[0], x_scale, weights[1], input_tensor.dtype, out)
         return out
 
 
