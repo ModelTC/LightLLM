@@ -288,6 +288,11 @@ class ModeBackend:
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
 
+    def flush_radix_cache(self):
+        if self.radix_cache is not None:
+            self.radix_cache.flush_cache()
+        return
+
     def _async_copy_next_token_infos_to_pin_mem(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
         """
         这个函数会把next token id和logprobs保存到pinned memory中

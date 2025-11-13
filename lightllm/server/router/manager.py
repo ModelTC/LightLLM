@@ -5,6 +5,7 @@ import torch
 import pickle
 import inspect
 import setproctitle
+import rpyc
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -151,6 +152,9 @@ class RouterManager:
             rpc_finished_event=self.rpc_finished_event,
         )
 
+        # 启动 rpyc 服务，供 HTTP Server 远程调用
+        self._start_router_rpc_service()
+
         kvargs = {
             "args": self.args,
             "rank_id": None,  # 由后续处理填充真实数据
@@ -229,6 +233,25 @@ class RouterManager:
 
             start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
 
+        return
+
+    def _start_router_rpc_service(self):
+        """launch a rpyc service for httpserver to call RouterManager"""
+        import threading
+        from rpyc.utils.server import ThreadedServer
+        import lightllm.utils.rpyc_fix_utils as _
+        from .mananger_rpc import RouterRpcService
+
+        service = RouterRpcService(self)
+        port = self.args.router_rpc_port
+
+        def start_server():
+            t = ThreadedServer(service, port=port, protocol_config={"allow_pickle": True})
+            t.start()
+
+        rpc_thread = threading.Thread(target=start_server, daemon=True)
+        rpc_thread.start()
+        logger.info(f"Router RPC service started successfully on port {port}")
         return
 
     def _get_schedule_time_interval(self):
@@ -534,6 +557,17 @@ class RouterManager:
             if self._get_paused_req_num() == 0:
                 self._generate_new_batch()
         return
+
+    def flush_cache(self) -> bool:
+        if self.running_batch is not None:
+            return False
+        if self.req_queue.get_wait_req_num() > 0:
+            return False
+        # if radix cache client is not initialized, just return True
+        if self.radix_cache_client is None:
+            return True
+        # only flush cache when no running batch and no waiting requests
+        return self.model_rpc_client.flush_radix_cache()
 
     def clean_up(self):
         return

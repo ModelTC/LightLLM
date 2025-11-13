@@ -58,6 +58,7 @@ from .api_models import (
     CompletionRequest,
     CompletionResponse,
 )
+from .io_struct import AbortReq
 from .build_prompt import build_prompt, init_tokenizer
 
 logger = init_logger(__name__)
@@ -291,6 +292,30 @@ async def metrics() -> Response:
     return response
 
 
+@app.post("/abort_req")
+async def abort_req(request: AbortReq, raw_request: Request):
+    """Abort a request."""
+    try:
+        await g_objs.httpserver_manager.abort_req(request)
+        return Response(status_code=200)
+    except Exception as e:
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
+
+
+@app.post("/flush_cache")
+@app.get("/flush_cache")
+async def flush_cache():
+    """Flush the radix cache."""
+    ret = await g_objs.httpserver_manager.flush_cache()
+    return Response(
+        content="Cache flushed successfully."
+        if ret
+        else "Cache flush failed. "
+        + "When there are running or waiting requests, the operation will not be performed.",
+        status_code=200 if ret else 500,
+    )
+
+
 @app.websocket("/pd_register")
 async def register_and_keep_alive(websocket: WebSocket):
     await websocket.accept()
@@ -357,6 +382,7 @@ async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
+    g_objs.httpserver_manager.connect_router_rpc()
     loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return

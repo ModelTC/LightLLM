@@ -225,11 +225,12 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=8 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=9 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
         router_port,
+        router_rpc_port,
         detokenization_port,
         http_server_port,
         visual_port,
@@ -237,8 +238,8 @@ def normal_or_p_d_start(args):
         cache_port,
         metric_port,
         multi_level_kv_cache_port,
-    ) = can_use_ports[0:8]
-    can_use_ports = can_use_ports[8:]
+    ) = can_use_ports[0:9]
+    can_use_ports = can_use_ports[9:]
 
     visual_model_tp_ports = []
     for _ in range(args.visual_dp):
@@ -248,6 +249,7 @@ def normal_or_p_d_start(args):
 
     # 将申请好的端口放入args参数中
     args.router_port = router_port
+    args.router_rpc_port = router_rpc_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
     args.visual_port = visual_port
