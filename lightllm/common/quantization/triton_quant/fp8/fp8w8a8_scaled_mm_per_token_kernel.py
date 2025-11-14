@@ -91,6 +91,8 @@ def _scaled_mm_per_token(
     stride_bn,
     stride_cm,
     stride_cn,
+    NEED_N_MASK: tl.constexpr,
+    NEED_K_MASK: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -124,27 +126,35 @@ def _scaled_mm_per_token(
 
     for k in range(0, tl.cdiv(K, BLOCK_K)):
         k_remaining = K - k * BLOCK_K
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < k_remaining, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        acc += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+        if NEED_K_MASK:
+            a = tl.load(a_ptrs, mask=offs_k[None, :] < k_remaining, other=0.0)
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
+        else:
+            a = tl.load(a_ptrs)
+            b = tl.load(b_ptrs)
+        acc = tl.dot(a, b, acc)
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
+    acc = acc * a_s[:, None] * b_s[None, :]
 
     acc = acc.to(out.dtype.element_ty)
 
     offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     c_ptrs = out + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    if NEED_N_MASK:
+        mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    else:
+        mask = offs_cm[:, None] < M
     tl.store(c_ptrs, acc, mask=mask)
 
 
 def get_test_configs():
     fp8_gemm_configs = []
 
-    for BLOCK_M in [64, 128, 256]:
+    for BLOCK_M in [8, 16, 32, 64]:
         for BLOCK_N in [64, 128, 256]:
-            for BLOCK_K in [64, 128]:
+            for BLOCK_K in [32, 64, 128, 256]:
                 if BLOCK_K * BLOCK_M * BLOCK_N >= 256 * 256 * 128:
                     continue
                 for num_warps in [2, 4, 8]:
@@ -173,7 +183,7 @@ def _get_static_key(A, B, out_dtype):
 
 
 @autotune(
-    kernel_name="fp8_scaled_mm_per_token:v1",
+    kernel_name="fp8_scaled_mm_per_token:v2",
     configs_gen_func=get_test_configs,
     static_key_func=_get_static_key,
     run_key_func=lambda A: A.shape[0],
@@ -204,6 +214,8 @@ def fp8_scaled_mm_per_token(
     _, N = B.shape
     if not run_config:
         run_config = Fp8ScaledMMKernelConfig.try_to_get_best_config(M=M, N=N, K=K, out_dtype=out_dtype)
+    NEED_N_MASK = N % run_config["BLOCK_N"] != 0
+    NEED_K_MASK = K % run_config["BLOCK_K"] != 0
     grid = (triton.cdiv(M, run_config["BLOCK_M"]) * triton.cdiv(N, run_config["BLOCK_N"]),)
     _scaled_mm_per_token[grid](
         A,
@@ -220,6 +232,8 @@ def fp8_scaled_mm_per_token(
         B.stride(1),
         out.stride(0),
         out.stride(1),
+        NEED_N_MASK=NEED_N_MASK,
+        NEED_K_MASK=NEED_K_MASK,
         **run_config,
     )
 
@@ -236,7 +250,7 @@ if __name__ == "__main__":
     N, K = 4096, 5120
 
     # 测试多个不同的 M 值
-    M_list = [128, 256, 512, 1024, 2048, 4096]
+    M_list = [1, 2, 4, 8, 16, 32, 48]
 
     print(f"{'='*80}")
     print(f"Starting Autotune for FP8 Scaled MM (N={N}, K={K})")
@@ -255,6 +269,44 @@ if __name__ == "__main__":
         Ascale = torch.randn((M, 1)).cuda()
         out = torch.zeros((M, N), dtype=output_dtype).cuda()
         test_data[M] = {"A": A, "Ascale": Ascale, "out": out}
+
+    # ============ Phase 0: Correctness Check ============
+    print("\n" + "=" * 80)
+    print("PHASE 0: Verifying Correctness Before Autotune")
+    print("=" * 80)
+
+    # 选择一个中等大小的 M 进行正确性验证
+    M_verify = 16 if 16 in M_list else M_list[len(M_list) // 2]
+    A_verify = test_data[M_verify]["A"]
+    Ascale_verify = test_data[M_verify]["Ascale"]
+    out_verify = test_data[M_verify]["out"]
+
+    print(f"\n[Verification] Testing with M={M_verify}")
+
+    # 计算ground truth
+    d_A = A_verify.to(output_dtype) * Ascale_verify.to(output_dtype)
+    d_B = B.to(output_dtype) * Bscale.to(output_dtype)
+    gt_C = d_A.mm(d_B)
+
+    # 运行kernel验证正确性
+    fp8_scaled_mm_per_token(A_verify, B, Ascale_verify, Bscale, output_dtype, out_verify)
+
+    # 计算cosine similarity
+    cosine_sim = F.cosine_similarity(out_verify.flatten().unsqueeze(0), gt_C.flatten().unsqueeze(0), dim=1)
+    print(f"[Verification] Cosine Similarity: {cosine_sim.item():.6f}")
+
+    # 计算max absolute error
+    max_abs_error = torch.max(torch.abs(out_verify - gt_C)).item()
+    mean_abs_error = torch.mean(torch.abs(out_verify - gt_C)).item()
+    print(f"[Verification] Max Absolute Error: {max_abs_error:.6e}")
+    print(f"[Verification] Mean Absolute Error: {mean_abs_error:.6e}")
+
+    # 验证阈值
+    if cosine_sim.item() < 0.99:
+        raise RuntimeError(f"Correctness check failed! Cosine similarity {cosine_sim.item():.6f} < 0.99")
+
+    print("[Verification] ✅ Correctness check passed!")
+    print("=" * 80)
 
     # ============ Phase 1: Autotune ============
     print("\n" + "=" * 80)
