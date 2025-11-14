@@ -425,17 +425,13 @@ class RadixCache:
         return
 
     def flush_cache(self):
-        queue = collections.deque()
-        queue.append(self.root_node)
-
-        while queue:
-            node = queue.popleft()
-            child_keys = list(node.children.keys())
-            for child_key in child_keys:
-                child = node.children[child_key]
-                node.remove_child(child)
-                queue.append(child)
-            del node
+        nodes_to_clear = collections.deque(self.root_node.children.values())
+        self.root_node.children.clear()
+        while nodes_to_clear:
+            node = nodes_to_clear.popleft()
+            nodes_to_clear.extend(node.children.values())
+            node.parent = None
+            node.children.clear()
 
         self.root_node.token_id_key[:] = 0
         self.root_node.token_mem_index_value[:] = 0
