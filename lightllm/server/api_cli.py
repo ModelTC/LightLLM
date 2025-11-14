@@ -7,7 +7,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run_mode",
         type=str,
-        choices=["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server"],
+        choices=["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server", "visual"],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
@@ -515,6 +515,41 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.03,
         help="""The interval of the schedule time, default is 30ms.""",
+    )
+    parser.add_argument(
+        "--image_embed_dir",
+        type=str,
+        default=None,
+        help="path for vit embed",
+    )
+    parser.add_argument(
+        "--enable_remote_vit",
+        action="store_true",
+        help="Whether to enable remote vit for multimodal service.",
+    )
+    parser.add_argument(
+        "--remote_vit_port",
+        type=int,
+        default=12346,
+        help="The port number for the remote vit service.",
+    )
+    # redis for vit llm disaggregation
+    parser.add_argument(
+        "--redis_port",
+        type=int,
+        default=6379,
+        help="The port number for the redis service in config_server mode.",
+    )
+    parser.add_argument(
+        "--redis_evict_fraction",
+        type=float,
+        default=0.3,
+        help="The evict fraction for the redis service in config_server mode.",
+    )
+    parser.add_argument(
+        "--start_redis",
+        action="store_true",
+        help="Whether to start the redis service in config_server mode.",
     )
     parser.add_argument(
         "--enable_cpu_cache",

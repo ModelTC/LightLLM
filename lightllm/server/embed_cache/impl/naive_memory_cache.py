@@ -7,7 +7,7 @@ import torch
 import time
 from collections import deque
 import multiprocessing.shared_memory as shm
-from ..utils import get_shm_name_data, get_shm_name_embed, free_shm
+from ..utils import get_shm_name_data, get_shm_name_embed, free_shm, free_afs
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -77,7 +77,12 @@ class InMemoryCache:
                 if record.data:
                     free_shm(get_shm_name_data(id))
                 if record.embed:
-                    free_shm(get_shm_name_embed(id))
+                    # 仅vit释放掉afs里的, llm端不做释放
+                    # if self.args.run_mode == "visual":
+                    #     free_afs(get_shm_name_embed(id), self.args.image_embed_dir)
+                    # elif not self.args.enable_remote_vit:
+                    if not self.args.enable_remote_vit and self.args.run_mode != "visual":
+                        free_shm(get_shm_name_embed(id))
                 del self._md5_to_record[record.md5sum]
                 del self._records[id]
                 self.occupied -= 1
@@ -103,7 +108,7 @@ class InMemoryCache:
                     rec.visittime = now
                     rec.ref += 1
                 else:
-                    uid_int = uuid.uuid1().int
+                    uid_int = md5sum
                     self._check_and_set_new_id_range(token_num)
                     rec = Record(
                         id=uid_int,
@@ -139,5 +144,5 @@ class InMemoryCache:
         for id_ in ids:
             self._records[id_].embed = True
 
-    def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
+    def get_items_embed(self, ids: list[int], embeding_only: bool = False) -> list[Optional[bool]]:
         return [self._records.get(id_).embed if id_ in self._records else False for id_ in ids]

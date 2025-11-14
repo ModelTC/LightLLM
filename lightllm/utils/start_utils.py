@@ -111,4 +111,12 @@ def kill_recursive(proc):
         logger.warning(f"Process {proc.pid} does not exist.")
 
 
+def is_multimodal_mode(args):
+    from transformers import PretrainedConfig
+
+    model_cfg, _ = PretrainedConfig.get_config_dict(args.model_dir)
+    is_multimodal = "visual" in model_cfg or "vision_config" in model_cfg
+    return is_multimodal
+
+
 process_manager = SubmoduleManager()

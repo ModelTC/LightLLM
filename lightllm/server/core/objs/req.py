@@ -246,7 +246,6 @@ class Req(ctypes.Structure):
         # 只有管理节点有一个引用
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
-
         if self.is_aborted and can_released_mark and ref_count_ok:
             return True
 

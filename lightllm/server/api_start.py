@@ -5,7 +5,7 @@ import uuid
 import subprocess
 import signal
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
-from lightllm.utils.start_utils import process_manager, kill_recursive
+from lightllm.utils.start_utils import process_manager, kill_recursive, is_multimodal_mode
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
@@ -15,6 +15,7 @@ from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
+from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
 
 logger = init_logger(__name__)
@@ -56,11 +57,12 @@ def setup_signal_handlers(http_server_process, process_manager):
     signal.signal(signal.SIGINT, signal_handler)
 
     logger.info(f"start process pid {os.getpid()}")
-    logger.info(f"http server pid {http_server_process.pid}")
+    if http_server_process:
+        logger.info(f"http server pid {http_server_process.pid}")
     return
 
 
-def normal_or_p_d_start(args):
+def check_and_set_args(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
@@ -75,7 +77,7 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual"]:
         return
 
     if args.enable_cpu_cache:
@@ -150,6 +152,7 @@ def normal_or_p_d_start(args):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
+    args.enable_multimodal = is_multimodal_mode(args)
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -162,13 +165,11 @@ def normal_or_p_d_start(args):
         args.visual_gpu_ids = args.visual_gpu_ids[:total_required_gpus]
 
     # 检查visual_nccl_port数量是否足够
-    if len(args.visual_nccl_ports) < args.visual_dp:
+    if args.visual_nccl_ports is not None and len(args.visual_nccl_ports) < args.visual_dp:
         raise ValueError(
             f"Not enough visual_nccl_ports specified. You need at least {args.visual_dp}, "
             f"but got ({len(args.visual_nccl_ports)})."
         )
-    else:
-        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
     if args.visual_dp <= 0:
         raise ValueError("visual_dp must be a positive integer.")
@@ -214,9 +215,13 @@ def normal_or_p_d_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
+
+def normal_or_p_d_start(args):
+
+    check_and_set_args(args)
+    already_uesd_ports = [args.nccl_port, args.port]
     if args.run_mode == "decode":
-        already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port, args.pd_decode_rpyc_port]
+        already_uesd_ports = [args.nccl_port, args.port, args.pd_decode_rpyc_port]
 
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
@@ -225,7 +230,7 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=8 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=8 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -245,6 +250,9 @@ def normal_or_p_d_start(args):
         tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
         can_use_ports = can_use_ports[args.visual_tp :]
         visual_model_tp_ports.append(tp_ports_for_dp)
+
+    args.visual_nccl_ports = can_use_ports[0 : args.visual_dp]
+    can_use_ports = can_use_ports[args.visual_dp :]
 
     # 将申请好的端口放入args参数中
     args.router_port = router_port
@@ -273,7 +281,6 @@ def normal_or_p_d_start(args):
     logger.info(f"all start args:{args}")
 
     ports_locker.release_port()
-
     if args.enable_multimodal:
         from .visualserver.manager import start_visual_process
 
@@ -283,15 +290,6 @@ def normal_or_p_d_start(args):
             ],
             start_args=[(args,)],
         )
-        process_manager.start_submodule_processes(
-            start_funcs=[
-                start_visual_process,
-            ],
-            start_args=[
-                (args, visual_model_tp_ports),
-            ],
-        )
-
         if args.enable_multimodal_audio:
             from .audioserver.manager import start_audio_process
 
@@ -301,6 +299,15 @@ def normal_or_p_d_start(args):
                 ],
                 start_args=[
                     (args,),
+                ],
+            )
+        if not args.enable_remote_vit:
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args, visual_model_tp_ports),
                 ],
             )
 
@@ -431,12 +438,79 @@ def pd_master_start(args):
     http_server_process.wait()
 
 
+def visual_start(args):
+    check_and_set_args(args)
+    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.remote_vit_port]
+    can_use_ports = alloc_can_use_network_port(
+        num=5 + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+    )
+    logger.info(f"alloced ports: {can_use_ports}")
+    (
+        router_port,
+        visual_port,
+        audio_port,
+        cache_port,
+        metric_port,
+    ) = can_use_ports[0:5]
+    can_use_ports = can_use_ports[5:]
+
+    visual_model_tp_ports = []
+    for _ in range(args.visual_dp):
+        tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
+        can_use_ports = can_use_ports[args.visual_tp :]
+        visual_model_tp_ports.append(tp_ports_for_dp)
+
+    # 将申请好的端口放入args参数中
+    args.router_port = router_port
+    args.visual_port = visual_port
+    args.audio_port = audio_port
+    args.cache_port = cache_port
+    args.metric_port = metric_port
+    args.visual_model_rpc_ports = visual_model_tp_ports
+
+    # 远程vit server 需要一个唯一的id
+    args.visual_node_id = uuid.uuid4().int
+
+    logger.info(f"all start args:{args}")
+
+    set_env_start_args(args)
+
+    from .visualserver.manager import start_visual_process
+
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_cache_manager,
+        ],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_visual_process,
+        ],
+        start_args=[
+            (args, visual_model_tp_ports),
+        ],
+    )
+    setup_signal_handlers(None, process_manager)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt, shutting down...")
+        process_manager.terminate_all_processes()
+        logger.info("All processes have been terminated gracefully.")
+        sys.exit(0)
+
+
 def config_server_start(args):
     set_unique_server_name(args)
     if args.run_mode != "config_server":
         return
 
     logger.info(f"all start args:{args}")
+
+    if args.start_redis:
+        start_redis_service(args)
 
     set_env_start_args(args)
 

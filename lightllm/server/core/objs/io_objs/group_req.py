@@ -23,7 +23,9 @@ class GroupReqObjs:
         return GroupReqIndexes(
             group_req_id=self.group_req_id,
             multimodal_params=self.multimodal_params,
-            shm_req_indexes=[req.index_in_shm_mem for req in self.shm_req_objs],
+            shm_req_indexes=[req.index_in_shm_mem for req in self.shm_req_objs]
+            if self.shm_req_objs is not None
+            else None,
             time_mark=self.time_mark,
         )
 
