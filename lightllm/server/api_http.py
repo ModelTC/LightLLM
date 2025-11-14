@@ -292,7 +292,7 @@ async def metrics() -> Response:
     return response
 
 
-@app.post("/abort_req")
+@app.post("/abort_request")
 async def abort_req(request: AbortReq, raw_request: Request):
     """Abort a request."""
     try:
