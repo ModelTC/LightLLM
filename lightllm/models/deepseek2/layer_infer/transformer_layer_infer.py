@@ -4,6 +4,7 @@ import torch.functional as F
 import torch.distributed as dist
 import numpy as np
 import triton
+import flashinfer
 from typing import Tuple
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.triton_kernel.destindex_copy_kv import destindex_copy_kv
@@ -26,7 +27,7 @@ from lightllm.models.deepseek2.flashattention_infer_struct import Deepseek2Flash
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor, all_reduce, reduce_scatter_tensor
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, disable_trtllm_ragged_prefill
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.sgl_utils import flash_attn_varlen_func, flash_attn_with_kvcache, merge_state_v2
@@ -113,9 +114,14 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.enable_cc_method:
             if "triton_fp8kv" in self.mode:
                 if get_env_start_args().enable_flashinfer_prefill:
-                    self._context_attention_kernel = partial(
-                        Deepseek2TransformerLayerInfer._context_attention_flashinfer_kernel_with_CC_fp8, self
-                    )
+                    if disable_trtllm_ragged_prefill():
+                        self._context_attention_kernel = partial(
+                            Deepseek2TransformerLayerInfer._context_attention_flashinfer_kernel_with_CC_fp8, self
+                        )
+                    else:
+                        self._context_attention_kernel = partial(
+                            Deepseek2TransformerLayerInfer._context_attention_trtllm_ragged_with_CC_fp8, self
+                        )
                 else:
                     self._context_attention_kernel = partial(
                         Deepseek2TransformerLayerInfer._context_attention_kernel_with_CC_fp8, self
@@ -126,9 +132,14 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                         Deepseek2TransformerLayerInfer._context_attention_flashattention_kernel_with_CC, self
                     )
                 elif get_env_start_args().enable_flashinfer_prefill:
-                    self._context_attention_kernel = partial(
-                        Deepseek2TransformerLayerInfer._context_attention_flashinfer_kernel_with_CC, self
-                    )
+                    if disable_trtllm_ragged_prefill():
+                        self._context_attention_kernel = partial(
+                            Deepseek2TransformerLayerInfer._context_attention_flashinfer_kernel_with_CC, self
+                        )
+                    else:
+                        self._context_attention_kernel = partial(
+                            Deepseek2TransformerLayerInfer._context_attention_trtllm_ragged_with_CC, self
+                        )
                 else:
                     self._context_attention_kernel = partial(
                         Deepseek2TransformerLayerInfer._context_attention_kernel_with_CC, self
@@ -465,6 +476,105 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         k = torch.cat([k_nope, torch.repeat_interleave(k_rope, self.tp_q_head_num_, dim=-2)], dim=-1)
         infer_state.prefill_wrapper.run(q, k, v, out=o_tensor)
         return o_tensor
+
+    def _context_attention_trtllm_ragged_with_CC(
+        self,
+        q: torch.Tensor,
+        kv,
+        infer_state: Deepseek2FlashInferStateInfo,
+        layer_weight: Deepseek2TransformerLayerWeight,
+        out=None,
+    ) -> torch.Tensor:
+        k_nope, k_rope, v = self._decompress_kv(
+            kv,
+            infer_state,
+            layer_weight,
+            False,
+            infer_state.total_token_num,
+            infer_state.b_seq_len,
+            infer_state.max_value_in_b_seq_len,
+            infer_state.b1_kv_start_loc,
+        )
+        o_tensor = (
+            self.alloc_tensor((q.shape[0], q.shape[1], self.qk_nope_head_dim), dtype=q.dtype) if out is None else out
+        )
+        k = torch.cat([k_nope, torch.repeat_interleave(k_rope, self.tp_q_head_num_, dim=-2)], dim=-1)
+
+        seq_lens = infer_state.b_seq_len.int()
+        cum_seq_lens = infer_state.b1_cu_q_seq_len.int()
+        max_seq_len = int(seq_lens.max().item())
+
+        o = flashinfer.prefill.trtllm_ragged_attention_deepseek(
+            query=q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
+            key=k.view(-1, self.tp_k_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
+            value=v.view(-1, self.tp_v_head_num_, self.v_head_dim),
+            workspace_buffer=infer_state.flashinfer_extra_state.workspace_buffer,
+            seq_lens=seq_lens,
+            max_q_len=max_seq_len,
+            max_kv_len=max_seq_len,
+            bmm1_scale=self.softmax_scale,
+            bmm2_scale=1.0,
+            o_sf_scale=1.0,
+            batch_size=infer_state.batch_size,
+            window_left=-1,
+            cum_seq_lens_q=cum_seq_lens,
+            cum_seq_lens_kv=cum_seq_lens,
+            enable_pdl=False,
+            is_causal=True,
+            return_lse=False,
+        )
+        o_tensor.copy_(o)
+        return o_tensor
+
+    def _context_attention_trtllm_ragged_with_CC_fp8(
+        self,
+        q: torch.Tensor,
+        kv,
+        infer_state: Deepseek2FlashInferStateInfo,
+        layer_weight: Deepseek2TransformerLayerWeight,
+        out=None,
+    ) -> torch.Tensor:
+        k_nope, k_rope, v = self._decompress_kv(
+            kv,
+            infer_state,
+            layer_weight,
+            True,
+            infer_state.total_token_num,
+            infer_state.b_seq_len,
+            infer_state.max_value_in_b_seq_len,
+            infer_state.b1_kv_start_loc,
+        )
+        o_tensor = (
+            self.alloc_tensor((q.shape[0], q.shape[1], self.qk_nope_head_dim), dtype=q.dtype) if out is None else out
+        )
+        k = torch.cat([k_nope, torch.repeat_interleave(k_rope, self.tp_q_head_num_, dim=-2)], dim=-1)
+
+        seq_lens = infer_state.b_seq_len.int()
+        cum_seq_lens = infer_state.b1_cu_q_seq_len.int()
+        max_seq_len = int(seq_lens.max().item())
+
+        o = flashinfer.prefill.trtllm_ragged_attention_deepseek(
+            query=q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
+            key=k.view(-1, self.tp_k_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim),
+            value=v.view(-1, self.tp_v_head_num_, self.v_head_dim),
+            workspace_buffer=infer_state.flashinfer_extra_state.workspace_buffer,
+            seq_lens=seq_lens,
+            max_q_len=max_seq_len,
+            max_kv_len=max_seq_len,
+            bmm1_scale=self.softmax_scale,
+            bmm2_scale=1.0,
+            o_sf_scale=1.0,
+            batch_size=infer_state.batch_size,
+            window_left=-1,
+            cum_seq_lens_q=cum_seq_lens,
+            cum_seq_lens_kv=cum_seq_lens,
+            enable_pdl=False,
+            is_causal=True,
+            return_lse=False,
+        )
+        o_tensor.copy_(o)
+        return o_tensor
+        return q
 
     def _context_attention_kernel_with_CC(
         self,
