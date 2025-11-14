@@ -35,7 +35,7 @@ WORKDIR /root
 
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip
-RUN pip install -r /lightllm/requirements.txt --no-cache-dir
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r /lightllm/requirements.txt --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu128
 
 RUN pip install --no-cache-dir vllm --pre --extra-index-url https://wheels.vllm.ai/nightly 
 
