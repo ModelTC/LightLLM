@@ -181,6 +181,15 @@ class ModelRpcServer:
     def get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
 
+    def flush_radix_cache(self):
+        try:
+            if self.backend is not None:
+                self.backend.flush_radix_cache()
+            return True
+        except BaseException as e:
+            logger.exception(f"flush radix cache failed: {str(e)}")
+            return False
+
 
 class ModelRpcClient:
     def __init__(self, rpc_event, rpc_finished_event):
@@ -209,6 +218,16 @@ class ModelRpcClient:
         self.rpc_finished_event.clear()
         func_name, ret = self.rpc_shm_results.read_func_result()
         assert func_name == "get_max_total_token_num"
+        return ret
+
+    def flush_radix_cache(self) -> bool:
+        self.rpc_shm_params.write_func_params("flush_radix_cache", ())
+        self.rpc_event.set()
+
+        self.rpc_finished_event.wait()
+        self.rpc_finished_event.clear()
+        func_name, ret = self.rpc_shm_results.read_func_result()
+        assert func_name == "flush_radix_cache"
         return ret
 
 

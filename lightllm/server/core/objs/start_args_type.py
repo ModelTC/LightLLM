@@ -113,6 +113,7 @@ class StartArgs:
     disk_cache_storage_size: float = field(default=10)
     # zmp ports
     router_port: int = field(default=None)
+    router_rpc_port: int = field(default=None)
     detokenization_port: int = field(default=None)
     http_server_port: int = field(default=None)
     visual_port: int = field(default=None)
