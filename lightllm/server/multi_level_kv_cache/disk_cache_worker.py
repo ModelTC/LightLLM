@@ -8,6 +8,7 @@ from typing import List, Optional
 import torch
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
+from .cpu_cache_client import CpuKvCacheClient
 
 logger = init_logger(__name__)
 
@@ -33,7 +34,7 @@ class DiskCacheWorker:
     def __init__(
         self,
         disk_cache_storage_size: float,
-        cpu_cache_client,
+        cpu_cache_client: CpuKvCacheClient,
         disk_cache_dir: Optional[str] = None,
     ):
         self.cpu_cache_client = cpu_cache_client
@@ -88,20 +89,23 @@ class DiskCacheWorker:
 
     def _gather_offload_payloads(self) -> List[List[_PagePayload]]:
         self.cpu_cache_client.lock.acquire_sleep1ms()
-        try:
-            grouped_indexes = self.cpu_cache_client.get_pages_to_offloading()
-            payload_groups: List[List[_PagePayload]] = []
-            if not grouped_indexes:
-                return payload_groups
-            for group in grouped_indexes:
-                payloads: List[_PagePayload] = []
-                for page_index in group:
-                    page_item = self.cpu_cache_client.page_items.get_item_by_index(page_index)
-                    payloads.append(_PagePayload(index=page_index, hash_key=int(page_item.hash_key)))
-                payload_groups.append(payloads)
+        grouped_indexes = self.cpu_cache_client.get_pages_to_offloading()
+        self.cpu_cache_client.lock.release()
+
+        payload_groups: List[List[_PagePayload]] = []
+        if not grouped_indexes:
             return payload_groups
-        finally:
-            self.cpu_cache_client.lock.release()
+
+        self.cpu_cache_client.lock.acquire_sleep1ms()
+        page_items = self.cpu_cache_client.page_items.linked_items
+        for group in grouped_indexes:
+            payloads: List[_PagePayload] = []
+            for page_index in group:
+                page_item = page_items[page_index]
+                payloads.append(_PagePayload(index=page_index, hash_key=int(page_item.hash_key)))
+            payload_groups.append(payloads)
+        self.cpu_cache_client.lock.release()
+        return payload_groups
 
     # 数据写入磁盘
     def _persist_pages_to_disk(self, payloads: List[_PagePayload]) -> None:

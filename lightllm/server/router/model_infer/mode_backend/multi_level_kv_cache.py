@@ -48,9 +48,9 @@ class MultiLevelKvCacheModule(object):
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
             match_tokens = len(page_list) * token_page_size
-            # 更新命中的 cpu kv cache 长度.
+            # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
             if is_master_in_dp:
-                req.shm_req.cpu_prompt_cache_len = match_tokens - req.shm_req.disk_prompt_cache_len
+                req.shm_req.cpu_prompt_cache_len = match_tokens - req.cur_kv_len - req.shm_req.disk_prompt_cache_len
 
             need_token_num = match_tokens - req.cur_kv_len
             # 多匹配了一定数量的token同时请求长度大于一定的长度，才进行复制操作，不然操作效率不高，代价过高
