@@ -281,11 +281,6 @@ class KVTransProcess:
                 self.task_out_queue,
             )
             assert self.task_out_queue.get(timeout=30) == "proc_start"
-            # 确保在子进程读取共享内存之前，主进程已经将 mem_manager 写入共享内存
-            if self.device_id == 0:
-                manager._put_mem_manager_to_shm()
-            # 通知子进程可以从共享内存读取 mem_manager
-            self.task_in_queue.put("mem_managers_ready")
             assert self.task_out_queue.get(timeout=60) == "get_mem_managers_ok"
 
             return True

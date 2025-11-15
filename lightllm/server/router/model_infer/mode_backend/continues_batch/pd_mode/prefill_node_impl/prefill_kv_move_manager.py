@@ -142,8 +142,7 @@ class PrefillKVMoveManager:
             raise e
 
     # ==================================================================================
-    # 与推理进程交互接口,  _remove_req_refs_from_prompt_cache 和
-    # _put_mem_manager_to_shm 都是通过 rpyc 与推理进程进行交互的接口
+    # 与推理进程交互接口,  _remove_req_refs_from_prompt_cache
     # ==================================================================================
 
     def _remove_req_refs_from_prompt_cache(self, tasks: List[KVMoveTask]):
@@ -161,12 +160,6 @@ class PrefillKVMoveManager:
                         rpyc.async_(conn.remove_req_refs_from_prompt_cache)([task.group_request_id for task in _tasks])
                     )
             asyncio.run(self.wait_all_future_finish(futures))
-        return
-
-    def _put_mem_manager_to_shm(self):
-        with self.infer_rpyc_lock:
-            for obj in self.infer_rpyc_objs:
-                obj.put_mem_manager_to_shm()
         return
 
     async def wait_all_future_finish(self, futures: List[AsyncResult]):

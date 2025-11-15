@@ -86,7 +86,6 @@ class DecodeKVMoveManager(rpyc.Service):
     # _put_kv_received_to_radix_cache
     # _fail_to_realese_forzen_tokens
     # _unfrozen_time_out_reqs_tokens
-    # _put_mem_manager_to_shm
     # 上述接口都是 kv move manager 与推理进程进行交互的接口，主要用于申请锁定kv资源或者释放
     # kv资源的接口
     # ==================================================================================
@@ -152,12 +151,6 @@ class DecodeKVMoveManager(rpyc.Service):
             for conn in self.infer_rpyc_objs:
                 futures.append(rpyc.async_(conn.unfrozen_time_out_reqs_tokens)())
             asyncio.run(self.wait_all_future_finish(futures))
-        return
-
-    def _put_mem_manager_to_shm(self) -> None:
-        with self.infer_rpyc_lock:
-            for obj in self.infer_rpyc_objs:
-                obj.put_mem_manager_to_shm()
         return
 
     # ==================================================================================

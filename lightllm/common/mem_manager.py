@@ -2,6 +2,7 @@ import re
 import os
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 from typing import List, Union
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.pd_io_struct import KVMoveTask
@@ -435,6 +436,10 @@ class MemoryManager:
         """
         将 mem manager 写入到 shm中，方便pd分离等特性直接从中读取，不依赖进程间队列。
         """
+        from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import reduce_tensor
+
+        mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
+
         shm_name = f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}"
         obj_bytes = ForkingPickler.dumps(self).tobytes()
         shm = create_or_link_shm(name=shm_name, expected_size=len(obj_bytes) + 4, force_mode="create")
