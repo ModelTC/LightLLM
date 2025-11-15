@@ -25,8 +25,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 
-        # 将内存管理器写入共享内存，供kv传输进程获取后使用
-        self.model.mem_manager.create_shm()
+        # TODO 如何支持不支持 P2P的场景
         return
 
     def _init_reqs(self, reqs: List[Tuple]):

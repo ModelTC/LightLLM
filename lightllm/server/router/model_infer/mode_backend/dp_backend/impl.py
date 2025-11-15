@@ -27,7 +27,6 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids
 from .control_state import DPControlState
 from lightllm.common.mem_manager import MemoryManager
-import torch.multiprocessing as mp
 
 min_trans_token_num = int(os.getenv("LIGHTLLM_MIN_TRANS_TOKEN_NUM", "512"))
 dp_kv_transfer_req_num = int(os.getenv("LIGHTLLM_DP_KV_TRANSFER_REQ_NUM", "16"))
@@ -76,14 +75,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         if self.enable_dp_prompt_cache_fetch:
             torch.cuda.set_device(get_current_device_id())
 
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import reduce_tensor
             from lightllm.server.core.objs.shm_array import ShmArray
             from lightllm.utils.envs_utils import get_unique_server_name
-
-            mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
-
-            # Create shared memory for mem_manager
-            self.model.mem_manager.create_shm(use_for_pd_trans=False)
 
             # Create shared ShmArray for kv_indexes transfer
             # Use a small buffer to save shared memory
@@ -103,9 +96,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             self.mem_managers = []
             for rank_idx in range(self.node_world_size):
                 if rank_idx != self.rank_in_node:
-                    self.mem_managers.append(
-                        MemoryManager.from_shm(rank_idx, self.rank_in_node, use_for_pd_trans=False)
-                    )
+                    self.mem_managers.append(MemoryManager.loads_from_shm(self.rank_in_node))
                 else:
                     self.mem_managers.append(self.model.mem_manager)
 
