@@ -9,15 +9,15 @@ logger = init_logger(__name__)
 
 
 class DPChunkedForPrefillNode(DPChunkedPrefillBackend):
-    def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
+    def __init__(self, info_queue: mp.Queue) -> None:
         super().__init__()
         self.support_overlap = False
         self.info_queue: mp.Queue = info_queue
-        self.mem_queue: mp.Queue = mem_queue
         self.classed_req_no_decode = True
 
     def init_custom(self):
         ChunckedPrefillForPrefillNode.init_custom(self)
+        super().init_custom()
         return
 
     def _pre_handle_finished_reqs(self, finished_reqs):

@@ -91,7 +91,7 @@ def _handle_prefill_join(
         logger.warning(f"error while connect to prefill node: {e}")
 
 
-def _init_env(args, device_id: int, task_in_queue: mp.Queue, task_out_queue: mp.Queue, mem_queues: List[mp.Queue]):
+def _init_env(args, device_id: int, task_in_queue: mp.Queue, task_out_queue: mp.Queue):
     import os
 
     # os.environ["NCCL_DEBUG"] = "INFO"
@@ -111,7 +111,11 @@ def _init_env(args, device_id: int, task_in_queue: mp.Queue, task_out_queue: mp.
         graceful_registry(inspect.currentframe().f_code.co_name)
         task_out_queue.put("proc_start")
 
-        mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
+        # 从共享内存读取所有rank的mem_manager
+        node_world_size = args.tp // args.nnodes
+        mem_managers: List[MemoryManager] = [
+            MemoryManager.loads_from_shm(rank_in_node=rank) for rank in range(node_world_size)
+        ]
 
         task_out_queue.put("get_mem_managers_ok")
         connect_id_to_comm: Dict[str, PyNcclCommunicator] = {}
@@ -134,7 +138,7 @@ def _init_env(args, device_id: int, task_in_queue: mp.Queue, task_out_queue: mp.
                 logger.warning(f"unexpected task type: {task}")
 
     except Exception as e:
-        logger.error(f"Fatal error happened in kv trans process: {e}")
+        logger.error(f"Fatal error happened in kv trans process: {e} in device {device_id}")
         raise
 
 
@@ -143,9 +147,8 @@ def start_decode_trans_process(
     device_id: int,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
-    mem_queues: List[mp.Queue],
 ):
-    proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, mem_queues))
+    proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue))
     proc.start()
     assert proc.is_alive()
     logger.info(f"decode trans kv process for device: {device_id} start!")

@@ -12,10 +12,9 @@ logger = init_logger(__name__)
 
 
 class NIXLDecodeNode(ChunkedPrefillBackend):
-    def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
+    def __init__(self, info_queue: mp.Queue) -> None:
         super().__init__()
         self.info_queue: mp.Queue = info_queue
-        self.mem_queue: mp.Queue = mem_queue
         self.classed_req_strict_prefill = False
 
     def init_custom(self):
@@ -26,9 +25,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 
-        # 将当前的内存管理器放入到队列中，供kv传输进程获取后使用
-        for _ in range(self.node_world_size):
-            self.mem_queue.put(self.model.mem_manager)
+        # TODO 如何支持不支持 P2P的场景
         return
 
     def _init_reqs(self, reqs: List[Tuple]):

@@ -537,4 +537,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
+    parser.add_argument(
+        "--enable_dp_prompt_cache_fetch",
+        action="store_true",
+        default=False,
+        help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
+    )
     return parser

@@ -2,18 +2,22 @@ import re
 import os
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 from typing import List, Union
+from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
-from lightllm.utils.dist_utils import get_current_rank_in_node
+from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
+from lightllm.utils.shm_utils import create_or_link_shm
+from multiprocessing.reduction import ForkingPickler
 
 logger = init_logger(__name__)
 
@@ -93,7 +97,7 @@ class MemoryManager:
         """
         pd 分离模式使用的特殊接口
         """
-        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
         self.kv_move_buffer = torch.empty(
             (1, max_req_total_len + 8, 2 * self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
@@ -103,7 +107,7 @@ class MemoryManager:
         return
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
 
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
@@ -400,6 +404,59 @@ class MemoryManager:
 
     def load_index_kv_buffer(self, index, load_tensor_dict):
         self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
+
+    def copy_kv_from_other_dp_ranks(
+        self,
+        mem_managers: List["MemoryManager"],
+        move_token_indexes: torch.Tensor,
+        token_dp_indexes: torch.Tensor,
+        mem_indexes: torch.Tensor,
+        dp_size_in_node: int,
+        rank_in_dp: int,
+    ):
+        if not hasattr(self, "mem_ptrs_tensor"):
+            # 构建一个2D tensor，shape为(layer_num, mem_num)
+            mems_ptr_list = []
+            for i in range(0, len(mem_managers)):
+                mems_ptr_list.append(mem_managers[i].kv_buffer.data_ptr())
+            self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cuda")
+
+        # 一次性传输所有层
+        kv_trans_for_dp(
+            input_mems=self.mem_ptrs_tensor,
+            input_idx=move_token_indexes,
+            input_dp_idx=token_dp_indexes,
+            output=self.kv_buffer,
+            output_idx=mem_indexes,
+            dp_size_in_node=dp_size_in_node,
+            rank_in_dp=rank_in_dp,
+        )
+
+    def write_to_shm(self):
+        """
+        将 mem manager 写入到 shm中，方便pd分离等特性直接从中读取，不依赖进程间队列。
+        """
+        from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import reduce_tensor
+
+        mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
+
+        shm_name = f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}"
+        obj_bytes = ForkingPickler.dumps(self).tobytes()
+        shm = create_or_link_shm(name=shm_name, expected_size=len(obj_bytes) + 4, force_mode="create")
+        logger.info(f"create shm {shm.name} size {shm.size} for mem manger shared buffer")
+        shm.buf[0:4] = len(obj_bytes).to_bytes(4, "little")
+        shm.buf[4 : 4 + len(obj_bytes)] = obj_bytes
+        self.__shm_io_buffer = shm
+
+    @staticmethod
+    def loads_from_shm(rank_in_node: int) -> "MemoryManager":
+        shm_name = f"{get_unique_server_name()}_mem_manager_{rank_in_node}"
+        logger.info(f"get memmanager from shm {shm_name}")
+        shm = create_or_link_shm(name=shm_name, expected_size=-1, force_mode="link")
+        bytes_len = int.from_bytes(shm.buf[0:4], "little")
+        obj_bytes = shm.buf[4 : 4 + bytes_len].tobytes()
+        shm.close()
+        return ForkingPickler.loads(obj_bytes)
 
 
 class ReadOnlyStaticsMemoryManager:
