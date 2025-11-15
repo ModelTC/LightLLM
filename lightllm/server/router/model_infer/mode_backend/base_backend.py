@@ -218,6 +218,14 @@ class ModeBackend:
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
 
+        # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
+        # 读取
+        if (
+            self.args.run_mode in ["nixl_prefill", "nixl_decode", "prefill", "decode"]
+            or self.args.enable_dp_prompt_cache_fetch
+        ):
+            self.model.mem_manager.write_to_shm()
+
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
         self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True)
