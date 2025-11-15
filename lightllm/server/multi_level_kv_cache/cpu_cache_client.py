@@ -1,7 +1,7 @@
 import ctypes
 import torch
 import numpy as np
-from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
+from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name, get_disk_cache_prompt_limit_length
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from .shm_objs import ShmDict, ShmLinkedList, _LinkedListItem, IntList
@@ -37,6 +37,18 @@ class CpuKvCacheClient(object):
                 self.attach_shm_handle = self._attach_shm_cpu_kv_cache()
         return
 
+    @staticmethod
+    # 负数编码，用于标记一个page index是一个offload group的第一个page
+    def _encode_offload_head(page_index: int) -> int:
+        return -(page_index + 1)
+
+    @staticmethod
+    # 解码恢复page index，并返回该page index是否是一个offload group的第一个page
+    def _decode_offload_value(value: int) -> Tuple[int, bool]:
+        if value < 0:
+            return -(value + 1), True
+        return value, False
+
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
         assert self.page_hash_dict.get(hash_key) is None
         head = self.page_items.head
@@ -45,6 +57,8 @@ class CpuKvCacheClient(object):
         if cur_page.self_index == tail.self_index:
             return None
 
+        assert cur_page.is_empty() or cur_page.is_ready_recycle()
+        assert cur_page.ref_count == 0
         if cur_page.can_realloc(disk_offload_enable=disk_offload_enable):
             page_index = cur_page.self_index
             cur_page.del_self_from_list()
@@ -59,19 +73,18 @@ class CpuKvCacheClient(object):
         else:
             return None
 
-    def allocate_one_page(self, hash_key: int, disk_offload_enable: bool) -> Tuple[Optional[int], bool]:
+    def allocate_one_page(
+        self, page_items: List[_LinkedListItem], hash_key: int, disk_offload_enable: bool
+    ) -> Tuple[Optional[int], bool]:
         page_index = self.page_hash_dict.get(hash_key)
         if page_index is not None:
-            page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
+            page_item: _CpuPageStatus = page_items[page_index]
+            page_item.ref_count += 1
+            page_item.del_self_from_list()
+            self.page_items.add_item_to_tail(index=page_index)
             if page_item.is_data_ready():
-                page_item.ref_count += 1
-                page_item.del_self_from_list()
-                self.page_items.add_item_to_tail(index=page_index)
                 return page_index, True
             else:
-                page_item.ref_count += 1
-                page_item.del_self_from_list()
-                self.page_items.add_item_to_tail(index=page_index)
                 return page_index, False
         else:
             page_index = self.get_one_empty_page(hash_key=hash_key, disk_offload_enable=disk_offload_enable)
@@ -86,8 +99,11 @@ class CpuKvCacheClient(object):
         """
         page_list = []
         ready_list = []
+        page_items = self.page_items.linked_items
         for hash_key in hash_keys:
-            page_index, ready = self.allocate_one_page(hash_key=hash_key, disk_offload_enable=disk_offload_enable)
+            page_index, ready = self.allocate_one_page(
+                page_items=page_items, hash_key=hash_key, disk_offload_enable=disk_offload_enable
+            )
             if page_index is not None:
                 page_list.append(page_index)
                 ready_list.append(ready)
@@ -101,43 +117,80 @@ class CpuKvCacheClient(object):
         ready_list.extend([False for _ in range(left_num)])
         return page_list, ready_list
 
-    def update_pages_status_to_ready(self, page_list: List[int], deref: bool = True, disk_offload_enable: bool = False):
+    def update_pages_status_to_ready(
+        self,
+        page_list: List[int],
+        deref: bool = True,
+        disk_offload_enable: bool = False,
+    ):
+        offload_candidates: List[int] = []
+        page_items = self.page_items.linked_items
         for page_index in page_list:
             if page_index != -1:
-                cur_page: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
-                if cur_page.status < cur_page.READY:
-                    cur_page.status = cur_page.READY
-                    if disk_offload_enable:
-                        self.offload_page_indexes.add_item(value=cur_page.self_index)
+                cur_page = page_items[page_index]
+                if cur_page.status < _CpuPageStatus.READY:
+                    cur_page.status = _CpuPageStatus.READY
+                if disk_offload_enable:
+                    offload_candidates.append(cur_page.self_index)
                 if deref:
                     assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
+
+        # 控制prompt长度，较短的prompt不进行disk offload
+        limit_length = get_disk_cache_prompt_limit_length()
+        if (
+            disk_offload_enable
+            and offload_candidates
+            and len(page_list) * self.args.cpu_cache_token_page_size < limit_length
+        ):
+            logger.info(
+                f"skip disk offload for small page, " f"length = {len(page_list) * self.args.cpu_cache_token_page_size}"
+            )
+            self.mark_pages_recyclable(page_list=offload_candidates)
+            return
+
+        if disk_offload_enable and offload_candidates:
+            for idx, page_index in enumerate(offload_candidates):
+                if idx == 0:
+                    encoded = self._encode_offload_head(page_index)
+                else:
+                    encoded = page_index
+                self.offload_page_indexes.add_item(value=encoded)
+        return
+
+    def mark_pages_recyclable(self, page_list: List[int]):
+        page_items = self.page_items.linked_items
+        for page_index in page_list:
+            if page_index == -1:
+                continue
+            cur_page = page_items[page_index]
+            if cur_page.status >= _CpuPageStatus.READY:
+                cur_page.status = _CpuPageStatus.READY_RECYCLE
         return
 
     def query_one_page(self, hash_key: int) -> Tuple[Optional[int], bool]:
         page_index = self.page_hash_dict.get(hash_key)
         if page_index is not None:
             page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
+            page_item.ref_count += 1
+            # lru 更新
+            page_item.del_self_from_list()
+            self.page_items.add_item_to_tail(index=page_index)
             if page_item.is_data_ready():
-                page_item.ref_count += 1
-                # lru 更新
-                page_item.del_self_from_list()
-                self.page_items.add_item_to_tail(index=page_index)
                 return page_index, True
             else:
-                # lru 更新
-                page_item.del_self_from_list()
-                self.page_items.add_item_to_tail(index=page_index)
-                return None, False
+                return page_index, False
         else:
             return None, False
 
     def check_allpages_ready(self, page_list: List[int]) -> bool:
+        page_items = self.page_items.linked_items
         for page_index in page_list:
             if page_index == -1:
                 continue
-            page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
+            page_item = page_items[page_index]
             if not page_item.is_data_ready():
+                logger.info("cpu cache page %d not ready, status %d", page_index, page_item.status)
                 return False
         return True
 
@@ -145,38 +198,80 @@ class CpuKvCacheClient(object):
         """
         deref_pages
         """
+        page_items = self.page_items.linked_items
         for page_index in page_list:
             if page_index != -1:
-                self.deref_one_page(page_index=page_index)
+                page_item = page_items[page_index]
+                assert page_item.ref_count == 1
+                page_item.ref_count -= 1
         return
 
     def deref_one_page(self, page_index: int):
         page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
-        assert page_item.ref_count > 0
+        assert page_item.ref_count == 1
         page_item.ref_count -= 1
         return
 
-    def get_pages_to_offloading(self) -> List[int]:
+    def get_pages_to_offloading(self) -> List[List[int]]:
         page_list = self.offload_page_indexes.pop_all_item()
-        ans_list = []
-        if page_list is not None:
-            for page_index in page_list:
-                page_item: _CpuPageStatus = self.page_items.get_item_by_index(index=page_index)
-                if page_item.is_ready():
-                    page_item.ref_count += 1
-                    page_item.status = page_item.OFFLOADING
-                    ans_list.append(page_index)
-        return ans_list
+        groups: List[List[int]] = []
+        current_group: List[int] = []
+
+        if page_list is None:
+            return groups
+
+        # 缓存常量和对象引用，减少属性访问
+        page_items = self.page_items.linked_items
+        for value in page_list:
+            page_index, is_group_head = self._decode_offload_value(value)
+            if is_group_head and current_group:
+                groups.append(current_group)
+                current_group = []
+
+            page_item = page_items[page_index]
+            page_item.ref_count += 1
+            page_item.status = _CpuPageStatus.OFFLOADING
+            current_group.append(page_index)
+
+        if current_group:
+            groups.append(current_group)
+
+        return groups
 
     def update_pages_status_to_ready_recycle(self, page_list: List[int], deref: bool = True):
+        page_items = self.page_items.linked_items
         for page_index in page_list:
             if page_index != -1:
-                cur_page: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
+                cur_page = page_items[page_index]
                 assert cur_page.is_offloading()
-                cur_page.status = cur_page.READY_RECYCLE
+                cur_page.status = _CpuPageStatus.READY_RECYCLE
                 if deref:
-                    assert cur_page.ref_count > 0
+                    assert cur_page.ref_count == 1
                     cur_page.ref_count -= 1
+        return
+
+    def recycle_pages(self, page_list: List[int]):
+        page_items = self.page_items.linked_items
+        for page_index in page_list:
+            if page_index == -1:
+                continue
+            cur_page = page_items[page_index]
+
+            if cur_page.ref_count > 0:
+                cur_page.ref_count -= 1
+
+            if cur_page.ref_count != 0:
+                continue
+
+            if cur_page.hash_key != 0:
+                existing_index = self.page_hash_dict.get(cur_page.hash_key)
+                if existing_index is not None and existing_index == cur_page.self_index:
+                    self.page_hash_dict.remove(cur_page.hash_key)
+
+            cur_page.del_self_from_list()
+            cur_page.hash_key = 0
+            cur_page.status = _CpuPageStatus.EMPTY
+            self.page_items.add_item_to_tail(cur_page.self_index)
         return
 
     def _create_cpu_status_list(self, init_shm_data: bool):
