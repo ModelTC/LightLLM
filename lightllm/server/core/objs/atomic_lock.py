@@ -14,6 +14,7 @@ class AtomicShmLock:
         self.shm = create_or_link_shm(self.lock_name, self.dest_size)
 
         self.shm.buf.cast("i")[0] = 0
+        self.acquire_time = None
         return
 
     def __enter__(self):
@@ -38,8 +39,15 @@ class AtomicShmLock:
                     last_log_time = now
                 time.sleep(0.001)
                 pass
+        self.acquire_time = time.monotonic()
 
-    def release(self):
+    def release(self, log_timeout=False, log_tag=""):
+        if log_timeout and self.acquire_time is not None:
+            hold_time = (time.monotonic() - self.acquire_time) * 1000  # 转换为毫秒
+            if hold_time > 5:
+                tag_str = f"[{log_tag}] " if log_tag else ""
+                logger.warning(f"{tag_str}Lock {self.lock_name} held for {hold_time:.2f}ms (>5ms)")
+            self.acquire_time = None
         with atomics.atomicview(buffer=self.shm.buf, atype=atomics.INT) as a:
             while not a.cmpxchg_weak(1, 0):
                 pass
