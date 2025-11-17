@@ -89,7 +89,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
         aborted_count = 0
         cur_group_reqs = []
         for req in self.waiting_req_list:
-            if req.is_aborted:
+            if req.is_aborted and not self.router.is_multinode_tp:
                 aborted_count += 1
                 abort_req_list.append(req)
                 continue
