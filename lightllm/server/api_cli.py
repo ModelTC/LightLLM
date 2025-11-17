@@ -128,7 +128,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool_call_parser",
         type=str,
-        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen"],
+        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31"],
         default=None,
         help="tool call parser type",
     )
