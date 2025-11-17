@@ -1,1 +1,1 @@
-from .group_req import GroupReqIndexes, AbortedReqCmd, StopStrMatchedReqCmd
+from .group_req import AbortedReqCmd, StopStrMatchedReqCmd

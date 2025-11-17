@@ -80,7 +80,7 @@ class HttpServerManager:
                 self.multinode_req_manager = context.socket(zmq.PULL)
                 self.multinode_req_manager.bind(f"tcp://*:{args.multinode_httpmanager_port}")
                 logger.info(
-                    f"HttpServerManager listening for child node requests on *:{args.multinode_httpmanager_port}"
+                    f"HttpServerManager listening for master node requests on *:{args.multinode_httpmanager_port}"
                 )
 
         self.enable_multimodal = args.enable_multimodal
@@ -228,9 +228,9 @@ class HttpServerManager:
             if req_obj is None:
                 continue
             if isinstance(req_obj, GenerateReqMeta):
-                await self.process_generate_request(req_obj)
+                self.process_generate_request(req_obj)
             elif isinstance(req_obj, AbortReq):
-                await self.process_abort_request(req_obj)
+                self.process_abort_request(req_obj)
             else:
                 assert False, f"Unknown request type: {type(req_obj)}"
         return

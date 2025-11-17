@@ -111,7 +111,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
             ok_insert, new_batch_first_router_need_tokens = self._can_add_new_group_reqs(
                 cur_group_reqs, is_busy, new_batch_first_router_need_tokens
             )
-            if ok_insert:
+            if ok_insert and False:
                 can_run_list.extend(cur_group_reqs)
 
         new_batch = None
@@ -120,6 +120,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
 
         for req in abort_req_list:
             self.free_aborted_req_cpu_cache_pages(req)
+            self.free_aborted_req(req)
             self.router.shm_req_manager.put_back_req_obj(req)
         self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
         return new_batch

@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from lightllm.server.core.objs.req import Req
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from typing import List
 
 
@@ -18,7 +17,7 @@ class BaseReq(ABC):
 
 # for next node
 @dataclass
-class GenerateReqMeta:
+class GenerateReqMeta(BaseReq):
     prompt: str
     sampling_params: SamplingParams
     multimodal_params: MultimodalParams
@@ -26,7 +25,7 @@ class GenerateReqMeta:
 
 # for next module
 @dataclass
-class GenerateReqIndex:
+class GenerateReqIndex(BaseReq):
     group_req_id: int
     multimodal_params: MultimodalParams
     shm_req_indexes: List[int]

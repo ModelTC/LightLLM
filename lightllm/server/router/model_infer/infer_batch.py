@@ -477,6 +477,8 @@ class InferReq:
             self.finish_status.set_status(FinishStatus.FINISHED_STOP)
         elif output_len >= self.sampling_param.shm_param.max_new_tokens:
             self.finish_status.set_status(FinishStatus.FINISHED_LENGTH)
+        elif self.infer_aborted:
+            self.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
         return
 
     def _stop_sequences_matched(self, output_len: int):

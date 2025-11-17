@@ -18,7 +18,6 @@ from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import (
-    GroupReqIndexes,
     AbortedReqCmd,
     StopStrMatchedReqCmd,
 )
@@ -31,6 +30,7 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.common.mem_manager import ReadOnlyStaticsMemoryManager
+from lightllm.server.io_struct import BaseReq, GenerateReqIndex
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -435,7 +435,7 @@ class RouterManager:
         else:
             return self.max_total_token_num - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
 
-    def _add_req(self, group_req_indexes: GroupReqIndexes):
+    def _add_req(self, group_req_indexes: BaseReq):
         req_group = []
         for req_index in group_req_indexes.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
@@ -538,11 +538,9 @@ class RouterManager:
         try:
             # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
             for _ in range(self.recv_max_count):
-                recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                if isinstance(recv_req, GroupReqIndexes):
+                recv_req: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                if isinstance(recv_req, GenerateReqIndex):
                     self._add_req(recv_req)
-                else:
-                    assert False, f"Error Req Inf {recv_req}"
 
             # 当队列中存在较多的请求时，将一次接受的数量上调
             self.recv_max_count = min(int(self.recv_max_count * 1.3), 256)
