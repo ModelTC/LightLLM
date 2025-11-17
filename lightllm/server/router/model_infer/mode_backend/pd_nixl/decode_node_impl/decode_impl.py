@@ -18,12 +18,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         self.classed_req_strict_prefill = False
 
     def init_custom(self):
-
         assert kv_trans_use_p2p()
-        if kv_trans_use_p2p():
-            from ..p2p_fix import reduce_tensor
-
-            mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 
         # TODO 如何支持不支持 P2P的场景
         return
