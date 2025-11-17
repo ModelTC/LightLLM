@@ -136,11 +136,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--chat_template",
         type=str,
         default=None,
-        help="chat template jinja file path"
-        "lightllm/common/chat_template/tool_chat_template_deepseekv31.jinja"
-        "lightllm/common/chat_template/tool_chat_template_deepseekv32.jinja"
-        "lightllm/common/chat_template/tool_chat_template_qwen.jinja"
-        "lightllm/common/chat_template/tool_chat_template_deepseekr1.jinja",
+        help=("chat template jinja file path. For example:\n"
+              "- lightllm/common/chat_template/tool_chat_template_deepseekv31.jinja\n"
+              "- lightllm/common/chat_template/tool_chat_template_deepseekv32.jinja\n"
+              "- lightllm/common/chat_template/tool_chat_template_qwen.jinja\n"
+              "- lightllm/common/chat_template/tool_chat_template_deepseekr1.jinja"),
     )
     parser.add_argument(
         "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
