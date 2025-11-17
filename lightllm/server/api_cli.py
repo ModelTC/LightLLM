@@ -138,10 +138,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "chat template jinja file path. For example:\n"
-            "- lightllm/common/chat_template/tool_chat_template_deepseekv31.jinja\n"
-            "- lightllm/common/chat_template/tool_chat_template_deepseekv32.jinja\n"
-            "- lightllm/common/chat_template/tool_chat_template_qwen.jinja\n"
-            "- lightllm/common/chat_template/tool_chat_template_deepseekr1.jinja"
+            "- /test/chat_template/tool_chat_template_deepseekv31.jinja\n"
+            "- /test/chat_template/tool_chat_template_deepseekv32.jinja\n"
+            "- /test/chat_template/tool_chat_template_qwen.jinja\n"
+            "- /test/chat_template/tool_chat_template_deepseekr1.jinja"
         ),
     )
 
