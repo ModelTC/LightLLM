@@ -6,6 +6,11 @@ def init_tokenizer(args):
     from lightllm.server.tokenizer import get_tokenizer
 
     tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+    chat_path = args.chat_template
+    if chat_path is not None:
+        with open(chat_path, "r", encoding="utf-8") as f:
+            chat_template_str = f.read()
+        tokenizer.chat_template = chat_template_str
 
 
 async def build_prompt(request, tools) -> str:
