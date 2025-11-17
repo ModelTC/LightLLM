@@ -187,7 +187,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d 
-    MOE_MODE=EP KV_TRANS_USE_P2P=1 LOADWORKER=18 python -m lightllm.server.api_server \
+    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
     --tp 8 \
@@ -211,7 +211,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d
-    MOE_MODE=EP KV_TRANS_USE_P2P=1 LOADWORKER=18 python -m lightllm.server.api_server \
+    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
     --tp 8 \

@@ -21,11 +21,6 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
 
     def init_custom(self):
         assert kv_trans_use_p2p()
-
-        if kv_trans_use_p2p():
-            from ..p2p_fix import reduce_tensor
-
-            mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
         return
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
