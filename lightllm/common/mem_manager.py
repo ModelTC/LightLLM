@@ -69,7 +69,6 @@ class BaseAllocator:
         Args:
             free_index (torch.Tensor): _description_
         """
-
         end = self.mark_start
         start = self.mark_start - len(free_index)
         assert start >= 0, f"error free state start: {self.mark_start} free len {len(free_index)}"
@@ -121,7 +120,7 @@ class MemoryManager(BaseAllocator):
         self.dtype = dtype
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
-        super().__init__(self.siz, mem_manager_name)
+        super().__init__(self.size, mem_manager_name)
 
         self._init_buffers(
             self.size,
