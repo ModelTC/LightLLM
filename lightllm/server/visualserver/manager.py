@@ -57,7 +57,7 @@ class VisualManager:
         self.trust_remote_code = args.trust_remote_code
         self.args = args
         self.visual_model_rpc_ports = visual_model_rpc_ports
-        self.send_batch_size = min(args.visual_send_batch_size, args.cache_capacity, args.visual_infer_batch_size)
+        self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
 
     async def wait_to_model_ready(self):

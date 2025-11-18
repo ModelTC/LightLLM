@@ -162,6 +162,8 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
 
     def preprocess(self, image) -> Tuple[torch.Tensor, torch.Tensor]:
         image_arr = np.asarray(image, dtype=np.uint8)
+        # TODO check cuda tensor oom reason
+        # image_data = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous().to("cuda", non_blocking=True)
         image_data = torch.from_numpy(image_arr).permute(2, 0, 1)
 
         grouped_images, grouped_images_index = group_images_by_shape(
