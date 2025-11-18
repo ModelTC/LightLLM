@@ -48,7 +48,6 @@ def gen_random_input_text(tokenizer, input_len) -> str:
 
 
 def gen_random_input_text_with_seed(tokenizer, input_len, seed) -> str:
-    """Generate random input text with a specific seed"""
     rng = random.Random(seed)
     random_ids = [rng.randint(0, tokenizer.vocab_size) for _ in range(input_len)]
     random_text = tokenizer.decode(random_ids)
@@ -68,15 +67,12 @@ def gen_random_data(
     output_lens = get_random_length(reqs_num, output_len, range_ratio)
     input_lens = get_random_length(reqs_num, input_len, range_ratio)
 
-    # Generate input_len2 lengths if input_len2 > 0
     if input_len2 > 0:
         input_lens2 = get_random_length(reqs_num, input_len2, range_ratio)
 
     for i in range(reqs_num):
-        # Generate first part with main random state
         input_text = gen_random_input_text(tokenizer, input_lens[i])
 
-        # Generate second part with seed2 if specified
         if input_len2 > 0 and seed2 is not None:
             input_text2 = gen_random_input_text_with_seed(tokenizer, input_lens2[i], seed2 + i)
             input_text = input_text + input_text2
@@ -339,7 +335,9 @@ def main():
     parser.add_argument("--input_num", type=int, default=2000)
     parser.add_argument("--input_qps", type=float, default=30.0)
     parser.add_argument("--input_len", type=int, default=1024)
-    parser.add_argument("--input_len2", type=int, default=0, help="Length of second part to append, 0 means disabled")
+    parser.add_argument(
+        "--input_len2", type=int, default=0, help="Length of second part to append behind input_len, 0 means disabled"
+    )
     parser.add_argument("--output_len", type=int, default=128)
     parser.add_argument("--server_api", type=str, default="lightllm")
     parser.add_argument("--dump_file", type=str, default="")
