@@ -499,6 +499,7 @@ class RouterManager:
                     dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
                     req_id_select_mark = [1 for _ in range(len(req_ids))]
                     req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
+                    # TODO: 这里可以合成一个 allreudce，req_id_select_mark + aborted_req_mask
                     dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
                     aborted_req_mask = torch.tensor(
                         [req.is_aborted for req in new_batch.reqs], dtype=torch.bool, device="cpu"
