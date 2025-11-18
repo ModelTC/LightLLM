@@ -57,8 +57,6 @@ class CpuKvCacheClient(object):
         if cur_page.self_index == tail.self_index:
             return None
 
-        assert cur_page.is_empty() or cur_page.is_ready_recycle()
-        assert cur_page.ref_count == 0
         if cur_page.can_realloc(disk_offload_enable=disk_offload_enable):
             page_index = cur_page.self_index
             cur_page.del_self_from_list()
@@ -130,8 +128,11 @@ class CpuKvCacheClient(object):
                 cur_page = page_items[page_index]
                 if cur_page.status < _CpuPageStatus.READY:
                     cur_page.status = _CpuPageStatus.READY
+
+                # 全部落盘，已落盘前缀部分会在落盘中自动剔除
                 if disk_offload_enable:
                     offload_candidates.append(cur_page.self_index)
+
                 if deref:
                     assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
@@ -202,13 +203,13 @@ class CpuKvCacheClient(object):
         for page_index in page_list:
             if page_index != -1:
                 page_item = page_items[page_index]
-                assert page_item.ref_count == 1
+                assert page_item.ref_count > 0
                 page_item.ref_count -= 1
         return
 
     def deref_one_page(self, page_index: int):
         page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
-        assert page_item.ref_count == 1
+        assert page_item.ref_count > 0
         page_item.ref_count -= 1
         return
 
@@ -220,7 +221,6 @@ class CpuKvCacheClient(object):
         if page_list is None:
             return groups
 
-        # 缓存常量和对象引用，减少属性访问
         page_items = self.page_items.linked_items
         for value in page_list:
             page_index, is_group_head = self._decode_offload_value(value)
@@ -243,10 +243,9 @@ class CpuKvCacheClient(object):
         for page_index in page_list:
             if page_index != -1:
                 cur_page = page_items[page_index]
-                assert cur_page.is_offloading()
                 cur_page.status = _CpuPageStatus.READY_RECYCLE
                 if deref:
-                    assert cur_page.ref_count == 1
+                    assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
         return
 

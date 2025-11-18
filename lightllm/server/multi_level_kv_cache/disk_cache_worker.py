@@ -13,7 +13,7 @@ from .cpu_cache_client import CpuKvCacheClient
 logger = init_logger(__name__)
 
 try:
-    from cache import PyLocalCacheService, PyState
+    from light_mem import PyLocalCacheService, PyState
 except ImportError as e:
     logger.error(
         "Failed to import LightMem library. Please install it first.\n"
@@ -42,8 +42,11 @@ class DiskCacheWorker:
 
         assert disk_cache_storage_size > 0
         storage_size = int(disk_cache_storage_size * (1024 ** 3))
-        num_shard = 64
+        # num_shard与KVCACHE_MAX_BLOCK_SIZE相关，KVCACHE_MAX_BLOCK_SIZE默认64MB前提下，
+        # num_shard设置32, 能使disk cache的容量利用率达到90%，继续增大num_shard会导致容量利用率下降
+        num_shard = 32
         num_worker = 48
+        # 读写同时进行时，分配16线程用来写，32线程用来读
         max_concurrent_write_tasks = 16
 
         cache_dir = disk_cache_dir
@@ -134,16 +137,24 @@ class DiskCacheWorker:
         self.cpu_cache_client.update_pages_status_to_ready_recycle(page_list=page_indexes, deref=True)
         self.cpu_cache_client.lock.release()
 
-    def blocks_exist(self, tokens: List[int], start_pos: int = 0) -> bool:
+    def query_loadable_pages(self, tokens: List[int], start_pos: int) -> int:
+        """
+        查询从start_pos位置开始,可以从disk cache加载的最长前缀长度
+        Returns:
+            loadable_len: 从start_pos开始可以加载的长度
+        """
         if not tokens or start_pos < 0 or start_pos >= len(tokens):
-            return False
+            return 0
 
         query_result = self.service.query(tokens)
-        block_start = start_pos // self.service._n
-        block_end = math.ceil(len(tokens) / self.service._n)
-        if block_start >= block_end:
-            return False
-        return all(query_result[block_start:block_end])
+        n = self.service._n
+        start_block = start_pos // n
+        try:
+            first_false_idx = start_block + query_result[start_block:].index(False)
+        except ValueError:
+            return len(tokens) - start_pos
+        first_missing_pos = first_false_idx * n
+        return max(0, first_missing_pos - start_pos)
 
     # 从磁盘读取数据到内存
     def load_pages(self, tokens: List[int], page_indexes: List[int], start_pos: int = 0) -> bool:
