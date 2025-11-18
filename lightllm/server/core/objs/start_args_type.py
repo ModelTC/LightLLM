@@ -33,6 +33,7 @@ class StartArgs:
     tool_call_parser: Optional[str] = field(
         default=None, metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen"]}
     )
+    chat_template: Optional[str] = field(default=None)
     running_max_req_size: int = field(default=1000)
     tp: int = field(default=1)
     dp: int = field(default=1)

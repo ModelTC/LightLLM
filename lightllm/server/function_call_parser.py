@@ -29,13 +29,7 @@ from .api_models import Tool
 
 logger = logging.getLogger(__name__)
 
-TOOLS_TAG_LIST = [
-    "<|plugin|>",
-    "<function=",
-    "<tool_call>",
-    "<|python_tag|>",
-    "[TOOL_CALLS]",
-]
+TOOLS_TAG_LIST = ["<|plugin|>", "<function=", "<tool_call>", "<|python_tag|>", "[TOOL_CALLS]", "<｜tool▁calls▁begin｜>"]
 
 
 class ToolCallItem(BaseModel):
