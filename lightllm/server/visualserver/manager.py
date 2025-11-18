@@ -8,7 +8,6 @@ import pickle
 import inspect
 import setproctitle
 from typing import List
-from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -18,6 +17,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.server.io_struct import BaseReq, GenerateReqIndex
 from rpyc.utils.classic import obtain
 
 
@@ -48,7 +48,7 @@ class VisualManager:
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.cache_port = args.cache_port
-        self.waiting_reqs: List[GroupReqIndexes] = []
+        self.waiting_reqs: List[BaseReq] = []
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
         self.vit_dp = args.visual_dp
@@ -171,11 +171,12 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                    if isinstance(recv_req, GroupReqIndexes):
+                    recv_req: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                    # 目前只有 GenerateReqIndex 会进入这个队列，判断是否需要推理图片
+                    if isinstance(recv_req, GenerateReqIndex):
                         self.waiting_reqs.append(recv_req)
                     else:
-                        assert False, f"Error Req Inf {recv_req}"
+                        self.send_to_next_module.send_pyobj(recv_req, protocol=pickle.HIGHEST_PROTOCOL)
                 self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
             except zmq.ZMQError:
                 # 当队列已经开始清空的时候，将一次接受数量下调

@@ -70,7 +70,7 @@ class NIXLPDQueue(BaseQueue):
         waiting_queue = self.waiting_req_list
 
         for req in waiting_queue:
-            if req.is_aborted:
+            if req.is_aborted and not self.router.is_multinode_tp:
                 # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.
                 # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token的泄漏
                 aborted_count += 1
@@ -88,6 +88,7 @@ class NIXLPDQueue(BaseQueue):
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
         for req in abort_req_list:
             self.free_aborted_req_cpu_cache_pages(req)
+            self.free_aborted_req(req)
             self.router.shm_req_manager.put_back_req_obj(req)
         self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
         return new_batch

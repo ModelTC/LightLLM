@@ -292,11 +292,11 @@ async def metrics() -> Response:
     return response
 
 
-@app.post("/abort_req")
-async def abort_req(request: AbortReq, raw_request: Request):
+@app.post("/abort_request")
+async def abort_request(request: AbortReq, raw_request: Request):
     """Abort a request."""
     try:
-        await g_objs.httpserver_manager.abort_req(request)
+        await g_objs.httpserver_manager.abort_request(request)
         return Response(status_code=200)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")

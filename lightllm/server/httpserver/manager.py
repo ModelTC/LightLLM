@@ -25,12 +25,18 @@ from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
-from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
+from lightllm.server.io_struct import (
+    AbortReq,
+    BaseReq,
+    GenerateReq,
+    GenerateReqMeta,
+    GenerateReqIndex,
+)
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -74,7 +80,7 @@ class HttpServerManager:
                 self.multinode_req_manager = context.socket(zmq.PULL)
                 self.multinode_req_manager.bind(f"tcp://*:{args.multinode_httpmanager_port}")
                 logger.info(
-                    f"HttpServerManager listening for child node requests on *:{args.multinode_httpmanager_port}"
+                    f"HttpServerManager listening for master node requests on *:{args.multinode_httpmanager_port}"
                 )
 
         self.enable_multimodal = args.enable_multimodal
@@ -218,18 +224,32 @@ class HttpServerManager:
     async def loop_for_request(self):
         assert self.args.node_rank > 0
         while True:
-            (
-                prompt,
-                sampling_params,
-                multimodal_params,
-            ) = await self.multinode_req_manager.recv_pyobj()
-            results_generator = self.generate(prompt, sampling_params, multimodal_params, None)
+            req_obj = await self.multinode_req_manager.recv_pyobj()
+            if req_obj is None:
+                continue
+            if isinstance(req_obj, GenerateReqMeta):
+                self.process_generate_request(req_obj)
+            elif isinstance(req_obj, AbortReq):
+                self.process_abort_request(req_obj)
+            else:
+                assert False, f"Unknown request type: {type(req_obj)}"
+        return
 
-            async def generate_wrapper(results_generator):
-                async for _, _, _, _ in results_generator:
-                    pass
+    def process_generate_request(self, req_meta: GenerateReqMeta):
+        prompt = req_meta.prompt
+        sampling_params = req_meta.sampling_params
+        multimodal_params = req_meta.multimodal_params
+        results_generator = self.generate(prompt, sampling_params, multimodal_params, None)
 
-            asyncio.create_task(generate_wrapper(results_generator))
+        async def generate_wrapper(results_generator):
+            async for _, _, _, _ in results_generator:
+                pass
+
+        asyncio.create_task(generate_wrapper(results_generator))
+        return
+
+    def process_abort_request(self, request: AbortReq):
+        asyncio.create_task(self.abort_request(request))
         return
 
     def alloc_req_id(self, sampling_params, is_health_req: bool = False):
@@ -279,10 +299,6 @@ class HttpServerManager:
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)
 
         try:
-            original_multimodal_params = None
-            if self.is_multinode_tp_master:
-                original_multimodal_params = copy.deepcopy(multimodal_params)
-
             if self.pd_mode.is_P_or_NORMAL():
                 await multimodal_params.verify_and_preload(request)
 
@@ -346,12 +362,17 @@ class HttpServerManager:
                 )
                 req_objs.append(req_obj)
 
-            req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
+            req_status = ReqStatus(
+                group_request_id=group_request_id,
+                prompt=prompt,
+                sampling_params=sampling_params,
+                multimodal_params=multimodal_params,
+                req_objs=req_objs,
+                start_time=start_time,
+            )
             self.req_id_to_out_inf[group_request_id] = req_status
 
-            await self.transfer_to_next_module_or_node(
-                prompt, sampling_params, original_multimodal_params, req_status.group_req_objs
-            )
+            await self.transfer_to_next_module_or_node(req_status.group_req_objs)
 
             results_generator = self._wait_to_token_package(
                 start_time,
@@ -482,44 +503,49 @@ class HttpServerManager:
 
     async def transfer_to_next_module_or_node(
         self,
-        prompt: str,
-        sampling_params: SamplingParams,
-        original_multimodal_params: MultimodalParams,
-        group_req_objs: Optional[GroupReqObjs] = None,
+        req_obj: Optional["BaseReq"] = None,
     ):
         # 多节点纯tp 运行模式下，master 节点需要将请求转发给slave节点.
+        req_to_next_node = req_obj.get_req_to_next_node()
+        self.transfer_to_next_node(req_to_next_node)
+        req_to_next_module = req_obj.get_req_to_next_module()
+        await self.transfer_to_next_module(req_to_next_module)
+        return
+
+    def transfer_to_next_node(
+        self,
+        req_to_next_node: Optional["BaseReq"] = None,
+    ):
         if self.is_multinode_tp_master:
             for sender in self.multinode_req_manager:
                 sender.send_pyobj(
-                    (prompt, sampling_params, original_multimodal_params),
+                    req_to_next_node,
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
-
-        await self.transfer_to_next_module(group_req_objs)
         return
 
     async def transfer_to_next_module(
         self,
-        group_req_objs: Optional[GroupReqObjs] = None,
+        req_to_next_module: Optional["GenerateReqIndex"] = None,
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
             if self.enable_multimodal:
                 self.send_to_visual.send_pyobj(
-                    group_req_objs.to_group_req_index(),
+                    req_to_next_module,
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
                 return
 
             if self.args.enable_cpu_cache:
                 self.send_to_multi_level_kv_cache.send_pyobj(
-                    group_req_objs.to_group_req_index(),
+                    req_to_next_module,
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
                 return
 
             self.send_to_router.send_pyobj(
-                group_req_objs.to_group_req_index(),
+                req_to_next_module,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
             return
@@ -527,7 +553,7 @@ class HttpServerManager:
         if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
             self.send_to_router.send_pyobj(
-                group_req_objs.to_group_req_index(),
+                req_to_next_module,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
             return
@@ -643,11 +669,23 @@ class HttpServerManager:
             logger.warning(f"aborted group_request_id {group_req_id} not exist")
             return False
 
-        group_req_objs: GroupReqObjs = req_status.group_req_objs
+        group_req_objs: GenerateReq = req_status.group_req_objs
         for req in group_req_objs.shm_req_objs:
             req.is_aborted = True
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
+
+    async def abort_request(self, request: AbortReq):
+        request_id = request.request_id
+        abort_all = request.abort_all
+        if self.is_multinode_tp_master:
+            self.transfer_to_next_node(req_to_next_node=request)
+        if request_id is not None and not abort_all:
+            await self.abort(request_id)
+        if abort_all:
+            for group_req_id in list(self.req_id_to_out_inf.keys()):
+                await self.abort(group_req_id)
+        pass
 
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()
@@ -776,11 +814,21 @@ class HttpServerManager:
 
 
 class ReqStatus:
-    def __init__(self, group_request_id, multimodal_params, req_objs: List[Req], start_time) -> None:
+    def __init__(
+        self,
+        group_request_id: int,
+        prompt: str,
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        req_objs: List[Req],
+        start_time,
+    ) -> None:
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
-        self.group_req_objs = GroupReqObjs(
+        self.group_req_objs = GenerateReq(
             group_req_id=group_request_id,
+            prompt=prompt,
+            sampling_params=sampling_params,
             multimodal_params=multimodal_params,
             shm_req_objs=req_objs,
             time_mark=start_time,

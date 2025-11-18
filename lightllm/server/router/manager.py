@@ -18,7 +18,6 @@ from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import (
-    GroupReqIndexes,
     AbortedReqCmd,
     StopStrMatchedReqCmd,
 )
@@ -31,6 +30,7 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.common.mem_manager import ReadOnlyStaticsMemoryManager
+from lightllm.server.io_struct import BaseReq, GenerateReqIndex
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -385,8 +385,13 @@ class RouterManager:
         ans = []
         if self.running_batch is None:
             return ans
-        for req in self.running_batch.reqs:
-            if req.is_aborted and req._router_aborted is False:
+        aborted_req_mask = torch.tensor(
+            [req.is_aborted for req in self.running_batch.reqs], dtype=torch.bool, device="cpu"
+        )
+        if self.is_multinode_tp:
+            dist.all_reduce(aborted_req_mask, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
+        for req, is_aborted in zip(self.running_batch.reqs, aborted_req_mask.numpy()):
+            if is_aborted and req._router_aborted is False:
                 req._router_aborted = True
                 ans.append(req)
         return ans
@@ -435,7 +440,7 @@ class RouterManager:
         else:
             return self.max_total_token_num - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
 
-    def _add_req(self, group_req_indexes: GroupReqIndexes):
+    def _add_req(self, group_req_indexes: BaseReq):
         req_group = []
         for req_index in group_req_indexes.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
@@ -481,9 +486,22 @@ class RouterManager:
                     dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
                     req_id_select_mark = [1 for _ in range(len(req_ids))]
                     req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
+                    # TODO: 这里可以合成一个 allreudce，req_id_select_mark + aborted_req_mask
                     dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
+                    aborted_req_mask = torch.tensor(
+                        [req.is_aborted for req in new_batch.reqs], dtype=torch.bool, device="cpu"
+                    )
+                    dist.all_reduce(aborted_req_mask, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
                     back_req_list = []
-                    for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
+                    for req_id, select, is_aborted in zip(
+                        req_ids, req_id_select_mark.numpy(), aborted_req_mask.numpy()
+                    ):
+                        # 释放多节点abort 请求，如果select == 0， is_aborted 一定为False
+                        if is_aborted and select == 1:
+                            req = new_batch.pop_req(req_id)
+                            self.req_queue.free_aborted_req(req)
+                            self.shm_req_manager.put_back_req_obj(req)
+                            continue
                         if select == 0:
                             req = new_batch.pop_req(req_id)
                             back_req_list.append(req)
@@ -499,23 +517,28 @@ class RouterManager:
                 else:
                     req_ids = [None for _ in range(req_num)]
                     dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
-                    all_req_id_set = set([req.request_id for req in self.req_queue.waiting_req_list])
+                    # all_req_id_set = set([req.request_id for req in self.req_queue.waiting_req_list])
+                    id_to_req_obj = {req.request_id: req for req in self.req_queue.waiting_req_list}
                     req_id_select_mark = []
+                    aborted_req_mask = []
                     for req_id in req_ids:
-                        req_id_select_mark.append(1 if req_id in all_req_id_set else 0)
+                        req_id_select_mark.append(1 if req_id in id_to_req_obj else 0)
+                        aborted_req_mask.append(id_to_req_obj[req_id].is_aborted if req_id in id_to_req_obj else False)
                     req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
                     dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-                    select_req_ids = []
-                    for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
-                        if select == 1:
-                            select_req_ids.append(req_id)
-
+                    aborted_req_mask = torch.tensor(aborted_req_mask, dtype=torch.bool, device="cpu")
+                    dist.all_reduce(aborted_req_mask, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
                     select_reqs = []
-                    for req_id in select_req_ids:
-                        for req in self.req_queue.waiting_req_list:
-                            if req.request_id == req_id:
-                                select_reqs.append(req)
-
+                    for req_id, select, is_aborted in zip(
+                        req_ids, req_id_select_mark.numpy(), aborted_req_mask.numpy()
+                    ):
+                        if select == 1:
+                            req = id_to_req_obj[req_id]
+                            if is_aborted:
+                                self.req_queue.free_aborted_req(req)
+                                self.shm_req_manager.put_back_req_obj(req)
+                                continue
+                            select_reqs.append(req)
                     for req in select_reqs:
                         self.req_queue.waiting_req_list.remove(req)
                     if select_reqs:
@@ -538,11 +561,9 @@ class RouterManager:
         try:
             # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
             for _ in range(self.recv_max_count):
-                recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                if isinstance(recv_req, GroupReqIndexes):
+                recv_req: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                if isinstance(recv_req, GenerateReqIndex):
                     self._add_req(recv_req)
-                else:
-                    assert False, f"Error Req Inf {recv_req}"
 
             # 当队列中存在较多的请求时，将一次接受的数量上调
             self.recv_max_count = min(int(self.recv_max_count * 1.3), 256)

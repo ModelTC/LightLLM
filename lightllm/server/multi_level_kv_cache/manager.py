@@ -10,7 +10,7 @@ import threading
 import concurrent.futures
 from queue import Queue
 from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
-from lightllm.server.core.objs.io_objs import GroupReqIndexes
+from lightllm.server.io_struct import GenerateReqIndex
 from lightllm.utils.graceful_utils import graceful_registry
 from .cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.log_utils import init_logger
@@ -51,7 +51,7 @@ class MultiLevelKVCacheManager:
                 logger.exception(str(e))
         return
 
-    def _handle_group_req_cpu_cache_match(self, group_req_indexes: GroupReqIndexes, start_time: float):
+    def _handle_group_req_cpu_cache_match(self, group_req_indexes: GenerateReqIndex, start_time: float):
         """
         match cpu cache pages
         """
@@ -110,8 +110,8 @@ class MultiLevelKVCacheManager:
                 try:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
                     for _ in range(recv_max_count):
-                        recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                        assert isinstance(recv_obj, GroupReqIndexes)
+                        recv_obj: GenerateReqIndex = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                        assert isinstance(recv_obj, GenerateReqIndex)
                         recv_objs.append(recv_obj)
 
                         start_time = recv_obj.time_mark
