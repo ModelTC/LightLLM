@@ -396,19 +396,6 @@ class RouterManager:
                 ans.append(req)
         return ans
 
-    def get_multinode_tp_aborted_reqs(self, reqs: List[Req]) -> List[Req]:
-        if len(reqs) == 0:
-            return []
-        if not self.is_multinode_tp:
-            return reqs
-        aborted_req_mask = torch.tensor([req.is_aborted for req in reqs], dtype=torch.bool, device="cpu")
-        dist.all_reduce(aborted_req_mask, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-        new_reqs = []
-        for req, is_aborted in zip(reqs, aborted_req_mask.numpy()):
-            if is_aborted:
-                new_reqs.append(req)
-        return new_reqs
-
     def _get_stop_str_reqs_from_running_batch(self) -> List[Req]:
         # to do, 多节点tp模式，暂时不能支持 stop str 匹配退出
         if self.is_multinode_tp:
