@@ -16,6 +16,7 @@ from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
+from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.shm_utils import create_or_link_shm
 from multiprocessing.reduction import ForkingPickler
 
@@ -432,13 +433,22 @@ class MemoryManager:
             rank_in_dp=rank_in_dp,
         )
 
-    def write_to_shm(self):
+    def write_to_shm(self, req_manager):
         """
         将 mem manager 写入到 shm中，方便pd分离等特性直接从中读取，不依赖进程间队列。
         """
-        from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import reduce_tensor
+        if kv_trans_use_p2p():
+            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import reduce_tensor
 
-        mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
+            mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
+
+        from lightllm.common.req_manager import ReqManager
+
+        req_manager: ReqManager = req_manager
+
+        # 这个地方是一个不太优雅的设计，但是暂时这么做，可以让dp shared kv swap模块直接访问 req_manager 中的 req_to_token_indexs
+        # 避免过多无用的数据复制和传输开销。
+        self.req_to_token_indexs: torch.Tensor = req_manager.req_to_token_indexs
 
         shm_name = f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}"
         obj_bytes = ForkingPickler.dumps(self).tobytes()

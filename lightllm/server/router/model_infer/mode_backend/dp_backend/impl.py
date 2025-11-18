@@ -27,9 +27,7 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids
 from .control_state import DPControlState
 from lightllm.common.mem_manager import MemoryManager
-
-min_trans_token_num = int(os.getenv("LIGHTLLM_MIN_TRANS_TOKEN_NUM", "512"))
-dp_kv_transfer_req_num = int(os.getenv("LIGHTLLM_DP_KV_TRANSFER_REQ_NUM", "16"))
+from .dp_shared_kv_trans import DPKVSharedMoudle
 
 
 class DPChunkedPrefillBackend(ModeBackend):
@@ -39,7 +37,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 用于控制每一步是执行prefill 和 decode 还是跳过
         self.control_state_machine = DPControlState(backend=self)
         self.enable_dp_prompt_cache_fetch = get_env_start_args().enable_dp_prompt_cache_fetch
-        self.min_trans_token_num = min_trans_token_num
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
@@ -75,21 +72,12 @@ class DPChunkedPrefillBackend(ModeBackend):
         if self.enable_dp_prompt_cache_fetch:
             torch.cuda.set_device(get_current_device_id())
 
-            from lightllm.server.core.objs.shm_array import ShmArray
-            from lightllm.utils.envs_utils import get_unique_server_name
-
-            # Create shared ShmArray for kv_indexes transfer
-            # Use a small buffer to save shared memory
-            self.dp_kv_transfer_req_num = dp_kv_transfer_req_num
-            max_len = get_env_start_args().max_req_total_len + 8
-            self.shared_kv_indexes_name = f"{get_unique_server_name()}_shared_kv_indexes_global"
-            self.shared_kv_indexes = ShmArray(
-                self.shared_kv_indexes_name, (self.dp_kv_transfer_req_num, max_len), dtype=np.int64
+            self.dp_kv_shared_moudle = DPKVSharedMoudle(
+                max_req_num=self.args.running_max_req_size,
+                max_req_seq_len=self.args.max_req_total_len + 8,
+                dp_size_in_node=self.dp_size_in_node,
+                backend=self,
             )
-            # Only rank_in_node == 0 creates the shared memory
-            if self.rank_in_node == 0:
-                self.shared_kv_indexes.create_shm()
-
             dist.barrier(group=self.node_nccl_group)
 
             # Collect mem_managers from all ranks
@@ -99,172 +87,29 @@ class DPChunkedPrefillBackend(ModeBackend):
                     self.mem_managers.append(MemoryManager.loads_from_shm(self.rank_in_node))
                 else:
                     self.mem_managers.append(self.model.mem_manager)
-
-            # Other ranks link to the shared memory
-            if self.rank_in_node != 0:
-                self.shared_kv_indexes.link_shm()
             return
 
     def _init_reqs(self, reqs: List[Tuple]):
-        my_reqs = reqs
-        other_reqs = []
-        if self.dp_size_in_node != 1:
-            dp_rank_in_node = self.dp_rank_in_node
-            my_reqs = [req for req in reqs if req[3] == dp_rank_in_node]
-            other_reqs = [req for req in reqs if req[3] != dp_rank_in_node]
+        if not self.args.enable_dp_prompt_cache_fetch:
+            return super()._init_reqs(reqs)
+
+        dp_rank_in_node = self.dp_rank_in_node
+        current_dp_reqs = [req for req in reqs if req[3] == dp_rank_in_node]
+        other_dp_reqs = [req for req in reqs if req[3] != dp_rank_in_node]
 
         g_infer_state_lock.acquire()
-        infer_reqs = g_infer_context.add_reqs(my_reqs, init_prefix_cache=not self.enable_dp_prompt_cache_fetch)
-        if self.enable_dp_prompt_cache_fetch:
-            self._fetch_dp_prompt_cache(infer_reqs, other_reqs=other_reqs, origin_reqs=reqs)
-            for r in infer_reqs:
-                r._match_radix_cache()
 
+        infer_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
+        req_dp_ranks = [req[3] for req in reqs]
+        self.dp_kv_shared_moudle.fill_reqs_info(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
+        trans_taskes = self.dp_kv_shared_moudle.build_shared_kv_trans_tasks(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
+        self.dp_kv_shared_moudle.kv_trans(trans_tasks=trans_taskes)
+
+        g_infer_context._filter(finished_request_ids=[req[0] for req in other_dp_reqs])
         g_infer_state_lock.release()
-        req_ids = [e[0] for e in my_reqs]
+
+        req_ids = [e[0] for e in current_dp_reqs]
         return req_ids
-
-    def _match_radix_cache(self, shm_req):
-        input_token_ids = shm_req.shm_prompt_ids.arr[0 : shm_req.input_len]
-        key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
-        key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-        _, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=False)
-        return kv_len, value_tensor
-
-    def _fetch_dp_prompt_cache(
-        self, infer_reqs: List[InferReq], other_reqs: List[Tuple] = [], origin_reqs: List[Tuple] = []
-    ):
-        # shm_index_2_index = {r[1]: i for i, r in enumerate(origin_reqs)}
-        my_match = []
-        other_match = []
-        # match all the reqs in this dp rank.
-        for r in infer_reqs:
-            if r.sampling_param.disable_prompt_cache:
-                continue
-            shm_req = r.shm_req
-
-            kv_len, value_tensor = self._match_radix_cache(shm_req)
-            # only the first rank is ok
-            if self.rank_in_dp == 0:
-                with g_infer_context.shm_req_manager.get_req_lock_by_index(shm_req.index_in_shm_mem):
-                    shm_req.dp_origin_kv_len = kv_len
-                    if kv_len > shm_req.dp_max_kv_len:
-                        shm_req.dp_max_kv_len = kv_len
-                        shm_req.dp_max_kv_rank = self.dp_rank_in_node  # 单机
-            my_match.append((shm_req, kv_len, value_tensor))
-
-        # match all the reqs in other dp ranks.
-        other_shm_reqs = []
-        if self.rank_in_dp == 0:
-            for r in other_reqs:
-                _, shm_index, _, _ = r
-                shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(shm_index)
-                other_shm_reqs.append(shm_req)
-                sampling_param = InferSamplingParams(shm_req, g_infer_context.vocab_size)
-                if sampling_param.disable_prompt_cache:
-                    continue
-                shm_req.link_prompt_ids_shm_array()
-
-                kv_len, value_tensor = self._match_radix_cache(shm_req)
-                with g_infer_context.shm_req_manager.get_req_lock_by_index(shm_req.index_in_shm_mem):
-                    if kv_len > shm_req.dp_max_kv_len:
-                        shm_req.dp_max_kv_len = kv_len
-                        shm_req.dp_max_kv_rank = self.dp_rank_in_node  # 单机
-                    other_match.append((shm_req, kv_len, value_tensor))
-
-        # wait all the ranks to finish the match
-        dist.barrier(group=self.node_nccl_group)
-
-        # 创建 shm_index 到匹配结果的映射
-        shm_index_to_match = {match[0].index_in_shm_mem: match for match in my_match}
-        shm_index_to_match.update({match[0].index_in_shm_mem: match for match in other_match})
-
-        my_trans_match = []
-        other_trans_match = []
-        transfer_count = 0
-        for r in origin_reqs:
-            _, shm_index, _, suggested_dp_index = r
-            shm_req, kv_len, value_tensor = shm_index_to_match[shm_index]
-            match = (shm_req, kv_len, value_tensor, suggested_dp_index)
-
-            # 需要传输的
-            if suggested_dp_index != shm_req.dp_max_kv_rank:
-                # 需要获取的
-                if suggested_dp_index == self.dp_rank_in_node:
-                    my_trans_match.append((match, transfer_count))
-                # 需要给其他dp的
-                else:
-                    other_trans_match.append((match, transfer_count))
-                transfer_count += 1
-
-                if transfer_count == self.dp_kv_transfer_req_num:
-                    self._transfer_dp_kv_cache(my_trans_match, other_trans_match)
-                    my_trans_match = []
-                    other_trans_match = []
-                    transfer_count = 0
-
-        if transfer_count > 0:
-            self._transfer_dp_kv_cache(my_trans_match, other_trans_match)
-
-        self.release_all_shm_reqs(other_shm_reqs)
-
-    def _transfer_dp_kv_cache(self, my_match: List[Tuple], other_match: List[Tuple]):
-        for match, index in other_match:
-            shm_req, kv_len, value_tensor, _ = match
-            trans_len = kv_len - shm_req.dp_origin_kv_len
-            if shm_req.dp_max_kv_rank == self.dp_rank_in_node:
-                self.shared_kv_indexes.arr[index, 0:trans_len] = value_tensor[shm_req.dp_origin_kv_len : kv_len]
-
-        dist.barrier(group=self.node_nccl_group)
-
-        if not my_match:
-            return
-
-        move_token_indexes = []
-        token_dp_indexes = []
-        trans_info = []
-        alloc_size = 0
-        for match, index in my_match:
-            shm_req, kv_len, value_tensor, _ = match
-            trans_len = shm_req.dp_max_kv_len - kv_len
-            if trans_len > 0 and shm_req.dp_max_kv_rank != self.dp_rank_in_node:
-                move_token_indexes.extend(self.shared_kv_indexes.arr[index, 0:trans_len])
-                token_dp_indexes.extend([shm_req.dp_max_kv_rank] * trans_len)
-                trans_info.append((shm_req, kv_len, value_tensor, trans_len))
-                alloc_size += trans_len
-
-        if alloc_size < self.min_trans_token_num:
-            return
-
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_size)
-        mem_indexes = self.model.mem_manager.alloc(alloc_size).cuda()
-
-        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
-        token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device="cuda")
-
-        self.model.mem_manager.copy_kv_from_other_dp_ranks(
-            mem_managers=self.mem_managers,
-            move_token_indexes=move_token_indexes,
-            token_dp_indexes=token_dp_indexes,
-            mem_indexes=mem_indexes,
-            dp_size_in_node=self.dp_size_in_node,
-            rank_in_dp=self.rank_in_dp,
-        )
-        self.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {alloc_size}")
-
-        start_index = 0
-        for shm_req, kv_len, value_tensor, trans_len in trans_info:
-            new_value_tensor = mem_indexes[start_index : start_index + trans_len].cpu()
-            start_index += trans_len
-            key = torch.tensor(shm_req.shm_prompt_ids.arr[0 : shm_req.dp_max_kv_len], dtype=torch.int64, device="cpu")
-            value_tensor = (
-                torch.cat((value_tensor, new_value_tensor), dim=0) if value_tensor is not None else new_value_tensor
-            )
-            g_infer_context.radix_cache.insert(key, value_tensor)
-
-    def release_all_shm_reqs(self, shm_reqs):
-        for shm_req in shm_reqs:
-            g_infer_context.shm_req_manager.put_back_req_obj(shm_req)
 
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
