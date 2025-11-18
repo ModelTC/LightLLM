@@ -420,11 +420,11 @@ class MemoryManager:
             mems_ptr_list = []
             for i in range(0, len(mem_managers)):
                 mems_ptr_list.append(mem_managers[i].kv_buffer.data_ptr())
-            self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cuda")
+            self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cpu", pin_memory=True)
 
         # 一次性传输所有层
         kv_trans_for_dp(
-            input_mems=self.mem_ptrs_tensor,
+            input_mems=self.mem_ptrs_tensor.cuda(non_blocking=True),
             input_idx=move_token_indexes,
             input_dp_idx=token_dp_indexes,
             output=self.kv_buffer,
