@@ -224,7 +224,7 @@ class ModeBackend:
             self.args.run_mode in ["nixl_prefill", "nixl_decode", "prefill", "decode"]
             or self.args.enable_dp_prompt_cache_fetch
         ):
-            self.model.mem_manager.write_to_shm()
+            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
