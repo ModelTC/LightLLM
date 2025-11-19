@@ -14,8 +14,9 @@ def launch_server(args: StartArgs):
     else:
         normal_or_p_d_start(args)
 
+
 if __name__ == "__main__":
     parser = make_argument_parser()
     args = parser.parse_args()
 
-    launch_server(StartArgs(**args))
+    launch_server(StartArgs(**vars(args)))
