@@ -33,7 +33,10 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.server.io_struct import (
     AbortReq,
     BaseReq,
+    FlushCacheReq,
+    FlushCacheResp,
     GenerateReq,
+    GenerateResp,
     GenerateReqMeta,
     GenerateReqIndex,
 )
@@ -96,9 +99,8 @@ class HttpServerManager:
         self.shm_req_manager = ShmReqManager()
 
         # recv from detokenization
-        self.zmq_recv_socket = context.socket(zmq.SUB)
+        self.zmq_recv_socket = context.socket(zmq.PULL)
         self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
-        self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -120,6 +122,9 @@ class HttpServerManager:
         # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+        # 交互式请求 event
+        self.flush_cache_event: Optional[asyncio.Event] = None
         return
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
@@ -743,64 +748,16 @@ class HttpServerManager:
 
         while True:
             try:
-                await asyncio.wait_for(self.zmq_recv_socket.recv_pyobj(), timeout=0.05)
+                recv_obj = await asyncio.wait_for(self.zmq_recv_socket.recv_pyobj(), timeout=0.05)
             except asyncio.TimeoutError:
-                pass
+                recv_obj = None
 
             try:
-                for group_req_id_ in list(self.req_id_to_out_inf.keys()):
-                    req_status = self.req_id_to_out_inf.get(group_req_id_, None)
-                    if req_status is None:
-                        continue
+                if recv_obj is None or isinstance(recv_obj, GenerateResp):
+                    await self._handle_recv_generate_request(recv_obj)
+                elif isinstance(recv_obj, FlushCacheResp):
+                    await self._handle_recv_flush_cache_request(recv_obj)
 
-                    token_list = []
-                    for req in req_status.group_req_objs.shm_req_objs:
-                        req_id = req.request_id
-                        read_token_count = 1
-                        if req.out_tokens_queue.is_full():
-                            read_token_count = LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
-
-                        for _ in range(read_token_count):
-                            if not req.out_tokens_queue.is_empty():
-
-                                text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
-                                req.cumlogprob += float(req.shm_logprobs.arr[src_index])
-                                metadata = {
-                                    "id": int(req.shm_prompt_ids.arr[src_index]),
-                                    "logprob": float(req.shm_logprobs.arr[src_index]),
-                                    "cumlogprob": float(req.cumlogprob) / count_output_tokens,
-                                    "special": special,
-                                    "count_output_tokens": count_output_tokens,
-                                    "prompt_cache_len": req.prompt_cache_len,
-                                    "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
-                                    "mtp_accepted_token_num": req.mtp_accepted_token_num,
-                                }
-                                if self.args.return_all_prompt_logprobs:
-                                    metadata.update(req.get_all_prompt_metadata())
-                                if self.args.use_reward_model:
-                                    metadata["score"] = float(req.reward_score)
-
-                                req.out_tokens_queue.pop_no_ret()
-
-                                finished_token_index = (
-                                    req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
-                                )
-
-                                if finished_token_index != src_index:
-                                    token_list.append((req_id, text, metadata, FinishStatus()))
-                                else:
-                                    if req.stop_str_matched:
-                                        finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
-                                    else:
-                                        finish_status = FinishStatus(req.finish_status.status)
-
-                                    token_list.append((req_id, text, metadata, finish_status))
-                            else:
-                                break
-
-                    async with req_status.lock:
-                        req_status.out_token_info_list.extend(token_list)
-                        req_status.event.set()
             except BaseException as e:
                 logger.exception(str(e))
                 raise e
@@ -808,9 +765,74 @@ class HttpServerManager:
             self.recycle_event.set()
         return
 
+    async def _handle_recv_generate_request(self, recv_obj: GenerateReqMeta):
+        for group_req_id_ in list(self.req_id_to_out_inf.keys()):
+            req_status = self.req_id_to_out_inf.get(group_req_id_, None)
+            if req_status is None:
+                continue
+
+            token_list = []
+            for req in req_status.group_req_objs.shm_req_objs:
+                req_id = req.request_id
+                read_token_count = 1
+                if req.out_tokens_queue.is_full():
+                    read_token_count = LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
+
+                for _ in range(read_token_count):
+                    if not req.out_tokens_queue.is_empty():
+
+                        text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
+                        req.cumlogprob += float(req.shm_logprobs.arr[src_index])
+                        metadata = {
+                            "id": int(req.shm_prompt_ids.arr[src_index]),
+                            "logprob": float(req.shm_logprobs.arr[src_index]),
+                            "cumlogprob": float(req.cumlogprob) / count_output_tokens,
+                            "special": special,
+                            "count_output_tokens": count_output_tokens,
+                            "prompt_cache_len": req.prompt_cache_len,
+                            "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
+                            "mtp_accepted_token_num": req.mtp_accepted_token_num,
+                        }
+                        if self.args.return_all_prompt_logprobs:
+                            metadata.update(req.get_all_prompt_metadata())
+                        if self.args.use_reward_model:
+                            metadata["score"] = float(req.reward_score)
+
+                        req.out_tokens_queue.pop_no_ret()
+
+                        finished_token_index = (
+                            req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
+                        )
+
+                        if finished_token_index != src_index:
+                            token_list.append((req_id, text, metadata, FinishStatus()))
+                        else:
+                            if req.stop_str_matched:
+                                finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
+                            else:
+                                finish_status = FinishStatus(req.finish_status.status)
+
+                            token_list.append((req_id, text, metadata, finish_status))
+                    else:
+                        break
+
+            async with req_status.lock:
+                req_status.out_token_info_list.extend(token_list)
+                req_status.event.set()
+
+    async def _handle_recv_flush_cache_request(self, recv_obj: FlushCacheReq):
+        assert self.flush_cache_event is not None
+        self.flush_cache_event.success = recv_obj.success
+        self.flush_cache_event.set()
+        return
+
     async def flush_cache(self):
-        ret = await self.router_rpc_client.flush_cache()
-        return ret
+        if self.flush_cache_event is None:
+            self.flush_cache_event = asyncio.Event()
+        await self.transfer_to_next_module(FlushCacheReq())
+        await self.flush_cache_event.wait()
+        self.flush_cache_event.clear()
+        return self.flush_cache_event.success
 
 
 class ReqStatus:

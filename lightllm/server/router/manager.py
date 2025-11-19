@@ -30,7 +30,12 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.common.mem_manager import ReadOnlyStaticsMemoryManager
-from lightllm.server.io_struct import BaseReq, GenerateReqIndex
+from lightllm.server.io_struct import (
+    BaseReq,
+    GenerateReqIndex,
+    FlushCacheReq,
+    FlushCacheResp,
+)
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -559,11 +564,15 @@ class RouterManager:
             self.recv_max_count = 64
 
         try:
+            # 多机tp需要广播给其他node的请求
+            special_reqs = []
             # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
             for _ in range(self.recv_max_count):
                 recv_req: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                 if isinstance(recv_req, GenerateReqIndex):
                     self._add_req(recv_req)
+                elif isinstance(recv_req, FlushCacheReq):
+                    special_reqs.append(recv_req)
 
             # 当队列中存在较多的请求时，将一次接受的数量上调
             self.recv_max_count = min(int(self.recv_max_count * 1.3), 256)
@@ -572,6 +581,8 @@ class RouterManager:
             # 当队列已经开始清空的时候，将一次接受的数量下调
             self.recv_max_count = 64
 
+        self._process_special_reqs(special_reqs)
+
         if self.is_multinode_tp:
             self._multinode_tp_generate_new_batch()
         else:
@@ -579,16 +590,46 @@ class RouterManager:
                 self._generate_new_batch()
         return
 
+    def _process_special_reqs(self, special_reqs: List[BaseReq]):
+        if self.is_multinode_tp:
+            special_reqs = self.broadcast_reqs_to_other_nodes(special_reqs)
+        for req in special_reqs:
+            if isinstance(req, FlushCacheReq):
+                self.flush_cache()
+
+    def broadcast_reqs_to_other_nodes(self, reqs: List[BaseReq]):
+        req_num = len(reqs)
+        if self.node_rank == 0:
+            req_nums = [len(reqs)]
+            dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
+            req_num = req_nums[0]
+            if req_num > 0:
+                dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
+        else:
+            req_nums = [None]
+            dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
+            req_num = req_nums[0]
+            if req_num > 0:
+                reqs = [None for _ in range(req_num)]
+                dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
+        return reqs
+
     def flush_cache(self) -> bool:
-        if self.running_batch is not None:
-            return False
-        if self.req_queue.get_wait_req_num() > 0:
-            return False
         # if radix cache client is not initialized, just return True
         if self.radix_cache_client is None:
-            return True
+            success = True
         # only flush cache when no running batch and no waiting requests
-        return self.model_rpc_client.flush_radix_cache()
+        elif self.running_batch is not None or self.req_queue.get_wait_req_num() > 0:
+            success = False
+        else:
+            success = self.model_rpc_client.flush_radix_cache()
+
+        if self.is_multinode_tp:
+            # 等待其他节点的flush 结果
+            dist.barrier(group=self.mulitnode_group)
+        if self.is_multinode_tp_master:
+            self.send_to_detokenization.send_pyobj(FlushCacheResp(success=success), protocol=pickle.HIGHEST_PROTOCOL)
+        return success
 
     def clean_up(self):
         return

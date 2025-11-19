@@ -60,6 +60,21 @@ class GenerateReq(BaseReq):
 
 
 @dataclass
+class GenerateResp(BaseReq):
+    pass
+
+
+@dataclass
+class FlushCacheReq(BaseReq):
+    pass
+
+
+@dataclass
+class FlushCacheResp(BaseReq):
+    success: bool
+
+
+@dataclass
 class AbortReq(BaseReq):
     # 外部调用传入，等同内部的 group_req_id
     request_id: int = None
