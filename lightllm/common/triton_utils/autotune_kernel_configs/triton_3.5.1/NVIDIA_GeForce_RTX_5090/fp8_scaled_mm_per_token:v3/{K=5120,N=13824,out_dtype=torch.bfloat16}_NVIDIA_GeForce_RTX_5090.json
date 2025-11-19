@@ -1,0 +1,10 @@
+{
+  "32130": {
+    "BLOCK_K": 128,
+    "BLOCK_M": 128,
+    "BLOCK_N": 128,
+    "GROUP_M": 1,
+    "num_stages": 2,
+    "num_warps": 4
+  }
+}
