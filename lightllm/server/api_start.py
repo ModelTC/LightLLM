@@ -16,6 +16,7 @@ from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.shm_size_check import check_recommended_shm_size
+from lightllm.server.core.objs.start_args_type import StartArgs
 
 logger = init_logger(__name__)
 
@@ -60,11 +61,7 @@ def setup_signal_handlers(http_server_process, process_manager):
     return
 
 
-def normal_or_p_d_start(args):
-    from lightllm.server.core.objs.start_args_type import StartArgs
-
-    args: StartArgs = args
-
+def normal_or_p_d_start(args: StartArgs):
     set_unique_server_name(args)
 
     if not args.disable_shm_warning:
@@ -370,7 +367,7 @@ def normal_or_p_d_start(args):
     return
 
 
-def pd_master_start(args):
+def pd_master_start(args: StartArgs):
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
@@ -433,7 +430,7 @@ def pd_master_start(args):
     http_server_process.wait()
 
 
-def config_server_start(args):
+def config_server_start(args: StartArgs):
     set_unique_server_name(args)
     if args.run_mode != "config_server":
         return

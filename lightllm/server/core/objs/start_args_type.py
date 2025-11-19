@@ -128,3 +128,14 @@ class StartArgs:
 
     # kernel setting
     enable_fa3: bool = field(default=False)
+
+    httpserver_workers: int = field(default=1)
+    disable_shm_warning: bool = field(default=False)
+    dp_balancer: str = field(default="bs_balancer")
+    enable_custom_allgather: bool = field(default=False)
+    enable_fused_shared_experts: bool = field(default=False)
+    enable_mps: bool = field(default=False)
+    multinode_router_gloo_port: int = field(default=20001)
+    schedule_time_interval: float = field(default=0.03)
+    use_dynamic_prompt_cache: bool = field(default=False)
+    disable_custom_allreduce: bool = field(default=False)
