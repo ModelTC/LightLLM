@@ -316,6 +316,18 @@ async def flush_cache():
     )
 
 
+@app.post("/pause_generation")
+async def pause_generation():
+    await g_objs.httpserver_manager.pause_generation()
+    return Response(content="Generation paused successfully.", status_code=200)
+
+
+@app.post("/continue_generation")
+async def continue_generation():
+    await g_objs.httpserver_manager.continue_generation()
+    return Response(content="Generation continued successfully.", status_code=200)
+
+
 @app.websocket("/pd_register")
 async def register_and_keep_alive(websocket: WebSocket):
     await websocket.accept()
