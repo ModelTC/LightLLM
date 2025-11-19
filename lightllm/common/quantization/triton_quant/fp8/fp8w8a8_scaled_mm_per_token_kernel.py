@@ -8,6 +8,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from triton import Config
 from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.utils.device_utils import triton_support_tensor_descriptor
 
 
 class Fp8ScaledMMKernelConfig(KernelConfigs):
@@ -78,8 +79,11 @@ def grouped_launch(pid, m, n, block_m: tl.constexpr, block_n: tl.constexpr, grou
 @triton.jit
 def _scaled_mm_per_token(
     A,
+    A_desc: "tl.core.tensor_descriptor",
     B,
+    B_desc: "tl.core.tensor_descriptor",
     out,
+    out_desc: "tl.core.tensor_descriptor",
     Ascale,
     Bscale,
     M,
@@ -91,6 +95,8 @@ def _scaled_mm_per_token(
     stride_bn,
     stride_cm,
     stride_cn,
+    USE_TMA: tl.constexpr,
+    B_IS_TRANS: tl.constexpr,
     NEED_N_MASK: tl.constexpr,
     NEED_K_MASK: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -114,8 +120,10 @@ def _scaled_mm_per_token(
     offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_N), BLOCK_N)
 
     offs_k = tl.arange(0, BLOCK_K)
-    a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+
+    if not USE_TMA:
+        a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+        b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
     Ascale_ptrs = Ascale + offs_am
     Bscale_ptrs = Bscale + offs_bn
@@ -125,28 +133,39 @@ def _scaled_mm_per_token(
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     for k in range(0, tl.cdiv(K, BLOCK_K)):
-        k_remaining = K - k * BLOCK_K
-        if NEED_K_MASK:
+        if USE_TMA:
+            a = A_desc.load([start_m, k * BLOCK_K])
+            if not B_IS_TRANS:
+                b = B_desc.load([k * BLOCK_K, start_n])
+            else:
+                b = B_desc.load([start_n, k * BLOCK_K]).T
+        elif NEED_K_MASK:
+            k_remaining = K - k * BLOCK_K
             a = tl.load(a_ptrs, mask=offs_k[None, :] < k_remaining, other=0.0)
             b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
         else:
             a = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
         acc = tl.dot(a, b, acc)
-        a_ptrs += BLOCK_K * stride_ak
-        b_ptrs += BLOCK_K * stride_bk
+        if not USE_TMA:
+            a_ptrs += BLOCK_K * stride_ak
+            b_ptrs += BLOCK_K * stride_bk
+
     acc = acc * a_s[:, None] * b_s[None, :]
 
     acc = acc.to(out.dtype.element_ty)
 
-    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    c_ptrs = out + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    if NEED_N_MASK:
-        mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    if not USE_TMA:
+        offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        c_ptrs = out + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+        if NEED_N_MASK:
+            mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+        else:
+            mask = offs_cm[:, None] < M
+        tl.store(c_ptrs, acc, mask=mask)
     else:
-        mask = offs_cm[:, None] < M
-    tl.store(c_ptrs, acc, mask=mask)
+        out_desc.store([start_m, start_n], acc)
 
 
 def get_test_configs():
@@ -210,6 +229,9 @@ def fp8_scaled_mm_per_token(
     Returns:
         torch.Tensor: out.
     """
+    assert A.is_contiguous()
+    B_is_trans = not B.is_contiguous() and B.stride(0) == 1
+
     M, K = A.shape
     _, N = B.shape
     if not run_config:
@@ -217,21 +239,64 @@ def fp8_scaled_mm_per_token(
     NEED_N_MASK = N % run_config["BLOCK_N"] != 0
     NEED_K_MASK = K % run_config["BLOCK_K"] != 0
     grid = (triton.cdiv(M, run_config["BLOCK_M"]) * triton.cdiv(N, run_config["BLOCK_N"]),)
+
+    BLOCK_M = run_config["BLOCK_M"]
+    BLOCK_K = run_config["BLOCK_K"]
+    BLOCK_N = run_config["BLOCK_N"]
+
+    # use tma
+    support_tma = triton_support_tensor_descriptor()
+    if support_tma:
+        stride = A.stride(-2)
+        if (stride * A.dtype.itemsize) % 16 != 0:
+            support_tma = False
+        _B = B if not B_is_trans else B.transpose(0, 1)
+        stride = _B.stride(-2)
+        if (stride * _B.dtype.itemsize) % 16 != 0:
+            support_tma = False
+
+    if support_tma:
+        # TMA descriptors require a global memory allocation
+        def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+            return torch.empty(size, device="cuda", dtype=torch.int8)
+
+        triton.set_allocator(alloc_fn)
+
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        A_desc = TensorDescriptor(A, A.shape, A.stride(), [BLOCK_M, BLOCK_K])
+        if B_is_trans:
+            _B = B.transpose(0, 1)
+            assert _B.is_contiguous()
+            B_desc = TensorDescriptor(_B, _B.shape, _B.stride(), [BLOCK_N, BLOCK_K])
+        else:
+            B_desc = TensorDescriptor(B, B.shape, B.stride(), [BLOCK_K, BLOCK_N])
+        out_desc = TensorDescriptor(out, out.shape, out.stride(), [BLOCK_M, BLOCK_N])
+    else:
+        A_desc = None
+        B_desc = None
+        out_desc = None
+
     _scaled_mm_per_token[grid](
-        A,
-        B,
-        out,
-        Ascale,
-        Bscale,
-        M,
-        N,
-        K,
-        A.stride(0),
-        A.stride(1),
-        B.stride(0),
-        B.stride(1),
-        out.stride(0),
-        out.stride(1),
+        A=A,
+        A_desc=A_desc,
+        B=B,
+        B_desc=B_desc,
+        out=out,
+        out_desc=out_desc,
+        Ascale=Ascale,
+        Bscale=Bscale,
+        M=M,
+        N=N,
+        K=K,
+        stride_am=A.stride(0),
+        stride_ak=A.stride(1),
+        stride_bk=B.stride(0),
+        stride_bn=B.stride(1),
+        stride_cm=out.stride(0),
+        stride_cn=out.stride(1),
+        USE_TMA=support_tma,
+        B_IS_TRANS=B_is_trans,
         NEED_N_MASK=NEED_N_MASK,
         NEED_K_MASK=NEED_K_MASK,
         **run_config,
