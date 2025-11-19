@@ -221,7 +221,7 @@ def normal_or_p_d_start(args):
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
     ports_locker = PortLocker(already_uesd_ports)
-    # ports_locker.lock_port()
+    ports_locker.lock_port()
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(

@@ -823,9 +823,14 @@ class HttpServerManager:
         if self.flush_cache_event is None:
             self.flush_cache_event = asyncio.Event()
         await self.transfer_to_next_module(FlushCacheReq())
-        await self.flush_cache_event.wait()
+        try:
+            await asyncio.wait_for(self.flush_cache_event.wait(), timeout=30)
+            ret = self.flush_cache_event.success
+        except asyncio.TimeoutError:
+            # 超时直接返回失败
+            ret = False
         self.flush_cache_event.clear()
-        return self.flush_cache_event.success
+        return ret
 
 
 class ReqStatus:
