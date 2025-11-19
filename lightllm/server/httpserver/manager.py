@@ -813,7 +813,7 @@ class HttpServerManager:
                 req_status.out_token_info_list.extend(token_list)
                 req_status.event.set()
 
-    async def _handle_recv_flush_cache_request(self, recv_obj: FlushCacheReq):
+    async def _handle_recv_flush_cache_request(self, recv_obj: FlushCacheResp):
         assert self.flush_cache_event is not None
         self.flush_cache_event.success = recv_obj.success
         self.flush_cache_event.set()
