@@ -22,6 +22,11 @@ from transformers.image_utils import (
 )
 from torchvision.transforms.v2 import functional as F
 
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
+
+
 IMAGE_FACTOR = 28
 MIN_PIXELS = 4 * 28 * 28
 MAX_PIXELS = 16384 * 28 * 28
@@ -110,6 +115,7 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
         self.interpolation = interpolation
         self.data_format = ChannelDimension.FIRST
         self._fused_cache = {}  # key: (do_norm, do_rescale, rescale_factor, device)
+        self.free_gpu_mem = 0
 
     def _get_fused_mean_std(
         self,
@@ -162,9 +168,19 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
 
     def preprocess(self, image) -> Tuple[torch.Tensor, torch.Tensor]:
         image_arr = np.asarray(image, dtype=np.uint8)
-        # TODO check cuda tensor oom reason
-        # image_data = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous().to("cuda", non_blocking=True)
-        image_data = torch.from_numpy(image_arr).permute(2, 0, 1)
+        image_data = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous()
+
+        self.free_gpu_mem, _ = torch.cuda.mem_get_info()
+        image_size = int(image_arr.size) * 4  # 后面需要转float32
+        if image_size < self.free_gpu_mem * 0.9:
+            image_data = image_data.to("cuda", non_blocking=True)
+        else:
+            logger.warning(
+                f"[Qwen2VLImageProcessor] preprocess fallback to CPU:"
+                f"shape = {tuple(image_arr.shape), }"
+                f"image_size = {image_size/(1024**2):.2f} MB,"
+                f"free_gpu_mem = {self.free_gpu_mem/(1024**2):.2f} MB"
+            )
 
         grouped_images, grouped_images_index = group_images_by_shape(
             [image_data], disable_grouping=self.disable_grouping
