@@ -8,7 +8,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from triton import Config
 from lightllm.common.triton_utils.autotuner import autotune
-from lightllm.utils.device_utils import triton_support_tensor_descriptor
+from lightllm.utils.device_utils import triton_support_tensor_descriptor, is_5090_gpu
 
 
 class Fp8ScaledMMKernelConfig(KernelConfigs):
@@ -250,6 +250,8 @@ def fp8_scaled_mm_per_token(
 
     # use tma
     support_tma = triton_support_tensor_descriptor()
+    # 5090 上，小shape开启tma性能不是很好。
+    support_tma = support_tma and (not is_5090_gpu())
     if support_tma:
         stride = A.stride(-2)
         if (stride * A.dtype.itemsize) % 16 != 0:
