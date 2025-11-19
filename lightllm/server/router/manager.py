@@ -592,7 +592,7 @@ class RouterManager:
                 dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
         return reqs
 
-    def flush_cache(self) -> bool:
+    def flush_cache(self) -> None:
         # if radix cache client is not initialized, just return True
         if self.radix_cache_client is None:
             success = True
