@@ -592,7 +592,7 @@ class RouterManager:
                 dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
         return reqs
 
-    def flush_cache(self) -> bool:
+    def flush_cache(self) -> None:
         # if radix cache client is not initialized, just return True
         if self.radix_cache_client is None:
             success = True
@@ -605,9 +605,9 @@ class RouterManager:
         if self.is_multinode_tp:
             # 等待其他节点的flush 结果
             dist.barrier(group=self.mulitnode_group)
-        if self.is_multinode_tp_master:
+        if self.node_rank == 0:
             self.send_to_detokenization.send_pyobj(FlushCacheResp(success=success), protocol=pickle.HIGHEST_PROTOCOL)
-        return success
+        return
 
     def clean_up(self):
         return
