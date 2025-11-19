@@ -243,3 +243,15 @@ def triton_support_tensor_descriptor() -> bool:
     except:
         logger.info("triton not support tensor_descriptor")
         return False
+
+
+@lru_cache(maxsize=None)
+def is_5090_gpu() -> bool:
+    try:
+        gpu_name = torch.cuda.get_device_name(0)
+        if "5090" in gpu_name:
+            return True
+        else:
+            return False
+    except:
+        return False
