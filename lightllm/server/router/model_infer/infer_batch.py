@@ -107,9 +107,10 @@ class InferenceContext:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
         else:
             input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+            # NOTE req.cur_kv_len-1 用于配合 _match_radix_cache 中的 key = key[0 : len(key) - 1]
+            key = torch.tensor(input_token_ids[0 : req.cur_kv_len-1], dtype=torch.int64, device="cpu")
             # .cpu() 是 流内阻塞操作
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len-1].detach().cpu()
 
             buffer_idx = None
             if hasattr(self.req_manager, "req_to_buffer_indexes"):

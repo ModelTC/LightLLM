@@ -56,18 +56,16 @@ class Qwen3NextBackend(ChunkedPrefillBackend):
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
 
-        # 对于 Qwen3Next 模型，在 chunked_prefill 过程中调用 radix_cache.insert 保存中间状态
         if not self.disable_chunked_prefill:
             for req in run_reqs:
                 if not req.is_multi_chat_req and req.cur_kv_len < req.get_cur_total_len():
-                    self._handle_qwen3next_radix_cache_insert(req)
+                    self._handle_hybrid_radix_cache_insert(req)
 
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
 
-    def _handle_qwen3next_radix_cache_insert(self, req: "InferReq"):
-        # 在 chunked_prefill 过程中，为 Qwen3Next 模型保存 state buffer 中间状态到 radix cache
+    def _handle_hybrid_radix_cache_insert(self, req: "InferReq"):
         from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
         is_qwen3next = isinstance(self.radix_cache, HybridRadixCache)
 
@@ -76,19 +74,15 @@ class Qwen3NextBackend(ChunkedPrefillBackend):
 
         g_infer_state_lock.acquire()
         try:
-            # 获取当前 chunked_prefill 处理的 token IDs
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
 
-            # 获取对应的 token 索引
             value = self.model.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
 
             buffer_idx = self.model.req_manager.req_to_buffer_indexes[req.req_idx].cpu()
 
-            # 确保有足够的空间用于新的 buffer
             self.radix_cache.free_radix_cache_to_get_enough_token(0, 1)
 
-            # 分配新的 buffer 并复制当前 buffer 的内容
             new_buffer_idx = self.model.req_manager.mem_manager.alloc_state_cache_buffer(1)[0]
             self.model.req_manager.mem_manager.copy_state_cache_buffer(buffer_idx, new_buffer_idx)
             self.model.req_manager.req_to_buffer_indexes[req.req_idx] = new_buffer_idx

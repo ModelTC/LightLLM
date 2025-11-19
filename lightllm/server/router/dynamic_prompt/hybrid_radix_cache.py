@@ -2,6 +2,8 @@ import torch
 import numpy as np
 import collections
 import xxhash
+import threading
+import time
 from typing import Tuple, Dict, Set, List, Optional, Union
 from typing_extensions import override
 from sortedcontainers import SortedSet
@@ -83,6 +85,17 @@ class HybridRadixCache:
             f"{unique_name}_tree_total_buffer_num_{rank_in_node}", (1,), dtype=np.int64
         )
         self.tree_total_buffer_num.arr[0] = 0
+        
+        # Statistics for match_prefix (lock-free counters for performance)
+        # In CPython, simple integer operations are atomic due to GIL
+        self.match_prefix_total_key_len = 0  # Sum of all input key lengths
+        self.match_prefix_total_match_len = 0  # Sum of all matched lengths (len(value))
+        self.match_prefix_lock = threading.Lock()  # Only used when reading/resetting in background thread
+        
+        # Start background thread for periodic statistics printing
+        self._stats_thread = threading.Thread(target=self._print_stats_periodically, daemon=True)
+        self._stats_thread.start()
+        
         logger.info(f"HybridRadixCache initialized!")
 
     def insert(self, key, value, buffer_idx) -> Tuple[int, Optional[HybridTreeNode]]:
@@ -174,12 +187,19 @@ class HybridRadixCache:
         assert len(key) != 0
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
+        
+        # Update statistics (lock-free increment for performance)
+        key_len = len(key)
+        self.match_prefix_total_key_len += key_len
+        
         if tree_node != self.root_node:
             if len(ans_value_list) != 0:
                 value = torch.concat(ans_value_list)
             else:
                 value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
-            return tree_node, len(value), value
+            match_len = len(value)
+            self.match_prefix_total_match_len += match_len
+            return tree_node, match_len, value
         else:
             return None, 0, None
     
@@ -447,3 +467,17 @@ class HybridRadixCache:
 
     def get_tree_total_tokens_num(self):
         return self.tree_total_tokens_num.arr[0]
+    
+    def _print_stats_periodically(self):
+        """Background thread to print statistics every 10 seconds"""
+        while True:
+            time.sleep(10)
+            try:
+                if self.match_prefix_total_key_len > 0:
+                    match_ratio = (self.match_prefix_total_match_len / self.match_prefix_total_key_len) * 100.0
+                    logger.info(
+                        f"RadixCache Match Ratio: {match_ratio:.2f}%"
+                    )
+            except Exception as e:
+                # Silently ignore errors to avoid affecting main thread
+                pass
