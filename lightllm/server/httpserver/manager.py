@@ -280,13 +280,6 @@ class HttpServerManager:
             assert False, "dead code path"
         return group_request_id
 
-    def connect_router_rpc(self):
-        from lightllm.server.router.mananger_rpc import connect_router_rpc
-
-        self.router_rpc_client = connect_router_rpc(self.args.router_rpc_port)
-        logger.info("HttpServerManager connected to Router RPC service successfully")
-        return
-
     async def generate(
         self,
         prompt: Union[str, List[int]],
