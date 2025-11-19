@@ -91,8 +91,6 @@ def _scaled_mm_per_token(
     M,
     N,
     K,
-    m_block_num,
-    n_block_num,
     stride_am,
     stride_ak,
     stride_bk,
@@ -109,6 +107,8 @@ def _scaled_mm_per_token(
     GROUP_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    m_block_num = tl.cdiv(M, BLOCK_M)
+    n_block_num = tl.cdiv(N, BLOCK_N)
     pid_m, pid_n = grouped_launch(pid, m_block_num, n_block_num, GROUP_M)
 
     start_m = pid_m * BLOCK_M
@@ -206,7 +206,7 @@ def _get_static_key(A, B, out_dtype):
 
 
 @autotune(
-    kernel_name="fp8_scaled_mm_per_token:v2",
+    kernel_name="fp8_scaled_mm_per_token:v3",
     configs_gen_func=get_test_configs,
     static_key_func=_get_static_key,
     run_key_func=lambda A: A.shape[0],
@@ -293,8 +293,6 @@ def fp8_scaled_mm_per_token(
         M=M,
         N=N,
         K=K,
-        m_block_num=triton.cdiv(M, BLOCK_M),
-        n_block_num=triton.cdiv(N, BLOCK_N),
         stride_am=A.stride(0),
         stride_ak=A.stride(1),
         stride_bk=B.stride(0),
