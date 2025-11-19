@@ -61,17 +61,19 @@ class Fp8ScaledMMKernelConfig(KernelConfigs):
 
 
 @triton.jit
-def grouped_launch(pid, m, n, block_m: tl.constexpr, block_n: tl.constexpr, group_m: tl.constexpr):
+def grouped_launch(pid, m_block_num, n_block_num, group_m: tl.constexpr):
 
-    grid_m = tl.cdiv(m, block_m)
-    grid_n = tl.cdiv(n, block_n)
+    num_pid_in_group = group_m * n_block_num
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * group_m
+    group_size_m = tl.minimum(m_block_num - first_pid_m, group_m)
+    in_group_index = pid % num_pid_in_group
 
-    width = group_m * grid_n
-    group_id = pid // width
-    group_size = tl.minimum(grid_m - group_id * group_m, group_m)
-
-    pid_m = group_id * group_m + (pid % group_size)
-    pid_n = (pid % width) // group_size
+    # Swizzle pattern: zigzag traversal
+    back_mark = (in_group_index // group_size_m) % 2
+    back_mark1 = -1 * (2 * back_mark - 1)
+    pid_m = first_pid_m + back_mark * (group_size_m - 1) + back_mark1 * (in_group_index % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
     return pid_m, pid_n
 
@@ -89,6 +91,8 @@ def _scaled_mm_per_token(
     M,
     N,
     K,
+    m_block_num,
+    n_block_num,
     stride_am,
     stride_ak,
     stride_bk,
@@ -105,7 +109,7 @@ def _scaled_mm_per_token(
     GROUP_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    pid_m, pid_n = grouped_launch(pid, M, N, BLOCK_M, BLOCK_N, GROUP_M)
+    pid_m, pid_n = grouped_launch(pid, m_block_num, n_block_num, GROUP_M)
 
     start_m = pid_m * BLOCK_M
     start_n = pid_n * BLOCK_N
@@ -289,6 +293,8 @@ def fp8_scaled_mm_per_token(
         M=M,
         N=N,
         K=K,
+        m_block_num=triton.cdiv(M, BLOCK_M),
+        n_block_num=triton.cdiv(N, BLOCK_N),
         stride_am=A.stride(0),
         stride_ak=A.stride(1),
         stride_bk=B.stride(0),
