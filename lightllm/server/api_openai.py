@@ -281,7 +281,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             if request.tool_choice != "none" and request.tools:
                 delta = request_output
                 group_request_id = convert_sub_id_to_group_id(sub_req_id)
-                index = metadata["id"]
+                index = sub_req_id
                 finish_reason = finish_status.get_finish_reason()
 
                 if index not in parser_dict:

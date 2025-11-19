@@ -193,7 +193,7 @@ class DeltaMessage(BaseModel):
 class ChatCompletionStreamResponseChoice(BaseModel):
     index: int
     delta: DeltaMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):
