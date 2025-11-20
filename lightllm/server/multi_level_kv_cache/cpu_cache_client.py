@@ -210,8 +210,8 @@ class CpuKvCacheClient(object):
         page_items = self.page_items.linked_items
         index = 0
         while index < len(page_list):
-            group_size = page_list[0]
-            groups.append(page_list[1 : 1 + group_size])
+            group_size = page_list[index]
+            groups.append(page_list[index + 1 : index + 1 + group_size])
             for page_index in groups[-1]:
                 page_item: _CpuPageStatus = page_items[page_index]
                 page_item.ref_count += 1
