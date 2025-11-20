@@ -152,3 +152,5 @@ class StartArgs:
     schedule_time_interval: float = field(default=0.03)
     use_dynamic_prompt_cache: bool = field(default=False)
     disable_custom_allreduce: bool = field(default=False)
+
+    weight_version: str = "default"

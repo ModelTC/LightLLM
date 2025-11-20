@@ -139,6 +139,10 @@ def get_server_info():
     server_info: dict[str, Any] = asdict(g_objs.args)
     return {**server_info}
 
+@app.get("/get_weight_version")
+@app.post("/get_weight_version")
+def get_weight_version():
+    return {"weight_version": g_objs.args.weight_version}
 
 @app.get("/healthz", summary="Check server health")
 @app.get("/health", summary="Check server health")
