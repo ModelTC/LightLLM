@@ -125,6 +125,10 @@ class CpuKvCacheClient(object):
                     assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
 
+                # 进入卸载队列的请求，引用计数加一，等卸载完成后再释放。
+                if disk_offload_enable:
+                    cur_page.ref_count += 1
+
         # 控制prompt长度，较短的prompt不进行disk offload
         limit_length = get_disk_cache_prompt_limit_length()
         if (
@@ -214,7 +218,6 @@ class CpuKvCacheClient(object):
             groups.append(page_list[index + 1 : index + 1 + group_size])
             for page_index in groups[-1]:
                 page_item: _CpuPageStatus = page_items[page_index]
-                page_item.ref_count += 1
                 # TODO 这个状态是否存在问题
                 page_item.status = _CpuPageStatus.OFFLOADING
 
