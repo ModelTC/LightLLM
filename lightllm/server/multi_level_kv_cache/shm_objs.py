@@ -102,6 +102,15 @@ class ShmLinkedList(object):
         self.tail.pre_index = item.self_index
         return
 
+    def add_item_to_head(self, index: int):
+        item = self.linked_items[index]
+        next_node = self.linked_items[self.head.next_index]
+        next_node.pre_index = item.self_index
+        item.next_index = next_node.self_index
+        item.pre_index = self.head.self_index
+        self.head.next_index = item.self_index
+        return
+
     def get_item_by_index(self, index: int) -> "_LinkedListItem":
         item = self.linked_items[index]
         return item

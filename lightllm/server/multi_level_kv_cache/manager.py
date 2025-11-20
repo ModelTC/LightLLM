@@ -34,8 +34,9 @@ class MultiLevelKVCacheManager:
         logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
+        self.only_cpu_cache_enable = args.enable_cpu_cache and not args.enable_disk_cache
         # 磁盘io在NVMe SSD上需要大量并发才能发挥性能
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=500)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=6 if self.only_cpu_cache_enable else 500)
         # 控制进行 cpu cache 页面匹配的时间，超过时间则不再匹配，直接转发。
         self.cpu_cache_time_out = 0.5
         self.recv_queue = Queue(maxsize=1024)
@@ -128,8 +129,6 @@ class MultiLevelKVCacheManager:
             deref=False,
             disk_offload_enable=False,
         )
-        if self.args.enable_disk_cache:
-            self.cpu_cache_client.mark_pages_recyclable(new_page_indexes)
         self.cpu_cache_client.lock.release()
         return all_pages, len(new_page_indexes)
 

@@ -111,38 +111,36 @@ class CpuKvCacheClient(object):
     ):
         offload_candidates: List[int] = []
         page_items = self.page_items.linked_items
+        not_exist_none_page = True
         for page_index in page_list:
             if page_index != -1:
                 cur_page: _CpuPageStatus = page_items[page_index]
                 if cur_page.status < _CpuPageStatus.READY:
                     cur_page.status = _CpuPageStatus.READY
 
-                # 全部落盘，已落盘前缀部分会在落盘中自动剔除
-                if disk_offload_enable:
-                    offload_candidates.append(cur_page.self_index)
-
                 if deref:
                     assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
 
-                # 进入卸载队列的请求，引用计数加一，等卸载完成后再释放。
-                if disk_offload_enable:
-                    cur_page.ref_count += 1
+                # 全部落盘，已落盘前缀部分会在落盘中自动剔除
+                if disk_offload_enable and not_exist_none_page:
+                    offload_candidates.append(cur_page.self_index)
+
+            else:
+                not_exist_none_page = False
 
         # 控制prompt长度，较短的prompt不进行disk offload
         limit_length = get_disk_cache_prompt_limit_length()
+
         if (
             disk_offload_enable
             and offload_candidates
-            and len(page_list) * self.args.cpu_cache_token_page_size < limit_length
+            and len(page_list) * self.args.cpu_cache_token_page_size >= limit_length
         ):
-            logger.info(
-                f"skip disk offload for small page, " f"length = {len(page_list) * self.args.cpu_cache_token_page_size}"
-            )
-            self.mark_pages_recyclable(page_list=offload_candidates)
-            return
-
-        if disk_offload_enable and offload_candidates:
+            # 加引用计数，落盘成功后再减掉
+            for offload_page_index in offload_candidates:
+                offload_page_item: _CpuPageStatus = page_items[offload_page_index]
+                offload_page_item.ref_count += 1
             # 写入到 offload_page_indexes 中的数据是分组的，其中
             # 开头的元素标记后续多少个元素是一组，便于读取时进行分组处理
             # 写入数据为 group_page_size, page_index1, page_index2, ...
@@ -150,28 +148,24 @@ class CpuKvCacheClient(object):
             self.offload_page_indexes.add_items(offload_candidates)
         return
 
-    def mark_pages_recyclable(self, page_list: List[int]):
-        page_items = self.page_items.linked_items
-        for page_index in page_list:
-            if page_index == -1:
-                continue
-            cur_page = page_items[page_index]
-            if cur_page.status >= _CpuPageStatus.READY:
-                cur_page.status = _CpuPageStatus.READY_RECYCLE
-        return
-
     def query_one_page(self, hash_key: int) -> Tuple[Optional[int], bool]:
+        """
+        返回的cpu page必然是数据ready可以被复用的。
+        """
         page_index = self.page_hash_dict.get(hash_key)
         if page_index is not None:
             page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
-            page_item.ref_count += 1
-            # lru 更新
-            page_item.del_self_from_list()
-            self.page_items.add_item_to_tail(index=page_index)
             if page_item.is_data_ready():
+                page_item.ref_count += 1
+                # lru 更新
+                page_item.del_self_from_list()
+                self.page_items.add_item_to_tail(index=page_index)
                 return page_index, True
             else:
-                return page_index, False
+                # lru 更新
+                page_item.del_self_from_list()
+                self.page_items.add_item_to_tail(index=page_index)
+                return None, False
         else:
             return None, False
 
@@ -180,7 +174,7 @@ class CpuKvCacheClient(object):
         for page_index in page_list:
             if page_index == -1:
                 continue
-            page_item = page_items[page_index]
+            page_item: _CpuPageStatus = page_items[page_index]
             if not page_item.is_data_ready():
                 logger.info("cpu cache page %d not ready, status %d", page_index, page_item.status)
                 return False
@@ -193,7 +187,7 @@ class CpuKvCacheClient(object):
         page_items = self.page_items.linked_items
         for page_index in page_list:
             if page_index != -1:
-                page_item = page_items[page_index]
+                page_item: _CpuPageStatus = page_items[page_index]
                 assert page_item.ref_count > 0
                 page_item.ref_count -= 1
         return
@@ -218,30 +212,21 @@ class CpuKvCacheClient(object):
             groups.append(page_list[index + 1 : index + 1 + group_size])
             for page_index in groups[-1]:
                 page_item: _CpuPageStatus = page_items[page_index]
-                # TODO 这个状态是否存在问题
-                page_item.status = _CpuPageStatus.OFFLOADING
+                assert page_item.is_ready()
 
             index = index + 1 + group_size
 
         return groups
 
-    def update_pages_status_to_ready_recycle(self, page_list: List[int], deref: bool = True):
-        page_items = self.page_items.linked_items
-        for page_index in page_list:
-            if page_index != -1:
-                cur_page = page_items[page_index]
-                cur_page.status = _CpuPageStatus.READY_RECYCLE
-                if deref:
-                    assert cur_page.ref_count > 0
-                    cur_page.ref_count -= 1
-        return
-
     def recycle_pages(self, page_list: List[int]):
+        """
+        当从硬盘cache中读取数据失败时,调用此函数回收页面
+        """
         page_items = self.page_items.linked_items
         for page_index in page_list:
             if page_index == -1:
                 continue
-            cur_page = page_items[page_index]
+            cur_page: _CpuPageStatus = page_items[page_index]
 
             if cur_page.ref_count > 0:
                 cur_page.ref_count -= 1
@@ -249,15 +234,15 @@ class CpuKvCacheClient(object):
             if cur_page.ref_count != 0:
                 continue
 
-            if cur_page.hash_key != 0:
+            if cur_page.is_loading():
                 existing_index = self.page_hash_dict.get(cur_page.hash_key)
                 if existing_index is not None and existing_index == cur_page.self_index:
                     self.page_hash_dict.remove(cur_page.hash_key)
 
-            cur_page.del_self_from_list()
-            cur_page.hash_key = 0
-            cur_page.status = _CpuPageStatus.EMPTY
-            self.page_items.add_item_to_tail(cur_page.self_index)
+                cur_page.del_self_from_list()
+                cur_page.hash_key = 0
+                cur_page.status = _CpuPageStatus.EMPTY
+                self.page_items.add_item_to_head(cur_page.self_index)
         return
 
     def _create_cpu_status_list(self, init_shm_data: bool):
@@ -346,12 +331,6 @@ class _CpuPageStatus(_LinkedListItem):
     def is_ready(self):
         return self.status == self.READY
 
-    def is_offloading(self):
-        return self.status == self.OFFLOADING
-
-    def is_ready_recycle(self):
-        return self.status == self.READY_RECYCLE
-
     def is_data_ready(self):
         """
         判断数据是否是填充ok的，可能包含多种状态下属于数据是可填充的状态。
@@ -359,7 +338,4 @@ class _CpuPageStatus(_LinkedListItem):
         return self.status >= self.READY
 
     def can_realloc(self, disk_offload_enable: bool):
-        if disk_offload_enable:
-            return (self.is_empty() or self.is_ready_recycle()) and self.ref_count == 0
-        else:
-            return (self.is_empty() or self.is_data_ready()) and self.ref_count == 0
+        return (self.is_empty() or self.is_data_ready()) and self.ref_count == 0

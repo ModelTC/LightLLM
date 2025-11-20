@@ -134,7 +134,7 @@ class DiskCacheWorker:
                 time.sleep(0.001)
 
         self.cpu_cache_client.lock.acquire_sleep1ms()
-        self.cpu_cache_client.update_pages_status_to_ready_recycle(page_list=page_indexes, deref=True)
+        self.cpu_cache_client.deref_pages(page_list=page_indexes)
         self.cpu_cache_client.lock.release()
 
     def query_loadable_pages(self, tokens: List[int], start_pos: int) -> int:
