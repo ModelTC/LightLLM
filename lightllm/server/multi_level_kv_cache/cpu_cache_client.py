@@ -37,18 +37,6 @@ class CpuKvCacheClient(object):
                 self.attach_shm_handle = self._attach_shm_cpu_kv_cache()
         return
 
-    @staticmethod
-    # 负数编码，用于标记一个page index是一个offload group的第一个page
-    def _encode_offload_head(page_index: int) -> int:
-        return -(page_index + 1)
-
-    @staticmethod
-    # 解码恢复page index，并返回该page index是否是一个offload group的第一个page
-    def _decode_offload_value(value: int) -> Tuple[int, bool]:
-        if value < 0:
-            return -(value + 1), True
-        return value, False
-
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
         assert self.page_hash_dict.get(hash_key) is None
         head = self.page_items.head
@@ -125,7 +113,7 @@ class CpuKvCacheClient(object):
         page_items = self.page_items.linked_items
         for page_index in page_list:
             if page_index != -1:
-                cur_page = page_items[page_index]
+                cur_page: _CpuPageStatus = page_items[page_index]
                 if cur_page.status < _CpuPageStatus.READY:
                     cur_page.status = _CpuPageStatus.READY
 
@@ -151,12 +139,11 @@ class CpuKvCacheClient(object):
             return
 
         if disk_offload_enable and offload_candidates:
-            for idx, page_index in enumerate(offload_candidates):
-                if idx == 0:
-                    encoded = self._encode_offload_head(page_index)
-                else:
-                    encoded = page_index
-                self.offload_page_indexes.add_item(value=encoded)
+            # 写入到 offload_page_indexes 中的数据是分组的，其中
+            # 开头的元素标记后续多少个元素是一组，便于读取时进行分组处理
+            # 写入数据为 group_page_size, page_index1, page_index2, ...
+            self.offload_page_indexes.add_item(len(offload_candidates))
+            self.offload_page_indexes.add_items(offload_candidates)
         return
 
     def mark_pages_recyclable(self, page_list: List[int]):
@@ -216,25 +203,22 @@ class CpuKvCacheClient(object):
     def get_pages_to_offloading(self) -> List[List[int]]:
         page_list = self.offload_page_indexes.pop_all_item()
         groups: List[List[int]] = []
-        current_group: List[int] = []
 
         if page_list is None:
             return groups
 
         page_items = self.page_items.linked_items
-        for value in page_list:
-            page_index, is_group_head = self._decode_offload_value(value)
-            if is_group_head and current_group:
-                groups.append(current_group)
-                current_group = []
+        index = 0
+        while index < len(page_list):
+            group_size = page_list[0]
+            groups.append(page_list[1 : 1 + group_size])
+            for page_index in groups[-1]:
+                page_item: _CpuPageStatus = page_items[page_index]
+                page_item.ref_count += 1
+                # TODO 这个状态是否存在问题
+                page_item.status = _CpuPageStatus.OFFLOADING
 
-            page_item = page_items[page_index]
-            page_item.ref_count += 1
-            page_item.status = _CpuPageStatus.OFFLOADING
-            current_group.append(page_index)
-
-        if current_group:
-            groups.append(current_group)
+            index = index + 1 + group_size
 
         return groups
 
@@ -287,7 +271,7 @@ class CpuKvCacheClient(object):
         )
         self.offload_page_indexes = IntList(
             name=f"{get_unique_server_name()}_cpu_kv_cache_offload_page_indexes",
-            capacity=self.page_num,
+            capacity=self.page_num * 2,
             init_shm_data=init_shm_data,
         )
         return

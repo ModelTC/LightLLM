@@ -37,6 +37,13 @@ class IntList(object):
         self.arr[-1] += 1
         return
 
+    def add_items(self, values: List[int]):
+        write_index = self.arr[-1]
+        n = len(values)
+        self.arr[write_index : write_index + n] = values
+        self.arr[-1] += n
+        return
+
     def pop_all_item(self) -> Optional[List[int]]:
         if self.size() == 0:
             return None
