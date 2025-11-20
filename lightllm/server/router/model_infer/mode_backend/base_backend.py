@@ -4,7 +4,7 @@ import torch
 import time
 import threading
 import torch.distributed as dist
-from typing import List, Tuple, Callable, Optional
+from typing import Dict, List, Literal, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
@@ -39,6 +39,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
 
 class ModeBackend:
@@ -218,11 +219,19 @@ class ModeBackend:
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
 
+        self.profiler: Optional[ProcessProfiler] = None
+        if self.args.enable_profiling:
+            self.profiler = ProcessProfiler(
+                mode=self.args.enable_profiling,
+                name=f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}",
+            )
+            self.profiling_active = False
+
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
-        self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True)
+        self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True, name="loop0")
         self.infer_loop_thread.start()
-        self.infer_loop_thread1 = threading.Thread(target=self.infer_loop, daemon=True)
+        self.infer_loop_thread1 = threading.Thread(target=self.infer_loop, daemon=True, name="loop1")
         self.infer_loop_thread1.start()
         return
 
@@ -308,6 +317,14 @@ class ModeBackend:
             self._try_read_new_reqs_multinode_tp()
         else:
             self._try_read_new_reqs_normal()
+
+        # on each loop thread
+        if self.profiler is not None:
+            if self.profiler.is_active != self.profiling_active:
+                if self.profiling_active:
+                    self.profiler.start()
+                else:
+                    self.profiler.stop()
         return
 
     def _try_read_new_reqs_normal(self):
@@ -373,6 +390,11 @@ class ModeBackend:
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
+                elif isinstance(obj, ProfilerCmd):
+                    if obj.cmd == "start":
+                        self.profiling_active = True
+                    elif obj.cmd == "stop":
+                        self.profiling_active = False
                 else:
                     assert False, f"error type {type(obj)}"
             if init_reqs:
