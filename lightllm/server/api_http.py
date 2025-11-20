@@ -33,7 +33,7 @@ from http import HTTPStatus
 import uuid
 from PIL import Image
 import multiprocessing as mp
-from typing import AsyncGenerator, Union
+from typing import Any, AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -129,6 +129,15 @@ def readiness():
 @app.post("/get_model_name")
 def get_model_name():
     return {"model_name": g_objs.args.model_name}
+
+
+@app.get("/get_server_info")
+@app.post("/get_server_info")
+def get_server_info():
+    # 将 StartArgs 转换为字典格式
+    from dataclasses import asdict
+    server_info: dict[str, Any] = asdict(g_objs.args)
+    return {**server_info}
 
 
 @app.get("/healthz", summary="Check server health")

@@ -7,7 +7,6 @@ logger = init_logger(__name__)
 
 def launch_server(args: StartArgs):
     from .api_start import pd_master_start, normal_or_p_d_start, config_server_start
-    logger.info(f"Launching server with args: {args}")
     
     try:
         # this code will not be ok for settings to fork to subprocess
