@@ -115,7 +115,6 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
         self.interpolation = interpolation
         self.data_format = ChannelDimension.FIRST
         self._fused_cache = {}  # key: (do_norm, do_rescale, rescale_factor, device)
-        self.free_gpu_mem = 0
 
     def _get_fused_mean_std(
         self,
@@ -166,21 +165,18 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
 
         return images
 
+    @torch.inference_mode()
     def preprocess(self, image) -> Tuple[torch.Tensor, torch.Tensor]:
-        image_arr = np.asarray(image, dtype=np.uint8)
-        image_data = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous()
+        try:
+            return self._preprocess_bydevice(image, device="cuda")
+        except Exception as e:
+            logger.warning(f"Exception during image preprocessing on CUDA: {str(e)}")
+            torch.cuda.current_stream().synchronize()
+            return self._preprocess_bydevice(image, device="cpu")
 
-        self.free_gpu_mem, _ = torch.cuda.mem_get_info()
-        image_size = int(image_arr.size) * 4  # 后面需要转float32
-        if image_size < self.free_gpu_mem * 0.9:
-            image_data = image_data.to("cuda", non_blocking=True)
-        else:
-            logger.warning(
-                f"[Qwen2VLImageProcessor] preprocess fallback to CPU:"
-                f"shape = {tuple(image_arr.shape), }"
-                f"image_size = {image_size/(1024**2):.2f} MB,"
-                f"free_gpu_mem = {self.free_gpu_mem/(1024**2):.2f} MB"
-            )
+    def _preprocess_bydevice(self, image, device="cuda") -> Tuple[torch.Tensor, torch.Tensor]:
+        image_arr = np.asarray(image, dtype=np.uint8)
+        image_data = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous().to(device=device, non_blocking=True)
 
         grouped_images, grouped_images_index = group_images_by_shape(
             [image_data], disable_grouping=self.disable_grouping
