@@ -78,6 +78,7 @@ class StartArgs:
     grouping_key: List[str] = field(default_factory=list)
     push_interval: int = field(default=10)
     visual_infer_batch_size: int = field(default=1)
+    visual_send_batch_size: int = field(default=1)
     visual_gpu_ids: List[int] = field(default_factory=lambda: [0])
     visual_tp: int = field(default=1)
     visual_dp: int = field(default=1)

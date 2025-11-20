@@ -22,6 +22,11 @@ from transformers.image_utils import (
 )
 from torchvision.transforms.v2 import functional as F
 
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
+
+
 IMAGE_FACTOR = 28
 MIN_PIXELS = 4 * 28 * 28
 MAX_PIXELS = 16384 * 28 * 28
@@ -160,9 +165,19 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
 
         return images
 
+    @torch.inference_mode()
     def preprocess(self, image) -> Tuple[torch.Tensor, torch.Tensor]:
+        try:
+            return self._preprocess_bydevice(image, device="cuda")
+        except Exception as e:
+            logger.warning(f"Exception during image preprocessing on CUDA: {str(e)}")
+            torch.cuda.current_stream().synchronize()
+            return self._preprocess_bydevice(image, device="cpu")
+
+    def _preprocess_bydevice(self, image, device="cuda") -> Tuple[torch.Tensor, torch.Tensor]:
         image_arr = np.asarray(image, dtype=np.uint8)
-        image_data = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous().to("cuda", non_blocking=True)
+        image_data = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous().to(device=device, non_blocking=True)
+
         grouped_images, grouped_images_index = group_images_by_shape(
             [image_data], disable_grouping=self.disable_grouping
         )
@@ -183,27 +198,39 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
                     interpolation=self.interpolation,
                 )
             resized_images_grouped[shape] = stacked_images
-        resized_images = reorder_images(resized_images_grouped, grouped_images_index)
 
-        # Group images by size for further processing
-        # Needed in case do_resize is False, or resize returns images with different sizes
+        grouped_images = None
+        resized_images = reorder_images(resized_images_grouped, grouped_images_index)
+        resized_images_grouped = None
+
         grouped_images, grouped_images_index = group_images_by_shape(
             resized_images, disable_grouping=self.disable_grouping
         )
+        resized_images = None
+
         processed_images_grouped = {}
         processed_grids = {}
+
         for shape, stacked_images in grouped_images.items():
+            stacked_images = stacked_images.to("cuda", non_blocking=True)
+
             resized_height, resized_width = stacked_images.shape[-2:]
-            # Fused rescale and normalize
+
             patches = self.rescale_and_normalize(
-                stacked_images, self.do_rescale, self.rescale_factor, self.do_normalize, self.image_mean, self.image_std
+                stacked_images,
+                self.do_rescale,
+                self.rescale_factor,
+                self.do_normalize,
+                self.image_mean,
+                self.image_std,
             )
             if patches.ndim == 4:
-                # add a temporal dimension if we have images
                 patches = patches.unsqueeze(1)
+
             if patches.shape[1] % self.temporal_patch_size != 0:
                 repeats = patches[:, -1:].repeat(1, self.temporal_patch_size - 1, 1, 1, 1)
                 patches = torch.cat([patches, repeats], dim=1)
+
             batch_size, grid_t, channel = patches.shape[:3]
             grid_t = grid_t // self.temporal_patch_size
             grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
@@ -224,8 +251,7 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
                 .permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
                 .contiguous()
             )
-            # Reorder dimensions to group grid and patch information for subsequent flattening.
-            # (batch, grid_t, grid_h, grid_w, merge_h, merge_w, channel, temp_patch_size, patch_h, patch_w)
+
             flatten_patches = patches.view(
                 batch_size,
                 grid_t * grid_h * grid_w,
@@ -235,9 +261,12 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
             processed_images_grouped[shape] = flatten_patches
             processed_grids[shape] = [[grid_t, grid_h, grid_w]] * batch_size
 
+        grouped_images = None
+
         processed_images = reorder_images(processed_images_grouped, grouped_images_index)
         processed_grids = reorder_images(processed_grids, grouped_images_index)
-        pixel_values = torch.cat(processed_images, dim=0)  # (num_patches_total, C*T*ps*ps)
+
+        pixel_values = torch.cat(processed_images, dim=0)
         image_grid_thw = torch.as_tensor(processed_grids)
 
         return pixel_values, image_grid_thw

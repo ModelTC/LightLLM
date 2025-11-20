@@ -57,6 +57,7 @@ class VisualManager:
         self.trust_remote_code = args.trust_remote_code
         self.args = args
         self.visual_model_rpc_ports = visual_model_rpc_ports
+        self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
 
     async def wait_to_model_ready(self):
@@ -117,6 +118,18 @@ class VisualManager:
             else:
                 processing_group_reqs = []
                 images_need_infer = []
+                ready_to_send = []
+
+                def flush_ready(force: bool = False):
+                    if not ready_to_send:
+                        return
+                    if not force and len(ready_to_send) < self.send_batch_size:
+                        return
+
+                    for group_req_indexes in ready_to_send:
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                    ready_to_send.clear()
+
                 while len(self.waiting_reqs) > 0:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
@@ -146,23 +159,24 @@ class VisualManager:
                         if len(images_need_infer) == self.infer_batch_size:
                             await self.infer_imgs(images_need_infer)
                             images_need_infer = []
-                            for _group_req_indexes in processing_group_reqs:
-                                self.send_to_next_module.send_pyobj(
-                                    _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
-                                )
+                            ready_to_send.extend(processing_group_reqs)
                             processing_group_reqs = []
+                            flush_ready(force=False)
 
                     if len(images_need_infer) == 0:
-                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        ready_to_send.append(group_req_indexes)
+                        flush_ready(force=False)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
                 if len(images_need_infer) > 0:
                     await self.infer_imgs(images_need_infer)
-                    for _group_req_indexes in processing_group_reqs:
-                        self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-                    processing_group_reqs = []
                     images_need_infer = []
+
+                    # 这些处理完 image 的 group 也 ready 了
+                    ready_to_send.extend(processing_group_reqs)
+                    processing_group_reqs = []
+                flush_ready(force=True)
 
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):

@@ -369,6 +369,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_infer_batch_size", type=int, default=1, help="number of images to process in each inference batch"
     )
     parser.add_argument(
+        "--visual_send_batch_size",
+        type=int,
+        default=1,
+        help="""
+        number of images embedding to send to llm process in each batch,
+        bigger size can improve throughput but increase latency possibly in some cases
+        """,
+    )
+    parser.add_argument(
         "--visual_gpu_ids", nargs="+", type=int, default=None, help="List of GPU IDs to use, e.g., 0 1 2"
     )
     parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
