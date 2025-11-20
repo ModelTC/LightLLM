@@ -85,7 +85,7 @@ def get_current_device_name():
         gpu_name = torch.cuda.get_device_name(device).replace(" ", "_")
         return gpu_name
     else:
-        return None
+        raise RuntimeError("No GPU available")
 
 
 @lru_cache(maxsize=None)
