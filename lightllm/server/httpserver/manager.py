@@ -604,32 +604,17 @@ class HttpServerManager:
                             f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
                             f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
                             f"prompt_token_num:{prompt_tokens} "
+                            f"gpu cache hit: {prompt_cache_len > 0}"
                             f"prompt_cache_len:{prompt_cache_len} "
                             f"prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"cpu cache hit: {cpu_prompt_cache_len > 0} "
                             f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
                             f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
+                            f"disk cache hit: {disk_prompt_cache_len > 0} "
                             f"disk_prompt_cache_len:{disk_prompt_cache_len} "
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
-                        if prompt_cache_len > 0:
-                            logger.info(
-                                f"[gpu cache hit] "
-                                f"prompt_cache_len:{prompt_cache_len} "
-                                f"prompt_cache_ratio:{prompt_cache_ratio} "
-                            )
-                        if cpu_prompt_cache_len > 0:
-                            logger.info(
-                                f"[cpu cache hit] "
-                                f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
-                                f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
-                            )
-                        if disk_prompt_cache_len > 0:
-                            logger.info(
-                                f"[disk cache hit] "
-                                f"disk_prompt_cache_len:{disk_prompt_cache_len} "
-                                f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
-                            )
                         if group_request_id < 0:
                             # health 探测请求，不记录日志和监控
                             return
