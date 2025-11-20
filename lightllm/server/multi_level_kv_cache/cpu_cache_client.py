@@ -309,8 +309,6 @@ class _CpuPageStatus(_LinkedListItem):
     EMPTY = 0  # 空闲
     LOADING = 1  # 从 gpu buffer 加载到 cpu 的状态，或者是从磁盘加载到 cpu 的状态
     READY = 2  # 数据已经加载到 cpu ok 的状态
-    OFFLOADING = 3  # 从 cpu 卸载到 硬盘的状态
-    READY_RECYCLE = 4  # 因为卸载到硬盘已经完成，所以可以进行回收使用
 
     def __init__(self):
         self.init()
