@@ -124,7 +124,7 @@ class TpPartBaseModel:
         self._init_some_value()
         self._init_custom()
         self._init_inferstate_cls()
-        self._autotune_warmup()
+        # self._autotune_warmup()
         self._init_padded_req()
         # wait必须在init cudagraph 之前，避免错误捕获
         self._wait_other_modules_ready()
@@ -773,6 +773,7 @@ class TpPartBaseModel:
             )
             logger.error(exception_str)
             raise Exception(exception_str)
+        torch.cuda.empty_cache()
         return
 
     def autotune_layers(self):
@@ -903,6 +904,9 @@ class TpPartBaseModel:
         del b_seq_len
         del b_ready_cache_len
         del model_output
+        del b_mtp_index
+        del b_prefill_start_loc
+        del b_q_seq_len
         torch.cuda.empty_cache()
         return
 

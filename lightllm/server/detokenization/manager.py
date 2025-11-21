@@ -84,10 +84,10 @@ class DeTokenizationManager:
                         if isinstance(recv_obj, FlushCacheResp):
                             self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
                             continue
-                        if isinstance(recv_obj, ReleaseMemoryResp):
+                        elif isinstance(recv_obj, ReleaseMemoryResp):
                             self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
                             continue
-                        if isinstance(recv_obj, ResumeMemoryResp):
+                        elif isinstance(recv_obj, ResumeMemoryResp):
                             self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
                             continue
                         self._add_new_group_req_index(recv_obj=recv_obj)

@@ -123,7 +123,6 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
     producer_threads = []
     for i, chunk in enumerate(file_chunks):
         thread = Thread(target=producer, args=(chunk,), name=f"Producer-{i}")
-        thread.daemon = True
         thread.start()
         producer_threads.append(thread)
 
