@@ -99,7 +99,6 @@ class DiskCacheWorker:
         if not grouped_indexes:
             return payload_groups
 
-        self.cpu_cache_client.lock.acquire_sleep1ms()
         page_items = self.cpu_cache_client.page_items.linked_items
         for group in grouped_indexes:
             payloads: List[_PagePayload] = []
@@ -107,7 +106,7 @@ class DiskCacheWorker:
                 page_item = page_items[page_index]
                 payloads.append(_PagePayload(index=page_index, hash_key=int(page_item.hash_key)))
             payload_groups.append(payloads)
-        self.cpu_cache_client.lock.release()
+
         return payload_groups
 
     # 数据写入磁盘
