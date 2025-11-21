@@ -128,13 +128,26 @@ class DiskCacheWorker:
                 time.sleep(0.001)
 
             task = self.service.create(tokens=tokens, kv_page_indexer=kv_indexer, mode="w")
+            # 立即释放已经在disk cache中的页面
+            if task.page_already_list:
+                self.cpu_cache_client.lock.acquire_sleep1ms()
+                self.cpu_cache_client.deref_pages(page_list=task.page_already_list)
+                self.cpu_cache_client.lock.release()
+
             # 数据安全即可结束等待，无需写入完成
             while not task.data_safe():
                 time.sleep(0.001)
 
-        self.cpu_cache_client.lock.acquire_sleep1ms()
-        self.cpu_cache_client.deref_pages(page_list=page_indexes)
-        self.cpu_cache_client.lock.release()
+            # 释放剩余需要写入的页面
+            remining_indexes = list(set(page_indexes) - set(task.page_already_list))
+            if remining_indexes:
+                self.cpu_cache_client.lock.acquire_sleep1ms()
+                self.cpu_cache_client.deref_pages(page_list=remining_indexes)
+                self.cpu_cache_client.lock.release()
+        else:
+            self.cpu_cache_client.lock.acquire_sleep1ms()
+            self.cpu_cache_client.deref_pages(page_list=page_indexes)
+            self.cpu_cache_client.lock.release()
 
     def query_loadable_pages(self, tokens: List[int], start_pos: int) -> int:
         """
