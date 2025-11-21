@@ -6,7 +6,7 @@ import copy
 import json
 import torch
 import torch.nn.functional as F
-from typing import final
+from typing import final, List, Optional
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
@@ -30,6 +30,10 @@ from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
+from lightllm.utils.torch_memory_saver_utils import (
+    TorchMemorySaverWrapper,
+    MemoryTag,
+)
 
 logger = init_logger(__name__)
 
@@ -88,6 +92,7 @@ class TpPartBaseModel:
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
         self.is_deepseekv3_mtp_mode = self.args.mtp_mode in ["deepseekv3_vanilla", "deepseekv3_eagle"]
+        self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
 
         self._init_datatype()
         self._init_config()
@@ -97,15 +102,24 @@ class TpPartBaseModel:
 
         # 更连续的显存分配可以有更好的性能
         if self.max_total_token_num is None:
-            self._init_weights()
-            self._init_mem_manager()
+            with self.torch_memory_saver.region(
+                tag=MemoryTag.WEIGHT, enable_cpu_backup=self.args.enable_weight_cpu_backup
+            ):
+                self._init_weights()
+            with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+                self._init_mem_manager()
         else:
-            self._init_mem_manager()
-            self._init_weights()
+            with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+                self._init_mem_manager()
+            with self.torch_memory_saver.region(
+                tag=MemoryTag.WEIGHT, enable_cpu_backup=self.args.enable_weight_cpu_backup
+            ):
+                self._init_weights()
 
         self._init_kv_move_buffer()
         self._check_mem_size()
-        self._init_req_manager()
+        with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            self._init_req_manager()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
@@ -904,3 +918,55 @@ class TpPartBaseModel:
             special_model_input["deepseekv3_mtp_draft_input_hiddens"] = None
 
         return special_model_input
+
+    def release_memory_occupation(self, tags: Optional[List[MemoryTag]]):
+        if tags is None:
+            self.release_all()
+            return
+        if MemoryTag.WEIGHT in tags:
+            self.release_weight()
+        if MemoryTag.KV_CACHE in tags:
+            self.release_kv_cache()
+        if MemoryTag.GRAPH in tags:
+            self.release_graph()
+        return
+
+    def resume_memory_occupation(self, tags: Optional[List[MemoryTag]]):
+        if tags is None:
+            self.resume_all()
+            return
+        if MemoryTag.WEIGHT in tags:
+            self.resume_weight()
+        if MemoryTag.KV_CACHE in tags:
+            self.resume_kv_cache()
+        if MemoryTag.GRAPH in tags:
+            self.resume_graph()
+        return
+
+    def release_weight(self):
+        self.torch_memory_saver.pause(tag=MemoryTag.WEIGHT)
+
+    def release_kv_cache(self):
+        self.torch_memory_saver.pause(tag=MemoryTag.KV_CACHE)
+
+    def release_graph(self):
+        self.torch_memory_saver.pause(tag=MemoryTag.GRAPH)
+
+    def release_all(self):
+        self.torch_memory_saver.pause(tag=MemoryTag.WEIGHT)
+        self.torch_memory_saver.pause(tag=MemoryTag.KV_CACHE)
+        self.torch_memory_saver.pause(tag=MemoryTag.GRAPH)
+
+    def resume_weight(self):
+        self.torch_memory_saver.resume(tag=MemoryTag.WEIGHT)
+
+    def resume_kv_cache(self):
+        self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
+
+    def resume_graph(self):
+        self.torch_memory_saver.resume(tag=MemoryTag.GRAPH)
+
+    def resume_all(self):
+        self.torch_memory_saver.resume(tag=MemoryTag.WEIGHT)
+        self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
+        self.torch_memory_saver.resume(tag=MemoryTag.GRAPH)

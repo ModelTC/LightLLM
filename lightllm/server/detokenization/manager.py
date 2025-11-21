@@ -20,6 +20,8 @@ from lightllm.server.io_struct import (
     BaseReq,
     GenerateResp,
     FlushCacheResp,
+    ReleaseMemoryResp,
+    ResumeMemoryResp,
 )
 
 logger = init_logger(__name__)
@@ -80,9 +82,13 @@ class DeTokenizationManager:
                     for _ in range(recv_max_count):
                         recv_obj: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                         if isinstance(recv_obj, FlushCacheResp):
-                            print("Detokenization receive flush cache request", flush=True)
                             self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
-                            print("Detokenization send flush cache request to httpserver", flush=True)
+                            continue
+                        if isinstance(recv_obj, ReleaseMemoryResp):
+                            self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
+                            continue
+                        if isinstance(recv_obj, ResumeMemoryResp):
+                            self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
                             continue
                         self._add_new_group_req_index(recv_obj=recv_obj)
 

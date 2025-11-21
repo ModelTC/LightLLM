@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from lightllm.server.core.objs.req import Req
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
-from typing import List
+from typing import List, Optional
+from lightllm.utils.torch_memory_saver_utils import MemoryTag
 
 
 @dataclass
@@ -79,3 +80,23 @@ class AbortReq(BaseReq):
     # 外部调用传入，等同内部的 group_req_id
     request_id: int = None
     abort_all: bool = False
+
+
+@dataclass
+class ReleaseMemoryReq(BaseReq):
+    tags: Optional[List[MemoryTag]] = None
+
+
+@dataclass
+class ReleaseMemoryResp(BaseReq):
+    success: bool
+
+
+@dataclass
+class ResumeMemoryReq(BaseReq):
+    tags: Optional[List[MemoryTag]] = None
+
+
+@dataclass
+class ResumeMemoryResp(BaseReq):
+    success: bool
