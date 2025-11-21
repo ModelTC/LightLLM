@@ -62,6 +62,8 @@ class MMWeightPack:
 class MMWeightTpl(BaseWeightTpl):
     def __init__(
         self,
+        in_dims: Optional[Union[int, List[int]]],
+        out_dims: Optional[Union[int, List[int]]],
         weight_names: Union[str, List[str]],
         bias_names: Optional[Union[str, List[str]]],
         data_type: torch.dtype,
@@ -71,6 +73,13 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         super().__init__(tp_rank, tp_world_size, data_type)
         self.lock = threading.Lock()
+
+        if isinstance(in_dims, int):
+            in_dims = [in_dims]
+        self.in_dims = in_dims
+        if isinstance(out_dims, int):
+            out_dims = [out_dims]
+        self.out_dims = out_dims
 
         if isinstance(weight_names, str):
             weight_names = [weight_names]
@@ -97,14 +106,14 @@ class MMWeightTpl(BaseWeightTpl):
 
         self.gen_weight_quant_param_names(quant_method=quant_method)
         self.quant_method = quant_method
-        self.sub_child_mm_params: List[MMWeightPack] = [
-            MMWeightPack(
-                has_bias=has_bias,
-                has_weight_scale=has_weight_scale,
-                has_weight_zero_point=has_weight_zero_point,
-            )
-            for _ in range(len(weight_names))
-        ]
+        # self.sub_child_mm_params: List[MMWeightPack] = [
+        #     MMWeightPack(
+        #         has_bias=has_bias,
+        #         has_weight_scale=has_weight_scale,
+        #         has_weight_zero_point=has_weight_zero_point,
+        #     )
+        #     for _ in range(len(weight_names))
+        # ]
         self.mm_param: MMWeightPack = MMWeightPack(
             has_bias=has_bias,
             has_weight_scale=has_weight_scale,
@@ -115,8 +124,16 @@ class MMWeightTpl(BaseWeightTpl):
         self.weight_fused_dim = 0
         self.bias_fused_dim = 0
         self.weight_scale_and_zero_point_fused_dim = 0
-
         self.load_finished: bool = False
+        self._init_weight()
+
+    def _init_weight(self):
+        in_dim = sum(self.in_dims)
+        out_dim = sum(self.out_dims)
+        self.mm_param.weight = torch.empty(in_dim, out_dim, dtype=self.data_type_)
+        if self.mm_param.has_bias:
+            self.mm_param.bias = torch.empty(out_dim, dtype=self.data_type_)
+        return
 
     def mm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
