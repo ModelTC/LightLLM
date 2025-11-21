@@ -13,9 +13,9 @@ from lightllm.utils.error_utils import log_exception
 logger = init_logger(__name__)
 
 
-def start_prefill_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
+def start_prefill_kv_move_manager_process(args, info_queue: mp.Queue):
     event = mp.Event()
-    proc = mp.Process(target=_init_env, args=(args, info_queue, mem_queues, event))
+    proc = mp.Process(target=_init_env, args=(args, info_queue, event))
     proc.start()
     event.wait()
     assert proc.is_alive()
@@ -23,7 +23,7 @@ def start_prefill_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues
     return
 
 
-def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.Event):
+def _init_env(args, info_queue: mp.Queue, event: mp.Event):
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
@@ -32,7 +32,7 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
     from .prefill_trans_process import start_prefill_trans_process
 
     manager = PrefillKVMoveManager(
-        args=args, info_queue=info_queue, mem_queues=mem_queues, start_trans_process_func=start_prefill_trans_process
+        args=args, info_queue=info_queue, start_trans_process_func=start_prefill_trans_process
     )
     assert manager is not None
     event.set()
@@ -42,12 +42,8 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
 
 
 class PrefillKVMoveManager(BaseKVMoveManager):
-    def __init__(
-        self, args: StartArgs, info_queue: mp.Queue, mem_queues: List[mp.Queue], start_trans_process_func: Callable
-    ):
-        super().__init__(
-            args=args, info_queue=info_queue, mem_queues=mem_queues, start_trans_process_func=start_trans_process_func
-        )
+    def __init__(self, args: StartArgs, info_queue: mp.Queue, start_trans_process_func: Callable):
+        super().__init__(args=args, info_queue=info_queue, start_trans_process_func=start_trans_process_func)
         return
 
     # ==================================================================================

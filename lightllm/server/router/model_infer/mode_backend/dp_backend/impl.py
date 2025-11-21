@@ -1,11 +1,14 @@
 import torch
 import time
 import numpy as np
+import os
 import torch.nn.functional as F
+import torch.distributed as dist
 from typing import List, Tuple, Optional, Callable
+from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
+from lightllm.server.router.model_infer.infer_batch import InferSamplingParams, g_infer_context, InferReq
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.pre import (
     padded_prepare_prefill_inputs,
@@ -23,6 +26,8 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids
 from .control_state import DPControlState
+from lightllm.common.mem_manager import MemoryManager
+from .dp_shared_kv_trans import DPKVSharedMoudle
 
 
 class DPChunkedPrefillBackend(ModeBackend):
@@ -59,6 +64,28 @@ class DPChunkedPrefillBackend(ModeBackend):
             else:
                 self.decode = self.decode_normal
         return
+
+    def _init_reqs(self, reqs: List[Tuple]):
+        if not self.args.enable_dp_prompt_cache_fetch:
+            return super()._init_reqs(reqs)
+
+        dp_rank_in_node = self.dp_rank_in_node
+        current_dp_reqs = [req for req in reqs if req[3] == dp_rank_in_node]
+        other_dp_reqs = [req for req in reqs if req[3] != dp_rank_in_node]
+
+        g_infer_state_lock.acquire()
+
+        infer_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
+        req_dp_ranks = [req[3] for req in reqs]
+        self.dp_kv_shared_moudle.fill_reqs_info(reqs=infer_reqs)
+        trans_taskes = self.dp_kv_shared_moudle.build_shared_kv_trans_tasks(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
+        self.dp_kv_shared_moudle.kv_trans(trans_tasks=trans_taskes)
+
+        g_infer_context._filter(finished_request_ids=[req[0] for req in other_dp_reqs])
+        g_infer_state_lock.release()
+
+        req_ids = [e[0] for e in current_dp_reqs]
+        return req_ids
 
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())

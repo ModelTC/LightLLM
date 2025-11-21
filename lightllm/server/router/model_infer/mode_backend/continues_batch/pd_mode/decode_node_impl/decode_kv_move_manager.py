@@ -33,7 +33,7 @@ KV_MOVE_MAX_NUM = 16
 
 
 class DecodeKVMoveManager(rpyc.Service):
-    def __init__(self, args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
+    def __init__(self, args, info_queue: mp.Queue):
         super().__init__()
         self.args = args
         # args.dp // args.nnodes 在跨机tp的场景下，可能为0
@@ -44,7 +44,6 @@ class DecodeKVMoveManager(rpyc.Service):
         assert self.dp_world_size <= self.node_world_size
 
         self.info_queue = info_queue
-        self.mem_queues = mem_queues
         self.infer_rpyc_lock = threading.Lock()
         self.infer_rpyc_objs: List[PDDecodeInferRpcServer] = []
 
@@ -87,7 +86,6 @@ class DecodeKVMoveManager(rpyc.Service):
     # _put_kv_received_to_radix_cache
     # _fail_to_realese_forzen_tokens
     # _unfrozen_time_out_reqs_tokens
-    # _put_mem_manager_to_mem_queue
     # 上述接口都是 kv move manager 与推理进程进行交互的接口，主要用于申请锁定kv资源或者释放
     # kv资源的接口
     # ==================================================================================
@@ -153,12 +151,6 @@ class DecodeKVMoveManager(rpyc.Service):
             for conn in self.infer_rpyc_objs:
                 futures.append(rpyc.async_(conn.unfrozen_time_out_reqs_tokens)())
             asyncio.run(self.wait_all_future_finish(futures))
-        return
-
-    def _put_mem_manager_to_mem_queue(self) -> None:
-        with self.infer_rpyc_lock:
-            for obj in self.infer_rpyc_objs:
-                obj.put_mem_manager_to_mem_queue()
         return
 
     # ==================================================================================
@@ -362,14 +354,14 @@ class DecodeKVMoveManager(rpyc.Service):
         return
 
 
-def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.Event):
+def _init_env(args, info_queue: mp.Queue, event: mp.Event):
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::decode_kv_move_manager")
 
-    manager = DecodeKVMoveManager(args, info_queue, mem_queues)
+    manager = DecodeKVMoveManager(args, info_queue)
     t = ThreadedServer(manager, port=args.pd_decode_rpyc_port, protocol_config={"allow_pickle": True})
     threading.Thread(target=lambda: t.start(), daemon=True).start()
 
@@ -381,9 +373,9 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
     return
 
 
-def start_decode_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
+def start_decode_kv_move_manager_process(args, info_queue: mp.Queue):
     event = mp.Event()
-    proc = mp.Process(target=_init_env, args=(args, info_queue, mem_queues, event))
+    proc = mp.Process(target=_init_env, args=(args, info_queue, event))
     proc.start()
     event.wait()
     assert proc.is_alive()
