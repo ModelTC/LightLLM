@@ -5,6 +5,8 @@ from safetensors import safe_open
 from tqdm import tqdm
 import lightllm.utils.petrel_helper as utils
 from lightllm.utils.dist_utils import get_current_device_id
+from queue import Queue
+from threading import Thread
 
 
 def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_layer_list=None, weight_dir=None):
@@ -28,7 +30,7 @@ def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_lay
     gc.collect()
 
 
-def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None, weight_dict=None):
+def load_hf_weights_old(data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None, weight_dict=None):
     if isinstance(data_type, str):
         data_type = torch.float16 if data_type == "fp16" else torch.float32
     if pre_post_layer is not None:
@@ -70,3 +72,69 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
             pass
 
     return
+
+
+def _read_file(file_, use_safetensors, weight_dir):
+    if use_safetensors:
+        weights = safe_open(os.path.join(weight_dir, file_), "pt", "cpu")
+        weights = {k: weights.get_tensor(k) for k in weights.keys()}
+    else:
+        weights = utils.PetrelHelper.load(os.path.join(weight_dir, file_), map_location="cpu")
+
+    return weights
+
+
+def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None, weight_dict=None):
+    if isinstance(data_type, str):
+        data_type = torch.float16 if data_type == "fp16" else torch.float32
+    if pre_post_layer is not None:
+        assert pre_post_layer.data_type_ == data_type, "type is not right"
+    if transformer_layer_list is not None:
+        assert transformer_layer_list[0].data_type_ == data_type, "type is not right"
+    if weight_dict:
+        if pre_post_layer is not None:
+            pre_post_layer.load_hf_weights(weight_dict)
+        if transformer_layer_list is not None:
+            for layer in transformer_layer_list:
+                layer.load_hf_weights(weight_dict)
+        del weight_dict
+        return
+    use_safetensors = True
+    files = utils.PetrelHelper.list(weight_dir, extension="all")
+    candidate_files = list(filter(lambda x: x.endswith(".safetensors"), files))
+    if len(candidate_files) == 0:
+        use_safetensors = False
+        candidate_files = list(filter(lambda x: x.endswith(".bin"), files))
+    assert len(candidate_files) != 0, "can only support pytorch tensor and safetensors format for weights."
+
+    weight_queue = Queue(maxsize=5)  # 控制内存使用
+
+    def producer(chunk):
+        for file_ in chunk:
+            weights = _read_file(file_, use_safetensors, weight_dir)
+            weight_queue.put(weights)
+
+    LOADWORKER = int(os.environ.get("LOADWORKER", 1))
+
+    num_producers = min(LOADWORKER, len(candidate_files))  # 生产者数量
+    chunk_size = (len(candidate_files) + num_producers - 1) // num_producers
+    file_chunks = [candidate_files[i : i + chunk_size] for i in range(0, len(candidate_files), chunk_size)]
+
+    producer_threads = []
+    for i, chunk in enumerate(file_chunks):
+        thread = Thread(target=producer, args=(chunk,), name=f"Producer-{i}")
+        thread.start()
+        producer_threads.append(thread)
+
+    for _ in tqdm(range(len(candidate_files)), desc="Loading weights"):
+        weights = weight_queue.get()
+        if pre_post_layer is not None:
+            pre_post_layer.load_hf_weights(weights)
+        if transformer_layer_list is not None:
+            for layer in transformer_layer_list:
+                layer.load_hf_weights(weights)
+        del weights
+        gc.collect()
+
+    for thread in producer_threads:
+        thread.join()

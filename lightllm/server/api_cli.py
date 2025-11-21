@@ -537,4 +537,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
+    parser.add_argument(
+        "--enable_torch_memory_saver",
+        action="store_true",
+        help="""enable torch memory saver, which is used for release_memory and resume_memory during RL training.""",
+    )
+    parser.add_argument("--enable_weight_cpu_backup", action="store_true", help="""enable weight cpu backup.""")
     return parser
