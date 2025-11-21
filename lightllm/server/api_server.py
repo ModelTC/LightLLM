@@ -5,12 +5,22 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+
 def launch_server(args: StartArgs):
     from .api_start import pd_master_start, normal_or_p_d_start, config_server_start
-    
+
     try:
         # this code will not be ok for settings to fork to subprocess
-        torch.multiprocessing.set_start_method("spawn")  
+        torch.multiprocessing.set_start_method("spawn")
+    except RuntimeError as e:
+        logger.warning(f"Failed to set start method: {e}")
+    except Exception as e:
+        logger.error(f"Failed to set start method: {e}")
+        raise e
+
+    try:
+        # this code will not be ok for settings to fork to subprocess
+        torch.multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
         logger.warning(f"Failed to set start method: {e}")
     except Exception as e:
