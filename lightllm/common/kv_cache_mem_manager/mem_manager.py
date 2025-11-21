@@ -451,16 +451,18 @@ class MemoryManager:
         self.req_to_token_indexs: torch.Tensor = req_manager.req_to_token_indexs
 
         shm_name = f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}"
-        obj_bytes = ForkingPickler.dumps(self).tobytes()
-        shm = create_or_link_shm(name=shm_name, expected_size=len(obj_bytes) + 4, force_mode="create")
-        logger.info(f"create shm {shm.name} size {shm.size} for mem manger shared buffer")
-        shm.buf[0:4] = len(obj_bytes).to_bytes(4, "little")
-        shm.buf[4 : 4 + len(obj_bytes)] = obj_bytes
-        self.__shm_io_buffer = shm
+        for rank_in_node in range(0, get_node_world_size() * 2):
+            obj_bytes = ForkingPickler.dumps(self).tobytes()
+            shm = create_or_link_shm(
+                name=f"{shm_name}_{rank_in_node}", expected_size=len(obj_bytes) + 4, force_mode="create"
+            )
+            logger.info(f"create shm {shm.name} size {shm.size} for mem manger shared buffer")
+            shm.buf[0:4] = len(obj_bytes).to_bytes(4, "little")
+            shm.buf[4 : 4 + len(obj_bytes)] = obj_bytes
 
     @staticmethod
-    def loads_from_shm(rank_in_node: int) -> "MemoryManager":
-        shm_name = f"{get_unique_server_name()}_mem_manager_{rank_in_node}"
+    def loads_from_shm(rank_in_node: int, current_rank_in_node: int) -> "MemoryManager":
+        shm_name = f"{get_unique_server_name()}_mem_manager_{rank_in_node}_{current_rank_in_node}"
         logger.info(f"get memmanager from shm {shm_name}")
         shm = create_or_link_shm(name=shm_name, expected_size=-1, force_mode="link")
         bytes_len = int.from_bytes(shm.buf[0:4], "little")

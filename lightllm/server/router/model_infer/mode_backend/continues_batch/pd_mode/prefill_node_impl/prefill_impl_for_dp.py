@@ -17,7 +17,6 @@ class DPChunkedForPrefillNode(DPChunkedPrefillBackend):
 
     def init_custom(self):
         ChunckedPrefillForPrefillNode.init_custom(self)
-        super().init_custom()
         return
 
     def _pre_handle_finished_reqs(self, finished_reqs):

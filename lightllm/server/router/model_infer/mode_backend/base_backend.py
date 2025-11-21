@@ -39,6 +39,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+from .dp_backend.dp_shared_kv_trans import init_dp_kv_shared
 
 
 class ModeBackend:
@@ -209,7 +210,17 @@ class ModeBackend:
                 [rank for rank in range(self.global_world_size)], backend="nccl"
             )
 
+        if (
+            self.args.run_mode in ["nixl_prefill", "nixl_decode", "prefill", "decode"]
+            or self.args.enable_dp_prompt_cache_fetch
+        ):
+            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+
         self.init_custom()
+
+        if self.args.enable_dp_prompt_cache_fetch:
+            init_dp_kv_shared(self)
+
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         # 只会在 nixl pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_nixl_trans_io_buffer = ShmObjsIOBuffer(tail_str="nixl")
@@ -220,11 +231,6 @@ class ModeBackend:
 
         # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
         # 读取
-        if (
-            self.args.run_mode in ["nixl_prefill", "nixl_decode", "prefill", "decode"]
-            or self.args.enable_dp_prompt_cache_fetch
-        ):
-            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。

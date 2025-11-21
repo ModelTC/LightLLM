@@ -68,27 +68,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         self.classed_req_strict_prefill = False
         return
 
-    def init_custom(self):
-        if self.enable_dp_prompt_cache_fetch:
-            torch.cuda.set_device(get_current_device_id())
-
-            self.dp_kv_shared_moudle = DPKVSharedMoudle(
-                max_req_num=self.args.running_max_req_size,
-                max_req_seq_len=self.args.max_req_total_len + 8,
-                dp_size_in_node=self.dp_size_in_node,
-                backend=self,
-            )
-            dist.barrier(group=self.node_nccl_group)
-
-            # Collect mem_managers from all ranks
-            self.mem_managers = []
-            for rank_idx in range(self.node_world_size):
-                if rank_idx != self.rank_in_node:
-                    self.mem_managers.append(MemoryManager.loads_from_shm(self.rank_in_node))
-                else:
-                    self.mem_managers.append(self.model.mem_manager)
-            return
-
     def _init_reqs(self, reqs: List[Tuple]):
         if not self.args.enable_dp_prompt_cache_fetch:
             return super()._init_reqs(reqs)
@@ -101,7 +80,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         infer_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         req_dp_ranks = [req[3] for req in reqs]
-        self.dp_kv_shared_moudle.fill_reqs_info(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
+        self.dp_kv_shared_moudle.fill_reqs_info(reqs=infer_reqs)
         trans_taskes = self.dp_kv_shared_moudle.build_shared_kv_trans_tasks(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
         self.dp_kv_shared_moudle.kv_trans(trans_tasks=trans_taskes)
 
