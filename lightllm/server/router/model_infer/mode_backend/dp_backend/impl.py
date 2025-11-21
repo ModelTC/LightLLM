@@ -36,7 +36,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # 用于控制每一步是执行prefill 和 decode 还是跳过
         self.control_state_machine = DPControlState(backend=self)
-        self.enable_dp_prompt_cache_fetch = get_env_start_args().enable_dp_prompt_cache_fetch
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
