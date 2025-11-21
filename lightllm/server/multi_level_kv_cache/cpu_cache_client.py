@@ -47,14 +47,15 @@ class CpuKvCacheClient(object):
 
         if cur_page.can_realloc(disk_offload_enable=disk_offload_enable):
             page_index = cur_page.self_index
-            cur_page.del_self_from_list()
             if not cur_page.is_empty():
                 self.page_hash_dict.remove(cur_page.hash_key)
             cur_page.hash_key = hash_key
             cur_page.status = cur_page.LOADING
+            assert cur_page.ref_count == 0
             cur_page.ref_count += 1
+            if cur_page.ref_count == 1:
+                cur_page.del_self_from_list()
             self.page_hash_dict.put(hash_key, page_index)
-            self.page_items.add_item_to_tail(cur_page.self_index)
             return page_index
         else:
             return None
@@ -66,8 +67,8 @@ class CpuKvCacheClient(object):
         if page_index is not None:
             page_item: _CpuPageStatus = page_items[page_index]
             page_item.ref_count += 1
-            page_item.del_self_from_list()
-            self.page_items.add_item_to_tail(index=page_index)
+            if page_item.ref_count == 1:
+                page_item.del_self_from_list()
             if page_item.is_data_ready():
                 return page_index, True
             else:
@@ -121,6 +122,9 @@ class CpuKvCacheClient(object):
                 if deref:
                     assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
+                    if cur_page.ref_count == 0:
+                        # 放回 LRU 列表头部
+                        self.page_items.add_item_to_tail(cur_page.self_index)
 
                 # 全部落盘，已落盘前缀部分会在落盘中自动剔除
                 if disk_offload_enable and not_exist_none_page:
@@ -141,6 +145,9 @@ class CpuKvCacheClient(object):
             for offload_page_index in offload_candidates:
                 offload_page_item: _CpuPageStatus = page_items[offload_page_index]
                 offload_page_item.ref_count += 1
+                if offload_page_item.ref_count == 1:
+                    # 从 LRU 列表中移除
+                    offload_page_item.del_self_from_list()
             # 写入到 offload_page_indexes 中的数据是分组的，其中
             # 开头的元素标记后续多少个元素是一组，便于读取时进行分组处理
             # 写入数据为 group_page_size, page_index1, page_index2, ...
@@ -157,14 +164,14 @@ class CpuKvCacheClient(object):
             page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
             if page_item.is_data_ready():
                 page_item.ref_count += 1
-                # lru 更新
-                page_item.del_self_from_list()
-                self.page_items.add_item_to_tail(index=page_index)
+                if page_item.ref_count == 1:
+                    page_item.del_self_from_list()
                 return page_index, True
             else:
-                # lru 更新
-                page_item.del_self_from_list()
-                self.page_items.add_item_to_tail(index=page_index)
+                if page_item.ref_count == 0:
+                    # lru 更新
+                    page_item.del_self_from_list()
+                    self.page_items.add_item_to_tail(index=page_index)
                 return None, False
         else:
             return None, False
@@ -176,7 +183,6 @@ class CpuKvCacheClient(object):
                 continue
             page_item: _CpuPageStatus = page_items[page_index]
             if not page_item.is_data_ready():
-                logger.info("cpu cache page %d not ready, status %d", page_index, page_item.status)
                 return False
         return True
 
@@ -190,12 +196,18 @@ class CpuKvCacheClient(object):
                 page_item: _CpuPageStatus = page_items[page_index]
                 assert page_item.ref_count > 0
                 page_item.ref_count -= 1
+                if page_item.ref_count == 0:
+                    # 放回 LRU 列表头部
+                    self.page_items.add_item_to_tail(page_item.self_index)
         return
 
     def deref_one_page(self, page_index: int):
         page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
         assert page_item.ref_count > 0
         page_item.ref_count -= 1
+        if page_item.ref_count == 0:
+            # 放回 LRU 列表头部
+            self.page_items.add_item_to_tail(page_item.self_index)
         return
 
     def get_pages_to_offloading(self) -> List[List[int]]:
@@ -230,19 +242,17 @@ class CpuKvCacheClient(object):
 
             if cur_page.ref_count > 0:
                 cur_page.ref_count -= 1
+                if cur_page.ref_count == 0:
+                    if cur_page.is_loading():
+                        existing_index = self.page_hash_dict.get(cur_page.hash_key)
+                        assert existing_index is not None and existing_index == cur_page.self_index
+                        self.page_hash_dict.remove(cur_page.hash_key)
+                        cur_page.hash_key = 0
+                        cur_page.status = _CpuPageStatus.EMPTY
+                        self.page_items.add_item_to_head(cur_page.self_index)
+                    else:
+                        self.page_items.add_item_to_tail(cur_page.self_index)
 
-            if cur_page.ref_count != 0:
-                continue
-
-            if cur_page.is_loading():
-                existing_index = self.page_hash_dict.get(cur_page.hash_key)
-                if existing_index is not None and existing_index == cur_page.self_index:
-                    self.page_hash_dict.remove(cur_page.hash_key)
-
-                cur_page.del_self_from_list()
-                cur_page.hash_key = 0
-                cur_page.status = _CpuPageStatus.EMPTY
-                self.page_items.add_item_to_head(cur_page.self_index)
         return
 
     def _create_cpu_status_list(self, init_shm_data: bool):
