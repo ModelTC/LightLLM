@@ -37,7 +37,7 @@ class DPKVSharedMoudle:
         填充请求的 kv 信息到共享内存中
         """
         self.backend.node_nccl_group.barrier()
-        if self.backend.rank_in_dp == 0:
+        if self.backend.is_master_in_dp:
             self.shared_req_infos.arr[0 : len(reqs), self.dp_rank_in_node, self._KV_LEN_INDEX] = [
                 req.cur_kv_len for req in reqs
             ]
@@ -68,7 +68,8 @@ class DPKVSharedMoudle:
         ):
             # 当前请求是本 dp_rank 负责的
             is_current_dp_handle = req_dp_rank == self.dp_rank_in_node
-            trans_size = max_req_radix_cache_len - req.cur_kv_len
+            # 计算需要传输的 kv 长度， 不能超过 req.get_cur_total_len() - 1
+            trans_size = min(max_req_radix_cache_len, req.get_cur_total_len() - 1) - req.cur_kv_len
 
             if is_current_dp_handle and trans_size > 0 and g_infer_context.get_can_alloc_token_num() > trans_size:
                 g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(trans_size)
@@ -78,7 +79,7 @@ class DPKVSharedMoudle:
                 max_kv_len_mem_manager_index = max_kv_len_dp_rank * self.backend.dp_world_size + self.backend.rank_in_dp
                 max_kv_len_mem_manager: MemoryManager = self.backend.mem_managers[max_kv_len_mem_manager_index]
                 max_kv_len_mem_indexes = max_kv_len_mem_manager.req_to_token_indexs[
-                    max_kv_len_req_idx, req.cur_kv_len : max_req_radix_cache_len
+                    max_kv_len_req_idx, req.cur_kv_len : req.cur_kv_len + trans_size
                 ]
                 trans_tasks.append(
                     TransTask(
@@ -143,22 +144,21 @@ class TransTask:
 
 
 def init_dp_kv_shared(backend):
-    if backend.enable_dp_prompt_cache_fetch:
-        torch.cuda.set_device(get_current_device_id())
+    torch.cuda.set_device(get_current_device_id())
 
-        backend.dp_kv_shared_moudle = DPKVSharedMoudle(
-            max_req_num=backend.args.running_max_req_size,
-            max_req_seq_len=backend.args.max_req_total_len + 8,
-            dp_size_in_node=backend.dp_size_in_node,
-            backend=backend,
-        )
-        backend.node_nccl_group.barrier()
+    backend.dp_kv_shared_moudle = DPKVSharedMoudle(
+        max_req_num=backend.args.running_max_req_size,
+        max_req_seq_len=backend.args.max_req_total_len + 8,
+        dp_size_in_node=backend.dp_size_in_node,
+        backend=backend,
+    )
+    backend.node_nccl_group.barrier()
 
-        # Collect mem_managers from all ranks
-        backend.mem_managers = []
-        for rank_idx in range(backend.node_world_size):
-            if rank_idx != backend.rank_in_node:
-                backend.mem_managers.append(MemoryManager.loads_from_shm(rank_idx, backend.rank_in_node))
-            else:
-                backend.mem_managers.append(backend.model.mem_manager)
+    # Collect mem_managers from all ranks
+    backend.mem_managers = []
+    for rank_idx in range(backend.node_world_size):
+        if rank_idx != backend.rank_in_node:
+            backend.mem_managers.append(MemoryManager.loads_from_shm(rank_idx, backend.rank_in_node))
+        else:
+            backend.mem_managers.append(backend.model.mem_manager)
     return

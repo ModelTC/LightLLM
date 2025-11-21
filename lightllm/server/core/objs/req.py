@@ -122,12 +122,6 @@ class Req(ctypes.Structure):
         ("cpu_cache_match_page_indexes", CpuCachePageList),
         # 分块hash的块大小
         ("cpu_cache_token_page_size", ctypes.c_int),
-        # 所有DP中的最大kv cache的长度
-        ("dp_max_kv_len", ctypes.c_int),
-        # 拥有最大kv cache长度的dp_rank
-        ("dp_max_kv_rank", ctypes.c_int),
-        # 原DP的kv len
-        ("dp_origin_kv_len", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -189,10 +183,6 @@ class Req(ctypes.Structure):
         self.post_init()
 
         self.cpu_cache_token_page_size = get_env_start_args().cpu_cache_token_page_size
-        # 初始化DP模式相关字段
-        self.dp_max_kv_len = 0
-        self.dp_max_kv_rank = -1
-        self.dp_origin_kv_len = 0
         if get_env_start_args().enable_cpu_cache:
             self._fill_input_token_hash()
         return
