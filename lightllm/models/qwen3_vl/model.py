@@ -15,14 +15,13 @@ from transformers.utils import TensorType, logging
 from lightllm.models.qwen2_vl.flashattention_infer_struct import Qwen2VLFlashAttentionStateInfo
 from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
-from lightllm.models.qwen3_vl.infer_struct import Qwen3VLMOEInferStateInfo
+from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
 from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
-from lightllm.models.qwen3_vl.layer_weights.transformers_layer_weight import (
-    Qwen3VLTransformerLayerWeight,
-    Qwen3VLMOETransformerLayerWeight,
-)
+from lightllm.models.qwen3_vl.layer_weights.transformers_layer_weight import Qwen3VLTransformerLayerWeight
+from lightllm.models.qwen3_vl_moe.layer_weights.transformers_layer_weight import Qwen3VLMOETransformerLayerWeight
+from lightllm.models.qwen3_vl_moe.layer_infer.transformer_layer_infer import Qwen3VLMOETransformerLayerInfer
 
 import torch
 from PIL import Image
@@ -109,7 +108,7 @@ class Qwen3VLTpPartModel(Qwen3TpPartModel):
     pre_and_post_weight_class = Qwen3VLPreAndPostLayerWeight
     transformer_weight_class = Qwen3VLTransformerLayerWeight
 
-    infer_state_class = Qwen3VLMOEInferStateInfo
+    infer_state_class = Qwen3VLInferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)
@@ -132,12 +131,12 @@ class Qwen3VLTpPartModel(Qwen3TpPartModel):
 class Qwen3VLMOETpPartModel(Qwen3MOEModel):
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
-    transformer_layer_infer_class = Qwen3VLTransformerLayerInfer
+    transformer_layer_infer_class = Qwen3VLMOETransformerLayerInfer
 
     pre_and_post_weight_class = Qwen3VLPreAndPostLayerWeight
     transformer_weight_class = Qwen3VLMOETransformerLayerWeight
 
-    infer_state_class = Qwen3VLMOEInferStateInfo
+    infer_state_class = Qwen3VLInferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)

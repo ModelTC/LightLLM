@@ -4,7 +4,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
-class Qwen3VLMOEInferStateInfo(LlamaInferStateInfo):
+class Qwen3VLInferStateInfo(LlamaInferStateInfo):
     def __init__(self):
         super().__init__()
         self.deepstack_features = []
@@ -31,7 +31,6 @@ class Qwen3VLMOEInferStateInfo(LlamaInferStateInfo):
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         InferStateInfo.init_some_extra_state(self, model, input_ids)
         pos = self.position_ids[None, :].expand(3, -1)
-
         cos_T = torch.index_select(model._cos_cached, 0, pos[0])  # [L, d/2]
         cos_H = torch.index_select(model._cos_cached, 0, pos[1])
         cos_W = torch.index_select(model._cos_cached, 0, pos[2])

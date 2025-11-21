@@ -108,11 +108,11 @@ class LlamaTpPartModel(TpPartBaseModel):
         模型特殊的一些初始化
         """
         rope_scaling = self.config.get("rope_scaling", None)
-        if "mrope_section" in rope_scaling:
-            self.mrope_section = rope_scaling["mrope_section"]
         if rope_scaling is None:
             self._init_to_get_rotary()
             return
+        if "mrope_section" in rope_scaling:
+            self.mrope_section = rope_scaling["mrope_section"]
 
         if "rope_type" in rope_scaling:
             scaling_type = rope_scaling["rope_type"]
@@ -209,7 +209,6 @@ class LlamaTpPartModel(TpPartBaseModel):
         )
         freqs = torch.outer(t, inv_freq)
         self.freqs = freqs.cuda()
-        print(f"model.freqs is {self.freqs}")
         self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
         self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
         return
