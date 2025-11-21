@@ -559,4 +559,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
+    parser.add_argument(
+        "--linear_attn_cache_size", type=int, default=2000, help="""The size of linear attn cache. """
+    )
     return parser
