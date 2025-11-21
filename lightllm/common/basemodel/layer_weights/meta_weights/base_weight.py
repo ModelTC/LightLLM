@@ -16,10 +16,6 @@ class BaseWeight(ABC):
     def verify_load(self) -> bool:
         pass
 
-    @abstractmethod
-    def _init_weight(self):
-        pass
-
 
 class BaseWeightTpl(BaseWeight):
     def __init__(self, tp_rank: int = None, tp_world_size: int = None, data_type: torch.dtype = None):
@@ -33,6 +29,3 @@ class BaseWeightTpl(BaseWeight):
 
     def verify_load(self) -> bool:
         raise NotImplementedError("verify_load must implement this method")
-
-    def _init_weight(self):
-        raise NotImplementedError("init_weight must implement this method")
