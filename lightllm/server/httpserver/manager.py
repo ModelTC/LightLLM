@@ -10,6 +10,7 @@ import copy
 import hashlib
 import datetime
 import pickle
+import inspect
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -39,6 +40,17 @@ from lightllm.server.io_struct import (
     GenerateResp,
     GenerateReqMeta,
     GenerateReqIndex,
+    InitWeightsUpdateGroupReq,
+    InitWeightsUpdateGroupRsp,
+    DestroyWeightsUpdateGroupReq,
+    DestroyWeightsUpdateGroupRsp,
+    UpdateWeightsFromDistributedReq,
+    UpdateWeightsFromDistributedRsp,
+    UpdateWeightsFromTensorReq,
+    UpdateWeightsFromTensorRsp,
+    GeneralHttpToModelRpcReq,
+    GeneralModelToHttpRpcRsp
+
 )
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
@@ -128,6 +140,7 @@ class HttpServerManager:
 
         # 交互式请求 event
         self.flush_cache_event: Optional[asyncio.Event] = None
+        self.async_events_per_func: Dict[str, asyncio.Event] = {}
         return
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
@@ -757,6 +770,8 @@ class HttpServerManager:
                     await self._handle_recv_generate_request(recv_obj)
                 elif isinstance(recv_obj, FlushCacheResp):
                     await self._handle_recv_flush_cache_request(recv_obj)
+                elif isinstance(recv_obj, GeneralModelToHttpRpcRsp):
+                    await self._handle_recv_general_model_to_http_request(recv_obj)
 
             except BaseException as e:
                 logger.exception(str(e))
@@ -826,6 +841,13 @@ class HttpServerManager:
         self.flush_cache_event.set()
         return
 
+    async def _handle_recv_general_model_to_http_request(self, recv_obj: GeneralModelToHttpRpcRsp):
+        assert recv_obj.func_name is not None
+        event = await self.get_event_for_func(recv_obj.func_name)
+        event.result = recv_obj
+        event.set()
+        return
+
     async def flush_cache(self):
         if self.flush_cache_event is None:
             self.flush_cache_event = asyncio.Event()
@@ -855,6 +877,57 @@ class HttpServerManager:
         async with self.is_pause_cond:
             self.is_pause = False
             self.is_pause_cond.notify_all()
+
+    async def get_event_for_func(self, func_name: str) -> asyncio.Event:
+        if func_name not in self.async_events_per_func:
+            self.async_events_per_func[func_name] = asyncio.Event()
+        return self.async_events_per_func[func_name]
+
+    async def http_to_model_special_request(self, request: GeneralHttpToModelRpcReq, timeout: int=300) -> GeneralModelToHttpRpcRsp:
+        event = await self.get_event_for_func(request.func_name)
+        await self.transfer_to_next_module(request)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+            ret = event.result
+
+        except asyncio.TimeoutError:
+            ret = GeneralModelToHttpRpcRsp(success=False, msg="wait for response timeout", func_name=request.func_name)
+        except Exception as e:
+            ret = GeneralModelToHttpRpcRsp(success=False, msg="wait for response error: %s" % str(e), func_name=request.func_name)
+        return ret
+
+
+    async def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
+        return await self.http_to_model_special_request(GeneralHttpToModelRpcReq(
+            func_name="init_weights_update_group", func_args=request))
+
+
+    async def destroy_weights_update_group(self, request: DestroyWeightsUpdateGroupReq):
+        return await self.http_to_model_special_request(GeneralHttpToModelRpcReq(
+            func_name="destroy_weights_update_group", func_args=request))
+
+
+    async def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
+
+        if request.abort_all_requests:
+            await self.abort_request(AbortReq(abort_all=True))
+
+        if request.flush_cache:
+            await self.flush_cache()
+
+        return await self.http_to_model_special_request(
+            GeneralHttpToModelRpcReq(func_name="update_weights_from_distributed", func_args=request))
+
+    async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> Tuple[bool, str]:
+        if request.abort_all_requests:
+            await self.abort_request(AbortReq(abort_all=True))
+
+        if request.flush_cache:
+            await self.flush_cache()
+
+        return await self.http_to_model_special_request(
+            GeneralHttpToModelRpcReq(func_name="update_weights_from_tensor", func_args=request)
+        )
 
 
 class ReqStatus:

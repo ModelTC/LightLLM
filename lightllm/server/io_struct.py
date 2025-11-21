@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from lightllm.server.core.objs.req import Req
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
-from typing import List
+from typing import List, Optional, Any, Union
 
 
 @dataclass
@@ -14,6 +14,10 @@ class BaseReq(ABC):
     def get_req_to_next_module(self):
         return self
 
+@dataclass
+class BaseRsp(ABC):
+    success: bool
+    msg: Optional[str]
 
 # for next node
 @dataclass
@@ -79,3 +83,82 @@ class AbortReq(BaseReq):
     # 外部调用传入，等同内部的 group_req_id
     request_id: int = None
     abort_all: bool = False
+
+
+@dataclass
+class GeneralHttpToModelRpcReq(BaseReq):
+    func_name: str
+    func_args: Optional[Any] = None
+
+@dataclass
+class GeneralModelToHttpRpcRsp(BaseRsp):
+    func_name: str
+    func_rsp: Optional[Any] = None
+
+@dataclass
+class InitWeightsUpdateGroupReq(BaseReq):
+    # The master address
+    master_address: str
+    # The master port
+    master_port: int
+    # The rank offset
+    rank_offset: int
+    # The world size
+    world_size: int
+    # The group name
+    group_name: str = "weight_update_group"
+    # The backend
+    backend: str = "nccl"
+
+@dataclass
+class InitWeightsUpdateGroupRsp(BaseRsp):
+    pass
+
+@dataclass
+class DestroyWeightsUpdateGroupReq(BaseReq):
+    group_name: str = "weight_update_group"
+
+@dataclass
+class DestroyWeightsUpdateGroupRsp(BaseRsp):
+    pass
+
+@dataclass
+class UpdateWeightsFromDistributedReq(BaseReq):
+    names: List[str]
+    dtypes: List[str]
+    shapes: List[List[int]]
+    # The group name
+    group_name: str = "weight_update_group"
+    # Whether to flush the cache after updating weights
+    flush_cache: bool = True
+    # Whether to abort all requests before updating weights
+    abort_all_requests: bool = False
+    # Optional: Update weight version along with weights
+    weight_version: Optional[str] = None
+
+@dataclass
+class UpdateWeightsFromDistributedRsp(BaseRsp):
+    pass
+
+
+@dataclass
+class UpdateWeightsFromTensorReq(BaseReq):
+    """Update model weights from tensor input.
+
+    - Tensors are serialized for transmission
+    - Data is structured in JSON for easy transmission over HTTP
+    """
+
+    serialized_named_tensors: List[Union[str, bytes]]
+    # Optional format specification for loading
+    load_format: Optional[str] = None
+    # Whether to flush the cache after updating weights
+    flush_cache: bool = True
+    # Whether to abort all requests before updating weights
+    abort_all_requests: bool = False
+    # Optional: Update weight version along with weights
+    weight_version: Optional[str] = None
+
+@dataclass
+class UpdateWeightsFromTensorRsp(BaseRsp):
+    pass
