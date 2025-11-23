@@ -145,8 +145,24 @@ def _fwd_kernel_flash_decode_stage1(
 
 @torch.no_grad()
 def flash_decode_stage1(
-    q, k, v, Req_to_tokens, B_req_idx, B_Seqlen, max_len_in_batch, mid_out, mid_out_logsumexp, block_seq
+    q: torch.Tensor,
+    k: torch.Tensor,
+    k_scale: torch.Tensor,
+    v: torch.Tensor,
+    v_scale: torch.Tensor,
+    Req_to_tokens: torch.Tensor,
+    B_req_idx: torch.Tensor,
+    b_shared_seq_len: torch.Tensor,
+    b_mark_shared_group: torch.Tensor,
+    max_len_in_batch: int,
+    mid_out: torch.Tensor,
+    mid_out_logsumexp: torch.Tensor,
+    block_seq: int,
+    max_batch_group_size: int,
 ):
+    """
+    该kernel是为多样性生成定制的gqa算子,其中
+    """
     BLOCK_SEQ = block_seq
     BLOCK_N = 16
     assert BLOCK_SEQ % BLOCK_N == 0
@@ -158,41 +174,51 @@ def flash_decode_stage1(
     batch, kv_head_num = B_req_idx.shape[0], k.shape[1]
     grid = (batch, kv_head_num, triton.cdiv(max_len_in_batch, BLOCK_SEQ))
     gqa_group_size = q.shape[1] // k.shape[1]
-    assert triton.next_power_of_2(k.shape[-1]) == k.shape[-1]
+    assert triton.next_power_of_2(Lk) == Lk
+    KV_QUANT_GROUP_SIZE = v.shape[-1] // v_scale.shape[-1]
+    BLOCK_HEAD = triton.next_power_of_2(gqa_group_size)
+    BLOCK_BATCH = triton.next_power_of_2(max_batch_group_size)
+    if BLOCK_HEAD * BLOCK_BATCH < 16:
+        BLOCK_BATCH = 16 // BLOCK_HEAD
 
     _fwd_kernel_flash_decode_stage1[grid](
-        q,
-        k,
-        v,
-        sm_scale,
-        Req_to_tokens,
-        B_req_idx,
-        B_Seqlen,
-        mid_out,
-        mid_out_logsumexp,
-        Req_to_tokens.stride(0),
-        Req_to_tokens.stride(1),
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        mid_out.stride(0),
-        mid_out.stride(1),
-        mid_out.stride(2),
-        mid_out.stride(3),
-        mid_out_logsumexp.stride(0),
-        mid_out_logsumexp.stride(1),
-        mid_out_logsumexp.stride(2),
-        gqa_group_size,
-        BLOCK_HEAD=max(16, triton.next_power_of_2(gqa_group_size)),
-        BLOCK_SEQ=BLOCK_SEQ,
+        Q=q,
+        stride_qbs=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_qd=q.stride(2),
+        K=k,
+        K_scale=k_scale,
+        stride_kbs=k.stride(0),
+        stride_kh=k.stride(1),
+        stride_kd=k.stride(2),
+        V=v,
+        V_scale=v,
+        stride_vbs=v.stride(0),
+        stride_vh=v.stride(1),
+        stride_vd=v.stride(2),
+        sm_scale=sm_scale,
+        Req_to_tokens=Req_to_tokens,
+        stride_req_to_tokens_b=Req_to_tokens.stride(0),
+        stride_req_to_tokens_s=Req_to_tokens.stride(1),
+        B_req_idx=B_req_idx,
+        b_shared_seq_len=b_shared_seq_len,
+        b_mark_shared_group=b_mark_shared_group,
+        Mid_O=mid_out,
+        stride_mid_ob=mid_out.stride(0),
+        stride_mid_oh=mid_out.stride(1),
+        stride_mid_os=mid_out.stride(2),
+        stride_mid_od=mid_out.stride(3),
+        Mid_O_LogExpSum=mid_out_logsumexp,  # [batch, head, seq_block_num]
+        stride_mid_o_eb=mid_out_logsumexp.stride(0),
+        stride_mid_o_eh=mid_out_logsumexp.stride(1),
+        stride_mid_o_es=mid_out_logsumexp.stride(2),
+        gqa_group_size=gqa_group_size,
+        BLOCK_HEAD=BLOCK_HEAD,
+        BLOCK_SEQ=block_seq,
         BLOCK_HEADDIM=Lk,
         BLOCK_N=BLOCK_N,
+        BLOCK_BATCH=BLOCK_BATCH,
+        KV_QUANT_GROUP_SIZE=KV_QUANT_GROUP_SIZE,
         num_warps=2,
         num_stages=2,
     )
