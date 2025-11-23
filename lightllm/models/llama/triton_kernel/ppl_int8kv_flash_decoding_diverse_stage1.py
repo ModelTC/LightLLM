@@ -47,7 +47,8 @@ def _fwd_kernel_flash_decode_stage1(
     shared_batch_group_size = tl.load(b_mark_shared_group + cur_batch)
     if shared_batch_group_size == 0:
         return
-    cur_batch = cur_batch - shared_batch_group_size
+    cur_batch_end = cur_batch + 1
+    cur_batch = cur_batch - (shared_batch_group_size - 1)
     cur_kv_head = tl.program_id(1)
     seq_start_block = tl.program_id(2)
 
@@ -62,7 +63,7 @@ def _fwd_kernel_flash_decode_stage1(
     cur_batch_end_index = tl.minimum(cur_batch_seq_len, cur_batch_start_index + BLOCK_SEQ)
 
     offs_batch = cur_batch + tl.arange(0, BLOCK_BATCH)
-    offs_batch = tl.where(offs_batch < cur_batch + shared_batch_group_size, offs_batch, cur_batch)
+    offs_batch = tl.where(offs_batch < cur_batch_end, offs_batch, cur_batch)
 
     off_q = offs_batch[:, None, None] * stride_qbs + cur_q_head_range[None, :, None] * stride_qh + offs_d[None, None, :]
 
