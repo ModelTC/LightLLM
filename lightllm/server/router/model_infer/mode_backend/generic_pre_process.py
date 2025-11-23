@@ -4,6 +4,7 @@ from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelInput
+from lightllm.utils.envs_utils import get_env_start_args, get_diverse_max_batch_shared_group_size
 
 
 def prepare_prefill_inputs(
@@ -99,12 +100,16 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_mtp_index = []
     b_seq_len = []
     b_q_seq_len = []
+    b_shared_seq_len = []
+    max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
     for req in req_objs:
+        _radix_shared_len = req.get_radix_cache_shared_len()
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
         seq_len = req.get_cur_total_len()
         assert req.cur_kv_len == seq_len - 1, f"{req.cur_kv_len} {seq_len}"
         b_seq_len.append(seq_len)
+        b_shared_seq_len.append(_radix_shared_len)
         total_token_num += seq_len
         max_len_in_batch = max(max_len_in_batch, seq_len)
         b_mtp_index.append(0)
@@ -114,6 +119,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
             b_req_idx.append(req.req_idx)
             seq_len += 1
             b_seq_len.append(seq_len)
+            b_shared_seq_len.append(_radix_shared_len)
             total_token_num += seq_len
             max_len_in_batch = max(max_len_in_batch, seq_len)
             b_mtp_index.append(step + 1)
@@ -124,7 +130,36 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
 
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
+    b_shared_seq_len = torch.tensor(b_shared_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    if get_env_start_args().diverse_mode:
+        b_mark_shared_group = []
+        shared_nodes = [req.shared_kv_node for req in run_reqs]
+        _current_group = []
+        for node in shared_nodes:
+            if not _current_group:
+                _current_group.append(node)
+            elif node == _current_group[-1]:
+                _current_group.append(node)
+            else:
+                b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
+                b_mark_shared_group[-1] = len(_current_group)
+                _current_group.clear()
+                _current_group.append(node)
+
+            if len(_current_group) == max_batch_shared_group_size:
+                b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
+                b_mark_shared_group[-1] = len(_current_group)
+                _current_group.clear()
+        if _current_group:
+            b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
+            b_mark_shared_group[-1] = len(_current_group)
+            _current_group.clear()
+
+        assert len(b_mark_shared_group) == len(run_reqs)
+        b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
+    else:
+        b_mark_shared_group = None
 
     # dynamic prompt cache 准备 token
     g_infer_state_lock.acquire()
@@ -144,6 +179,8 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
+        b_shared_seq_len=b_shared_seq_len,
+        b_mark_shared_group=b_mark_shared_group,
         is_prefill=False,
     )
     return model_input, run_reqs

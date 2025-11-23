@@ -193,4 +193,9 @@ def enable_radix_tree_timer_merge() -> bool:
 
 @lru_cache(maxsize=None)
 def get_radix_tree_merge_update_delta() -> int:
-    return int(os.getenv("LIGHTLMM_RADIX_TREE_MERGE_DELTA", 6000))
+    return int(os.getenv("LIGHTLLM_RADIX_TREE_MERGE_DELTA", 6000))
+
+
+@lru_cache(maxsize=None)
+def get_diverse_max_batch_shared_group_size() -> int:
+    return int(os.getenv("LIGHTLLM_MAX_BATCH_SHARED_GROUP_SIZE", 4))
