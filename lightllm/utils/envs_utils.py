@@ -199,3 +199,8 @@ def get_radix_tree_merge_update_delta() -> int:
 @lru_cache(maxsize=None)
 def get_diverse_max_batch_shared_group_size() -> int:
     return int(os.getenv("LIGHTLLM_MAX_BATCH_SHARED_GROUP_SIZE", 4))
+
+
+@lru_cache(maxsize=None)
+def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
+    return get_env_start_args().diverse_mode and "ppl_int8kv_flashdecoding_diverse" in get_env_start_args().mode

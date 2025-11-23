@@ -2,7 +2,7 @@ import torch
 from dataclasses import dataclass, field
 from typing import Optional
 from typing import List
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 
 
 @dataclass
@@ -62,7 +62,7 @@ class ModelInput:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
         if self.b_prefill_start_loc is not None:
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
-        if not self.is_prefill and get_env_start_args().diverse_mode:
+        if not self.is_prefill and enable_diverse_mode_gqa_decode_fast_kernel():
             batch_size = len(self.b_req_idx)
             if self.b_mark_shared_group is None:
                 self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device="cuda")

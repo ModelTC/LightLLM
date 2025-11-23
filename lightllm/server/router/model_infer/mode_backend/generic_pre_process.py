@@ -4,7 +4,10 @@ from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelInput
-from lightllm.utils.envs_utils import get_env_start_args, get_diverse_max_batch_shared_group_size
+from lightllm.utils.envs_utils import (
+    enable_diverse_mode_gqa_decode_fast_kernel,
+    get_diverse_max_batch_shared_group_size,
+)
 
 
 def prepare_prefill_inputs(
@@ -93,7 +96,7 @@ def prepare_prefill_inputs(
 
 
 def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[InferReq]]:
-    run_reqs = []
+    run_reqs: List[InferReq] = []
     total_token_num = 0
     max_len_in_batch = 0
     b_req_idx = []
@@ -130,9 +133,18 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
 
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
-    b_shared_seq_len = torch.tensor(b_shared_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
-    if get_env_start_args().diverse_mode:
+
+    if enable_diverse_mode_gqa_decode_fast_kernel():
+        # b_shared_seq_len 和 b_mark_shared_group 只会在 diverse_mode 下的 decode 阶段真正被使用的参数,
+        # 用于记录请求间的共享关系。
+        # 举列说明:
+        # b_shared_seq_len : [10, 10, 10, 11, 11, 11, 11]
+        # b_mark_shared_group: [0, 0, 3, 0, 0, 0, 4]
+        # b_mark_shared_group 中每一个不为0的位置都代表其与前面多少个请求形成一个共享前缀组。属于
+        # 同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。某些模式可以利用这两个
+        # 输入加速算子的运行。
+        b_shared_seq_len = torch.tensor(b_shared_seq_len, dtype=torch.int32, device="cpu")
         b_mark_shared_group = []
         shared_nodes = [req.shared_kv_node for req in run_reqs]
         _current_group = []
@@ -159,6 +171,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         assert len(b_mark_shared_group) == len(run_reqs)
         b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
     else:
+        b_shared_seq_len = None
         b_mark_shared_group = None
 
     # dynamic prompt cache 准备 token
