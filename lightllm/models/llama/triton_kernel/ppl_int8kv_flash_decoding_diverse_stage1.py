@@ -161,7 +161,12 @@ def flash_decode_stage1(
     max_batch_group_size: int,
 ):
     """
-    该kernel是为多样性生成定制的gqa算子,其中
+    该kernel是为多样性生成定制的gqa算子,其中 b_mark_shared_group 是一个shape 为 (batch_size,)的tensor,
+    其内容标记那些请求是共享前缀的请求组。举列说明:
+    b_shared_seq_len : [10, 10, 10, 11, 11, 11, 11]
+    b_mark_shared_group: [0, 0, 3, 0, 0, 0, 4]
+    b_mark_shared_group 中每一个不为0的位置都代表其与前面多少个请求形成一个共享前缀组。属于
+    同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。
     """
     BLOCK_SEQ = block_seq
     BLOCK_N = 16
