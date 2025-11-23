@@ -104,7 +104,7 @@ def _fwd_kernel_flash_decode_stage1(
             other=0,
         )
         v_scale = tl.load(
-            V + off_k_scale.T,
+            V_scale + off_k_scale.T,
             mask=n_mask[:, None],
             other=0.0,
         )
