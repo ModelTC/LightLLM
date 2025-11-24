@@ -4,7 +4,7 @@ import torch
 
 
 @triton.jit
-def rotary_kernel_tiled(
+def rotary_kernel(
     inp_ptr,
     cos_ptr,
     sin_ptr,
@@ -20,18 +20,16 @@ def rotary_kernel_tiled(
     H,
     D,
     BLOCK_SEQ: tl.constexpr,
-    BLOCK_HEAD: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    pid_head_blk = tl.program_id(0)  # head tile
-    pid_seq_blk = tl.program_id(1)  # seq  tile
-    pid_d_blk = tl.program_id(2)  # dim  tile
+    pid_h = tl.program_id(0)
+    pid_seq_blk = tl.program_id(1)
+    pid_d_blk = tl.program_id(2)
 
-    offs_h = pid_head_blk * BLOCK_HEAD + tl.arange(0, BLOCK_HEAD)
+    offs_h = tl.full((1,), pid_h, tl.int64)
     offs_l = pid_seq_blk * BLOCK_SEQ + tl.arange(0, BLOCK_SEQ)
     offs_d = pid_d_blk * BLOCK_D + tl.arange(0, BLOCK_D)
 
-    offs_h = offs_h.to(tl.int64)
     offs_l = offs_l.to(tl.int64)
     offs_d = offs_d.to(tl.int64)
 
@@ -52,7 +50,6 @@ def rotary_kernel_tiled(
 
     cos_base_2d = offs_l[:, None] * stride_cos_l + offs_d[None, :] * stride_cos_d
     sin_base_2d = offs_l[:, None] * stride_sin_l + offs_d[None, :] * stride_sin_d
-
     mask_ld = mask_l[:, None] & mask_d[None, :]
 
     cos_2d = tl.load(cos_ptr + cos_base_2d, mask=mask_ld, other=0.0)
@@ -68,7 +65,6 @@ def rotary_kernel_tiled(
     partner_val = tl.load(inp_ptr + partner_base, mask=mask, other=0.0)
 
     rotated = tl.where(d_b < HALF_D, -partner_val, partner_val)
-
     y = x * cos + rotated * sin
 
     tl.store(out_ptr + base, y, mask=mask)
@@ -92,7 +88,6 @@ def apply_rotary_pos_emb_triton(
     y = torch.empty_like(x)
 
     BLOCK_SEQ = 16
-    BLOCK_HEAD = 4
 
     if D >= 128:
         num_warps = 8
@@ -100,12 +95,12 @@ def apply_rotary_pos_emb_triton(
         num_warps = 4
 
     grid = (
-        triton.cdiv(H, BLOCK_HEAD),
+        H,
         triton.cdiv(L, BLOCK_SEQ),
         triton.cdiv(D, BLOCK_D),
     )
 
-    rotary_kernel_tiled[grid](
+    rotary_kernel[grid](
         inp_ptr=x,
         cos_ptr=cos,
         sin_ptr=sin,
@@ -121,7 +116,6 @@ def apply_rotary_pos_emb_triton(
         H=H,
         D=D,
         BLOCK_SEQ=BLOCK_SEQ,
-        BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_D=BLOCK_D,
         num_warps=num_warps,
     )
