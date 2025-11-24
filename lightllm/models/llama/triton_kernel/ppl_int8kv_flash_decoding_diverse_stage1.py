@@ -1,10 +1,77 @@
 import torch
 import triton
 import triton.language as tl
+from typing import Optional
+from lightllm.common.kernel_config import KernelConfigs
+from frozendict import frozendict
+from functools import lru_cache
+from typing import Dict
+
+
+class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
+    kernel_name: str = "_fwd_kernel_flash_decode_diverse_stage1:v1"
+
+    @classmethod
+    @lru_cache(maxsize=200)
+    def try_to_get_best_config(
+        cls,
+        batch_size: int,
+        avg_seq_len_in_batch: int,
+        gqa_group_size: int,
+        q_head_dim: int,
+        block_seq: int,
+        out_dtype: str,
+    ) -> dict:
+        key_params = {
+            "gqa_group_size": gqa_group_size,
+            "q_head_dim": q_head_dim,
+            "block_seq": block_seq,
+            "out_dtype": str(out_dtype),
+        }
+        key_params = frozendict(key_params)
+
+        finded_config = cls.get_the_config(key_params)
+
+        if finded_config:
+            batch_size_config: dict = finded_config[
+                min(
+                    finded_config.keys(),
+                    key=lambda x: abs(int(x) - avg_seq_len_in_batch),
+                )
+            ]
+            config = batch_size_config[min(batch_size_config.keys(), key=lambda x: abs(int(x) - batch_size))]
+
+            return config
+        else:
+            config = {
+                "BLOCK_N": 16,
+                "num_warps": 2,
+                "num_stages": 2,
+            }
+        return config
+
+    @classmethod
+    def save_config(
+        cls,
+        gqa_group_size: int,
+        q_head_dim: int,
+        block_seq: int,
+        out_dtype: str,
+        config_json: Dict[int, Dict[int, Dict]],
+    ):
+        key_params = {
+            "gqa_group_size": gqa_group_size,
+            "q_head_dim": q_head_dim,
+            "block_seq": block_seq,
+            "out_dtype": str(out_dtype),
+        }
+        key_params = frozendict(key_params)
+
+        return cls.store_config(key_params, config_json)
 
 
 @triton.jit
-def _fwd_kernel_flash_decode_stage1(
+def _fwd_kernel_flash_decode_diverse_stage1(
     Q,
     stride_qbs,
     stride_qh,
@@ -160,6 +227,7 @@ def flash_decode_stage1(
     mid_out_logsumexp: torch.Tensor,
     block_seq: int,
     max_batch_group_size: int,
+    run_config: Optional[dict] = None,
 ):
     """
     该kernel是为多样性生成定制的gqa算子,其中 b_mark_shared_group 是一个shape 为 (batch_size,)的tensor,
@@ -169,9 +237,27 @@ def flash_decode_stage1(
     b_mark_shared_group 中每一个不为0的位置都代表其与前面多少个请求形成一个共享前缀组。属于
     同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。
     """
+    if not run_config:
+        if torch.cuda.is_current_stream_capturing():
+            avg_seq_len_in_batch = max_len_in_batch
+        else:
+            avg_seq_len_in_batch = max_len_in_batch
+
+        run_config = GQADiverseDecodeStage1KernelConfig.try_to_get_best_config(
+            batch_size=int(q.shape[0]),
+            avg_seq_len_in_batch=avg_seq_len_in_batch,
+            gqa_group_size=int(q.shape[1] // k.shape[1]),
+            q_head_dim=int(q.shape[2]),
+            block_seq=block_seq,
+            out_dtype=q.dtype,
+        )
+
+    BLOCK_N = run_config["BLOCK_N"]
+    num_warps = run_config["num_warps"]
+    num_stages = run_config["num_stages"]
+
     assert q.dim() == 3 and k.dim() == 3 and v.dim() == 3
     BLOCK_SEQ = block_seq
-    BLOCK_N = 16
     assert BLOCK_SEQ % BLOCK_N == 0
     # shape constraints
     Lq, Lk = q.shape[-1], k.shape[-1]
@@ -189,7 +275,7 @@ def flash_decode_stage1(
     if BLOCK_HEAD * BLOCK_BATCH < 16:
         BLOCK_BATCH = 16 // BLOCK_HEAD
 
-    _fwd_kernel_flash_decode_stage1[grid](
+    _fwd_kernel_flash_decode_diverse_stage1[grid](
         Q=q,
         stride_qbs=q.stride(0),
         stride_qh=q.stride(1),
@@ -227,7 +313,7 @@ def flash_decode_stage1(
         BLOCK_N=BLOCK_N,
         BLOCK_BATCH=BLOCK_BATCH,
         KV_QUANT_GROUP_SIZE=KV_QUANT_GROUP_SIZE,
-        num_warps=2,
-        num_stages=2,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return
