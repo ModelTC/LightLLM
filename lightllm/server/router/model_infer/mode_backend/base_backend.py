@@ -164,8 +164,8 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
-        is_qwen3next = model_cfg.get("model_type", "") == "qwen3_next"
-        radix_cache_class = RadixCache if not is_qwen3next else HybridRadixCache
+        is_hybrid_model = model_cfg.get("model_type", "") in ["qwen3_next"]
+        radix_cache_class = RadixCache if not is_hybrid_model else HybridRadixCache
         self.radix_cache = (
             radix_cache_class(
                 get_unique_server_name(),
