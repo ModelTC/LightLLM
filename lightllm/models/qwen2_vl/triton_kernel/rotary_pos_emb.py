@@ -20,16 +20,17 @@ def rotary_kernel(
     H,
     D,
     BLOCK_SEQ: tl.constexpr,
+    BLOCK_HEAD: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    pid_h = tl.program_id(0)
+    pid_head_blk = tl.program_id(0)
     pid_seq_blk = tl.program_id(1)
-    pid_d_blk = tl.program_id(2)
 
-    offs_h = tl.full((1,), pid_h, tl.int64)
+    offs_h = pid_head_blk * BLOCK_HEAD + tl.arange(0, BLOCK_HEAD)
     offs_l = pid_seq_blk * BLOCK_SEQ + tl.arange(0, BLOCK_SEQ)
-    offs_d = pid_d_blk * BLOCK_D + tl.arange(0, BLOCK_D)
+    offs_d = tl.arange(0, BLOCK_D)
 
+    offs_h = offs_h.to(tl.int64)
     offs_l = offs_l.to(tl.int64)
     offs_d = offs_d.to(tl.int64)
 
@@ -65,13 +66,16 @@ def rotary_kernel(
     partner_val = tl.load(inp_ptr + partner_base, mask=mask, other=0.0)
 
     rotated = tl.where(d_b < HALF_D, -partner_val, partner_val)
+
     y = x * cos + rotated * sin
 
     tl.store(out_ptr + base, y, mask=mask)
 
 
 def apply_rotary_pos_emb_triton(
-    tensor: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, BLOCK_D: int = 128
+    tensor: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> torch.Tensor:
     assert tensor.is_cuda and cos.is_cuda and sin.is_cuda
     assert cos.is_contiguous() and sin.is_contiguous()
@@ -88,6 +92,8 @@ def apply_rotary_pos_emb_triton(
     y = torch.empty_like(x)
 
     BLOCK_SEQ = 16
+    BLOCK_HEAD = 4
+    BLOCK_D = triton.next_power_of_2(D)
 
     if D >= 128:
         num_warps = 8
@@ -95,9 +101,8 @@ def apply_rotary_pos_emb_triton(
         num_warps = 4
 
     grid = (
-        H,
+        triton.cdiv(H, BLOCK_HEAD),
         triton.cdiv(L, BLOCK_SEQ),
-        triton.cdiv(D, BLOCK_D),
     )
 
     rotary_kernel[grid](
@@ -116,6 +121,7 @@ def apply_rotary_pos_emb_triton(
         H=H,
         D=D,
         BLOCK_SEQ=BLOCK_SEQ,
+        BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_D=BLOCK_D,
         num_warps=num_warps,
     )
