@@ -39,7 +39,6 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
-from .dp_backend.dp_shared_kv_trans import init_dp_kv_shared
 
 
 class ModeBackend:
@@ -215,11 +214,12 @@ class ModeBackend:
             or self.args.enable_dp_prompt_cache_fetch
         ):
             self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+            dist.barrier(group=self.node_nccl_group)
 
         self.init_custom()
 
         if self.args.enable_dp_prompt_cache_fetch:
-            init_dp_kv_shared(self)
+            self.init_dp_kv_shared()
 
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         # 只会在 nixl pd 模式下才会使用，用于上传分块传输任务是否成功。
@@ -242,6 +242,28 @@ class ModeBackend:
 
     def init_custom(self):
         pass
+
+    def init_dp_kv_shared(self):
+        from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
+        from lightllm.common.mem_manager import MemoryManager
+
+        torch.cuda.set_device(get_current_device_id())
+
+        self.dp_kv_shared_module = DPKVSharedMoudle(
+            max_req_num=self.args.running_max_req_size,
+            max_req_seq_len=self.args.max_req_total_len + 8,
+            dp_size_in_node=self.dp_size_in_node,
+            backend=self,
+        )
+
+        # Collect mem_managers from all ranks
+        self.mem_managers = []
+        for rank_idx in range(self.node_world_size):
+            if rank_idx != self.rank_in_node:
+                self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx, self.rank_in_node))
+            else:
+                self.mem_managers.append(self.model.mem_manager)
+        return
 
     def get_max_total_token_num(self):
         return self.model.mem_manager.size

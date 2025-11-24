@@ -1,4 +1,5 @@
 # 该文件用于提供在数据dp并行的推理模式下，共享kv cache trans相关的功能函数模块
+import time
 import numpy as np
 import dataclasses
 import torch
@@ -9,6 +10,8 @@ from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.server.core.objs.shm_array import ShmArray
 from ...infer_batch import InferReq
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.server.router.model_infer.infer_batch import g_infer_context
+import torch.distributed as dist
 
 
 class DPKVSharedMoudle:
@@ -36,7 +39,7 @@ class DPKVSharedMoudle:
         """
         填充请求的 kv 信息到共享内存中
         """
-        self.backend.node_nccl_group.barrier()
+        dist.barrier(group=self.backend.node_nccl_group)
         if self.backend.is_master_in_dp:
             self.shared_req_infos.arr[0 : len(reqs), self.dp_rank_in_node, self._KV_LEN_INDEX] = [
                 req.cur_kv_len for req in reqs
@@ -54,9 +57,7 @@ class DPKVSharedMoudle:
         """
         构建共享kv交换信息
         """
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
-        self.backend.node_nccl_group.barrier()
+        dist.barrier(group=self.backend.node_nccl_group)
 
         trans_tasks: List[TransTask] = []
         rank_max_radix_cache_lens = np.max(
@@ -96,7 +97,6 @@ class DPKVSharedMoudle:
     def kv_trans(self, trans_tasks: List["TransTask"]):
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        self.backend.node_nccl_group.barrier()
         # kv 传输
         if len(trans_tasks) > 0:
             max_kv_len_mem_indexes = []
@@ -104,14 +104,13 @@ class DPKVSharedMoudle:
             mem_indexes = []
 
             for i, trans_task in enumerate(trans_tasks):
-                max_kv_len_mem_indexes.extend(trans_task.max_kv_len_mem_indexes)
+                max_kv_len_mem_indexes.append(trans_task.max_kv_len_mem_indexes)
                 max_kv_len_dp_ranks.extend([trans_task.max_kv_len_dp_rank] * len(trans_task.max_kv_len_mem_indexes))
-                mem_indexes.extend(trans_task.mem_indexes)
+                mem_indexes.append(trans_task.mem_indexes)
 
-            max_kv_len_mem_indexes_tensor = torch.tensor(max_kv_len_mem_indexes, dtype=torch.int64, device="cuda")
+            max_kv_len_mem_indexes_tensor = torch.cat(max_kv_len_mem_indexes).to(dtype=torch.int64, device="cuda")
             max_kv_len_dp_ranks_tensor = torch.tensor(max_kv_len_dp_ranks, dtype=torch.int32, device="cuda")
-            mem_indexes_tensor = torch.tensor(mem_indexes, dtype=torch.int64, device="cuda")
-
+            mem_indexes_tensor = torch.cat(mem_indexes).to(dtype=torch.int64, device="cuda")
             self.backend.model.mem_manager.copy_kv_from_other_dp_ranks(
                 mem_managers=self.backend.mem_managers,
                 move_token_indexes=max_kv_len_mem_indexes_tensor,
@@ -122,7 +121,6 @@ class DPKVSharedMoudle:
             )
             self.backend.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {len(mem_indexes_tensor)}")
 
-        self.backend.node_nccl_group.barrier()
         for trans_task in trans_tasks:
             g_infer_context.req_manager.req_to_token_indexs[
                 trans_task.req.req_idx,
@@ -131,7 +129,6 @@ class DPKVSharedMoudle:
             trans_task.req.cur_kv_len += len(trans_task.mem_indexes)
             if self.backend.is_master_in_dp:
                 trans_task.req.shm_req.shm_cur_kv_len = trans_task.req.cur_kv_len
-        self.backend.node_nccl_group.barrier()
 
 
 @dataclasses.dataclass
@@ -141,24 +138,3 @@ class TransTask:
     max_kv_len_dp_rank: int
     max_kv_len_mem_manager_index: int
     max_kv_len_mem_indexes: torch.Tensor
-
-
-def init_dp_kv_shared(backend):
-    torch.cuda.set_device(get_current_device_id())
-
-    backend.dp_kv_shared_moudle = DPKVSharedMoudle(
-        max_req_num=backend.args.running_max_req_size,
-        max_req_seq_len=backend.args.max_req_total_len + 8,
-        dp_size_in_node=backend.dp_size_in_node,
-        backend=backend,
-    )
-    backend.node_nccl_group.barrier()
-
-    # Collect mem_managers from all ranks
-    backend.mem_managers = []
-    for rank_idx in range(backend.node_world_size):
-        if rank_idx != backend.rank_in_node:
-            backend.mem_managers.append(MemoryManager.loads_from_shm(rank_idx, backend.rank_in_node))
-        else:
-            backend.mem_managers.append(backend.model.mem_manager)
-    return

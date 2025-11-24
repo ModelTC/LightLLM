@@ -79,9 +79,9 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         infer_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         req_dp_ranks = [req[3] for req in reqs]
-        self.dp_kv_shared_moudle.fill_reqs_info(reqs=infer_reqs)
-        trans_taskes = self.dp_kv_shared_moudle.build_shared_kv_trans_tasks(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
-        self.dp_kv_shared_moudle.kv_trans(trans_tasks=trans_taskes)
+        self.dp_kv_shared_module.fill_reqs_info(reqs=infer_reqs)
+        trans_taskes = self.dp_kv_shared_module.build_shared_kv_trans_tasks(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
+        self.dp_kv_shared_module.kv_trans(trans_tasks=trans_taskes)
 
         g_infer_context._filter(finished_request_ids=[req[0] for req in other_dp_reqs])
         g_infer_state_lock.release()
