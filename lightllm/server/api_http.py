@@ -49,6 +49,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.error_utils import ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.server.io_struct import ReleaseMemoryReq, ResumeMemoryReq
 from dataclasses import dataclass
 
 from .api_openai import chat_completions_impl, completions_impl
@@ -379,6 +380,20 @@ async def pause_generation():
 async def continue_generation():
     await g_objs.httpserver_manager.continue_generation()
     return Response(content="Generation continued successfully.", status_code=200)
+
+
+@app.get("/release_memory_occupation")
+@app.post("/release_memory_occupation")
+async def release_memory_occupation(request: ReleaseMemoryReq):
+    await g_objs.httpserver_manager.release_memory_occupation(request)
+    return Response(content="Memory occupation released successfully.", status_code=200)
+
+
+@app.get("/resume_memory_occupation")
+@app.post("/resume_memory_occupation")
+async def resume_memory_occupation(request: ResumeMemoryReq):
+    await g_objs.httpserver_manager.resume_memory_occupation(request)
+    return Response(content="Memory occupation resumed successfully.", status_code=200)
 
 
 @app.websocket("/pd_register")

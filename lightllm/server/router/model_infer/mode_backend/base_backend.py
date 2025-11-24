@@ -40,6 +40,7 @@ from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
+from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.server.io_struct import (
     InitWeightsUpdateGroupReq,
@@ -437,6 +438,17 @@ class ModeBackend:
             self.logger.error(message)
 
             return False, message
+
+    def release_memory_occupation(self, tags: List[MemoryTag]):
+        self.model.release_memory_occupation(tags)
+        self.flush_radix_cache()
+        self.model.req_manager.free_all()
+        self.model.mem_manager.free_all()
+        return
+
+    def resume_memory_occupation(self, tags: List[MemoryTag]):
+        self.model.resume_memory_occupation(tags)
+        return
 
     def _async_copy_next_token_infos_to_pin_mem(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
         """

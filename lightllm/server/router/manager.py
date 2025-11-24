@@ -36,11 +36,16 @@ from lightllm.server.io_struct import (
     FlushCacheReq,
     FlushCacheResp,
     GeneralHttpToModelRpcReq,
-    GeneralModelToHttpRpcRsp
+    GeneralModelToHttpRpcRsp,
+    ReleaseMemoryReq,
+    ReleaseMemoryResp,
+    ResumeMemoryReq,
+    ResumeMemoryResp,
 )
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.torch_memory_saver_utils import MemoryTag
 
 logger = init_logger(__name__)
 
@@ -552,6 +557,12 @@ class RouterManager:
                     self._add_req(recv_req)
                 elif isinstance(recv_req, (FlushCacheReq, GeneralHttpToModelRpcReq)):
                     special_reqs.append(recv_req)
+                elif isinstance(recv_req, ReleaseMemoryReq):
+                    special_reqs.append(recv_req)
+                elif isinstance(recv_req, ResumeMemoryReq):
+                    special_reqs.append(recv_req)
+                else:
+                    raise ValueError(f"Unknown request type: {type(recv_req)}")
 
             # 当队列中存在较多的请求时，将一次接受的数量上调
             self.recv_max_count = min(int(self.recv_max_count * 1.3), 256)
@@ -577,6 +588,11 @@ class RouterManager:
                 self.flush_cache()
             elif isinstance(req, (GeneralHttpToModelRpcReq)):
                 self.forward_to_model(req)
+            elif isinstance(req, ReleaseMemoryReq):
+                self.release_memory_occupation(req.tags)
+            elif isinstance(req, ResumeMemoryReq):
+                self.resume_memory_occupation(req.tags)
+        return
 
     def broadcast_reqs_to_other_nodes(self, reqs: List[BaseReq]):
         req_num = len(reqs)
@@ -625,6 +641,22 @@ class RouterManager:
 
         if self.node_rank == 0:
             self.send_to_detokenization.send_pyobj(ret, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def release_memory_occupation(self, tags: List[MemoryTag]):
+        success = self.model_rpc_client.release_memory_occupation(tags)
+        if self.is_multinode_tp:
+            dist.barrier(group=self.mulitnode_group)
+        if self.node_rank == 0:
+            self.send_to_detokenization.send_pyobj(ReleaseMemoryResp(success=success), protocol=pickle.HIGHEST_PROTOCOL)
+        return
+
+    def resume_memory_occupation(self, tags: List[MemoryTag]):
+        success = self.model_rpc_client.resume_memory_occupation(tags)
+        if self.is_multinode_tp:
+            dist.barrier(group=self.mulitnode_group)
+        if self.node_rank == 0:
+            self.send_to_detokenization.send_pyobj(ResumeMemoryResp(success=success), protocol=pickle.HIGHEST_PROTOCOL)
+        return
 
     def clean_up(self):
         return

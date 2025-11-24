@@ -34,6 +34,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.io_struct import GeneralHttpToModelRpcReq, GeneralModelToHttpRpcRsp
+from lightllm.utils.torch_memory_saver_utils import MemoryTag
 
 logger = init_logger(__name__)
 
@@ -201,6 +202,22 @@ class ModelRpcServer:
             logger.exception(f"forward to model backend failed: {str(e)}")
             return GeneralModelToHttpRpcRsp(success=False, msg=f'forward to model backend failed: {str(e)}', func_name=req.func_name)
 
+    def release_memory_occupation(self, tags: List[MemoryTag]):
+        try:
+            self.backend.release_memory_occupation(tags)
+            return True
+        except BaseException as e:
+            logger.exception(f"release memory occupation failed: {str(e)}")
+            return False
+
+    def resume_memory_occupation(self, tags: List[MemoryTag]):
+        try:
+            self.backend.resume_memory_occupation(tags)
+            return True
+        except BaseException as e:
+            logger.exception(f"resume memory occupation failed: {str(e)}")
+            return False
+
 
 class ModelRpcClient:
     def __init__(self, rpc_event, rpc_finished_event):
@@ -249,6 +266,26 @@ class ModelRpcClient:
         self.rpc_finished_event.clear()
         func_name, ret = self.rpc_shm_results.read_func_result()
         assert func_name == "forward_to_model"
+        return ret
+
+    def release_memory_occupation(self, tags: List[MemoryTag]):
+        self.rpc_shm_params.write_func_params("release_memory_occupation", (tags,))
+        self.rpc_event.set()
+
+        self.rpc_finished_event.wait()
+        self.rpc_finished_event.clear()
+        func_name, ret = self.rpc_shm_results.read_func_result()
+        assert func_name == "release_memory_occupation"
+        return ret
+
+    def resume_memory_occupation(self, tags: List[MemoryTag]):
+        self.rpc_shm_params.write_func_params("resume_memory_occupation", (tags,))
+        self.rpc_event.set()
+
+        self.rpc_finished_event.wait()
+        self.rpc_finished_event.clear()
+        func_name, ret = self.rpc_shm_results.read_func_result()
+        assert func_name == "resume_memory_occupation"
         return ret
 
 def _init_env(
@@ -313,7 +350,11 @@ async def start_model_process(
             success_event,
         ),
     )
-    proc.start()
+    from lightllm.utils.torch_memory_saver_utils import TorchMemorySaverWrapper
+
+    torch_memory_saver = TorchMemorySaverWrapper(args.enable_torch_memory_saver)
+    with torch_memory_saver.configure_subprocess():
+        proc.start()
 
     # Use asyncio.to_thread to make the blocking wait non-blocking
     await asyncio.to_thread(success_event.wait, timeout=40)

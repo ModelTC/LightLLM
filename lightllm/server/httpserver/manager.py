@@ -14,7 +14,7 @@ import inspect
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Union, List, Tuple, Dict, Optional
+from typing import Union, List, Tuple, Dict, Optional, Literal
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
@@ -49,13 +49,17 @@ from lightllm.server.io_struct import (
     UpdateWeightsFromTensorReq,
     UpdateWeightsFromTensorRsp,
     GeneralHttpToModelRpcReq,
-    GeneralModelToHttpRpcRsp
-
+    GeneralModelToHttpRpcRsp,
+    ReleaseMemoryReq,
+    ReleaseMemoryResp,
+    ResumeMemoryReq,
+    ResumeMemoryResp,
 )
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
+from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -141,6 +145,8 @@ class HttpServerManager:
         # 交互式请求 event
         self.flush_cache_event: Optional[asyncio.Event] = None
         self.async_events_per_func: Dict[str, asyncio.Event] = {}
+        self.release_memory_event: Optional[asyncio.Event] = None
+        self.resume_memory_event: Optional[asyncio.Event] = None
         return
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
@@ -772,6 +778,10 @@ class HttpServerManager:
                     await self._handle_recv_flush_cache_request(recv_obj)
                 elif isinstance(recv_obj, GeneralModelToHttpRpcRsp):
                     await self._handle_recv_general_model_to_http_request(recv_obj)
+                elif isinstance(recv_obj, ReleaseMemoryResp):
+                    await self._handle_recv_release_memory_request(recv_obj)
+                elif isinstance(recv_obj, ResumeMemoryResp):
+                    await self._handle_recv_resume_memory_request(recv_obj)
 
             except BaseException as e:
                 logger.exception(str(e))
@@ -846,6 +856,17 @@ class HttpServerManager:
         event = await self.get_event_for_func(recv_obj.func_name)
         event.result = recv_obj
         event.set()
+
+    async def _handle_recv_release_memory_request(self, recv_obj: ReleaseMemoryResp):
+        assert self.release_memory_event is not None
+        self.release_memory_event.success = recv_obj.success
+        self.release_memory_event.set()
+        return
+
+    async def _handle_recv_resume_memory_request(self, recv_obj: ResumeMemoryResp):
+        assert self.resume_memory_event is not None
+        self.resume_memory_event.success = recv_obj.success
+        self.resume_memory_event.set()
         return
 
     async def flush_cache(self):
@@ -864,6 +885,8 @@ class HttpServerManager:
     async def pause_generation(self):
         # 因为请求是从master node转发到slave node的
         # 所以只要master暂停了，slave自然暂停。
+        if self.is_pause:
+            return
         async with self.is_pause_cond:
             self.is_pause = True
             while True:
@@ -928,6 +951,37 @@ class HttpServerManager:
         return await self.http_to_model_special_request(
             GeneralHttpToModelRpcReq(func_name="update_weights_from_tensor", func_args=request)
         )
+
+    async def release_memory_occupation(self, request: ReleaseMemoryReq):
+        assert len(self.req_id_to_out_inf) == 0, "there are still requests running, cannot release memory occupation"
+        # 暂停接受请求，除非resume
+        await self.pause_generation()
+        if self.release_memory_event is None:
+            self.release_memory_event = asyncio.Event()
+        await self.transfer_to_next_module(ReleaseMemoryReq(tags=request.tags))
+        try:
+            await asyncio.wait_for(self.release_memory_event.wait(), timeout=60)
+            ret = self.release_memory_event.success
+        except asyncio.TimeoutError:
+            # 超时直接返回失败
+            ret = False
+        self.release_memory_event.clear()
+        return ret
+
+    async def resume_memory_occupation(self, request: ResumeMemoryReq):
+        if self.resume_memory_event is None:
+            self.resume_memory_event = asyncio.Event()
+        await self.transfer_to_next_module(ResumeMemoryReq(tags=request.tags))
+        try:
+            await asyncio.wait_for(self.resume_memory_event.wait(), timeout=60)
+            ret = self.resume_memory_event.success
+        except asyncio.TimeoutError:
+            # 超时直接返回失败
+            ret = False
+        self.resume_memory_event.clear()
+        if ret:
+            await self.continue_generation()
+        return ret
 
 
 class ReqStatus:
