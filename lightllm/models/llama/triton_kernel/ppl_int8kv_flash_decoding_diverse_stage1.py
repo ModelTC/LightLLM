@@ -77,7 +77,7 @@ def _fwd_kernel_flash_decode_stage1(
 
     offs_n = cur_batch_start_index + tl.arange(0, BLOCK_N)
     Q_BATCH_HEAD_NUM: tl.constexpr = BLOCK_BATCH * BLOCK_HEAD
-    q = tl.load(Q + off_q, other=0.0).view(Q_BATCH_HEAD_NUM, BLOCK_HEADDIM)
+    q = tl.load(Q + off_q).reshape(Q_BATCH_HEAD_NUM, BLOCK_HEADDIM)
 
     sum_exp = tl.zeros([Q_BATCH_HEAD_NUM], dtype=tl.float32)
     max_logic = tl.zeros([Q_BATCH_HEAD_NUM], dtype=tl.float32) - float("inf")
@@ -88,7 +88,7 @@ def _fwd_kernel_flash_decode_stage1(
         n_mask = offs_n_new < cur_batch_end_index
         k_loc = tl.load(
             Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n_new,
-            mask=offs_n_new < cur_batch_end_index,
+            mask=n_mask,
             other=0,
         ).to(tl.int64)
         off_k = k_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None]
@@ -96,9 +96,9 @@ def _fwd_kernel_flash_decode_stage1(
         k = tl.load(K + off_k, mask=n_mask[None, :], other=0)
         k_scale = tl.load(K_scale + off_k_scale, mask=n_mask[None, :], other=0.0)
         k = k * k_scale
-        att_value = tl.dot(q, k)
+        att_value = tl.dot(q, k.to(q.dtype))
         att_value *= sm_scale
-        att_value = tl.where(offs_n_new[None, :] < cur_batch_end_index, att_value, -1000000000.0)
+        att_value = tl.where(n_mask[None, :], att_value, float("-inf"))
         v = tl.load(
             V + off_k.T,
             mask=n_mask[:, None],
@@ -117,7 +117,7 @@ def _fwd_kernel_flash_decode_stage1(
         exp_logic = tl.exp(att_value - new_max_logic[:, None])
         logic_scale = tl.exp(max_logic - new_max_logic)
         acc *= logic_scale[:, None]
-        acc += tl.dot(exp_logic.to(v.dtype), v)
+        acc += tl.dot(exp_logic.to(q.dtype), v.to(q.dtype))
 
         sum_exp = sum_exp * logic_scale + tl.sum(exp_logic, axis=1)
         max_logic = new_max_logic
@@ -135,11 +135,11 @@ def _fwd_kernel_flash_decode_stage1(
         )
         tl.store(
             Mid_O + off_mid_o,
-            (acc / sum_exp[:, None]).view(BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM),
+            (acc / sum_exp[:, None]).reshape(BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM),
         )
         tl.store(
             Mid_O_LogExpSum + off_mid_o_logexpsum,
-            (max_logic + tl.log(sum_exp)).view(BLOCK_BATCH, BLOCK_HEAD),
+            (max_logic + tl.log(sum_exp)).reshape(BLOCK_BATCH, BLOCK_HEAD),
         )
     return
 
@@ -169,6 +169,7 @@ def flash_decode_stage1(
     b_mark_shared_group 中每一个不为0的位置都代表其与前面多少个请求形成一个共享前缀组。属于
     同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。
     """
+    assert q.dim() == 3 and k.dim() == 3 and v.dim() == 3
     BLOCK_SEQ = block_seq
     BLOCK_N = 16
     assert BLOCK_SEQ % BLOCK_N == 0
@@ -182,6 +183,7 @@ def flash_decode_stage1(
     gqa_group_size = q.shape[1] // k.shape[1]
     assert triton.next_power_of_2(Lk) == Lk
     KV_QUANT_GROUP_SIZE = v.shape[-1] // v_scale.shape[-1]
+    assert KV_QUANT_GROUP_SIZE == 8
     BLOCK_HEAD = triton.next_power_of_2(gqa_group_size)
     BLOCK_BATCH = triton.next_power_of_2(max_batch_group_size)
     if BLOCK_HEAD * BLOCK_BATCH < 16:
@@ -198,7 +200,7 @@ def flash_decode_stage1(
         stride_kh=k.stride(1),
         stride_kd=k.stride(2),
         V=v,
-        V_scale=v,
+        V_scale=v_scale,
         stride_vbs=v.stride(0),
         stride_vh=v.stride(1),
         stride_vd=v.stride(2),
