@@ -21,40 +21,33 @@ def rotary_kernel(
     HALF_D: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    # program_id(0) : seq idx)
-    # program_id(1) : head idx)
-    # program_id(2) : 块化的 d 维
     pid_l = tl.program_id(0).to(tl.int64)
     pid_h = tl.program_id(1).to(tl.int64)
     pid_blk = tl.program_id(2).to(tl.int64)
 
-    # 当前 block 处理的 d 下标
     offs_d = tl.arange(0, BLOCK_D)
     d = pid_blk * BLOCK_D + offs_d
     mask = d < D
 
-    # base 是 (l, h, 0) 的起始地址
     base = pid_l * stride_l + pid_h * stride_h
 
-    # ---- load x / cos / sin ----
     in_ptr = inp_ptr + base + d * stride_d
 
-    cos_ptr_ = cos_ptr + pid_l * stride_cos_l + d * stride_cos_d
-    sin_ptr_ = sin_ptr + pid_l * stride_sin_l + d * stride_sin_d
+    cos_ptr_ = cos_ptr + pid_l * stride_cos_l + d
+    sin_ptr_ = sin_ptr + pid_l * stride_sin_l + d
 
-    x = tl.load(in_ptr, mask=mask, other=0.0)
-    cos = tl.load(cos_ptr_, mask=mask, other=0.0)
-    sin = tl.load(sin_ptr_, mask=mask, other=0.0)
+    x = tl.load(in_ptr, mask=mask)
+    cos = tl.load(cos_ptr_, mask=mask)
+    sin = tl.load(sin_ptr_, mask=mask)
 
-    # ---- rotary partner (偶/奇半维互换) ----
     partner_d = tl.where(d < HALF_D, d + HALF_D, d - HALF_D)
     partner_ptr = inp_ptr + base + partner_d * stride_d
-    partner_val = tl.load(partner_ptr, mask=mask, other=0.0)
+    partner_val = tl.load(partner_ptr, mask=mask)
     rotated = tl.where(d < HALF_D, -partner_val, partner_val)
 
     y = x * cos + rotated * sin
 
-    out_ptr_ = out_ptr + base + d * stride_d
+    out_ptr_ = out_ptr + base + d
     tl.store(out_ptr_, y, mask=mask)
 
 
@@ -67,9 +60,8 @@ def apply_rotary_pos_emb_triton(
         raise RuntimeError("tensor shape should be [L, H, D]")
 
     orig_dtype = tensor.dtype
-    x = tensor.float()  # [L, H, D]
+    x = tensor.float()
 
-    # cos/sin: [L, D/2] -> [L, D]
     cos = cos.repeat(1, 2).view(cos.size(0), -1).contiguous().float()
     sin = sin.repeat(1, 2).view(sin.size(0), -1).contiguous().float()
 
