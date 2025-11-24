@@ -122,12 +122,14 @@ def test_decode_attentions(
 
     graph.replay()
 
-    torch.cuda.synchronize()
-    start = time.time()
-    # graph.replay()
-    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    graph.replay()
+    end_event.record()
+    end_event.synchronize()
 
-    cost_time = (time.time() - start) * 1000
+    cost_time = start_event.elapsed_time(end_event=end_event)
 
     logger.info(f"fp16 {test_seq_len} cost time: {cost_time} ms")
     return cost_time

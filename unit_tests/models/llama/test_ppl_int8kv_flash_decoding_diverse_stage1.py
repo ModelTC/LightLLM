@@ -15,7 +15,7 @@ def setup_tensors():
     max_batch_group_size = 4
     quant_group_size = 8
 
-    test_dtype = torch.float32
+    test_dtype = torch.bfloat16
 
     kv_shape = (batch_size * seq_len, kv_head_num, head_dim)
     kv_scale_shape = (batch_size * seq_len, kv_head_num, head_dim // quant_group_size)
