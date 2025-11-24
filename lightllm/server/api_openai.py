@@ -614,6 +614,7 @@ async def _collect_generation_results(
                 "text": request_output,
                 "logprob": metadata.get("logprob", None),
                 "id": metadata.get("id", None),
+                "top_logprobs": metadata.get("top_logprobs", None),
             }
             token_infos.append(token_info)
 
@@ -693,16 +694,30 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
     all_tokens = []
     all_token_logprobs = []
     all_text_offsets = []
+    all_top_logprobs = []
     offset = 0
 
     def add_tokens_to_logprobs(token_ids=None, token_infos=None, logprob_map=None):
         nonlocal offset
 
-        def add_single_token(token_text: str, logprob: float):
+        def add_single_token(token_text: str, logprob: float, top_logprobs: List[Dict[int, float]] = None):
             nonlocal offset
             all_tokens.append(token_text)
             all_token_logprobs.append(logprob)
             all_text_offsets.append(offset)
+            if top_logprobs is not None:
+                formatted_top_logprobs = {}
+                for item in top_logprobs:
+                    for t_id, t_prob in item.items():
+                        t_text = tokenizer.decode([t_id], skip_special_tokens=False)
+                        formatted_top_logprobs[t_text] = t_prob
+                all_top_logprobs.append(formatted_top_logprobs)
+            else:
+                if logprob is not None:
+                    all_top_logprobs.append({token_text: logprob})
+                else:
+                    all_top_logprobs.append(None)
+
             offset += len(token_text)
 
         if token_ids is not None:
@@ -712,7 +727,7 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
                 add_single_token(token_text, logprob)
         elif token_infos is not None:
             for token_info in token_infos:
-                add_single_token(token_info["text"], token_info["logprob"])
+                add_single_token(token_info["text"], token_info["logprob"], token_info.get("top_logprobs", None))
 
     # 处理 echo 模式下的 prompt tokens
     if request.echo and result.get("prompt_logprobs") is not None:
@@ -743,18 +758,9 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
     if result.get("token_infos"):
         add_tokens_to_logprobs(token_infos=result["token_infos"])
 
-    top_logprobs_list = []
-    for i, (token, logprob) in enumerate(zip(all_tokens, all_token_logprobs)):
-        if logprob is not None:
-            # TODO: 标准实现需要从后端获取top-k个logprobs数据
-            # 目前后端不支持，只能获取所选token的logprobs
-            top_logprobs_list.append({token: logprob})
-        else:
-            top_logprobs_list.append(None)
-
     return {
         "tokens": all_tokens,
         "token_logprobs": all_token_logprobs,
-        "top_logprobs": top_logprobs_list,
+        "top_logprobs": all_top_logprobs,
         "text_offset": all_text_offsets,
     }

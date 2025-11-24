@@ -10,6 +10,7 @@ from typing import List, Dict, Tuple, Optional, Callable, Any
 from lightllm.common.req_manager import ReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
+from lightllm.server.core.objs.req import MAX_TOP_K_LOGPROBS
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
@@ -361,6 +362,7 @@ class InferReq:
         self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
         self.shm_req.link_prompt_ids_shm_array()
         self.shm_req.link_logprobs_shm_array()
+        self.shm_req.link_top_logprobs_shm_array()
         self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
 
         # 更新 nixl pd 分离模式下， prefill 节点需要开始传输的起始位置
@@ -453,10 +455,26 @@ class InferReq:
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
         return chunked_end
 
-    def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
+    def set_next_gen_token_id(
+        self,
+        next_token_id: int,
+        logprob: float,
+        output_len: int,
+        top_k_ids: List[int] = None,
+        top_k_logprobs: List[float] = None,
+    ):
         index = self.shm_req.input_len + output_len
         self.shm_req.shm_prompt_ids.arr[index - 1] = next_token_id
         self.shm_req.shm_logprobs.arr[index - 1] = logprob
+
+        if top_k_ids is not None and top_k_logprobs is not None:
+            k = min(len(top_k_ids), MAX_TOP_K_LOGPROBS)
+            self.shm_req.shm_top_logprobs_ids.arr[index - 1, :k] = top_k_ids[:k]
+            self.shm_req.shm_top_logprobs_val.arr[index - 1, :k] = top_k_logprobs[:k]
+            # Zero out the rest if any
+            if k < MAX_TOP_K_LOGPROBS:
+                self.shm_req.shm_top_logprobs_ids.arr[index - 1, k:] = 0
+                self.shm_req.shm_top_logprobs_val.arr[index - 1, k:] = -float("inf")
         return
 
     def update_mtp_accepted_token_num(self, accept_token_num: int):
@@ -528,6 +546,8 @@ class InferReqUpdatePack:
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
         is_master_in_dp: bool,
         nixl_prefill_chuncked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
+        top_k_ids: List[int] = None,
+        top_k_logprobs: List[float] = None,
     ):
         # nixl_prefill_chuncked_handle_func 主要是为了处理 nixl prefill 模式下
         # 分块 prefill 后，形成对应的pd 分块传输处理。
@@ -540,7 +560,7 @@ class InferReqUpdatePack:
         req_obj = self.req_obj
         shm_req = req_obj.shm_req
         finish_status = req_obj.finish_status
-        req_obj.set_next_gen_token_id(next_token_id, next_token_logprob, self.output_len)
+        req_obj.set_next_gen_token_id(next_token_id, next_token_logprob, self.output_len, top_k_ids, top_k_logprobs)
 
         # 这里提前判定的主要作用是：
         # 在 mtp mode 下，可以存在同一个 req 对象的多次处理，
