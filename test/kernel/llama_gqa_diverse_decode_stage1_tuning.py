@@ -308,7 +308,7 @@ if __name__ == "__main__":
                 yield batch_size, seq_len
 
     for q_head_dim in [128]:
-        for gqa_group_size in [4, 5, 8, 16]:
+        for gqa_group_size in [2, 4, 5, 8, 16]:
             store_json_ans = collections.defaultdict(dict)
             for batch_size, seq_len in config_iter():
                 ans = mp_tuning(
