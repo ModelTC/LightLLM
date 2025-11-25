@@ -5,8 +5,8 @@ from lightllm.utils.light_utils import light_ops
 
 def create_tensors(shared_seq_len):
     batch_size = 4
-    num_heads = 4
-    kv_head_num = 1
+    num_heads = 32
+    kv_head_num = 8
     seq_len = 256
     head_dim = 128
     max_len_in_batch = seq_len
@@ -113,6 +113,14 @@ def test_flash_decode_stage2_execution(shared_seq_len):
     print(f"\nshared_seq_len={shared_seq_len}")
     print(f"mid_out: {mid_out[0:4, 0, 0, 0]}")
     print(f"true_mid_out: {true_mid_out[0:4, 0, 0, 0]}")
+    abs_diff = (mid_out - true_mid_out).abs()
+    max_diff = abs_diff.max()
+    max_diff_idx = abs_diff.argmax()
+    max_diff_idx_unraveled = torch.unravel_index(max_diff_idx, abs_diff.shape)
+    mid_out_value = mid_out[max_diff_idx_unraveled]
+    true_mid_out_value = true_mid_out[max_diff_idx_unraveled]
+    print(f"max abs diff: {max_diff}, mid_out value: {mid_out_value}, " f"true_mid_out value: {true_mid_out_value}")
+
     assert torch.allclose(
         mid_out[0:4, 0, 0, 0], true_mid_out[0:4, 0, 0, 0], atol=1e-2
     ), f"Mid output does not match expected values for shared_seq_len={shared_seq_len}"
