@@ -110,7 +110,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             self._context_attention_kernel = partial(
                 LlamaTransformerLayerInfer._context_attention_kernel_ppl_int8kv, self
             )
-        elif "ppl_int8kv_flashdecoding" in self.mode:
+        elif "ppl_int8kv_flashdecoding_diverse" in self.mode:
             self._token_attention_kernel = partial(
                 LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv_flashdecoding_diverse, self
             )
@@ -118,7 +118,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             self._context_attention_kernel = partial(
                 LlamaTransformerLayerInfer._context_attention_kernel_ppl_int8kv, self
             )
-        elif "ppl_int8kv_flashdecoding_diverse" in self.mode:
+        elif "ppl_int8kv_flashdecoding" in self.mode:
             self._token_attention_kernel = partial(
                 LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv_flashdecoding, self
             )
