@@ -37,7 +37,8 @@ class MockInferState:
         self.b_mark_shared_group = b_mark_shared_group
 
 
-@pytest.mark.parametrize("shared_seq_len", [32])
+# @pytest.mark.parametrize("shared_seq_len", [512])
+@pytest.mark.parametrize("shared_seq_len", [0, 77, 256, 311, 512, 550])
 def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_len):
     """
     测试 ppl_int8kv_flash_decoding_diverse 的 token_decode_attention_flash_decoding
@@ -50,10 +51,11 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
         token_decode_attention_flash_decoding as baseline_attention,
     )
 
-    batch_size = 4
+    batch_size = 6
     num_heads = 32
     kv_head_num = 8
-    seq_len = 256
+    mark_shared_group_size = 3
+    seq_len = 1024
     head_dim = 128
     quant_group_size = 8
     test_dtype = torch.bfloat16
@@ -63,16 +65,24 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
     kv_scale_shape = (batch_size * seq_len, kv_head_num, head_dim // quant_group_size)
 
     q = torch.randn(size=(batch_size, num_heads, head_dim), dtype=test_dtype, device="cuda")
+
+    # 生成 cache_k 和 cache_v，使得每 mark_shared_group_size 个 batch 共享相同的 cache
+
     cache_k = torch.randint(low=-100, high=100, size=kv_shape, dtype=torch.int8, device="cuda")
-    cache_k_scale = torch.ones(size=kv_scale_shape, dtype=test_dtype, device="cuda")
+    cache_k_scale = torch.ones(size=kv_scale_shape, dtype=test_dtype, device="cuda") / 100.0
     cache_v = torch.randint(low=-100, high=100, size=kv_shape, dtype=torch.int8, device="cuda")
-    cache_v_scale = torch.ones(size=kv_scale_shape, dtype=test_dtype, device="cuda")
+    cache_v_scale = torch.ones(size=kv_scale_shape, dtype=test_dtype, device="cuda") / 100.0
 
     req_to_tokens = torch.arange(0, seq_len * batch_size, dtype=torch.int32, device="cuda").view(batch_size, seq_len)
+    for i in range(batch_size):
+        if i % mark_shared_group_size != 0:
+            req_to_tokens[i, :shared_seq_len] = req_to_tokens[i - 1, :shared_seq_len]
+
     b_req_idx = torch.arange(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
     b_shared_seq_len = torch.full((batch_size,), shared_seq_len, dtype=torch.int32, device="cuda")
-    b_mark_shared_group = torch.ones(batch_size, dtype=torch.int32, device="cuda")
+    b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
+    b_mark_shared_group[mark_shared_group_size - 1 :: mark_shared_group_size] = mark_shared_group_size
 
     # 创建 baseline 的 infer_state (不需要 b_shared_seq_len)
     baseline_infer_state = MockInferState(
@@ -106,7 +116,6 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
         cache_v_scale=cache_v_scale,
         alloc_tensor_func=alloc_tensor_func,
     )
-
     # 运行 diverse 版本
     diverse_out = diverse_attention(
         q=q.clone(),

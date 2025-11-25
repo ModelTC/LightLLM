@@ -56,16 +56,15 @@ def token_decode_attention_flash_decoding(
             B_req_idx=infer_state.b_req_idx,
             b_shared_seq_len=infer_state.b_shared_seq_len,
             b_mark_shared_group=infer_state.b_mark_shared_group,
-            b_seq_len=infer_state.b_seq_len,
             max_len_in_batch=infer_state.max_len_in_batch,
             mid_out=mid_o,
             mid_out_logsumexp=mid_o_logexpsum,
-            BLOCK_SEQ=BLOCK_SEQ,
+            block_seq=BLOCK_SEQ,
             max_batch_group_size=get_diverse_max_batch_shared_group_size(),
         )
     stream2.wait_stream(current_stream)
     with torch.cuda.stream(stream2):
-        light_ops.group8_int8kv_flashdecoding_stage1(
+        light_ops.group8_int8kv_flashdecoding_diverse_stage2(
             BLOCK_SEQ,
             mid_o,
             mid_o_logexpsum,
@@ -78,6 +77,7 @@ def token_decode_attention_flash_decoding(
             infer_state.req_manager.req_to_token_indexs,
             infer_state.b_req_idx,
             infer_state.b_seq_len,
+            infer_state.b_shared_seq_len,
             infer_state.max_len_in_batch,
         )
 
