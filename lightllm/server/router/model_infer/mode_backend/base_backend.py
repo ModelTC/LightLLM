@@ -33,6 +33,7 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.utils.serializer import LocalSerializedTensor, MultiprocessingSerializer
 from lightllm.utils.patch_torch import monkey_patch_torch_reductions
+from lightllm.utils.tensor_bucket import FlattenedTensorBucket, FlattenedTensorMetadata
 from lightllm.distributed import dist_group_manager
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
@@ -398,6 +399,38 @@ class ModeBackend:
             self.logger.error(error_msg)
             return False, error_msg
 
+    def _update_weights_from_flattened_bucket(
+        self,
+        flattened_tensor_bucket_dict,
+    ):
+        """Handle flattened bucket format for weight updates"""
+        flattened_tensor = flattened_tensor_bucket_dict["flattened_tensor"]
+        metadata = flattened_tensor_bucket_dict["metadata"]
+
+        # Convert metadata dict to our format
+        converted_metadata = []
+        for meta in metadata:
+            converted_meta = FlattenedTensorMetadata(
+                name=meta.name,
+                shape=meta.shape,
+                dtype=meta.dtype,
+                start_idx=meta.start_idx,
+                end_idx=meta.end_idx,
+                numel=meta.numel,
+            )
+            converted_metadata.append(converted_meta)
+
+        # Create bucket and reconstruct tensors
+        bucket = FlattenedTensorBucket(
+            flattened_tensor=flattened_tensor, metadata=converted_metadata
+        )
+        reconstructed_tensors = bucket.reconstruct_tensors()
+
+        # Load the reconstructed tensors using the standard method
+        self.model.load_weights(reconstructed_tensors)
+
+        return True, "Succeeded to update parameter online from flattened bucket tensor."
+
     def update_weights_from_tensor(
         self,
         request: UpdateWeightsFromTensorReq
@@ -405,11 +438,10 @@ class ModeBackend:
         try:
             monkey_patch_torch_reductions()
             if request.load_format == "flattened_bucket":
-                raise NotImplementedError()
-                # # Handle flattened bucket format
-                # return self._update_weights_from_flattened_bucket(
-                #     flattened_tensor_bucket_dict=named_tensors
-                # )
+                # Handle flattened bucket format
+                return self._update_weights_from_flattened_bucket(
+                    flattened_tensor_bucket_dict=request.named_tensors
+                )
 
             # We need to get device after patch otherwise the device would be wrong
             self.device_module = torch.get_device_module("cuda")
