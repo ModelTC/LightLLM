@@ -1,8 +1,8 @@
 import time
+import uuid
 
 from pydantic import BaseModel, Field, field_validator
-from typing import Dict, List, Optional, Union, Literal
-import uuid
+from typing import Any, Dict, List, Optional, Union, Literal
 
 
 class ImageURL(BaseModel):
@@ -52,6 +52,21 @@ class StreamOptions(BaseModel):
     include_usage: Optional[bool] = False
 
 
+class JsonSchemaResponseFormat(BaseModel):
+    name: str
+    description: Optional[str] = None
+    # schema is the field in openai but that causes conflicts with pydantic so
+    # instead use json_schema with an alias
+    json_schema: Optional[dict[str, Any]] = Field(default=None, alias="schema")
+    strict: Optional[bool] = None
+
+
+class ResponseFormat(BaseModel):
+    # type must be "json_schema", "json_object", or "text"
+    type: Literal["text", "json_object", "json_schema"]
+    json_schema: Optional[JsonSchemaResponseFormat] = None
+
+
 class CompletionRequest(BaseModel):
     model: str
     # prompt: string or tokens
@@ -71,6 +86,14 @@ class CompletionRequest(BaseModel):
     best_of: Optional[int] = 1
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
+    response_format: Optional[ResponseFormat] = Field(
+        default=None,
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", or {'type': 'text' } is supported."
+        ),
+    )
 
     # Additional parameters supported by LightLLM
     do_sample: Optional[bool] = False
@@ -94,7 +117,14 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
-    response_format: Optional[Dict] = None
+    response_format: Optional[ResponseFormat] = Field(
+        default=None,
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", or {'type': 'text' } is supported."
+        ),
+    )
 
     # OpenAI Adaptive parameters for tool call
     tools: Optional[List[Tool]] = Field(default=None, examples=[None])

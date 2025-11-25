@@ -73,7 +73,10 @@ def apply_rotary_pos_emb_triton(
     HALF_D = D // 2
     y = torch.empty_like(x)
 
-    BLOCK_L = 16
+    if L <= 4096:
+        BLOCK_L = 16
+    else:
+        BLOCK_L = 128
     grid = (H, triton.cdiv(L, BLOCK_L), triton.cdiv(D, BLOCK_D))
 
     rotary_kernel[grid](
