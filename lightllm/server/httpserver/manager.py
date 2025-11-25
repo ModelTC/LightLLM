@@ -676,9 +676,9 @@ class HttpServerManager:
                         continue
 
                     logger.info(
-                        f"left req id {req_status.group_req_objs.group_req_id}"
-                        f"can release {req_status.group_req_objs.shm_req_objs[0].can_released_mark} "
-                        f"refcount {req_status.group_req_objs.shm_req_objs[0].ref_count}"
+                        f"left req id: {req_status.group_req_objs.group_req_id}, "
+                        f"can release: {req_status.group_req_objs.shm_req_objs[0].can_released_mark}, "
+                        f"refcount: {req_status.group_req_objs.shm_req_objs[0].ref_count}"
                     )
         return
 
