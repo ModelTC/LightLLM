@@ -1,5 +1,5 @@
 import torch
-from .api_cli import make_argument_parser
+from .api_cli import add_cli_args
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 
@@ -26,7 +26,9 @@ def launch_server(args: StartArgs):
 
 
 if __name__ == "__main__":
-    parser = make_argument_parser()
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+    add_cli_args(parser)
     args = parser.parse_args()
 
     launch_server(StartArgs(**vars(args)))

@@ -165,6 +165,7 @@ class UpdateWeightsFromTensorRsp(BaseRsp):
     pass
 
 
+@dataclass
 class ReleaseMemoryReq(BaseReq):
     tags: Optional[List[MemoryTag]] = None
 
