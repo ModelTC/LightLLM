@@ -150,3 +150,6 @@ class StartArgs:
     enable_weight_cpu_backup: bool = field(default=False)
 
     weight_version: str = "default"
+
+    enable_torch_memory_saver: bool = field(default=False)
+    enable_weight_cpu_backup: bool = field(default=False)

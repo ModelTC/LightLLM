@@ -1,8 +1,7 @@
 import argparse
 
 
-def make_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--run_mode",
