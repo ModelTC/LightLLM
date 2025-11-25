@@ -15,6 +15,8 @@ from .mm_slicer import RowSliceMixin, QuantizedRowSliceMixin, AwqQuantizedRowSli
 class StandardROWMMWeight(MMWeightTpl):
     def __init__(
         self,
+        in_dim: int,
+        out_dims: Optional[Union[int, List[int]]],
         weight_names: Union[str, List[str]],
         data_type: torch.dtype,
         bias_names: Optional[Union[str, List[str]]] = None,
@@ -23,6 +25,8 @@ class StandardROWMMWeight(MMWeightTpl):
         tp_world_size: int = None,
     ) -> None:
         super().__init__(
+            in_dim=in_dim,
+            out_dims=out_dims,
             weight_names=weight_names,
             bias_names=bias_names,
             data_type=data_type,
