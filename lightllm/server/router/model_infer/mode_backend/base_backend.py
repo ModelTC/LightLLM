@@ -4,7 +4,7 @@ import torch
 import time
 import threading
 import torch.distributed as dist
-from typing import List, Tuple, Callable, Optional
+from typing import List, Tuple, Callable, Optional, Union
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
@@ -16,7 +16,7 @@ from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateL
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
-from lightllm.utils.dist_utils import init_distributed_env
+from lightllm.utils.dist_utils import init_distributed_env, init_custom_process_group
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
@@ -31,6 +31,9 @@ from lightllm.utils.envs_utils import (
     enable_radix_tree_timer_merge,
     get_radix_tree_merge_update_delta,
 )
+from lightllm.utils.serializer import LocalSerializedTensor, MultiprocessingSerializer
+from lightllm.utils.patch_torch import monkey_patch_torch_reductions
+from lightllm.utils.tensor_bucket import FlattenedTensorBucket, FlattenedTensorMetadata
 from lightllm.distributed import dist_group_manager
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
@@ -39,6 +42,12 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+from lightllm.server.io_struct import (
+    InitWeightsUpdateGroupReq,
+    DestroyWeightsUpdateGroupReq,
+    UpdateWeightsFromDistributedReq,
+    UpdateWeightsFromTensorReq
+)
 
 
 class ModeBackend:
@@ -111,6 +120,8 @@ class ModeBackend:
             2 if (self.args.enable_decode_microbatch_overlap or self.args.enable_prefill_microbatch_overlap) else 1
         )
         dist_group_manager.create_groups(group_size=group_size)  # set the default group
+
+        self._model_update_group = {}
 
         self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
 
@@ -292,6 +303,172 @@ class ModeBackend:
         if self.radix_cache is not None:
             self.radix_cache.flush_cache()
         return
+
+    def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
+        assert (
+            torch.distributed.is_initialized()
+        ), "Default torch process group must be initialized"
+
+        assert request.group_name != "", "Group name cannot be empty"
+        rank = request.rank_offset + self.rank_in_dp
+        self.logger.info(
+            f"init custom process group: master_address={request.master_address}, master_port={request.master_port}, "
+            f"rank_offset={request.rank_offset}, rank={rank}, world_size={request.world_size}, group_name={request.group_name}, "
+            f" backend={request.backend}"
+        )
+
+        try:
+            if request.group_name in self._model_update_group:
+                raise ValueError(
+                    f"Process group with name {request.group_name} already exists."
+                )
+
+            self._model_update_group[request.group_name] = init_custom_process_group(
+                backend=request.backend,
+                init_method=f"tcp://{request.master_address}:{request.master_port}",
+                world_size=request.world_size,
+                rank=rank,
+                group_name=request.group_name,
+            )
+            return True, "Succeeded to initialize custom process group."
+
+        except Exception as e:
+            message = f"Failed to initialize custom process group: {e}."
+            self.logger.error(message)
+            return False, message
+
+    def destroy_weights_update_group(self, request: DestroyWeightsUpdateGroupReq):
+        try:
+            if request.group_name in self._model_update_group:
+                pg = self._model_update_group.pop(request.group_name)
+                torch.distributed.destroy_process_group(pg)
+                return True, "Succeeded to destroy custom process group."
+            else:
+                return False, "The group to be destroyed does not exist."
+        except Exception as e:
+            message = f"Failed to destroy custom process group: {e}."
+            self.logger.error(message)
+            return False, message
+
+    def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
+        """
+        Update specific parameter in the model weights online
+        through `_model_update_group` process group.
+
+        Args:
+            name: the name of the parameter to be updated.
+            dtype: the data type of the parameter to be updated.
+            shape: the shape of the parameter to be updated.
+        """
+
+        assert request.group_name in self._model_update_group, (
+            f"Group {request.group_name} not in {list(self._model_update_group.keys())}. "
+            "Please call `init_weights_update_group` first."
+        )
+
+        try:
+            weights = []
+            handles = []
+            for name, dtype, shape in zip(request.names, request.dtypes, request.shapes):
+                target_dtype = (
+                    dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
+                )
+                weight = torch.empty(shape, dtype=target_dtype, device='cuda')
+                handles.append(
+                    torch.distributed.broadcast(
+                        weight,
+                        src=0,
+                        group=self._model_update_group[request.group_name],
+                        async_op=True,
+                    )
+                )
+                weights.append((name, weight))
+            for handle in handles:
+                handle.wait()
+
+            self.model.load_weights(weights)
+            return True, "Succeeded to update parameter online from distributed."
+
+        except Exception as e:
+            error_msg = (
+                f"Failed to update parameter online: {e}. "
+                f"The full weights of the ModelRunner are partially updated. "
+                f"Please discard the whole weights."
+            )
+            self.logger.error(error_msg)
+            return False, error_msg
+
+    def _update_weights_from_flattened_bucket(
+        self,
+        flattened_tensor_bucket_dict,
+    ):
+        """Handle flattened bucket format for weight updates"""
+        flattened_tensor = flattened_tensor_bucket_dict["flattened_tensor"]
+        metadata = flattened_tensor_bucket_dict["metadata"]
+
+        # Convert metadata dict to our format
+        converted_metadata = []
+        for meta in metadata:
+            converted_meta = FlattenedTensorMetadata(
+                name=meta.name,
+                shape=meta.shape,
+                dtype=meta.dtype,
+                start_idx=meta.start_idx,
+                end_idx=meta.end_idx,
+                numel=meta.numel,
+            )
+            converted_metadata.append(converted_meta)
+
+        # Create bucket and reconstruct tensors
+        bucket = FlattenedTensorBucket(
+            flattened_tensor=flattened_tensor, metadata=converted_metadata
+        )
+        reconstructed_tensors = bucket.reconstruct_tensors()
+
+        # Load the reconstructed tensors using the standard method
+        self.model.load_weights(reconstructed_tensors)
+
+        return True, "Succeeded to update parameter online from flattened bucket tensor."
+
+    def update_weights_from_tensor(
+        self,
+        request: UpdateWeightsFromTensorReq
+    ):
+        try:
+            monkey_patch_torch_reductions()
+            if request.load_format == "flattened_bucket":
+                # Handle flattened bucket format
+                return self._update_weights_from_flattened_bucket(
+                    flattened_tensor_bucket_dict=request.named_tensors
+                )
+
+            # We need to get device after patch otherwise the device would be wrong
+            self.device_module = torch.get_device_module("cuda")
+            infered_device = self.device_module.current_device()
+
+            named_tensors=MultiprocessingSerializer.deserialize(
+                request.serialized_named_tensors[self.rank_in_dp]
+            )
+
+            def _unwrap_tensor(tensor, tp_rank, device):
+                if isinstance(tensor, LocalSerializedTensor):
+                    tensor = tensor.get(tp_rank)
+                return tensor.to(device)
+
+            named_tensors = {
+                name : _unwrap_tensor(tensor, tp_rank=self.rank_in_dp, device=infered_device)
+                for name, tensor in named_tensors
+            }
+
+            self.model.load_weights(named_tensors)
+
+            return True, "Succeeded to update parameter online from tensor."
+
+        except Exception as e:
+            message = f"Failed to update parameter online from tensor. Reason: {e}."
+            self.logger.error(message)
+
+            return False, message
 
     def _async_copy_next_token_infos_to_pin_mem(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
         """

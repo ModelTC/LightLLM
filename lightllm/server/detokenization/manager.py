@@ -20,6 +20,7 @@ from lightllm.server.io_struct import (
     BaseReq,
     GenerateResp,
     FlushCacheResp,
+    GeneralModelToHttpRpcRsp
 )
 
 logger = init_logger(__name__)
@@ -83,6 +84,10 @@ class DeTokenizationManager:
                             print("Detokenization receive flush cache request", flush=True)
                             self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
                             print("Detokenization send flush cache request to httpserver", flush=True)
+                            continue
+                        elif isinstance(recv_obj, GeneralModelToHttpRpcRsp):
+                            self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
+                            print(f"Detokenization send {recv_obj.func_name} request to httpserver")
                             continue
                         self._add_new_group_req_index(recv_obj=recv_obj)
 

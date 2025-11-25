@@ -58,7 +58,14 @@ from .api_models import (
     CompletionRequest,
     CompletionResponse,
 )
-from .io_struct import AbortReq
+from .io_struct import (
+    AbortReq,
+    InitWeightsUpdateGroupReq,
+    DestroyWeightsUpdateGroupReq,
+    UpdateWeightsFromDistributedReq,
+    UpdateWeightsFromTensorReq,
+    GeneralModelToHttpRpcRsp
+)
 from .build_prompt import build_prompt, init_tokenizer
 
 logger = init_logger(__name__)
@@ -314,6 +321,39 @@ async def abort_request(request: AbortReq, raw_request: Request):
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
 
+
+async def handle_request_common(request_obj, handler):
+    try:
+        ret: GeneralModelToHttpRpcRsp = await handler(request_obj)
+        if ret.success:
+            return JSONResponse({"success": ret.success, "message": ret.msg}, status_code=200)
+        else:
+            return create_error_response(HTTPStatus.BAD_REQUEST, ret.msg)
+    except Exception as e:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED,
+            f"error: {str(e)}"
+        )
+
+@app.post("/init_weights_update_group")
+async def init_weights_update_group(request: InitWeightsUpdateGroupReq, raw_request: Request):
+    """Init weights update group."""
+    return await handle_request_common(request, g_objs.httpserver_manager.init_weights_update_group)
+
+@app.post("/destroy_weights_update_group")
+async def destroy_weights_update_group(request: DestroyWeightsUpdateGroupReq, raw_request: Request):
+    """Destroy weights update group."""
+    return await handle_request_common(request, g_objs.httpserver_manager.destroy_weights_update_group)
+
+@app.post("/update_weights_from_distributed")
+async def update_weights_from_distributed(request: UpdateWeightsFromDistributedReq, raw_request: Request):
+    """Update model parameter from distributed online."""
+    return await handle_request_common(request, g_objs.httpserver_manager.update_weights_from_distributed)
+
+@app.post("/update_weights_from_tensor")
+async def update_weights_from_distributed(request: UpdateWeightsFromTensorReq, raw_request: Request):
+    """Update model parameter from distributed online."""
+    return await handle_request_common(request, g_objs.httpserver_manager.update_weights_from_tensor)
 
 @app.post("/flush_cache")
 @app.get("/flush_cache")
