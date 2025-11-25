@@ -144,7 +144,6 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         # b_mark_shared_group 中每一个不为0的位置都代表其与前面多少个请求形成一个共享前缀组。属于
         # 同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。某些模式可以利用这两个
         # 输入加速算子的运行。
-        b_shared_seq_len = torch.tensor(b_shared_seq_len, dtype=torch.int32, device="cpu")
         b_mark_shared_group = []
         shared_nodes = [req.shared_kv_node for req in run_reqs]
         _current_group = []
@@ -169,6 +168,13 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
             _current_group.clear()
 
         assert len(b_mark_shared_group) == len(run_reqs)
+        # 如果一个 shared group 的长度为1， 则将其共享长度强制修改为0， 避免无效计算，提升
+        # 算子执行效率。
+        b_shared_seq_len = [
+            0 if group_size == 1 else shared_len
+            for shared_len, group_size in zip(b_shared_seq_len, b_mark_shared_group)
+        ]
+        b_shared_seq_len = torch.tensor(b_shared_seq_len, dtype=torch.int32, device="cpu")
         b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
     else:
         b_shared_seq_len = None

@@ -283,6 +283,10 @@ class TpPartBaseModel:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
             else:
                 infer_state.b_ready_cache_len = torch.zeros_like(input=infer_state.b_seq_len)
+        else:
+            if enable_diverse_mode_gqa_decode_fast_kernel():
+                infer_state.b_shared_seq_len = model_input.b_shared_seq_len
+                infer_state.b_mark_shared_group = model_input.b_mark_shared_group
 
         infer_state.multimodal_params = model_input.multimodal_params
 
