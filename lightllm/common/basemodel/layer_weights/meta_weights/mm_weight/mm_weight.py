@@ -108,12 +108,17 @@ class MMWeightTpl(BaseWeightTpl):
         in_dim = self.in_dim
         out_dim = sum(self.out_dims)
         if self.quant_method is None:
-            self.mm_param.weight = torch.empty((out_dim, in_dim), dtype=self.data_type_).cuda(get_current_device_id())
+            self.mm_param.weight = (
+                torch.empty((out_dim, in_dim), dtype=self.data_type_).cuda(get_current_device_id()).t()
+            )
         else:
-            self.mm_param.weight = self.quant_method.create_weight(out_dim, in_dim)
-            self.mm_param.weight_scale = self.quant_method.create_weight_scale(out_dim, in_dim, dtype=self.data_type_)
+            device_id = get_current_device_id()
+            self.mm_param.weight = self.quant_method.create_weight(out_dim, in_dim, device_id)
+            self.mm_param.weight_scale = self.quant_method.create_weight_scale(
+                out_dim, in_dim, dtype=self.data_type_, device_id=device_id
+            )
             self.mm_param.weight_zero_point = self.quant_method.create_weight_zero_point(
-                out_dim, in_dim, dtype=self.data_type_
+                out_dim, in_dim, dtype=self.data_type_, device_id=device_id
             )
         if self.mm_param.has_bias:
             self.mm_param.bias = torch.empty(out_dim, dtype=self.data_type_).cuda(get_current_device_id())
@@ -127,7 +132,7 @@ class MMWeightTpl(BaseWeightTpl):
                 input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger
             )
         if out is None:
-            shape = (input_tensor.shape[0], self.mm_param.weight.shape[0])
+            shape = (input_tensor.shape[0], self.mm_param.weight.shape[1])
             dtype = input_tensor.dtype
             device = input_tensor.device
             if use_custom_tensor_mananger:
@@ -135,8 +140,8 @@ class MMWeightTpl(BaseWeightTpl):
             else:
                 out = torch.empty(shape, dtype=dtype, device=device)
         if self.mm_param.bias is None:
-            return torch.mm(input_tensor, self.mm_param.weight.t(), out=out)
-        return torch.addmm(self.mm_param.bias, input_tensor, self.mm_param.weight.t(), out=out)
+            return torch.mm(input_tensor, self.mm_param.weight, out=out)
+        return torch.addmm(self.mm_param.bias, input_tensor, self.mm_param.weight, out=out)
 
     def gen_weight_quant_param_names(self, quant_method: Optional[QuantizationMethod]):
         if quant_method is None:
@@ -177,8 +182,6 @@ class MMWeightTpl(BaseWeightTpl):
         return
 
     def load_hf_weights(self, weights):
-        # if self.mm_param.is_load_finished():
-        #     return
 
         for sub_child_index, param_name in enumerate(self.weight_names):
             self._load_weight(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
@@ -197,44 +200,6 @@ class MMWeightTpl(BaseWeightTpl):
             for sub_child_index, param_name in enumerate(self.weight_zero_point_names):
                 self._load_weight_zero_point(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
 
-        # with self.lock:
-        #     # 在线量化操作
-        #     if (
-        #         self.quant_method is not None
-        #         and self.mm_param.weight is not None
-        #         and self.quant_method.weight_need_quanted(self.mm_param.weight)
-        #         and self.load_finished is False
-        #     ):
-        #         logger.info(f"online quant weight names: {self.weight_names}")
-        #         quantized_weight, weight_scale, weight_zero_point = self.quant_method.quantize(
-        #             self.mm_param.weight.cuda(get_current_device_id())
-        #         )
-        #         self.mm_param.weight = quantized_weight
-        #         self.mm_param.weight_scale = weight_scale
-        #         self.mm_param.weight_zero_point = weight_zero_point
-
-        # repack 操作
-        # if (
-        #     self.quant_method is not None
-        #     and self.mm_param.is_ready()
-        #     and self.quant_method.params_need_repack()
-        #     and self.load_finished is False
-        # ):
-        #     (
-        #         self.mm_param.weight,
-        #         self.mm_param.weight_scale,
-        #         self.mm_param.weight_zero_point,
-        #     ) = self.quant_method.params_repack(
-        #         weight=self.mm_param.weight,
-        #         weight_scale=self.mm_param.weight_scale,
-        #         weight_zero_point=self.mm_param.weight_zero_point,
-        #         dtype_type=self.data_type_,
-        #     )
-
-        # if self.mm_param.is_ready() and self.load_finished is False:
-        #     self._to_gpu_device()
-        #     self.load_finished = True
-
     def verify_load(self) -> bool:
         return self.mm_param.is_ready()
 
@@ -246,7 +211,14 @@ class MMWeightTpl(BaseWeightTpl):
             weight = self.param_slicer._slice_weight(weights[param_name])
             start_idx = self.cusum_out_dims[sub_child_index]
             end_idx = start_idx + weight.shape[0]
-            self.mm_param.weight[start_idx:end_idx, :].copy_(weight)
+            if self.quant_method is not None and self.quant_method.weight_need_quanted(weight):
+                qweight, weight_scale, weight_zero_point = self.quant_method.quantize(weight)
+                self.mm_param.weight[start_idx:end_idx, :].copy_(qweight)
+                self.mm_param.weight_scale[start_idx:end_idx].copy_(weight_scale)
+                if self.mm_param.has_weight_zero_point:
+                    self.mm_param.weight_zero_point[start_idx:end_idx].copy_(weight_zero_point)
+            else:
+                self.mm_param.weight[:, start_idx:end_idx].copy_(weight.t())
         return
 
     def _load_bias(
@@ -273,24 +245,6 @@ class MMWeightTpl(BaseWeightTpl):
         if param_name in weights:
             weight_zero_point = self.param_slicer._slice_weight_zero_point(weights[param_name])
             self.sub_child_mm_params[sub_child_index].weight_zero_point = weight_zero_point
-        return
-
-    def _to_gpu_device(self) -> None:
-        if self.mm_param.weight is not None:
-            if self.quant_method is not None:
-                self.mm_param.weight = self.mm_param.weight.cuda(get_current_device_id())
-            else:
-                # 让 k dim 更连续，大多数split k 算法的算子可能能更快
-                self.mm_param.weight = (
-                    self.mm_param.weight.to(self.data_type_).cuda(get_current_device_id()).transpose(0, 1)
-                )
-        if self.mm_param.weight_scale is not None:
-            self.mm_param.weight_scale = self.mm_param.weight_scale.cuda(get_current_device_id())
-        if self.mm_param.weight_zero_point is not None:
-            self.mm_param.weight_zero_point = self.mm_param.weight_zero_point.cuda(get_current_device_id())
-        if self.mm_param.bias is not None:
-            # TODO 是不是所有的bias都需要转换为全局设置的数据类型吗，会不会影响精度
-            self.mm_param.bias = self.mm_param.bias.to(self.data_type_).cuda(get_current_device_id())
         return
 
 
