@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 
 
 class PrefillKVMoveManager:
-    def __init__(self, args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
+    def __init__(self, args, info_queue: mp.Queue):
         self.args = args
         # args.dp // args.nnodes 在跨机tp的场景下，可能为0
         self.dp_size_in_node = max(1, args.dp // args.nnodes)
@@ -40,7 +40,6 @@ class PrefillKVMoveManager:
         assert self.dp_world_size <= self.node_world_size
 
         self.info_queue = info_queue
-        self.mem_queues = mem_queues
         self.infer_rpyc_objs: List[PDPrefillInferRpcServer] = []
 
         from .prefill_trans_obj import KVTransConnectObj
@@ -143,8 +142,7 @@ class PrefillKVMoveManager:
             raise e
 
     # ==================================================================================
-    # 与推理进程交互接口,  _remove_req_refs_from_prompt_cache 和
-    # _put_mem_manager_to_mem_queue 都是通过 rpyc 与推理进程进行交互的接口
+    # 与推理进程交互接口,  _remove_req_refs_from_prompt_cache
     # ==================================================================================
 
     def _remove_req_refs_from_prompt_cache(self, tasks: List[KVMoveTask]):
@@ -162,12 +160,6 @@ class PrefillKVMoveManager:
                         rpyc.async_(conn.remove_req_refs_from_prompt_cache)([task.group_request_id for task in _tasks])
                     )
             asyncio.run(self.wait_all_future_finish(futures))
-        return
-
-    def _put_mem_manager_to_mem_queue(self):
-        with self.infer_rpyc_lock:
-            for obj in self.infer_rpyc_objs:
-                obj.put_mem_manager_to_mem_queue()
         return
 
     async def wait_all_future_finish(self, futures: List[AsyncResult]):
@@ -223,14 +215,14 @@ class PrefillKVMoveManager:
         return
 
 
-def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.Event):
+def _init_env(args, info_queue: mp.Queue, event: mp.Event):
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::prefill_kv_move_manager")
 
-    manager = PrefillKVMoveManager(args, info_queue, mem_queues)
+    manager = PrefillKVMoveManager(args, info_queue)
     kv_trans_process_check = threading.Thread(target=manager.check_trans_process_loop, daemon=True)
     kv_trans_process_check.start()
     event.set()
@@ -239,9 +231,9 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
     return
 
 
-def start_prefill_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
+def start_prefill_kv_move_manager_process(args, info_queue: mp.Queue):
     event = mp.Event()
-    proc = mp.Process(target=_init_env, args=(args, info_queue, mem_queues, event))
+    proc = mp.Process(target=_init_env, args=(args, info_queue, event))
     proc.start()
     event.wait()
     assert proc.is_alive()
