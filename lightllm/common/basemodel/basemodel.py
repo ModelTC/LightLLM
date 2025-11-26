@@ -27,7 +27,7 @@ from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status
+from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
 
@@ -283,6 +283,10 @@ class TpPartBaseModel:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
             else:
                 infer_state.b_ready_cache_len = torch.zeros_like(input=infer_state.b_seq_len)
+        else:
+            if enable_diverse_mode_gqa_decode_fast_kernel():
+                infer_state.b_shared_seq_len = model_input.b_shared_seq_len
+                infer_state.b_mark_shared_group = model_input.b_mark_shared_group
 
         infer_state.multimodal_params = model_input.multimodal_params
 
@@ -319,6 +323,15 @@ class TpPartBaseModel:
             mode="constant",
             value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
         )
+        if enable_diverse_mode_gqa_decode_fast_kernel():
+            if new_model_input.b_shared_seq_len is not None:
+                new_model_input.b_shared_seq_len = F.pad(
+                    new_model_input.b_shared_seq_len, (0, padded_batch_size), mode="constant", value=0
+                )
+            if new_model_input.b_mark_shared_group is not None:
+                new_model_input.b_mark_shared_group = F.pad(
+                    new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=1
+                )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.deepseekv3_mtp_draft_input_hiddens is not None:

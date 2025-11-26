@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 def select_mem_manager_class(mode):
     logger.info(f"mode setting params: {mode}")
-    if "ppl_int8kv" in mode or "ppl_int8kv_flashdecoding" in mode:
+    if "ppl_int8kv" in mode or "ppl_int8kv_flashdecoding" in mode or "ppl_int8kv_flashdecoding_diverse" in mode:
         memory_manager_class = PPLINT8KVMemoryManager
         logger.info(f"Model kv cache using mode {mode}")
     elif "ppl_int4kv_flashdecoding" in mode:

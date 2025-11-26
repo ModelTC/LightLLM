@@ -204,7 +204,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         default=[],
         nargs="+",
-        help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_fp16 | triton_flashdecoding
+        help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_int8kv_flashdecoding | ppl_int8kv_flashdecoding_diverse
+                        | ppl_fp16 | triton_flashdecoding
                         | triton_gqa_attention | triton_gqa_flashdecoding | triton_fp8kv | offline_calibration_fp8kv
                         | export_fp8kv_calibration
                         triton_flashdecoding mode is for long context, current support llama llama2 qwen;

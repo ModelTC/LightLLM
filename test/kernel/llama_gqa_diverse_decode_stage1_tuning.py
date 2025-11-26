@@ -4,9 +4,9 @@ import os
 import torch.multiprocessing as mp
 from typing import List
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.llama.triton_kernel.gqa_flash_decoding_vsm import (
-    gqa_token_decode_attention_flash_decoding_vsm,
-    GQAVSMDecodeAttentionKernelConfig,
+from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding_diverse_stage1 import (
+    flash_decode_stage1,
+    GQADiverseDecodeStage1KernelConfig,
 )
 from lightllm.utils.watchdog_utils import Watchdog
 
@@ -30,6 +30,7 @@ def set_seed():
 
 @torch.no_grad()
 def test_decode_attentions(
+    block_seq: int,
     q_shape: List[int],
     kv_shape: List[int],
     test_seq_len: int,
@@ -53,6 +54,7 @@ def test_decode_attentions(
     state.b_seq_len = torch.full((state.batch_size,), fill_value=test_seq_len, dtype=torch.int32).cuda()
 
     args = []
+    batch_size = q_shape[0]
     q_head_dim = q_shape[2]
     q_head_num = q_shape[1]
     # kv_head_dim = kv_shape[2]
@@ -66,30 +68,57 @@ def test_decode_attentions(
     infer_state = state
     for _ in range(test_count):
         q = torch.randn(q_shape, device="cuda", dtype=dtype) / 10
-        k = torch.randn(kv_shape, device="cuda", dtype=dtype) / 10
-        v = torch.randn(kv_shape, device="cuda", dtype=dtype) / 10
-        o_tensor = torch.empty_like(q)
-        arg_list, kwargs = (q, k, v, infer_state), dict(out=o_tensor, **run_config)
+        k = torch.randint(low=-100, high=100, size=kv_shape, device="cuda", dtype=torch.int8)
+        k_scale = torch.ones(
+            size=(
+                kv_shape[0],
+                kv_shape[1],
+                kv_shape[2] // 8,
+            ),
+            device="cuda",
+            dtype=dtype,
+        )
+        v = torch.randint(low=-100, high=100, size=kv_shape, device="cuda", dtype=torch.int8)
+        v_scale = torch.ones(
+            size=(
+                kv_shape[0],
+                kv_shape[1],
+                kv_shape[2] // 8,
+            ),
+            device="cuda",
+            dtype=dtype,
+        )
+        mid_out = torch.zeros(
+            size=(batch_size, q_head_num, (test_seq_len // block_seq) + 2, q_head_dim), dtype=q.dtype, device="cuda"
+        )
+        mid_out_logsumexp = torch.zeros(
+            size=(batch_size, q_head_num, (test_seq_len // block_seq) + 2), dtype=q.dtype, device="cuda"
+        )
+        arg_list, kwargs = (
+            q,
+            k,
+            k_scale,
+            v,
+            v_scale,
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.b_req_idx,
+            infer_state.b_seq_len,
+            torch.ones(size=(batch_size,), device="cuda", dtype=torch.int32),
+            infer_state.max_len_in_batch,
+            mid_out,
+            mid_out_logsumexp,
+            block_seq,
+            4,
+        ), dict(run_config=run_config)
         args.append((arg_list, kwargs))
-
-    tensor_dict = {}
-
-    def inner_alloc_func(shape, dtype=torch.float32, device="cuda"):
-        shape = tuple(shape)
-        if shape not in tensor_dict:
-            ans = torch.empty(shape, dtype=dtype, device=device)
-            tensor_dict[shape] = ans
-            return ans
-        else:
-            return tensor_dict[shape]
 
     graph = torch.cuda.CUDAGraph()
     arg_list, kwargs = args[0]
-    gqa_token_decode_attention_flash_decoding_vsm(*arg_list, **kwargs)
+    flash_decode_stage1(*arg_list, **kwargs)
     with torch.cuda.graph(graph):
         for index in range(test_count):
             arg_list, kwargs = args[index]
-            gqa_token_decode_attention_flash_decoding_vsm(*arg_list, **kwargs)
+            flash_decode_stage1(*arg_list, **kwargs)
 
     graph.replay()
 
@@ -107,6 +136,7 @@ def test_decode_attentions(
 
 
 def worker(
+    block_seq: int,
     q_shape: List[int],
     kv_shape: List[int],
     test_seq_len: int,
@@ -122,6 +152,7 @@ def worker(
         for index in range(len(test_configs)):
             tuning_config = test_configs[index]
             cost_time = test_decode_attentions(
+                block_seq=block_seq,
                 q_shape=q_shape,
                 kv_shape=kv_shape,
                 test_seq_len=test_seq_len,
@@ -146,47 +177,41 @@ def worker(
 
 def get_test_configs(split_id, split_count):
     index = 0
-    for block_n in [16]:
-        # for block_n in [16, 32, 64, 128]:
-        for block_q_head in [
+    for block_n in [16, 32, 64]:
+        for num_warps in [
+            2,
+            4,
+            8,
             16,
         ]:
-            for stage1_num_warps in [
+            # for stage1_num_warps in [2, 4, 8, 16]:
+            for num_stages in [
+                1,
                 2,
+                3,
+                4,
+                5,
+                7,
+                9,
+                10,
+                11,
             ]:
-                # for stage1_num_warps in [2, 4, 8, 16]:
-                for stage1_num_stages in [
-                    1,
-                    # 2,
-                    # 3,
-                ]:
-                    for stage2_num_warps in [
-                        2,
-                    ]:
-                        # for stage2_num_warps in [1, 2, 4]:
-                        for stage2_num_stages in [
-                            1,
-                            # 2,
-                            # 3,
-                        ]:
-                            t_config = {
-                                "BLOCK_N": block_n,
-                                "BLOCK_Q_HEAD": block_q_head,
-                                "stage1_num_warps": stage1_num_warps,
-                                "stage1_num_stages": stage1_num_stages,
-                                "stage2_num_warps": stage2_num_warps,
-                                "stage2_num_stages": stage2_num_stages,
-                            }
-                            if index % split_count == split_id:
-                                yield t_config
-                                index += 1
-                            else:
-                                index += 1
+                t_config = {
+                    "BLOCK_N": block_n,
+                    "num_warps": num_warps,
+                    "num_stages": num_stages,
+                }
+                if index % split_count == split_id:
+                    yield t_config
+                    index += 1
+                else:
+                    index += 1
 
 
 def tuning_configs(
     device_id: int,  # use for mult mp tunning
     device_count: int,
+    block_seq: int,
     q_shape: List[int],
     kv_shape: List[int],
     test_seq_len: int,
@@ -205,6 +230,7 @@ def tuning_configs(
         p = mp.Process(
             target=worker,
             args=(
+                block_seq,
                 q_shape,
                 kv_shape,
                 test_seq_len,
@@ -235,6 +261,7 @@ def tuning_configs(
         p = mp.Process(
             target=worker,
             args=(
+                block_seq,
                 q_shape,
                 kv_shape,
                 test_seq_len,
@@ -271,36 +298,44 @@ if __name__ == "__main__":
     from lightllm.utils.tuning_utils import mp_tuning
     import collections
 
+    block_seq = 256
+
+    store_json_ans = collections.defaultdict(dict)
+
     def config_iter():
-        for batch_size in [1, 8, 16, 32, 64, 128, 256]:
-            for seq_len in [256, 512, 1024, 2048, 4096, 8192]:
-                if batch_size * seq_len > 128 * 1024 * 4:
-                    continue
+        for batch_size in [8, 32, 128, 256]:
+            for seq_len in [4096, 8192]:
                 yield batch_size, seq_len
 
-    for q_head_num in [32]:
-        for q_head_dim in [64, 128]:
-            for group_size in [8, 16, 32]:
-                store_json_ans = collections.defaultdict(dict)
-                for batch_size, seq_len in config_iter():
+    for q_head_dim in [128]:
+        for gqa_group_size in [2, 4, 5, 8, 16]:
+            store_json_ans = collections.defaultdict(dict)
+            for batch_size, seq_len in config_iter():
+                ans = mp_tuning(
+                    tuning_configs,
+                    {
+                        "block_seq": block_seq,
+                        "q_shape": [batch_size, gqa_group_size, q_head_dim],
+                        "kv_shape": [batch_size * seq_len, 1, q_head_dim],
+                        "test_seq_len": seq_len,
+                        "dtype": torch.half,
+                        "test_count": 1,
+                    },
+                )
+                store_json_ans[seq_len][batch_size] = ans
 
-                    kv_head_num = q_head_num // group_size
-                    ans = mp_tuning(
-                        tuning_configs,
-                        {
-                            "q_shape": [batch_size, q_head_num, q_head_dim],
-                            "kv_shape": [batch_size * seq_len, kv_head_num, q_head_dim],
-                            "test_seq_len": seq_len,
-                            "dtype": torch.half,
-                            "test_count": 1,
-                        },
-                    )
-                    store_json_ans[seq_len][batch_size] = ans
+                GQADiverseDecodeStage1KernelConfig.save_config(
+                    gqa_group_size=gqa_group_size,
+                    q_head_dim=q_head_dim,
+                    block_seq=block_seq,
+                    out_dtype=str(torch.float16),
+                    config_json=store_json_ans,
+                )
 
-                    GQAVSMDecodeAttentionKernelConfig.save_config(
-                        q_head_num=q_head_num,
-                        q_head_dim=q_head_dim,
-                        kv_head_num=kv_head_num,
-                        out_dtype=str(torch.half),
-                        config_json=store_json_ans,
-                    )
+                GQADiverseDecodeStage1KernelConfig.save_config(
+                    gqa_group_size=gqa_group_size,
+                    q_head_dim=q_head_dim,
+                    block_seq=block_seq,
+                    out_dtype=str(torch.bfloat16),
+                    config_json=store_json_ans,
+                )

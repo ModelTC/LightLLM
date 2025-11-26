@@ -110,6 +110,14 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             self._context_attention_kernel = partial(
                 LlamaTransformerLayerInfer._context_attention_kernel_ppl_int8kv, self
             )
+        elif "ppl_int8kv_flashdecoding_diverse" in self.mode:
+            self._token_attention_kernel = partial(
+                LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv_flashdecoding_diverse, self
+            )
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_ppl_int8kv, self)
+            self._context_attention_kernel = partial(
+                LlamaTransformerLayerInfer._context_attention_kernel_ppl_int8kv, self
+            )
         elif "ppl_int8kv_flashdecoding" in self.mode:
             self._token_attention_kernel = partial(
                 LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv_flashdecoding, self
@@ -762,6 +770,34 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ):
         from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding import token_decode_attention_flash_decoding
+
+        cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
+        cache_k_scale = infer_state.mem_manager.scale_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
+        cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
+            :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+        ]
+        cache_v_scale = infer_state.mem_manager.scale_buffer[self.layer_num_][
+            :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+        ]
+        return token_decode_attention_flash_decoding(
+            q,
+            infer_state,
+            self.tp_q_head_num_,
+            self.head_dim_,
+            cache_k,
+            cache_k_scale,
+            cache_v,
+            cache_v_scale,
+            out=out,
+            alloc_tensor_func=self.alloc_tensor,
+        )
+
+    def _token_decode_attention_ppl_int8kv_flashdecoding_diverse(
+        self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None
+    ):
+        from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding_diverse import (
+            token_decode_attention_flash_decoding,
+        )
 
         cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
         cache_k_scale = infer_state.mem_manager.scale_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
