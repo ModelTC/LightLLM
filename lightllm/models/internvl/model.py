@@ -81,7 +81,6 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
 
     def get_audio_token_length(self, audio: AudioItem):
         L = audio.audio_length
-        L = L if L <= 480000 else 480000  # max_length < 30s
         mel_len = L // 160
         dilation = 1
         L_in = mel_len
