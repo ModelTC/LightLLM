@@ -29,7 +29,7 @@ def rotary_kernel(
     offs_d = tl.arange(0, BLOCK_D)
     d = pid_blk * BLOCK_D + offs_d
     mask = d < D
-    for pid_l in tl.range(pid_l_start, total_len, step=tl.num_programs(axis=1)):
+    for pid_l in tl.range(pid_l_start, total_len, step=tl.num_programs(axis=1), num_stages=3):
 
         base = pid_l * stride_l + pid_h * stride_h
 
