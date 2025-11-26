@@ -24,7 +24,7 @@ class QuantizationMethod(ABC):
         self.hf_quantization_config = None
 
     @abstractmethod
-    def quantize(self, weights: torch.Tensor):
+    def quantize(self, weights: torch.Tensor, output: "MMWeightPack", offset: int = 0):
         pass
 
     @abstractmethod
@@ -47,15 +47,15 @@ class QuantizationMethod(ABC):
     # weight 不需要传递dtype，因为每个量化算法，量化后的weight的dtype是确定的
     # scale/zero_point暂时保留外部dtype接口，兼容部分根据weight dtype来动态确定scale/zero_point的dtype的情况
     @abstractmethod
-    def create_weight(self, out_dim: int, in_dim: int) -> torch.Tensor:
+    def create_weight(self, out_dim: int, in_dim: int, device_id: int) -> torch.Tensor:
         pass
 
     @abstractmethod
-    def create_weight_scale(self, out_dim: int, in_dim: int, dtype: torch.dtype) -> torch.Tensor:
+    def create_weight_scale(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
         pass
 
     @abstractmethod
-    def create_weight_zero_point(self, out_dim: int, in_dim: int, dtype: torch.dtype) -> torch.Tensor:
+    def create_weight_zero_point(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
         pass
 
     def weight_need_quanted(self, weight: torch.Tensor) -> bool:
