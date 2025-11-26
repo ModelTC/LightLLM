@@ -17,42 +17,38 @@ def rotary_kernel(
     stride_cos_d,
     stride_sin_l,
     stride_sin_d,
-    max_L,
+    total_len,
     D: tl.constexpr,
     HALF_D: tl.constexpr,
     BLOCK_D: tl.constexpr,
-    BLOCK_L: tl.constexpr,
 ):
     pid_h = tl.program_id(0).to(tl.int64)
-    pid_l_blk = tl.program_id(1).to(tl.int64)
-    pid_blk_d = tl.program_id(2).to(tl.int64)
+    pid_l_start = tl.program_id(1).to(tl.int64)
+    pid_blk = tl.program_id(2).to(tl.int64)
 
     offs_d = tl.arange(0, BLOCK_D)
-    d = pid_blk_d * BLOCK_D + offs_d
+    d = pid_blk * BLOCK_D + offs_d
     mask = d < D
+    for pid_l in tl.range(pid_l_start, total_len, step=tl.num_programs(axis=1)):
 
-    seq_start = pid_l_blk * BLOCK_L
-    seq_end = (pid_l_blk + 1) * BLOCK_L
-    seq_end = tl.where(seq_end < max_L, seq_end, max_L)
-
-    for seq in tl.range(seq_start, seq_end):
-        base = seq * stride_l + pid_h * stride_h
+        base = pid_l * stride_l + pid_h * stride_h
 
         in_ptr = inp_ptr + base + d * stride_d
-        cos_ptr_ = cos_ptr + seq * stride_cos_l + d * stride_cos_d
-        sin_ptr_ = sin_ptr + seq * stride_sin_l + d * stride_sin_d
+        cos_ptr_ = cos_ptr + pid_l * stride_cos_l + d
+        sin_ptr_ = sin_ptr + pid_l * stride_sin_l + d
 
-        x = tl.load(in_ptr, mask=mask, other=0.0)
-        cos = tl.load(cos_ptr_, mask=mask, other=0.0)
-        sin = tl.load(sin_ptr_, mask=mask, other=0.0)
+        x = tl.load(in_ptr, mask=mask)
+        cos = tl.load(cos_ptr_, mask=mask)
+        sin = tl.load(sin_ptr_, mask=mask)
 
         partner_d = tl.where(d < HALF_D, d + HALF_D, d - HALF_D)
         partner_ptr = inp_ptr + base + partner_d * stride_d
-        partner_val = tl.load(partner_ptr, mask=mask, other=0.0)
+        partner_val = tl.load(partner_ptr, mask=mask)
         rotated = tl.where(d < HALF_D, -partner_val, partner_val)
 
         y = x * cos + rotated * sin
-        out_ptr_ = out_ptr + base + d * stride_d
+
+        out_ptr_ = out_ptr + base + d
         tl.store(out_ptr_, y, mask=mask)
 
 
@@ -72,12 +68,12 @@ def apply_rotary_pos_emb_triton(
     L, H, D = x.shape
     HALF_D = D // 2
     y = torch.empty_like(x)
-
-    if L <= 4096:
-        BLOCK_L = 16
+    if L < 1024:
+        grid_L = L
     else:
-        BLOCK_L = 128
-    grid = (H, triton.cdiv(L, BLOCK_L), triton.cdiv(D, BLOCK_D))
+        grid_L = 1024
+
+    grid = (H, grid_L, triton.cdiv(D, BLOCK_D))
 
     rotary_kernel[grid](
         inp_ptr=x,
@@ -91,11 +87,10 @@ def apply_rotary_pos_emb_triton(
         stride_cos_d=cos.stride(1),
         stride_sin_l=sin.stride(0),
         stride_sin_d=sin.stride(1),
-        max_L=L,
+        total_len=L,
         D=D,
         HALF_D=HALF_D,
         BLOCK_D=BLOCK_D,
-        BLOCK_L=BLOCK_L,
     )
 
     return y.to(orig_dtype)
