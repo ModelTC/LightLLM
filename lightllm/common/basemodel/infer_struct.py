@@ -25,8 +25,8 @@ class InferStateInfo:
         self.b_start_loc: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
 
-        self.b_shared_seq_len: torch.Tensor = None  # only for diverse kv cache used in decode phase.
-        self.b_mark_shared_group: torch.Tensor = None  # only for diverse kv cache used in decode phase.
+        self.b_shared_seq_len: torch.Tensor = None  # only for diverse mode used in decode phase.
+        self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
 
         self.b_seq_len: torch.Tensor = None
         # max_len_in_batch prefill 和 decode 阶段含义不同
