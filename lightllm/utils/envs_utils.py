@@ -194,3 +194,8 @@ def enable_radix_tree_timer_merge() -> bool:
 @lru_cache(maxsize=None)
 def get_radix_tree_merge_update_delta() -> int:
     return int(os.getenv("LIGHTLMM_RADIX_TREE_MERGE_DELTA", 6000))
+
+
+@lru_cache(maxsize=None)
+def disable_trtllm_ragged_prefill():
+    return enable_env_vars("DISABLE_TRTLLM_RAGGED_PREFILL")

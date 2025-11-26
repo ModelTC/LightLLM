@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import torch.distributed as dist
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, disable_trtllm_ragged_prefill
 from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
 
 
@@ -68,22 +68,25 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
             if get_env_start_args().enable_flashinfer_prefill:
                 q_starts = self.b1_cu_q_seq_len.int()
                 kv_starts = self.b1_kv_start_loc.int()
-                if self.prefill_wrapper is None:
-                    self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
-                        self.flashinfer_extra_state.workspace_buffer, "NHD"
+                if disable_trtllm_ragged_prefill():
+                    if self.prefill_wrapper is None:
+                        self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
+                            self.flashinfer_extra_state.workspace_buffer, "NHD"
+                        )
+                    self.prefill_wrapper.plan(
+                        qo_indptr=q_starts,
+                        kv_indptr=kv_starts,
+                        num_qo_heads=self.flashinfer_extra_state.tp_q_head_num,
+                        num_kv_heads=self.flashinfer_extra_state.tp_q_head_num,
+                        head_dim_qk=self.flashinfer_extra_state.qk_nope_head_dim
+                        + self.flashinfer_extra_state.qk_rope_head_dim,
+                        head_dim_vo=self.flashinfer_extra_state.qk_nope_head_dim,
+                        q_data_type=self.flashinfer_extra_state.q_data_type,
+                        causal=True,
+                        sm_scale=self.flashinfer_extra_state.softmax_scale,
                     )
-                self.prefill_wrapper.plan(
-                    qo_indptr=q_starts,
-                    kv_indptr=kv_starts,
-                    num_qo_heads=self.flashinfer_extra_state.tp_q_head_num,
-                    num_kv_heads=self.flashinfer_extra_state.tp_q_head_num,
-                    head_dim_qk=self.flashinfer_extra_state.qk_nope_head_dim
-                    + self.flashinfer_extra_state.qk_rope_head_dim,
-                    head_dim_vo=self.flashinfer_extra_state.qk_nope_head_dim,
-                    q_data_type=self.flashinfer_extra_state.q_data_type,
-                    causal=True,
-                    sm_scale=self.flashinfer_extra_state.softmax_scale,
-                )
+                else:
+                    self.prefill_wrapper = None
         return
 
     def copy_for_cuda_graph(self, new_infer_state):
