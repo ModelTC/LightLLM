@@ -189,25 +189,23 @@ def _fwd_kernel_flash_decode_diverse_stage1(
         sum_exp = sum_exp * logic_scale + tl.sum(exp_logic, axis=1)
         max_logic = new_max_logic
 
-    need_store = tl.where(block_n_size == 0, 0, 1)
-    for _ in range(0, need_store, 1):
-        off_mid_o = (
-            offs_batch[:, None, None] * stride_mid_ob
-            + cur_q_head_range[None, :, None] * stride_mid_oh
-            + seq_start_block * stride_mid_os
-            + offs_d[None, None, :]
-        )
-        off_mid_o_logexpsum = (
-            offs_batch[:, None] * stride_mid_o_eb + cur_q_head_range[None, :] * stride_mid_o_eh + seq_start_block
-        )
-        tl.store(
-            Mid_O + off_mid_o,
-            (acc / sum_exp[:, None]).reshape(BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM),
-        )
-        tl.store(
-            Mid_O_LogExpSum + off_mid_o_logexpsum,
-            (max_logic + tl.log(sum_exp)).reshape(BLOCK_BATCH, BLOCK_HEAD),
-        )
+    off_mid_o = (
+        offs_batch[:, None, None] * stride_mid_ob
+        + cur_q_head_range[None, :, None] * stride_mid_oh
+        + seq_start_block * stride_mid_os
+        + offs_d[None, None, :]
+    )
+    off_mid_o_logexpsum = (
+        offs_batch[:, None] * stride_mid_o_eb + cur_q_head_range[None, :] * stride_mid_o_eh + seq_start_block
+    )
+    tl.store(
+        Mid_O + off_mid_o,
+        (acc / sum_exp[:, None]).reshape(BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM),
+    )
+    tl.store(
+        Mid_O_LogExpSum + off_mid_o_logexpsum,
+        (max_logic + tl.log(sum_exp)).reshape(BLOCK_BATCH, BLOCK_HEAD),
+    )
     return
 
 
