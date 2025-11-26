@@ -194,3 +194,8 @@ def enable_radix_tree_timer_merge() -> bool:
 @lru_cache(maxsize=None)
 def get_radix_tree_merge_update_delta() -> int:
     return int(os.getenv("LIGHTLMM_RADIX_TREE_MERGE_DELTA", 6000))
+
+
+@lru_cache(maxsize=None)
+def get_disk_cache_prompt_limit_length():
+    return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 10000))
