@@ -238,10 +238,7 @@ def flash_decode_stage1(
     同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。
     """
     if not run_config:
-        if torch.cuda.is_current_stream_capturing():
-            avg_seq_len_in_batch = max_len_in_batch
-        else:
-            avg_seq_len_in_batch = max_len_in_batch
+        avg_seq_len_in_batch = max_len_in_batch
 
         run_config = GQADiverseDecodeStage1KernelConfig.try_to_get_best_config(
             batch_size=int(q.shape[0]),
