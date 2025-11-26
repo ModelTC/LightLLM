@@ -30,7 +30,7 @@ class BaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor, output: "MMWeightPack"):
+    def quantize(self, weight: torch.Tensor, output: "MMWeightPack", offset: int = 0):
         pass
 
     def apply(
@@ -64,13 +64,15 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
-    def quantize(self, weight: torch.Tensor, output: "MMWeightPack"):
-        weight = weight.float()
+    def quantize(self, weight: torch.Tensor, output: "MMWeightPack", offset: int = 0):
+        weight = weight.float().cuda(self.device_id_)
         scale = weight.abs().max(dim=-1)[0] / 127
         weight = weight.transpose(0, 1) / scale.reshape(1, -1)
         weight = torch.round(weight.clamp(min=-128, max=127)).to(dtype=torch.int8)
-        output.weightp
-        return weight.cuda(self.device_id_), scale.cuda(self.device_id_), None
+        output.weight[:, offset : offset + weight.shape[1]].copy_(weight)
+        output.weight_scale[offset : offset + scale.shape[0]].copy_(scale.cuda(self.device_id_))
+        del weight, scale
+        return
 
     def apply(
         self,
@@ -122,13 +124,16 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, weight: torch.Tensor, output: "MMWeightPack", offset: int = 0):
         if self.is_moe:
-            return self.quantize_moe(weight)
+            return self.quantize_moe(weight, output, offset)
         qweight, weight_scale = scaled_fp8_quant(
-            weight.contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
+            weight.cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
         )
-        return qweight.transpose(0, 1), weight_scale, None
+        output.weight[:, offset : offset + qweight.shape[0]].copy_(qweight.t())
+        output.weight_scale[offset : offset + weight_scale.shape[0]].copy_(weight_scale.view(-1))
+        del qweight, weight_scale
+        return
 
     def quantize_moe(self, weight: torch.Tensor):
         num_experts = weight.shape[0]
@@ -171,6 +176,15 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     @property
     def method_name(self):
         return "vllm-fp8w8a8"
+
+    def create_weight(self, out_dim: int, in_dim: int, device_id: int) -> torch.Tensor:
+        return torch.empty((out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id).t()
+
+    def create_weight_scale(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
+        return torch.empty((out_dim,), dtype=torch.float32).cuda(device_id)
+
+    def create_weight_zero_point(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
+        return None
 
 
 @QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128"])
