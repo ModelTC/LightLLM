@@ -11,11 +11,9 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         self.position_sin = None
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        if "rope_type" in model.config["rope_scaling"]:
-            rope_scaling_type = model.config["rope_scaling"]["rope_type"]
-        elif "type" in model.config["rope_scaling"]:
-            rope_scaling_type = model.config["rope_scaling"]["type"]
-        if rope_scaling_type == "default":
+        rope_scaling = model.config["rope_scaling"].get("rope_type", {})
+        self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", None))
+        if self.rope_type != "mrope":
             super().init_some_extra_state(model, input_ids)
             return
         InferStateInfo.init_some_extra_state(self, model, input_ids)
