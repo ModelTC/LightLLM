@@ -71,7 +71,7 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
         super()._init_weight()
 
         n_split_head = self.network_config_["num_attention_heads"] // self.tp_world_size_
-        self.attn_sinks = TpNormWeight(self._attn_sink_name, torch.bfloat16, n_split_head)
+        self.attn_sinks = TpNormWeight(n_split_head, self._attn_sink_name, torch.bfloat16)
 
     def _init_ffn(self):
         self._init_moe()

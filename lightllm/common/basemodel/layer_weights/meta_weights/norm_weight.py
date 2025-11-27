@@ -4,49 +4,61 @@ from lightllm.utils.dist_utils import get_current_device_id
 
 
 class NormWeight(BaseWeightTpl):
-    def __init__(self, weight_name, data_type, bias_name=None):
+    def __init__(self, norm_dim: int, weight_name, data_type, bias_name=None):
         super().__init__()
+        self.norm_dim = norm_dim
         self.weight_name = weight_name
         self.bias_name = bias_name
         self.data_type_ = data_type
         self.weight = None
         self.bias = None
+        self.is_weight_ready = False
+        self.is_bias_ready = False
+        self._create_weight()
+
+    def _create_weight(self):
+        device = f"cuda:{get_current_device_id()}"
+        self.weight = torch.empty(self.norm_dim, dtype=self.data_type_, device=device)
+        self.bias = torch.empty(self.norm_dim, dtype=self.data_type_, device=device) if self.bias_name is not None else None
 
     def load_hf_weights(self, weights):
         if self.weight_name in weights:
-            self.weight = weights[self.weight_name].to(self.data_type_).cuda(get_current_device_id())
+            self.weight.copy_(weights[self.weight_name])
+            self.is_weight_ready = True
         if self.bias_name in weights:
-            self.bias = weights[self.bias_name].to(self.data_type_).cuda(get_current_device_id())
+            self.bias.copy_(weights[self.bias_name])
+            self.is_bias_ready = True
 
     def verify_load(self):
-        load_ok = True
-        # Verify weight. The weight must be not None.
-        load_ok = load_ok and self.weight is not None
-        # Verify bias. If bias_name is set, it must be not None.
-        if self.bias_name is not None:
-            load_ok = load_ok and self.bias is not None
-        return load_ok
+        return self.is_weight_ready and (self.bias_name is None or self.is_bias_ready)
+
+    def unready_weights(self):
+        self.is_weight_ready = False
+        self.is_bias_ready = False
 
 
 class GEMMANormWeight(NormWeight):
-    def __init__(self, weight_name, data_type, bias_name=None):
-        super().__init__(weight_name, data_type, bias_name)
+    def __init__(self, norm_dim: int, weight_name, data_type, bias_name=None):
+        super().__init__(norm_dim, weight_name, data_type, bias_name)
 
     def load_hf_weights(self, weights):
+        # TODO: 这里直接 +1 会不会导致精度问题? 计算时要求 (1.0 + weight.float()) ?
         if self.weight_name in weights:
-            self.weight = (weights[self.weight_name] + 1).to(self.data_type_).cuda(get_current_device_id())
+            self.weight.copy_((weights[self.weight_name] + 1).to(self.data_type_))
+            self.is_weight_ready = True
 
 
 class TpNormWeight(NormWeight):
-    def __init__(self, weight_name, data_type, split_n_embed, bias_name=None):
-        super().__init__(weight_name, data_type, bias_name)
-        self.split_n_embed = split_n_embed
+    def __init__(self, norm_dim: int, weight_name, data_type, bias_name=None):
+        super().__init__(norm_dim, weight_name, data_type, bias_name)
 
     def load_hf_weights(self, weights):
-        start = self.split_n_embed * self.tp_rank_
-        end = self.split_n_embed * (self.tp_rank_ + 1)
+        start = self.norm_dim * self.tp_rank_
+        end = self.norm_dim * (self.tp_rank_ + 1)
 
         if self.weight_name in weights:
-            self.weight = weights[self.weight_name][start:end].to(self.data_type_).cuda(get_current_device_id())
+            self.weight.copy_(weights[self.weight_name][start:end].to(self.data_type_))
+            self.is_weight_ready = True
         if self.bias_name in weights:
-            self.bias = weights[self.bias_name][start:end].to(self.data_type_).cuda(get_current_device_id())
+            self.bias.copy_(weights[self.bias_name][start:end].to(self.data_type_))
+            self.is_bias_ready = True

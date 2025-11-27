@@ -30,7 +30,7 @@ class BaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, weight: torch.Tensor, output: "MMWeightPack"):
         pass
 
     def apply(
@@ -47,6 +47,15 @@ class BaseQuantizationMethod(QuantizationMethod):
     def method_name(self):
         return "w8a8-base"
 
+    def create_weight(self, out_dim: int, in_dim: int, device_id: int) -> torch.Tensor:
+        raise NotImplementedError("Not implemented")
+
+    def create_weight_scale(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
+        raise NotImplementedError("Not implemented")
+
+    def create_weight_zero_point(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
+        raise NotImplementedError("Not implemented")
+
 
 @QUANTMETHODS.register(["vllm-w8a8", "w8a8"])
 class w8a8QuantizationMethod(BaseQuantizationMethod):
@@ -55,13 +64,12 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
-    def quantize(self, weight: torch.Tensor):
-        if isinstance(weight, tuple):
-            return (weight[0].transpose(0, 1).cuda(self.device_id_),) + weight[1:]
+    def quantize(self, weight: torch.Tensor, output: "MMWeightPack"):
         weight = weight.float()
         scale = weight.abs().max(dim=-1)[0] / 127
         weight = weight.transpose(0, 1) / scale.reshape(1, -1)
         weight = torch.round(weight.clamp(min=-128, max=127)).to(dtype=torch.int8)
+        output.weightp
         return weight.cuda(self.device_id_), scale.cuda(self.device_id_), None
 
     def apply(
@@ -93,6 +101,17 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
     @property
     def method_name(self):
         return "vllm-w8a8"
+
+    def create_weight(self, out_dim: int, in_dim: int, device_id: int) -> torch.Tensor:
+        return torch.empty((out_dim, in_dim), dtype=torch.int8).cuda(device_id).t()
+
+    def create_weight_scale(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
+        # per-channel量化
+        return torch.empty((out_dim,), dtype=torch.float32).cuda(device_id)
+
+    def create_weight_zero_point(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
+        # 对称量化
+        return None
 
 
 @QUANTMETHODS.register(["vllm-fp8w8a8", "fp8w8a8"])

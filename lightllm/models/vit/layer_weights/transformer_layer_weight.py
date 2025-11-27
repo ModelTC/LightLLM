@@ -119,17 +119,18 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_norm(self):
+        n_embed = self.network_config_["hidden_size"]
         self.att_norm_weight_ = NormWeight(
-            self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
+            n_embed, self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
         )
         self.ffn_norm_weight_ = NormWeight(
-            self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
+            n_embed, self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
         )
         if self.qk_norm:
             n_embed = self.network_config_["hidden_size"]
             split_n_embed = (n_embed + self.padding_hidden_size) // self.tp_world_size_
-            self.q_norm_weight_ = TpNormWeight(self._q_norm_weight_name, self.data_type_, split_n_embed)
-            self.k_norm_weight_ = TpNormWeight(self._k_norm_weight_name, self.data_type_, split_n_embed)
+            self.q_norm_weight_ = TpNormWeight(split_n_embed, self._q_norm_weight_name, self.data_type_)
+            self.k_norm_weight_ = TpNormWeight(split_n_embed, self._k_norm_weight_name, self.data_type_)
 
     def load_hf_weights(self, weights):
         if f"vision_model.encoder.layers.{self.layer_num_}.attn.qkv.weight" in weights:
