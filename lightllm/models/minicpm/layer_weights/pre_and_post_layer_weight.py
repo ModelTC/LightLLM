@@ -18,11 +18,11 @@ class MiniCPMPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
         split_start = split_indexes[self.tp_rank_]
         split_end = split_indexes[self.tp_rank_ + 1]
         if "model.embed_tokens.weight" in weights:
-            self.wte_weight_ = self._cuda(weights["model.embed_tokens.weight"][split_start:split_end, :])
+            self.wte_weight_.copy_(weights["model.embed_tokens.weight"][split_start:split_end, :])
         if "lm_head.weight" in weights:
-            self.lm_head_weight_ = self._cuda(weights["lm_head.weight"][split_start:split_end, :]) / self.lm_head_scale
+            self.lm_head_weight_.copy_(weights["lm_head.weight"][split_start:split_end, :] / self.lm_head_scale)
         if "model.norm.weight" in weights:
-            self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
+            self.final_norm_weight_.copy_(weights["model.norm.weight"])
 
         return
 

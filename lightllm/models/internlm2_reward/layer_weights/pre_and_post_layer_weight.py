@@ -14,10 +14,10 @@ class Internlm2RewardPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
         split_start = split_indexes[self.tp_rank_]
         split_end = split_indexes[self.tp_rank_ + 1]
         if "model.tok_embeddings.weight" in weights:
-            self.wte_weight_ = self._cuda(weights["model.tok_embeddings.weight"][split_start:split_end, :])
+            self.wte_weight_.copy_(weights["model.tok_embeddings.weight"][split_start:split_end, :])
         if "v_head.weight" in weights:
-            self.lm_head_weight_ = self._cuda(weights["v_head.weight"]).transpose(0, 1)
+            self.lm_head_weight_.copy_(weights["v_head.weight"].transpose(0, 1))
         if "model.norm.weight" in weights:
-            self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
+            self.final_norm_weight_.copy_(weights["model.norm.weight"])
 
         return
