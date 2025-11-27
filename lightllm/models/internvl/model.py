@@ -90,7 +90,7 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
         if L <= self.audio_max_length:
             cur_len = L
             if cur_len < self.audio_min_length:
-                cur_len = MIN_AUDIO_LEN
+                cur_len = self.audio_min_length
             chunk_lens.append(cur_len)
         else:
             start = 0
@@ -98,8 +98,8 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
                 end = min(start + self.audio_max_length, L)
                 cur_len = end - start
 
-                if cur_len < MIN_AUDIO_LEN:
-                    cur_len = MIN_AUDIO_LEN
+                if cur_len < self.audio_min_length:
+                    cur_len = self.audio_min_length
 
                 chunk_lens.append(cur_len)
                 start = end
