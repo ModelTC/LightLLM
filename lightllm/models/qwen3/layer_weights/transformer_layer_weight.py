@@ -20,5 +20,5 @@ class Qwen3TransformerLayerWeight(Qwen2TransformerLayerWeight):
     def _init_norm(self):
         super()._init_norm()
 
-        self.q_norm_weight_ = NormWeight(weight_name=self._q_norm_name, data_type=self.data_type_)
-        self.k_norm_weight_ = NormWeight(weight_name=self._k_norm_name, data_type=self.data_type_)
+        self.q_norm_weight_ = NormWeight(self.n_embed, weight_name=self._q_norm_name, data_type=self.data_type_)
+        self.k_norm_weight_ = NormWeight(self.n_embed, weight_name=self._k_norm_name, data_type=self.data_type_)

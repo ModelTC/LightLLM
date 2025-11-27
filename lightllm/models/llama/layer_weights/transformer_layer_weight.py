@@ -127,8 +127,8 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
 
     def _init_norm(self):
         self.att_norm_weight_ = NormWeight(
-            self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
+            self.n_embed, self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
         )
         self.ffn_norm_weight_ = NormWeight(
-            self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
+            self.n_embed, self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
         )
