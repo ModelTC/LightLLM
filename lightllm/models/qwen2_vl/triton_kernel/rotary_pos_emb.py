@@ -18,42 +18,50 @@ def rotary_kernel(
     stride_sin_l,
     stride_sin_d,
     total_len,
+    H,
     D: tl.constexpr,
     HALF_D: tl.constexpr,
+    BLOCK_HEAD: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    pid_h = tl.program_id(0).to(tl.int64)
+    pid_head_blk = tl.program_id(0).to(tl.int64)
     pid_l_start = tl.program_id(1).to(tl.int64)
     pid_blk = tl.program_id(2).to(tl.int64)
 
     offs_d = tl.arange(0, BLOCK_D)
     d = pid_blk * BLOCK_D + offs_d
     mask = d < D
-    for pid_l in tl.range(pid_l_start, total_len, step=tl.num_programs(axis=1), num_stages=3):
+    for pid_l in tl.range(pid_l_start, total_len, step=tl.num_programs(axis=1)):
 
-        base = pid_l * stride_l + pid_h * stride_h
+        base_l = pid_l * stride_l
 
-        in_ptr = inp_ptr + base + d * stride_d
         cos_ptr_ = cos_ptr + pid_l * stride_cos_l + d
         sin_ptr_ = sin_ptr + pid_l * stride_sin_l + d
 
-        x = tl.load(in_ptr, mask=mask)
         cos = tl.load(cos_ptr_, mask=mask)
         sin = tl.load(sin_ptr_, mask=mask)
 
         partner_d = tl.where(d < HALF_D, d + HALF_D, d - HALF_D)
-        partner_ptr = inp_ptr + base + partner_d * stride_d
-        partner_val = tl.load(partner_ptr, mask=mask)
-        rotated = tl.where(d < HALF_D, -partner_val, partner_val)
+        for off_h in tl.static_range(0, BLOCK_HEAD):
+            h = pid_head_blk * BLOCK_HEAD + off_h
+            mask_hd = mask & (h < H)
+            base = base_l + h * stride_h
 
-        y = x * cos + rotated * sin
+            in_ptr = inp_ptr + base + d * stride_d
+            partner_ptr = inp_ptr + base + partner_d * stride_d
 
-        out_ptr_ = out_ptr + base + d
-        tl.store(out_ptr_, y, mask=mask)
+            x = tl.load(in_ptr, mask=mask_hd, other=0.0)
+            partner_val = tl.load(partner_ptr, mask=mask_hd, other=0.0)
+            rotated = tl.where(d < HALF_D, -partner_val, partner_val)
+
+            y = x * cos + rotated * sin
+
+            out_ptr_ = out_ptr + base + d
+            tl.store(out_ptr_, y, mask=mask_hd)
 
 
 def apply_rotary_pos_emb_triton(
-    tensor: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, BLOCK_D: int = 128
+    tensor: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, BLOCK_HEAD: int = 4, BLOCK_D: int = 128
 ) -> torch.Tensor:
     assert tensor.is_cuda and cos.is_cuda and sin.is_cuda
     assert cos.is_contiguous() and sin.is_contiguous()
@@ -73,7 +81,7 @@ def apply_rotary_pos_emb_triton(
     else:
         grid_L = 1024
 
-    grid = (H, grid_L, triton.cdiv(D, BLOCK_D))
+    grid = (triton.cdiv(H, BLOCK_HEAD), grid_L, triton.cdiv(D, BLOCK_D))
 
     rotary_kernel[grid](
         inp_ptr=x,
@@ -88,8 +96,10 @@ def apply_rotary_pos_emb_triton(
         stride_sin_l=sin.stride(0),
         stride_sin_d=sin.stride(1),
         total_len=L,
+        H=H,
         D=D,
         HALF_D=HALF_D,
+        BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_D=BLOCK_D,
     )
 
