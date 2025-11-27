@@ -6,6 +6,7 @@ from typing import Tuple
 from functools import partial
 
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton
+from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 
 
@@ -13,12 +14,18 @@ class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
     def __init__(self, layer_num, network_config, mode=[]):
         super().__init__(layer_num, network_config, mode)
         self.mrope_section = network_config["rope_scaling"]["mrope_section"]
+        if "rope_type" in network_config["rope_scaling"]:
+            self.rope_scaling_type = network_config["rope_scaling"]["rope_type"]
+        elif "type" in network_config["rope_scaling"]:
+            self.rope_scaling_type = network_config["rope_scaling"]["type"]
         axis_map = []
         for i, n in enumerate(self.mrope_section * 2):
             axis_map += [i % 3] * n
         self.axis_map = torch.tensor(axis_map, dtype=torch.int32, device="cuda")
 
     def _get_qkv(self, input, infer_state, layer_weight):
+        if self.rope_scaling_type == "default":
+            return super()._get_qkv(input, infer_state, layer_weight)
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         seq_len, _ = q.shape

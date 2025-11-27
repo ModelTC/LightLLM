@@ -118,7 +118,9 @@ class LlamaTpPartModel(TpPartBaseModel):
             scaling_type = rope_scaling["type"]
         else:
             raise ValueError(f"Unknown RoPE scaling format {rope_scaling}")
-        if scaling_type == "yarn":
+        if scaling_type == "default":
+            self._init_to_get_rotary()
+        elif scaling_type == "yarn":
             self._init_to_get_yarn_rotary()
         elif scaling_type == "dynamic":
             self._init_to_get_dynamic_ntk_rotary()
