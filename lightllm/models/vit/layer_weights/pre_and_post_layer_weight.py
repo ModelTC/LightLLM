@@ -13,6 +13,34 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
         self.image_size = self.network_config_["image_size"]
         self.patch_size = self.network_config_["patch_size"]
         self.llm_hidden_size = self.network_config_["llm_hidden_size"]
+        self._create_weight()
+        return
+
+    def _create_weight(self):
+        split_indexes = np.linspace(0, self.embed_dim, self.tp_world_size_ + 1, dtype=np.int64)
+        split_start = split_indexes[self.tp_rank_]
+        split_end = split_indexes[self.tp_rank_ + 1]
+        split_embed_dim = split_end - split_start
+
+        # Pre-allocate memory for vision model weights
+        self.class_embedding = torch.empty((1, 1, split_embed_dim), dtype=self.data_type_).cuda()
+        self.position_embedding = torch.empty((1, 197, split_embed_dim), dtype=self.data_type_).cuda()  # 197 = (224//16)^2 + 1
+        self.patch_embedding_weight_ = torch.empty((split_embed_dim, 3, self.patch_size, self.patch_size), dtype=self.data_type_).cuda()
+        self.patch_embedding_bias_ = torch.empty(split_embed_dim, dtype=self.data_type_).cuda()
+
+        # Pre-allocate memory for adapter weights
+        self.layernorm_weight_ = torch.empty(self.embed_dim, dtype=self.data_type_).cuda()
+        self.layernorm_bias_ = torch.empty(self.embed_dim, dtype=self.data_type_).cuda()
+
+        split_indexes_llm = np.linspace(0, self.llm_hidden_size, self.tp_world_size_ + 1, dtype=np.int64)
+        split_start_llm = split_indexes_llm[self.tp_rank_]
+        split_end_llm = split_indexes_llm[self.tp_rank_ + 1]
+        split_llm_hidden_size = split_end_llm - split_start_llm
+
+        self.mlp1_1_weight_ = torch.empty((self.llm_hidden_size, split_llm_hidden_size), dtype=self.data_type_).cuda()
+        self.mlp1_1_bias_ = torch.empty(split_llm_hidden_size, dtype=self.data_type_).cuda()
+        self.mlp1_3_weight_ = torch.empty((split_llm_hidden_size, self.llm_hidden_size), dtype=self.data_type_).cuda()
+        self.mlp1_3_bias_ = torch.empty(self.llm_hidden_size, dtype=self.data_type_).cuda()
         return
 
     def _cuda(self, cpu_tensor):
@@ -40,40 +68,40 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
         split_start = split_indexes[self.tp_rank_]
         split_end = split_indexes[self.tp_rank_ + 1]
         if "vision_model.embeddings.class_embedding" in weights:
-            self.class_embedding = self._cuda(
+            self.class_embedding.copy_(
                 weights["vision_model.embeddings.class_embedding"][:, :, split_start:split_end]
             )
         if "vision_model.embeddings.position_embedding" in weights:
-            self.position_embedding = self._cuda(
+            self.position_embedding.copy_(
                 weights["vision_model.embeddings.position_embedding"][:, :, split_start:split_end]
             )
         if "vision_model.embeddings.patch_embedding.weight" in weights:
-            self.patch_embedding_weight_ = self._cuda(
+            self.patch_embedding_weight_.copy_(
                 weights["vision_model.embeddings.patch_embedding.weight"][split_start:split_end, :, :, :]
             )
         if "vision_model.embeddings.patch_embedding.bias" in weights:
-            self.patch_embedding_bias_ = self._cuda(
+            self.patch_embedding_bias_.copy_(
                 weights["vision_model.embeddings.patch_embedding.bias"][split_start:split_end]
             )
 
         if "mlp1.0.weight" in weights:
-            self.layernorm_weight_ = self._cuda(weights["mlp1.0.weight"])
+            self.layernorm_weight_.copy_(weights["mlp1.0.weight"])
         if "mlp1.0.bias" in weights:
-            self.layernorm_bias_ = self._cuda(weights["mlp1.0.bias"])
+            self.layernorm_bias_.copy_(weights["mlp1.0.bias"])
 
         split_indexes = np.linspace(0, self.llm_hidden_size, self.tp_world_size_ + 1, dtype=np.int64)
         split_start = split_indexes[self.tp_rank_]
         split_end = split_indexes[self.tp_rank_ + 1]
 
         if "mlp1.1.weight" in weights:
-            self.mlp1_1_weight_ = self._cuda(weights["mlp1.1.weight"][split_start:split_end, :]).t()
+            self.mlp1_1_weight_.copy_(weights["mlp1.1.weight"][split_start:split_end, :].t())
         if "mlp1.1.bias" in weights:
-            self.mlp1_1_bias_ = self._cuda(weights["mlp1.1.bias"][split_start:split_end])
+            self.mlp1_1_bias_.copy_(weights["mlp1.1.bias"][split_start:split_end])
 
         if "mlp1.3.weight" in weights:
-            self.mlp1_3_weight_ = self._cuda(weights["mlp1.3.weight"][:, split_start:split_end]).t()
+            self.mlp1_3_weight_.copy_(weights["mlp1.3.weight"][:, split_start:split_end].t())
         if "mlp1.3.bias" in weights:
-            self.mlp1_3_bias_ = self._cuda(weights["mlp1.3.bias"])
+            self.mlp1_3_bias_.copy_(weights["mlp1.3.bias"])
 
         return
 

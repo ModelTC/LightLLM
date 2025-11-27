@@ -66,8 +66,8 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_norm(self):
         super()._init_norm()
-        self.k_norm_weight_ = NormWeight(self.n_embed, self._k_norm_weight_name, self.data_type_, bias_name=None)
-        self.q_norm_weight_ = NormWeight(self.n_embed, self._q_norm_weight_name, self.data_type_, bias_name=None)
+        self.k_norm_weight_ = NormWeight(self.head_dim, self._k_norm_weight_name, self.data_type_, bias_name=None)
+        self.q_norm_weight_ = NormWeight(self.head_dim, self._q_norm_weight_name, self.data_type_, bias_name=None)
         self.pre_feedforward_layernorm_weight_ = NormWeight(
             self.n_embed, self._pre_feedforward_layernorm_name, self.data_type_, bias_name=None
         )
