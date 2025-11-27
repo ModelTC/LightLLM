@@ -299,14 +299,14 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self._load_mlp(f"model.layers.{self.layer_num_}.mlp")
 
     def _init_norm(self):
-        self.att_norm_weight_ = NormWeight(f"model.layers.{self.layer_num_}.input_layernorm.weight", self.data_type_)
+        self.att_norm_weight_ = NormWeight(self.network_config_["n_embed"], f"model.layers.{self.layer_num_}.input_layernorm.weight", self.data_type_)
         self.ffn_norm_weight_ = NormWeight(
-            f"model.layers.{self.layer_num_}.post_attention_layernorm.weight", self.data_type_
+            self.network_config_["n_embed"], f"model.layers.{self.layer_num_}.post_attention_layernorm.weight", self.data_type_
         )
         self.kv_a_layernorm_ = NormWeight(
-            f"model.layers.{self.layer_num_}.self_attn.kv_a_layernorm.weight", self.data_type_
+            self.network_config_["n_embed"], f"model.layers.{self.layer_num_}.self_attn.kv_a_layernorm.weight", self.data_type_
         )
         if self.q_lora_rank is not None:
             self.q_a_layernorm_ = NormWeight(
-                f"model.layers.{self.layer_num_}.self_attn.q_a_layernorm.weight", self.data_type_
+                self.network_config_["n_embed"], f"model.layers.{self.layer_num_}.self_attn.q_a_layernorm.weight", self.data_type_
             )
