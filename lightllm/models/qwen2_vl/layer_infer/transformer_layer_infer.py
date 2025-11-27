@@ -6,7 +6,6 @@ from typing import Tuple
 from functools import partial
 
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 
 
