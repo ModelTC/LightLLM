@@ -25,6 +25,7 @@ from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
+from lightllm.server.core.objs.req import MAX_TOP_K_LOGPROBS
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
@@ -730,6 +731,17 @@ class HttpServerManager:
                                     "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
                                 }
+
+                                top_k_ids = req.shm_top_logprobs_ids.arr[src_index]
+                                top_k_vals = req.shm_top_logprobs_val.arr[src_index]
+                                top_logprobs = []
+                                for i in range(MAX_TOP_K_LOGPROBS):
+                                    if top_k_vals[i] == -float("inf"):
+                                        break
+                                    top_logprobs.append({int(top_k_ids[i]): float(top_k_vals[i])})
+                                if top_logprobs:
+                                    metadata["top_logprobs"] = top_logprobs
+
                                 if self.args.return_all_prompt_logprobs:
                                     metadata.update(req.get_all_prompt_metadata())
                                 if self.args.use_reward_model:

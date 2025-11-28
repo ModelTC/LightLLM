@@ -16,6 +16,8 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+MAX_TOP_K_LOGPROBS = 20
+
 
 class FinishStatus(ctypes.Structure):
     _pack_ = 4
@@ -170,6 +172,7 @@ class Req(ctypes.Structure):
         self.input_len = len(prompt_ids)
         self.alloc_shm_numpy_len = self.input_len + self.sample_params.max_new_tokens + 1024  # + 1024 for safe
         self.create_logprobs_shm_array()
+        self.create_top_logprobs_shm_array()
         self.create_prompt_ids_shm_array()
         self.chunked_prefill_size = chunked_prefill_size
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
@@ -218,11 +221,33 @@ class Req(ctypes.Structure):
         self.shm_logprobs.create_shm()
         return
 
+    def create_top_logprobs_shm_array(self):
+        service_uni_name = get_unique_server_name()
+        name_ids = f"{service_uni_name}_shm_top_logprobs_ids_{self.index_in_shm_mem}"
+        self.shm_top_logprobs_ids = ShmArray(name_ids, (self.alloc_shm_numpy_len, MAX_TOP_K_LOGPROBS), dtype=np.int32)
+        self.shm_top_logprobs_ids.create_shm()
+
+        name_val = f"{service_uni_name}_shm_top_logprobs_val_{self.index_in_shm_mem}"
+        self.shm_top_logprobs_val = ShmArray(name_val, (self.alloc_shm_numpy_len, MAX_TOP_K_LOGPROBS), dtype=np.float32)
+        self.shm_top_logprobs_val.create_shm()
+        return
+
     def link_logprobs_shm_array(self):
         service_uni_name = get_unique_server_name()
         name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
         self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
         self.shm_logprobs.link_shm()
+        return
+
+    def link_top_logprobs_shm_array(self):
+        service_uni_name = get_unique_server_name()
+        name_ids = f"{service_uni_name}_shm_top_logprobs_ids_{self.index_in_shm_mem}"
+        self.shm_top_logprobs_ids = ShmArray(name_ids, (self.alloc_shm_numpy_len, MAX_TOP_K_LOGPROBS), dtype=np.int32)
+        self.shm_top_logprobs_ids.link_shm()
+
+        name_val = f"{service_uni_name}_shm_top_logprobs_val_{self.index_in_shm_mem}"
+        self.shm_top_logprobs_val = ShmArray(name_val, (self.alloc_shm_numpy_len, MAX_TOP_K_LOGPROBS), dtype=np.float32)
+        self.shm_top_logprobs_val.link_shm()
         return
 
     def get_prompt_ids(self):
