@@ -18,6 +18,8 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
+from lightllm.utils.flashinfer_utils import FLASHINFER_AVAILABLE, flashinfer
+
 
 class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
     """ """
@@ -138,10 +140,16 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        o = self._ffn_norm(o.float(), infer_state, layer_weight).to(torch.bfloat16)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
-        o = None
+        if FLASHINFER_AVAILABLE:
+            input1 = o.view(-1, self.embed_dim_)
+            flashinfer.norm.gemma_fused_add_rmsnorm(
+                input1, input_embdings, layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(o.view(-1, self.embed_dim_))
+            input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
 
+        o = None
         input1 = self._pre_feedforward_layernorm(input_embdings.float(), infer_state, layer_weight).to(torch.bfloat16)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
@@ -164,8 +172,14 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        o = self._ffn_norm(o.float(), infer_state, layer_weight).to(torch.bfloat16)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
+        if FLASHINFER_AVAILABLE:
+            input1 = o.view(-1, self.embed_dim_)
+            flashinfer.norm.gemma_fused_add_rmsnorm(
+                input1, input_embdings, layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(o.view(-1, self.embed_dim_))
+            input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         o = None
 
         input1 = self._pre_feedforward_layernorm(input_embdings.float(), infer_state, layer_weight).to(torch.bfloat16)
