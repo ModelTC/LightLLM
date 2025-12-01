@@ -20,7 +20,9 @@ from lightllm.server.io_struct import (
     BaseReq,
     GenerateResp,
     FlushCacheResp,
-    GeneralModelToHttpRpcRsp
+    ReleaseMemoryResp,
+    ResumeMemoryResp,
+    GeneralModelToHttpRpcRsp,
 )
 
 logger = init_logger(__name__)
@@ -80,14 +82,8 @@ class DeTokenizationManager:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
                     for _ in range(recv_max_count):
                         recv_obj: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                        if isinstance(recv_obj, FlushCacheResp):
-                            print("Detokenization receive flush cache request", flush=True)
+                        if isinstance(recv_obj, GeneralModelToHttpRpcRsp):
                             self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
-                            print("Detokenization send flush cache request to httpserver", flush=True)
-                            continue
-                        elif isinstance(recv_obj, GeneralModelToHttpRpcRsp):
-                            self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
-                            print(f"Detokenization send {recv_obj.func_name} request to httpserver")
                             continue
                         self._add_new_group_req_index(recv_obj=recv_obj)
 

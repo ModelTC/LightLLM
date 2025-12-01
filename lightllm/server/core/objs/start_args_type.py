@@ -8,7 +8,9 @@ from typing import List, Optional, Tuple
 class StartArgs:
     run_mode: str = field(
         default="normal",
-        metadata={"choices": ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server"]},
+        metadata={
+            "choices": ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server"]
+        },
     )
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
@@ -23,8 +25,7 @@ class StartArgs:
     config_server_port: int = field(default=None)
     pd_decode_rpyc_port: int = field(default=42000)
     select_p_d_node_strategy: str = field(
-        default="round_robin",
-        metadata={"choices": ["random", "round_robin", "adaptive_load"]}
+        default="round_robin", metadata={"choices": ["random", "round_robin", "adaptive_load"]}
     )
     model_name: str = field(default="default_model_name")
     model_dir: Optional[str] = field(default=None)
@@ -59,10 +60,7 @@ class StartArgs:
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)
     token_healing_mode: bool = field(default=False)
-    output_constraint_mode: str = field(
-        default="none", 
-        metadata={"choices": ["outlines", "xgrammar", "none"]}
-    )
+    output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
@@ -107,8 +105,7 @@ class StartArgs:
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
     mtp_mode: Optional[str] = field(
-        default=None, 
-        metadata={"choices": ["deepseekv3_vanilla", "deepseekv3_eagle", None]}
+        default=None, metadata={"choices": ["deepseekv3_vanilla", "deepseekv3_eagle", None]}
     )
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
@@ -141,10 +138,7 @@ class StartArgs:
 
     httpserver_workers: int = field(default=1)
     disable_shm_warning: bool = field(default=False)
-    dp_balancer: str = field(
-        default="bs_balancer",
-        metadata={"choices": ["round_robin", "bs_balancer"]}
-    )
+    dp_balancer: str = field(default="bs_balancer", metadata={"choices": ["round_robin", "bs_balancer"]})
     enable_custom_allgather: bool = field(default=False)
     enable_fused_shared_experts: bool = field(default=False)
     enable_mps: bool = field(default=False)
@@ -152,5 +146,7 @@ class StartArgs:
     schedule_time_interval: float = field(default=0.03)
     use_dynamic_prompt_cache: bool = field(default=False)
     disable_custom_allreduce: bool = field(default=False)
+    enable_torch_memory_saver: bool = field(default=False)
+    enable_weight_cpu_backup: bool = field(default=False)
 
     weight_version: str = "default"

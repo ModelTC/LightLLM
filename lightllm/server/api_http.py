@@ -49,6 +49,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.error_utils import ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.server.io_struct import ReleaseMemoryReq, ResumeMemoryReq
 from dataclasses import dataclass
 
 from .api_openai import chat_completions_impl, completions_impl
@@ -60,11 +61,12 @@ from .api_models import (
 )
 from .io_struct import (
     AbortReq,
+    FlushCacheReq,
     InitWeightsUpdateGroupReq,
     DestroyWeightsUpdateGroupReq,
     UpdateWeightsFromDistributedReq,
     UpdateWeightsFromTensorReq,
-    GeneralModelToHttpRpcRsp
+    GeneralModelToHttpRpcRsp,
 )
 from .build_prompt import build_prompt, init_tokenizer
 
@@ -143,13 +145,16 @@ def get_model_name():
 def get_server_info():
     # 将 StartArgs 转换为字典格式
     from dataclasses import asdict
+
     server_info: dict[str, Any] = asdict(g_objs.args)
     return {**server_info}
+
 
 @app.get("/get_weight_version")
 @app.post("/get_weight_version")
 def get_weight_version():
     return {"weight_version": g_objs.args.weight_version}
+
 
 @app.get("/healthz", summary="Check server health")
 @app.get("/health", summary="Check server health")
@@ -330,43 +335,38 @@ async def handle_request_common(request_obj, handler):
         else:
             return create_error_response(HTTPStatus.BAD_REQUEST, ret.msg)
     except Exception as e:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED,
-            f"error: {str(e)}"
-        )
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
+
 
 @app.post("/init_weights_update_group")
 async def init_weights_update_group(request: InitWeightsUpdateGroupReq, raw_request: Request):
     """Init weights update group."""
     return await handle_request_common(request, g_objs.httpserver_manager.init_weights_update_group)
 
+
 @app.post("/destroy_weights_update_group")
 async def destroy_weights_update_group(request: DestroyWeightsUpdateGroupReq, raw_request: Request):
     """Destroy weights update group."""
     return await handle_request_common(request, g_objs.httpserver_manager.destroy_weights_update_group)
+
 
 @app.post("/update_weights_from_distributed")
 async def update_weights_from_distributed(request: UpdateWeightsFromDistributedReq, raw_request: Request):
     """Update model parameter from distributed online."""
     return await handle_request_common(request, g_objs.httpserver_manager.update_weights_from_distributed)
 
+
 @app.post("/update_weights_from_tensor")
-async def update_weights_from_distributed(request: UpdateWeightsFromTensorReq, raw_request: Request):
+async def update_weights_from_tensor(request: UpdateWeightsFromTensorReq, raw_request: Request):
     """Update model parameter from distributed online."""
     return await handle_request_common(request, g_objs.httpserver_manager.update_weights_from_tensor)
+
 
 @app.post("/flush_cache")
 @app.get("/flush_cache")
 async def flush_cache():
     """Flush the radix cache."""
-    ret = await g_objs.httpserver_manager.flush_cache()
-    return Response(
-        content="Cache flushed successfully."
-        if ret
-        else "Cache flush failed. "
-        + "When there are running or waiting requests, the operation will not be performed.",
-        status_code=200 if ret else 500,
-    )
+    return await handle_request_common(FlushCacheReq(), g_objs.httpserver_manager.flush_cache)
 
 
 @app.post("/pause_generation")
@@ -379,6 +379,18 @@ async def pause_generation():
 async def continue_generation():
     await g_objs.httpserver_manager.continue_generation()
     return Response(content="Generation continued successfully.", status_code=200)
+
+
+@app.get("/release_memory_occupation")
+@app.post("/release_memory_occupation")
+async def release_memory_occupation(request: ReleaseMemoryReq):
+    return await handle_request_common(request, g_objs.httpserver_manager.release_memory_occupation)
+
+
+@app.get("/resume_memory_occupation")
+@app.post("/resume_memory_occupation")
+async def resume_memory_occupation(request: ResumeMemoryReq):
+    return await handle_request_common(request, g_objs.httpserver_manager.resume_memory_occupation)
 
 
 @app.websocket("/pd_register")
