@@ -9,29 +9,49 @@ class Qwen2RewardPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
         super().__init__(data_type, network_config, mode)
         return
 
+    def _create_weight(self):
+        vob_size = self.network_config_["vocab_size"]
+        hidden_size = self.network_config_["hidden_size"]
+        split_indexes = np.linspace(0, vob_size, self.tp_world_size_ + 1, dtype=np.int64)
+        split_start = split_indexes[self.tp_rank_]
+        split_end = split_indexes[self.tp_rank_ + 1]
+        split_vob_size = split_end - split_start
+
+        # Pre-allocate memory for weights
+        self.wte_weight_ = torch.empty((split_vob_size, hidden_size), dtype=self.data_type_).cuda()
+        self.lm_head_weight_ = torch.empty((split_vob_size, hidden_size), dtype=self.data_type_).cuda()
+        self.final_norm_weight_ = torch.empty(hidden_size, dtype=self.data_type_).cuda()
+
+        # Reward model specific weights
+        self.score_up_weight = torch.empty((hidden_size, 1), dtype=self.data_type_).cuda()
+        self.score_up_bias = torch.empty(1, dtype=self.data_type_).cuda()
+        self.score_down_weight = torch.empty((hidden_size, 1), dtype=self.data_type_).cuda()
+        self.score_down_bias = torch.empty(1, dtype=self.data_type_).cuda()
+        return
+
     def load_hf_weights(self, weights):
         vob_size = self.network_config_["vocab_size"]
         split_indexes = np.linspace(0, vob_size, self.tp_world_size_ + 1, dtype=np.int64)
         split_start = split_indexes[self.tp_rank_]
         split_end = split_indexes[self.tp_rank_ + 1]
         if "model.embed_tokens.weight" in weights:
-            self.wte_weight_ = self._cuda(weights["model.embed_tokens.weight"][split_start:split_end, :])
+            self.wte_weight_.copy_(weights["model.embed_tokens.weight"][split_start:split_end, :])
             tie_word_embeddings = self.network_config_.get("tie_word_embeddings", False)
             if tie_word_embeddings:
                 self.lm_head_weight_ = self.wte_weight_
 
         if "model.norm.weight" in weights:
-            self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
+            self.final_norm_weight_.copy_(weights["model.norm.weight"])
 
         if "score.0.weight" in weights:
-            self.score_up_weight = self._cuda(weights["score.0.weight"]).transpose(0, 1)
+            self.score_up_weight.copy_(weights["score.0.weight"].transpose(0, 1))
         if "score.0.bias" in weights:
-            self.score_up_bias = self._cuda(weights["score.0.bias"])
+            self.score_up_bias.copy_(weights["score.0.bias"])
 
         if "score.2.weight" in weights:
-            self.score_down_weight = self._cuda(weights["score.2.weight"]).transpose(0, 1)
+            self.score_down_weight.copy_(weights["score.2.weight"].transpose(0, 1))
         if "score.2.bias" in weights:
-            self.score_down_bias = self._cuda(weights["score.2.bias"])
+            self.score_down_bias.copy_(weights["score.2.bias"])
 
         return
 
