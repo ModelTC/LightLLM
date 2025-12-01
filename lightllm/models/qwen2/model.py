@@ -3,7 +3,7 @@ from lightllm.models.qwen2.layer_weights.pre_and_post_layer_weight import Qwen2P
 from lightllm.models.qwen2.layer_weights.transformer_layer_weight import Qwen2TransformerLayerWeight
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.mem_utils import select_mem_manager_class
-from lightllm.common.env_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 @ModelRegistry("qwen2")
