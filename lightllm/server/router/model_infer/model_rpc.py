@@ -34,6 +34,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
+from lightllm.server.io_struct import GeneralHttpToModelRpcReq, GeneralModelToHttpRpcRsp
 
 logger = init_logger(__name__)
 
@@ -182,15 +183,6 @@ class ModelRpcServer:
     def get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
 
-    def flush_radix_cache(self):
-        try:
-            if self.backend is not None:
-                self.backend.flush_radix_cache()
-            return True
-        except BaseException as e:
-            logger.exception(f"flush radix cache failed: {str(e)}")
-            return False
-
     def release_memory_occupation(self, tags: List[MemoryTag]):
         try:
             self.backend.release_memory_occupation(tags)
@@ -206,6 +198,18 @@ class ModelRpcServer:
         except BaseException as e:
             logger.exception(f"resume memory occupation failed: {str(e)}")
             return False
+
+    def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        try:
+            if self.backend is None or not hasattr(self.backend, req.func_name):
+                raise ValueError(f"Backend does not support function {req.func_name}")
+            success, ret = getattr(self.backend, req.func_name)(req.func_args)
+            return GeneralModelToHttpRpcRsp(success=success, msg=str(ret), func_name=req.func_name, func_rsp=ret)
+        except BaseException as e:
+            logger.exception(f"forward to model backend failed: {str(e)}")
+            return GeneralModelToHttpRpcRsp(
+                success=False, msg=f"forward to model backend failed: {str(e)}", func_name=req.func_name
+            )
 
 
 class ModelRpcClient:
@@ -237,34 +241,14 @@ class ModelRpcClient:
         assert func_name == "get_max_total_token_num"
         return ret
 
-    def flush_radix_cache(self) -> bool:
-        self.rpc_shm_params.write_func_params("flush_radix_cache", ())
+    def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        self.rpc_shm_params.write_func_params("forward_to_model", (req,))
         self.rpc_event.set()
 
         self.rpc_finished_event.wait()
         self.rpc_finished_event.clear()
         func_name, ret = self.rpc_shm_results.read_func_result()
-        assert func_name == "flush_radix_cache"
-        return ret
-
-    def release_memory_occupation(self, tags: List[MemoryTag]):
-        self.rpc_shm_params.write_func_params("release_memory_occupation", (tags,))
-        self.rpc_event.set()
-
-        self.rpc_finished_event.wait()
-        self.rpc_finished_event.clear()
-        func_name, ret = self.rpc_shm_results.read_func_result()
-        assert func_name == "release_memory_occupation"
-        return ret
-
-    def resume_memory_occupation(self, tags: List[MemoryTag]):
-        self.rpc_shm_params.write_func_params("resume_memory_occupation", (tags,))
-        self.rpc_event.set()
-
-        self.rpc_finished_event.wait()
-        self.rpc_finished_event.clear()
-        func_name, ret = self.rpc_shm_results.read_func_result()
-        assert func_name == "resume_memory_occupation"
+        assert func_name == "forward_to_model"
         return ret
 
 

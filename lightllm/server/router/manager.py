@@ -39,12 +39,13 @@ from lightllm.server.io_struct import (
     ReleaseMemoryResp,
     ResumeMemoryReq,
     ResumeMemoryResp,
+    GeneralHttpToModelRpcReq,
+    GeneralModelToHttpRpcRsp,
 )
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
-
 
 logger = init_logger(__name__)
 
@@ -554,11 +555,7 @@ class RouterManager:
                 recv_req: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                 if isinstance(recv_req, GenerateReqIndex):
                     self._add_req(recv_req)
-                elif isinstance(recv_req, FlushCacheReq):
-                    special_reqs.append(recv_req)
-                elif isinstance(recv_req, ReleaseMemoryReq):
-                    special_reqs.append(recv_req)
-                elif isinstance(recv_req, ResumeMemoryReq):
+                elif isinstance(recv_req, GeneralHttpToModelRpcReq):
                     special_reqs.append(recv_req)
                 else:
                     raise ValueError(f"Unknown request type: {type(recv_req)}")
@@ -583,13 +580,8 @@ class RouterManager:
         if self.is_multinode_tp:
             special_reqs = self.broadcast_reqs_to_other_nodes(special_reqs)
         for req in special_reqs:
-            if isinstance(req, FlushCacheReq):
-                self.flush_cache()
-            if isinstance(req, ReleaseMemoryReq):
-                self.release_memory_occupation(req.tags)
-            if isinstance(req, ResumeMemoryReq):
-                self.resume_memory_occupation(req.tags)
-        return
+            assert isinstance(req, GeneralHttpToModelRpcReq), "special request must be GeneralHttpToModelRpcReq"
+            self.forward_to_model(req)
 
     def broadcast_reqs_to_other_nodes(self, reqs: List[BaseReq]):
         req_num = len(reqs)
@@ -608,38 +600,19 @@ class RouterManager:
                 dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
         return reqs
 
-    def flush_cache(self) -> None:
-        # if radix cache client is not initialized, just return True
-        if self.radix_cache_client is None:
-            success = True
-        # only flush cache when no running batch and no waiting requests
-        elif self.running_batch is not None or self.req_queue.get_wait_req_num() > 0:
-            success = False
-        else:
-            success = self.model_rpc_client.flush_radix_cache()
-
+    def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> None:
+        ret = self.model_rpc_client.forward_to_model(req)
         if self.is_multinode_tp:
-            # 等待其他节点的flush 结果
-            dist.barrier(group=self.mulitnode_group)
-        if self.node_rank == 0:
-            self.send_to_detokenization.send_pyobj(FlushCacheResp(success=success), protocol=pickle.HIGHEST_PROTOCOL)
-        return
+            output_list = [None for _ in self.nnodes] if self.node_rank == 0 else None
+            dist.gather_object(ret, output_list, dst=0, group=self.mulitnode_group)
+            for res in output_list:
+                res: GeneralModelToHttpRpcRsp
+                if not res.success:
+                    ret = res
+                    break
 
-    def release_memory_occupation(self, tags: List[MemoryTag]):
-        success = self.model_rpc_client.release_memory_occupation(tags)
-        if self.is_multinode_tp:
-            dist.barrier(group=self.mulitnode_group)
         if self.node_rank == 0:
-            self.send_to_detokenization.send_pyobj(ReleaseMemoryResp(success=success), protocol=pickle.HIGHEST_PROTOCOL)
-        return
-
-    def resume_memory_occupation(self, tags: List[MemoryTag]):
-        success = self.model_rpc_client.resume_memory_occupation(tags)
-        if self.is_multinode_tp:
-            dist.barrier(group=self.mulitnode_group)
-        if self.node_rank == 0:
-            self.send_to_detokenization.send_pyobj(ResumeMemoryResp(success=success), protocol=pickle.HIGHEST_PROTOCOL)
-        return
+            self.send_to_detokenization.send_pyobj(ret, protocol=pickle.HIGHEST_PROTOCOL)
 
     def clean_up(self):
         return

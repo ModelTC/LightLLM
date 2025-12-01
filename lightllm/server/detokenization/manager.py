@@ -22,6 +22,7 @@ from lightllm.server.io_struct import (
     FlushCacheResp,
     ReleaseMemoryResp,
     ResumeMemoryResp,
+    GeneralModelToHttpRpcRsp,
 )
 
 logger = init_logger(__name__)
@@ -81,13 +82,7 @@ class DeTokenizationManager:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
                     for _ in range(recv_max_count):
                         recv_obj: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                        if isinstance(recv_obj, FlushCacheResp):
-                            self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
-                            continue
-                        elif isinstance(recv_obj, ReleaseMemoryResp):
-                            self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
-                            continue
-                        elif isinstance(recv_obj, ResumeMemoryResp):
+                        if isinstance(recv_obj, GeneralModelToHttpRpcRsp):
                             self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
                             continue
                         self._add_new_group_req_index(recv_obj=recv_obj)
