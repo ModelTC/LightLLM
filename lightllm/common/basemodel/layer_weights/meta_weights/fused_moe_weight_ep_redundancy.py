@@ -109,8 +109,8 @@ class FusedMoeWeightEPAutoRedundancy:
                     self.w2[0] = qw2
                     self.w2[1] = qw2_scale
                 else:
-                    self.w1[0] = self._cuda(w1)
-                    self.w2[0] = self._cuda(w2)
+                    self.w1[0] = w1
+                    self.w2[0] = w2
                 delattr(self, "w2_list")
                 delattr(self, "experts_up_projs")
                 delattr(self, "experts_gate_projs")
