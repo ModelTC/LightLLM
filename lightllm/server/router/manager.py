@@ -35,11 +35,12 @@ from lightllm.server.io_struct import (
     GenerateReqIndex,
     FlushCacheReq,
     FlushCacheResp,
+    GeneralHttpToModelRpcReq,
+    GeneralModelToHttpRpcRsp
 )
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-
 
 logger = init_logger(__name__)
 
@@ -549,7 +550,7 @@ class RouterManager:
                 recv_req: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                 if isinstance(recv_req, GenerateReqIndex):
                     self._add_req(recv_req)
-                elif isinstance(recv_req, FlushCacheReq):
+                elif isinstance(recv_req, (FlushCacheReq, GeneralHttpToModelRpcReq)):
                     special_reqs.append(recv_req)
 
             # 当队列中存在较多的请求时，将一次接受的数量上调
@@ -574,6 +575,8 @@ class RouterManager:
         for req in special_reqs:
             if isinstance(req, FlushCacheReq):
                 self.flush_cache()
+            elif isinstance(req, (GeneralHttpToModelRpcReq)):
+                self.forward_to_model(req)
 
     def broadcast_reqs_to_other_nodes(self, reqs: List[BaseReq]):
         req_num = len(reqs)
@@ -608,6 +611,20 @@ class RouterManager:
         if self.node_rank == 0:
             self.send_to_detokenization.send_pyobj(FlushCacheResp(success=success), protocol=pickle.HIGHEST_PROTOCOL)
         return
+
+    def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> None:
+        ret = self.model_rpc_client.forward_to_model(req)
+        if self.is_multinode_tp:
+            output_list = [None for _ in self.nnodes] if self.node_rank == 0 else None
+            dist.gather_object(ret, output_list, dst=0, group=self.mulitnode_group)
+            for res in output_list:
+                res : GeneralModelToHttpRpcRsp
+                if not res.success:
+                    ret = res
+                    break
+
+        if self.node_rank == 0:
+            self.send_to_detokenization.send_pyobj(ret, protocol=pickle.HIGHEST_PROTOCOL)
 
     def clean_up(self):
         return

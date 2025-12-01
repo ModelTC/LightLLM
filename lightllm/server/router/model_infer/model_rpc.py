@@ -33,6 +33,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.server.io_struct import GeneralHttpToModelRpcReq, GeneralModelToHttpRpcRsp
 
 logger = init_logger(__name__)
 
@@ -190,6 +191,16 @@ class ModelRpcServer:
             logger.exception(f"flush radix cache failed: {str(e)}")
             return False
 
+    def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        try:
+            if self.backend is None or not hasattr(self.backend, req.func_name):
+                raise ValueError(f"Backend does not support function {req.func_name}")
+            success, ret = getattr(self.backend, req.func_name)(req.func_args)
+            return GeneralModelToHttpRpcRsp(success=success, msg=str(ret), func_name=req.func_name, func_rsp=ret)
+        except BaseException as e:
+            logger.exception(f"forward to model backend failed: {str(e)}")
+            return GeneralModelToHttpRpcRsp(success=False, msg=f'forward to model backend failed: {str(e)}', func_name=req.func_name)
+
 
 class ModelRpcClient:
     def __init__(self, rpc_event, rpc_finished_event):
@@ -230,6 +241,15 @@ class ModelRpcClient:
         assert func_name == "flush_radix_cache"
         return ret
 
+    def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        self.rpc_shm_params.write_func_params("forward_to_model", (req,))
+        self.rpc_event.set()
+
+        self.rpc_finished_event.wait()
+        self.rpc_finished_event.clear()
+        func_name, ret = self.rpc_shm_results.read_func_result()
+        assert func_name == "forward_to_model"
+        return ret
 
 def _init_env(
     args,
