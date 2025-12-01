@@ -12,29 +12,23 @@ class NormWeight(BaseWeightTpl):
         self.data_type_ = data_type
         self.weight = None
         self.bias = None
-        self.is_weight_ready = False
-        self.is_bias_ready = False
         self._create_weight()
 
     def _create_weight(self):
         device = f"cuda:{get_current_device_id()}"
         self.weight = torch.empty(self.norm_dim, dtype=self.data_type_, device=device)
-        self.bias = torch.empty(self.norm_dim, dtype=self.data_type_, device=device) if self.bias_name is not None else None
+        self.bias = (
+            torch.empty(self.norm_dim, dtype=self.data_type_, device=device) if self.bias_name is not None else None
+        )
 
     def load_hf_weights(self, weights):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
-            self.is_weight_ready = True
         if self.bias_name in weights:
             self.bias.copy_(weights[self.bias_name])
-            self.is_bias_ready = True
 
     def verify_load(self):
-        return self.is_weight_ready and (self.bias_name is None or self.is_bias_ready)
-
-    def unready_weights(self):
-        self.is_weight_ready = False
-        self.is_bias_ready = False
+        return True
 
 
 class GEMMANormWeight(NormWeight):
@@ -45,7 +39,6 @@ class GEMMANormWeight(NormWeight):
         # TODO: 这里直接 +1 会不会导致精度问题? 计算时要求 (1.0 + weight.float()) ?
         if self.weight_name in weights:
             self.weight.copy_((weights[self.weight_name] + 1).to(self.data_type_))
-            self.is_weight_ready = True
 
 
 class TpNormWeight(NormWeight):
@@ -58,7 +51,5 @@ class TpNormWeight(NormWeight):
 
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name][start:end].to(self.data_type_))
-            self.is_weight_ready = True
         if self.bias_name in weights:
             self.bias.copy_(weights[self.bias_name][start:end].to(self.data_type_))
-            self.is_bias_ready = True
