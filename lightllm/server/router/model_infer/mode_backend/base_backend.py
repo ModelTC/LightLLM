@@ -47,7 +47,7 @@ from lightllm.server.io_struct import (
     InitWeightsUpdateGroupReq,
     DestroyWeightsUpdateGroupReq,
     UpdateWeightsFromDistributedReq,
-    UpdateWeightsFromTensorReq
+    UpdateWeightsFromTensorReq,
 )
 
 
@@ -306,23 +306,20 @@ class ModeBackend:
         return
 
     def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
-        assert (
-            torch.distributed.is_initialized()
-        ), "Default torch process group must be initialized"
+        assert torch.distributed.is_initialized(), "Default torch process group must be initialized"
 
         assert request.group_name != "", "Group name cannot be empty"
         rank = request.rank_offset + self.rank_in_dp
         self.logger.info(
             f"init custom process group: master_address={request.master_address}, master_port={request.master_port}, "
-            f"rank_offset={request.rank_offset}, rank={rank}, world_size={request.world_size}, group_name={request.group_name}, "
+            f"rank_offset={request.rank_offset}, rank={rank}, "
+            f"world_size={request.world_size}, group_name={request.group_name}, "
             f" backend={request.backend}"
         )
 
         try:
             if request.group_name in self._model_update_group:
-                raise ValueError(
-                    f"Process group with name {request.group_name} already exists."
-                )
+                raise ValueError(f"Process group with name {request.group_name} already exists.")
 
             self._model_update_group[request.group_name] = init_custom_process_group(
                 backend=request.backend,
@@ -371,10 +368,8 @@ class ModeBackend:
             weights = []
             handles = []
             for name, dtype, shape in zip(request.names, request.dtypes, request.shapes):
-                target_dtype = (
-                    dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
-                )
-                weight = torch.empty(shape, dtype=target_dtype, device='cuda')
+                target_dtype = dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
+                weight = torch.empty(shape, dtype=target_dtype, device="cuda")
                 handles.append(
                     torch.distributed.broadcast(
                         weight,
@@ -421,9 +416,7 @@ class ModeBackend:
             converted_metadata.append(converted_meta)
 
         # Create bucket and reconstruct tensors
-        bucket = FlattenedTensorBucket(
-            flattened_tensor=flattened_tensor, metadata=converted_metadata
-        )
+        bucket = FlattenedTensorBucket(flattened_tensor=flattened_tensor, metadata=converted_metadata)
         reconstructed_tensors = bucket.reconstruct_tensors()
 
         # Load the reconstructed tensors using the standard method
@@ -431,25 +424,20 @@ class ModeBackend:
 
         return True, "Succeeded to update parameter online from flattened bucket tensor."
 
-    def update_weights_from_tensor(
-        self,
-        request: UpdateWeightsFromTensorReq
-    ):
+    def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq):
         try:
             monkey_patch_torch_reductions()
             if request.load_format == "flattened_bucket":
                 # Handle flattened bucket format
                 return self._update_weights_from_flattened_bucket(
-                    flattened_tensor_bucket_dict=request.named_tensors
+                    flattened_tensor_bucket_dict=request.serialized_named_tensors
                 )
 
             # We need to get device after patch otherwise the device would be wrong
             self.device_module = torch.get_device_module("cuda")
             infered_device = self.device_module.current_device()
 
-            named_tensors=MultiprocessingSerializer.deserialize(
-                request.serialized_named_tensors[self.rank_in_dp]
-            )
+            named_tensors = MultiprocessingSerializer.deserialize(request.serialized_named_tensors[self.rank_in_dp])
 
             def _unwrap_tensor(tensor, tp_rank, device):
                 if isinstance(tensor, LocalSerializedTensor):
@@ -457,7 +445,7 @@ class ModeBackend:
                 return tensor.to(device)
 
             named_tensors = {
-                name : _unwrap_tensor(tensor, tp_rank=self.rank_in_dp, device=infered_device)
+                name: _unwrap_tensor(tensor, tp_rank=self.rank_in_dp, device=infered_device)
                 for name, tensor in named_tensors
             }
 
