@@ -21,7 +21,7 @@ class Qwen3MOEMTPPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
 
     def verify_load(self):
         errors = "weights load not ok"
-        weights = [self.eh_proj_weight_, self.enorm_weight_, self.hnorm_weight_, self.final_norm_weight_]
+        weights = [self.eh_proj_weight_, self.enorm_weight_, self.hnorm_weight_]
         for i in range(len(weights)):
             assert weights[i] is not None, "index:" + str(i) + " " + errors
         return
