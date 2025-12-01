@@ -76,8 +76,7 @@ class DiskCacheWorker:
         )
 
     def _prepare_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        num_page, num_layer = tensor.shape[0], tensor.shape[1]
-        return tensor.reshape(num_page, num_layer, -1)
+        return tensor.flatten(1).view(dtype=torch.uint8)
 
     def run(self) -> None:
         while True:
