@@ -142,7 +142,7 @@ class GuidedGrammar(ctypes.Structure):
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
         try:
-            if self.length > 0 and tokenizer is not None:
+            if self.length > 0 and tokenizer is not None and constraint != "json":
                 import xgrammar as xgr
 
                 tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)

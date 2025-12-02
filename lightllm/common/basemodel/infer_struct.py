@@ -24,6 +24,10 @@ class InferStateInfo:
         self.b_req_idx: torch.Tensor = None
         self.b_start_loc: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
+
+        self.b_shared_seq_len: torch.Tensor = None  # only for diverse mode used in decode phase.
+        self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
+
         self.b_seq_len: torch.Tensor = None
         # max_len_in_batch prefill 和 decode 阶段含义不同
         # prefill 阶段指每个req 输入token的长度（不包括已经cache的部分）最大值

@@ -128,10 +128,23 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool_call_parser",
         type=str,
-        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen"],
+        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31"],
         default=None,
         help="tool call parser type",
     )
+    parser.add_argument(
+        "--chat_template",
+        type=str,
+        default=None,
+        help=(
+            "chat template jinja file path. For example:\n"
+            "- /test/chat_template/tool_chat_template_deepseekv31.jinja\n"
+            "- /test/chat_template/tool_chat_template_deepseekv32.jinja\n"
+            "- /test/chat_template/tool_chat_template_qwen.jinja\n"
+            "- /test/chat_template/tool_chat_template_deepseekr1.jinja"
+        ),
+    )
+
     parser.add_argument(
         "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
     )
@@ -191,7 +204,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         default=[],
         nargs="+",
-        help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_fp16 | triton_flashdecoding
+        help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_int8kv_flashdecoding | ppl_int8kv_flashdecoding_diverse
+                        | ppl_fp16 | triton_flashdecoding
                         | triton_gqa_attention | triton_gqa_flashdecoding | triton_fp8kv | offline_calibration_fp8kv
                         | export_fp8kv_calibration
                         triton_flashdecoding mode is for long context, current support llama llama2 qwen;
@@ -354,6 +368,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--push_interval", type=int, default=10, help="interval of pushing monitoring metrics")
     parser.add_argument(
         "--visual_infer_batch_size", type=int, default=1, help="number of images to process in each inference batch"
+    )
+    parser.add_argument(
+        "--visual_send_batch_size",
+        type=int,
+        default=1,
+        help="""
+        number of images embedding to send to llm process in each batch,
+        bigger size can improve throughput but increase latency possibly in some cases
+        """,
     )
     parser.add_argument(
         "--visual_gpu_ids", nargs="+", type=int, default=None, help="List of GPU IDs to use, e.g., 0 1 2"
@@ -536,5 +559,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
     parser.add_argument(
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
+    )
+    parser.add_argument(
+        "--disk_cache_dir",
+        type=str,
+        default=None,
+        help="""Directory used to persist disk cache data. Defaults to a temp directory when not set.""",
     )
     return parser

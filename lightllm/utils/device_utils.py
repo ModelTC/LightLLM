@@ -82,7 +82,12 @@ def get_current_device_name():
 
     if torch.cuda.is_available():
         device = torch.cuda.current_device()
-        gpu_name = torch.cuda.get_device_name(device).replace(" ", "_")
+        gpu_name = torch.cuda.get_device_name(device)
+        # 4090 trans to 4090 D
+        if "4090" in gpu_name and "4090 D" not in gpu_name:
+            gpu_name = gpu_name.replace("4090", "4090 D")
+
+        gpu_name = gpu_name.replace(" ", "_")
         return gpu_name
     else:
         raise RuntimeError("No GPU available")
@@ -242,4 +247,16 @@ def triton_support_tensor_descriptor() -> bool:
             assert False
     except:
         logger.info("triton not support tensor_descriptor")
+        return False
+
+
+@lru_cache(maxsize=None)
+def is_5090_gpu() -> bool:
+    try:
+        gpu_name = torch.cuda.get_device_name(0)
+        if "5090" in gpu_name:
+            return True
+        else:
+            return False
+    except:
         return False

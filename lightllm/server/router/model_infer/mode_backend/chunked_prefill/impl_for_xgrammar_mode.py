@@ -35,7 +35,11 @@ class XgrammarBackend(ChunkedPrefillBackend):
             logger.info(f"grammar cache miss for {type}: '{grammar}'")
             try:
                 if type == "grammar":
-                    return self.xgrammar_compiler.compile_grammar(grammar)
+                    if grammar == "json":
+                        return self.xgrammar_compiler.compile_builtin_json_grammar()
+
+                    else:
+                        return self.xgrammar_compiler.compile_grammar(grammar)
                 elif type == "schema":
                     return self.xgrammar_compiler.compile_json_schema(grammar)
                 else:
