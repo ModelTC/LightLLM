@@ -86,6 +86,7 @@ class Req(ctypes.Structure):
         ("candetoken_out_len", ctypes.c_int),
         ("prompt_cache_len", ctypes.c_int),  # 用于记录prompt cache 的命中长度，用于统计,这里指gpu kv cache命中长度
         ("cpu_prompt_cache_len", ctypes.c_int),  # 用于记录在 enable_cpu_cache 的场景下,命中的 cpu kv cache 的长度
+        ("disk_prompt_cache_len", ctypes.c_int),  # 用于记录从磁盘命中的长度
         ("is_paused", ctypes.c_bool),  # 标记一个Req因为显存资源管理的原因被临时暂停了。
         ("finish_status", FinishStatus),
         # 这个标记变量是http_server 写入，其他进程读取，用于标记该请求是否因为断网被aborted。
@@ -155,6 +156,7 @@ class Req(ctypes.Structure):
         self.candetoken_out_len = 0
         self.prompt_cache_len = 0
         self.cpu_prompt_cache_len = 0
+        self.disk_prompt_cache_len = 0
         self.finish_token_index = -1
         self.can_released_mark = False
         self.reward_score = math.nan

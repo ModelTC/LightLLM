@@ -13,7 +13,7 @@ import pickle
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Union, List, Tuple, Dict, Optional
+from typing import Union, List, Tuple, Dict, Optional, AsyncGenerator
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
@@ -266,7 +266,7 @@ class HttpServerManager:
         nixl_pd_upload_websocket: ClientConnection = None,
         # 用于等待 pd_master 下发的交换信息
         nixl_pd_event: asyncio.Event = None,
-    ) -> Tuple[int, str, dict, FinishStatus]:
+    ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)
@@ -569,6 +569,7 @@ class HttpServerManager:
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
+                    disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
                         is_first_token = False
@@ -591,6 +592,8 @@ class HttpServerManager:
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
                         x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                        cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
+                        disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
 
                         mtp_avg_token_per_step = out_token_counter / max(
                             (out_token_counter - metadata["mtp_accepted_token_num"]), 1
@@ -603,10 +606,15 @@ class HttpServerManager:
                             f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
                             f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
                             f"prompt_token_num:{prompt_tokens} "
+                            f"gpu cache hit: {prompt_cache_len > 0} "
                             f"prompt_cache_len:{prompt_cache_len} "
                             f"prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"cpu cache hit: {cpu_prompt_cache_len > 0} "
                             f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
-                            f"used_cpu_prompt_cache_len:{max(0, cpu_prompt_cache_len - prompt_cache_len)} "
+                            f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
+                            f"disk cache hit: {disk_prompt_cache_len > 0} "
+                            f"disk_prompt_cache_len:{disk_prompt_cache_len} "
+                            f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
                         if group_request_id < 0:
@@ -728,6 +736,7 @@ class HttpServerManager:
                                     "count_output_tokens": count_output_tokens,
                                     "prompt_cache_len": req.prompt_cache_len,
                                     "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
+                                    "disk_prompt_cache_len": req.disk_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
                                 }
                                 if self.args.return_all_prompt_logprobs:

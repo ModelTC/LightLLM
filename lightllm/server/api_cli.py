@@ -560,4 +560,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
+    parser.add_argument(
+        "--disk_cache_dir",
+        type=str,
+        default=None,
+        help="""Directory used to persist disk cache data. Defaults to a temp directory when not set.""",
+    )
     return parser

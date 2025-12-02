@@ -8,7 +8,7 @@ import time
 import numpy as np
 import triton
 from functools import lru_cache
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, enable_huge_page
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, get_model_type
 from typing import List, Tuple, Optional
@@ -93,7 +93,7 @@ def create_shm_kv_cache_ptr() -> int:
     args = get_env_start_args()
     key = args.cpu_kv_cache_shm_id
     requested_size = calcu_cpu_cache_meta().calcu_size()
-    use_hugetlb = True
+    use_hugetlb = enable_huge_page()
 
     # 计算大页大小（默认从 /proc/meminfo 读取 Hugepagesize）
     def _get_default_hugepage_size() -> int:
@@ -109,37 +109,35 @@ def create_shm_kv_cache_ptr() -> int:
             pass
         return 2 * 1024 * 1024  # fallback 2MB
 
-    # 向上对齐到大页大小
-    huge_sz = _get_default_hugepage_size()
-    size_to_alloc = triton.cdiv(requested_size, huge_sz) * huge_sz
     shmflg = 0o666 | 0o1000  # 权限和 IPC_CREAT 标志
     if use_hugetlb:
+        # 向上对齐到大页大小
+        huge_sz = _get_default_hugepage_size()
+        size_to_alloc = triton.cdiv(requested_size, huge_sz) * huge_sz
         SHM_HUGETLB = 0o4000
         shmflg |= SHM_HUGETLB
         logger.info(
             f"Using SHM_HUGETLB, hugepage_size={huge_sz} bytes, requested={requested_size}, alloc={size_to_alloc}"
         )
+    else:
+        size_to_alloc = requested_size
+        logger.info(f"Using regular pages, requested={requested_size}, alloc={size_to_alloc}")
 
-    # 优先尝试 HugeTLB 分配，失败则回退到普通页
     shmid = libc.shmget(key, size_to_alloc, shmflg)
     hugepages_num = (size_to_alloc + 1024 * 1024 * 1024 - 1) // (1024 * 1024 * 1024)
-    if shmid < 0 and use_hugetlb:
-        err = ctypes.get_errno()
-        logger.error(
-            f"shmget with SHM_HUGETLB failed (errno={err}). Falling back to regular pages."
-            f"You may need to configure hugepages manually, e.g.,"
-            f"sudo sed -i 's/^GRUB_CMDLINE_LINUX=\"/& default_hugepagesz=1G \
-                hugepagesz=1G hugepages={hugepages_num}/' /etc/default/grub"
-            f"sudo update-grub"
-            f"sudo reboot"
-        )
-        # 回退：去掉 HUGETLB 标志，使用请求原始大小
-        shmflg_n = 0o666 | 0o1000
-        shmid = libc.shmget(key, size_to_alloc, shmflg_n)
-
     if shmid < 0:
         err = ctypes.get_errno()
-        raise Exception(f"Error creating shared memory (errno={err})")
+        if use_hugetlb:
+            raise Exception(
+                f"shmget with SHM_HUGETLB failed (errno={err}). Falling back to regular pages."
+                f"You may need to configure hugepages manually, e.g.,"
+                f"sudo sed -i 's/^GRUB_CMDLINE_LINUX=\"/& default_hugepagesz=1G \
+                    hugepagesz=1G hugepages={hugepages_num}/' /etc/default/grub"
+                f"sudo update-grub"
+                f"sudo reboot"
+            )
+        else:
+            raise Exception(f"Error creating regular shared memory (errno={err})")
 
     register_sysv_shm_for_cleanup(key, shmid)
     logger.info(f"Shared memory ID: {shmid}")

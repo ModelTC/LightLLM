@@ -204,3 +204,20 @@ def get_diverse_max_batch_shared_group_size() -> int:
 @lru_cache(maxsize=None)
 def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
     return get_env_start_args().diverse_mode and "ppl_int8kv_flashdecoding_diverse" in get_env_start_args().mode
+
+
+@lru_cache(maxsize=None)
+def get_disk_cache_prompt_limit_length():
+    return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
+
+
+@lru_cache(maxsize=None)
+def enable_huge_page():
+    """
+    大页模式：启动后可大幅缩短cpu kv cache加载时间
+    "sudo sed -i 's/^GRUB_CMDLINE_LINUX=\"/& default_hugepagesz=1G \
+        hugepagesz=1G hugepages={需要启用的大页容量}/' /etc/default/grub"
+    "sudo update-grub"
+    "sudo reboot"
+    """
+    return enable_env_vars("LIGHTLLM_HUGE_PAGE_ENABLE")

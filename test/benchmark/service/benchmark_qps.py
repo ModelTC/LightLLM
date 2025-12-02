@@ -47,19 +47,40 @@ def gen_random_input_text(tokenizer, input_len) -> str:
     return random_text
 
 
+def gen_random_input_text_with_seed(tokenizer, input_len, seed) -> str:
+    rng = random.Random(seed)
+    random_ids = [rng.randint(0, tokenizer.vocab_size) for _ in range(input_len)]
+    random_text = tokenizer.decode(random_ids)
+    return random_text
+
+
 def gen_random_data(
     input_len: int,
     output_len: int,
     reqs_num: int,
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     range_ratio: float,
+    input_len2: int = 0,
+    seed2: int = None,
 ) -> Tuple[List[str], List[int], List[int]]:
     prompts = []
     output_lens = get_random_length(reqs_num, output_len, range_ratio)
     input_lens = get_random_length(reqs_num, input_len, range_ratio)
+
+    if input_len2 > 0:
+        input_lens2 = get_random_length(reqs_num, input_len2, range_ratio)
+
     for i in range(reqs_num):
         input_text = gen_random_input_text(tokenizer, input_lens[i])
-        prompts.append((input_text, input_lens[i]))
+
+        if input_len2 > 0 and seed2 is not None:
+            input_text2 = gen_random_input_text_with_seed(tokenizer, input_lens2[i], seed2 + i)
+            input_text = input_text + input_text2
+            total_len = input_lens[i] + input_lens2[i]
+        else:
+            total_len = input_lens[i]
+
+        prompts.append((input_text, total_len))
     print("Generate random data finish.")
     return prompts, output_lens
 
@@ -314,10 +335,14 @@ def main():
     parser.add_argument("--input_num", type=int, default=2000)
     parser.add_argument("--input_qps", type=float, default=30.0)
     parser.add_argument("--input_len", type=int, default=1024)
+    parser.add_argument(
+        "--input_len2", type=int, default=0, help="Length of second part to append behind input_len, 0 means disabled"
+    )
     parser.add_argument("--output_len", type=int, default=128)
     parser.add_argument("--server_api", type=str, default="lightllm")
     parser.add_argument("--dump_file", type=str, default="")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed2", type=int, default=None, help="Seed for input_len2 part generation")
     parser.add_argument("--range_ratio", type=float, default=1.0)
     parser.add_argument(
         "--force_terminate",
@@ -356,6 +381,8 @@ def main():
             args.input_num if not args.continuous_send else 10 * args.input_num,
             tokenizer,
             args.range_ratio,
+            args.input_len2,
+            args.seed2,
         )
 
     percentiles = [25, 50, 75, 90, 95, 99, 100]
