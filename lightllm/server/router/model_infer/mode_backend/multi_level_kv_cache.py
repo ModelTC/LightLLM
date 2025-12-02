@@ -254,8 +254,6 @@ class MultiLevelKvCacheModule(object):
                 self.cpu_cache_client.lock.acquire_sleep1ms()
                 # 分组update，避免不同请求的page交叉，导致disk cache hash不一致
                 for pages in page_array_list:
-                    if not pages:
-                        continue
                     self.cpu_cache_client.update_pages_status_to_ready(
                         page_list=pages, deref=True, disk_offload_enable=self.args.enable_disk_cache
                     )

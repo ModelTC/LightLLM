@@ -123,7 +123,7 @@ class CpuKvCacheClient(object):
                     assert cur_page.ref_count > 0
                     cur_page.ref_count -= 1
                     if cur_page.ref_count == 0:
-                        # 放回 LRU 列表头部
+                        # 放回 LRU 列表尾部
                         self.page_items.add_item_to_tail(cur_page.self_index)
 
                 # 全部落盘，已落盘前缀部分会在落盘中自动剔除

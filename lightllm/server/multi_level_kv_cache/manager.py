@@ -164,16 +164,11 @@ class MultiLevelKVCacheManager:
                 continue
 
             finded_page_indexes: List[int] = []
-            disk_service = (
-                self.disk_cache_worker.service
-                if (self.disk_cache_worker is not None and self.disk_cache_worker.service is not None)
-                else None
-            )
             req.disk_prompt_cache_len = 0
 
             # 匹配 CPU cache
             all_pages = self._cpu_cache_match(token_hash_list)
-            if len(all_pages) == len(token_hash_list) or disk_service is None:
+            if len(all_pages) == len(token_hash_list) or self.only_cpu_cache_enable:
                 finded_page_indexes = all_pages
             else:
                 # 匹配 disk cache并load到cpu cache

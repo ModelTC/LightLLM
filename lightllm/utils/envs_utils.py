@@ -208,7 +208,7 @@ def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
 
 @lru_cache(maxsize=None)
 def get_disk_cache_prompt_limit_length():
-    return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 10000))
+    return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
 
 
 @lru_cache(maxsize=None)
