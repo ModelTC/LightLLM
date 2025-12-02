@@ -204,3 +204,9 @@ def get_diverse_max_batch_shared_group_size() -> int:
 @lru_cache(maxsize=None)
 def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
     return get_env_start_args().diverse_mode and "ppl_int8kv_flashdecoding_diverse" in get_env_start_args().mode
+    return int(os.getenv("LIGHTLMM_RADIX_TREE_MERGE_DELTA", 6000))
+
+
+@lru_cache(maxsize=None)
+def get_disk_cache_prompt_limit_length():
+    return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 10000))

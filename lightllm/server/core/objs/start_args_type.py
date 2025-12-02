@@ -113,6 +113,7 @@ class StartArgs:
     cpu_cache_token_page_size: int = field(default=64)
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
+    disk_cache_dir: Optional[str] = field(default=None)
     # zmp ports
     router_port: int = field(default=None)
     detokenization_port: int = field(default=None)

@@ -14,7 +14,6 @@ from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from .cpu_cache_client import CpuKvCacheClient
-from .disk_cache_worker import DiskCacheWorker
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -45,9 +44,12 @@ class MultiLevelKVCacheManager:
         self.disk_cache_worker = None
         self.disk_cache_thread = None
         if self.args.enable_disk_cache:
+            from .disk_cache_worker import DiskCacheWorker
+
             self.disk_cache_worker = DiskCacheWorker(
                 disk_cache_storage_size=self.args.disk_cache_storage_size,
                 cpu_cache_client=self.cpu_cache_client,
+                disk_cache_dir=self.args.disk_cache_dir,
             )
             self.disk_cache_thread = threading.Thread(target=self.disk_cache_worker.run, daemon=True)
             self.disk_cache_thread.start()
@@ -71,8 +73,8 @@ class MultiLevelKVCacheManager:
         if current_time - start_time >= self.cpu_cache_time_out:
             self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
             logger.warning(
-                f"blueswhen cpu cache match time out {current_time - start_time}s, "
-                "group_req_id: {group_req_indexes.group_req_id}"
+                f"cpu cache match time out {current_time - start_time}s, "
+                f"group_req_id: {group_req_indexes.group_req_id}"
             )
             return
 
