@@ -9,8 +9,7 @@ from lightllm.models.deepseek2.flashattention_infer_struct import Deepseek2Flash
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.common.deepseek2_mem_manager import Deepseek2MemoryManager
-from lightllm.common.deepseek2_fp8kv_mem_manager import Deepseek2FP8KVMemoryManager
+from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
@@ -94,9 +93,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         return super()._verify_params()
 
     def _init_mem_manager(self):
-        manager_class = Deepseek2MemoryManager
-        if "triton_fp8kv" in self.mode:
-            manager_class = Deepseek2FP8KVMemoryManager
+        manager_class = select_mem_manager_class()
 
         # mtp 模式下需要在mem manger上扩展draft model使用的layer
         added_mtp_layer_num = 0
