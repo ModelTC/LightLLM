@@ -10,6 +10,7 @@ from . import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.llm_utils import get_llm_model_class
 from functools import lru_cache
 
 logger = init_logger(__name__)
@@ -21,12 +22,7 @@ def select_mem_manager_class():
 
     # case 1
     # 先判断是否是 deepseek 系列的模型
-    from transformers.configuration_utils import PretrainedConfig
-
-    model_cfg, _ = PretrainedConfig.get_config_dict(get_env_start_args().model_dir)
-    from lightllm.models import get_model_class
-
-    model_class = get_model_class(model_cfg=model_cfg)
+    model_class = get_llm_model_class()
     from lightllm.models import Deepseek2TpPartModel
 
     if issubclass(model_class, Deepseek2TpPartModel):
