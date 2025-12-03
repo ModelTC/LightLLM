@@ -15,34 +15,6 @@ from .mm_slicer import SliceMixinTpl
 logger = init_logger(__name__)
 
 
-@dataclass
-class MMWeightPack:
-    weight: Optional[torch.Tensor] = None
-    bias: Optional[torch.Tensor] = None
-    weight_scale: Optional[torch.Tensor] = None
-    weight_zero_point: Optional[torch.Tensor] = None
-
-    has_bias: bool = False
-    has_weight_scale: bool = False
-    has_weight_zero_point: bool = False
-
-    def is_ready(self) -> bool:
-        return (
-            self.weight is not None
-            and (not self.has_bias or (self.has_bias and self.bias is not None))
-            and (not self.has_weight_scale or (self.has_weight_scale and self.weight_scale is not None))
-            and (not self.has_weight_zero_point or (self.has_weight_zero_point and self.weight_zero_point is not None))
-        )
-
-    def is_load_finished(self):
-        return (
-            (self.is_ready() and self.weight.is_cuda)
-            and ((self.has_bias and self.bias.is_cuda) or (not self.has_bias))
-            and ((self.has_weight_scale and self.weight_scale.is_cuda) or (not self.has_weight_scale))
-            and ((self.has_weight_zero_point and self.weight_zero_point.is_cuda) or (not self.has_weight_zero_point))
-        )
-
-
 class MMWeightTpl(BaseWeightTpl):
     def __init__(
         self,
@@ -76,26 +48,13 @@ class MMWeightTpl(BaseWeightTpl):
             if bias_names[0] is None:
                 bias_names = None
 
-        if quant_method is not None:
-            has_weight_scale = quant_method.has_weight_scale
-            has_weight_zero_point = quant_method.has_weight_zero_point
-        else:
-            has_weight_scale = False
-            has_weight_zero_point = False
-
         # 同时存在 weight_names 和 quanted_weight_names 是为了兼容在线和离线两种加载方案
         self.weight_names = weight_names
 
         self.bias_names = bias_names
-        has_bias = self.bias_names is not None
 
         self.gen_weight_quant_param_names(quant_method=quant_method)
         self.quant_method = quant_method
-        self.mm_param: MMWeightPack = MMWeightPack(
-            has_bias=has_bias,
-            has_weight_scale=has_weight_scale,
-            has_weight_zero_point=has_weight_zero_point,
-        )
         self.param_slicer: SliceMixinTpl = None
 
         self.weight_fused_dim = 0
@@ -105,23 +64,10 @@ class MMWeightTpl(BaseWeightTpl):
         self._create_weight()
 
     def _create_weight(self):
-        in_dim = self.in_dim
-        out_dim = sum(self.out_dims)
-        if self.quant_method is None:
-            self.mm_param.weight = (
-                torch.empty((out_dim, in_dim), dtype=self.data_type_).cuda(get_current_device_id()).t()
-            )
-        else:
-            device_id = get_current_device_id()
-            self.mm_param.weight = self.quant_method.create_weight(out_dim, in_dim, device_id)
-            self.mm_param.weight_scale = self.quant_method.create_weight_scale(
-                out_dim, in_dim, dtype=self.data_type_, device_id=device_id
-            )
-            self.mm_param.weight_zero_point = self.quant_method.create_weight_zero_point(
-                out_dim, in_dim, dtype=self.data_type_, device_id=device_id
-            )
-        if self.mm_param.has_bias:
-            self.mm_param.bias = torch.empty(out_dim, dtype=self.data_type_).cuda(get_current_device_id())
+        self.weight_pack = self.quant_method.create_weight(self)
+
+        if self.bias_names is not None:
+            self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).cuda(get_current_device_id())
         return
 
     def mm(

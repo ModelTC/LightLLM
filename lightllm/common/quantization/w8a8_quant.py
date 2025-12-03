@@ -9,8 +9,10 @@ from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_gemm_kernel imp
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 
-if TYPE_CHECKING:
-    from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightTpl
+from lightllm.common.quantization.quantize_method import QuantizedWeightPack
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe_weight_tp import FusedMoeWeightTP
 
 if HAS_LIGHTLLM_KERNEL:
 
@@ -30,13 +32,13 @@ class BaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor, output: "MMWeightPack"):
+    def quantize(self, raw_weight: BaseWeight) -> QuantizedWeightPack:
         pass
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "MMWeightPack",
+        weight_pack: QuantizedWeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
@@ -47,13 +49,7 @@ class BaseQuantizationMethod(QuantizationMethod):
     def method_name(self):
         return "w8a8-base"
 
-    def create_weight(self, out_dim: int, in_dim: int, device_id: int) -> torch.Tensor:
-        raise NotImplementedError("Not implemented")
-
-    def create_weight_scale(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
-        raise NotImplementedError("Not implemented")
-
-    def create_weight_zero_point(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
+    def create_weight(self, raw_weight: BaseWeight, *args, **kwargs) -> QuantizedWeightPack:
         raise NotImplementedError("Not implemented")
 
 
@@ -64,26 +60,34 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
-    def quantize(self, weight: torch.Tensor, output: "MMWeightPack"):
-        weight = weight.float()
-        scale = weight.abs().max(dim=-1)[0] / 127
-        weight = weight.transpose(0, 1) / scale.reshape(1, -1)
-        weight = torch.round(weight.clamp(min=-128, max=127)).to(dtype=torch.int8)
-        output.weightp
-        return weight.cuda(self.device_id_), scale.cuda(self.device_id_), None
+    def quantize(self, raw_weight: BaseWeight) -> QuantizedWeightPack:
+        if isinstance(raw_weight, MMWeightTpl):
+            weight = raw_weight.weight.float()
+            scale = weight.abs().max(dim=-1)[0] / 127
+            weight = weight.transpose(0, 1) / scale.reshape(1, -1)
+            weight = torch.round(weight.clamp(min=-128, max=127)).to(dtype=torch.int8)
+            return QuantizedWeightPack(
+                weight=weight.cuda(self.device_id_),
+                weight_scale=scale.cuda(self.device_id_),
+                weight_zero_point=None,
+            )
+        elif isinstance(raw_weight, FusedMoeWeightTP):
+            pass
+        else:
+            raise ValueError(f"Unsupported weight type: {type(raw_weight)}")
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "MMWeightPack",
+        weight_pack: QuantizedWeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias=None,
     ) -> torch.Tensor:
         input_scale = None
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
-        bias = weight_pack.bias
         input_scale = None  # dynamic quantization for input tensor
         x_q, x_scale, x_zp = vllm_ops.scaled_int8_quant(input_tensor, scale=input_scale, azp=None, symmetric=True)
         m = input_tensor.shape[0]
@@ -102,16 +106,18 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
     def method_name(self):
         return "vllm-w8a8"
 
-    def create_weight(self, out_dim: int, in_dim: int, device_id: int) -> torch.Tensor:
-        return torch.empty((out_dim, in_dim), dtype=torch.int8).cuda(device_id).t()
-
-    def create_weight_scale(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
-        # per-channel量化
-        return torch.empty((out_dim,), dtype=torch.float32).cuda(device_id)
-
-    def create_weight_zero_point(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
-        # 对称量化
-        return None
+    def create_weight(self, raw_weight: BaseWeight) -> QuantizedWeightPack:
+        if isinstance(raw_weight, MMWeightTpl):
+            out_dim = sum(raw_weight.out_dims)
+            return QuantizedWeightPack(
+                weight=torch.empty((out_dim, raw_weight.in_dim), dtype=torch.int8).cuda(self.device_id_).t(),
+                weight_scale=torch.empty((out_dim,), dtype=torch.float32).cuda(self.device_id_),
+                weight_zero_point=None,
+            )
+        elif isinstance(raw_weight, FusedMoeWeightTP):
+            pass
+        else:
+            raise ValueError(f"Unsupported weight type: {type(raw_weight)}")
 
 
 @QUANTMETHODS.register(["vllm-fp8w8a8", "fp8w8a8"])
@@ -122,32 +128,41 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
-    def quantize(self, weight: torch.Tensor):
-        if self.is_moe:
-            return self.quantize_moe(weight)
-        qweight, weight_scale = scaled_fp8_quant(
-            weight.contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
-        )
-        return qweight.transpose(0, 1), weight_scale, None
-
-    def quantize_moe(self, weight: torch.Tensor):
-        num_experts = weight.shape[0]
-        qweights = []
-        weight_scales = []
-        qweights = torch.empty_like(weight, dtype=torch.float8_e4m3fn).cuda(self.device_id_)
-        for i in range(num_experts):
-            qweight, weight_scale = scaled_fp8_quant(
-                weight[i].contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
+    def quantize(self, raw_weight: BaseWeight) -> QuantizedWeightPack:
+        if isinstance(raw_weight, MMWeightTpl):
+            weight = raw_weight.weight.float()
+            scale = weight.abs().max(dim=-1)[0] / 127
+            weight = weight.transpose(0, 1) / scale.reshape(1, -1)
+            weight = torch.round(weight.clamp(min=-128, max=127)).to(dtype=torch.int8)
+            return QuantizedWeightPack(
+                weight=weight.cuda(self.device_id_),
+                weight_scale=scale.cuda(self.device_id_),
+                weight_zero_point=None,
             )
-            qweights[i] = qweight
-            weight_scales.append(weight_scale)
-        weight_scale = torch.stack(weight_scales, dim=0).contiguous()
-        return qweights, weight_scale
+        elif isinstance(raw_weight, FusedMoeWeightTP):
+            num_experts = weight.shape[0]
+            qweights = []
+            weight_scales = []
+            qweights = torch.empty_like(weight, dtype=torch.float8_e4m3fn).cuda(self.device_id_)
+            for i in range(num_experts):
+                qweight, weight_scale = scaled_fp8_quant(
+                    weight[i].contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
+                )
+                qweights[i] = qweight
+                weight_scales.append(weight_scale)
+            weight_scale = torch.stack(weight_scales, dim=0).contiguous()
+            return QuantizedWeightPack(
+                weight=qweights.cuda(self.device_id_),
+                weight_scale=weight_scale.cuda(self.device_id_),
+                weight_zero_point=None,
+            )
+        else:
+            raise ValueError(f"Unsupported weight type: {type(raw_weight)}")
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "MMWeightPack",
+        weight_pack: QuantizedWeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
@@ -182,14 +197,14 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, raw_weight: BaseWeight) -> QuantizedWeightPack:
 
         raise Exception("Not implemented")
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "MMWeightPack",
+        weight_pack: QuantizedWeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,

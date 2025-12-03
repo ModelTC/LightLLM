@@ -2,9 +2,16 @@ import torch
 from abc import ABC, abstractmethod
 from lightllm.utils.dist_utils import get_current_device_id
 from typing import TYPE_CHECKING, Optional, Tuple
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeight
 
-if TYPE_CHECKING:
-    from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
+
+class QuantizedWeightPack:
+    weight: Optional[torch.Tensor] = None
+    weight_scale: Optional[torch.Tensor] = None
+    weight_zero_point: Optional[torch.Tensor] = None
+
+    has_weight_scale: bool = False
+    has_weight_zero_point: bool = False
 
 
 class QuantizationMethod(ABC):
@@ -24,14 +31,14 @@ class QuantizationMethod(ABC):
         self.hf_quantization_config = None
 
     @abstractmethod
-    def quantize(self, weights: torch.Tensor, output: "MMWeightPack", offset: int = 0):
+    def quantize(self, raw_weight: BaseWeight) -> QuantizedWeightPack:
         pass
 
     @abstractmethod
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "MMWeightPack",
+        weight_pack: QuantizedWeightPack,
         bias: Optional[torch.Tensor] = None,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
@@ -44,18 +51,8 @@ class QuantizationMethod(ABC):
     def method_name(self):
         pass
 
-    # weight 不需要传递dtype，因为每个量化算法，量化后的weight的dtype是确定的
-    # scale/zero_point暂时保留外部dtype接口，兼容部分根据weight dtype来动态确定scale/zero_point的dtype的情况
     @abstractmethod
-    def create_weight(self, out_dim: int, in_dim: int, device_id: int) -> torch.Tensor:
-        pass
-
-    @abstractmethod
-    def create_weight_scale(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
-        pass
-
-    @abstractmethod
-    def create_weight_zero_point(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> torch.Tensor:
+    def create_weight(self, raw_weight: BaseWeight) -> QuantizedWeightPack:
         pass
 
     def weight_need_quanted(self, weight: torch.Tensor) -> bool:
