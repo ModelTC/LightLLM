@@ -1,10 +1,18 @@
 import torch
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from lightllm.utils.dist_utils import get_current_device_id
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
+
+
+@dataclass
+class QuantizedWeightPack:
+    weight: Optional[torch.Tensor] = None
+    weight_scale: Optional[torch.Tensor] = None
+    weight_zero_point: Optional[torch.Tensor] = None
 
 
 class QuantizationMethod(ABC):
@@ -24,7 +32,7 @@ class QuantizationMethod(ABC):
         self.hf_quantization_config = None
 
     @abstractmethod
-    def quantize(self, weights: torch.Tensor, output: "MMWeightPack", offset: int = 0):
+    def quantize(self, weights: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
         pass
 
     @abstractmethod
