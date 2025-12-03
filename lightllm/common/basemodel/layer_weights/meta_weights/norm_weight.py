@@ -19,7 +19,9 @@ class NormWeight(BaseWeightTpl):
     def _create_weight(self):
         device = f"cuda:{get_current_device_id()}"
         self.weight = torch.empty(self.norm_dim, dtype=self.data_type_, device=device)
-        self.bias = torch.empty(self.norm_dim, dtype=self.data_type_, device=device) if self.bias_name is not None else None
+        self.bias = (
+            torch.empty(self.norm_dim, dtype=self.data_type_, device=device) if self.bias_name is not None else None
+        )
 
     def load_hf_weights(self, weights):
         if self.weight_name in weights:
@@ -31,10 +33,6 @@ class NormWeight(BaseWeightTpl):
 
     def verify_load(self):
         return self.is_weight_ready and (self.bias_name is None or self.is_bias_ready)
-
-    def unready_weights(self):
-        self.is_weight_ready = False
-        self.is_bias_ready = False
 
 
 class GEMMANormWeight(NormWeight):
