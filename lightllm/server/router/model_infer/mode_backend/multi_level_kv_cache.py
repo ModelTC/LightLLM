@@ -72,11 +72,28 @@ class MultiLevelKvCacheModule(object):
                     # TODO 更有效的分配策略。
                     grid_num = 16 if self.need_sync_compute_stream or (not self.args.enable_fa3) else 1
 
+                    mem_manager = self.backend.model.mem_manager
+                    if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
+                        cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
+                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[
+                            :, :, :, :, 0 : cpu_cache_meta.head_dim
+                        ]
+                        cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
+                            :, :, :, :, cpu_cache_meta.head_dim :
+                        ].view(mem_manager.scale_buffer.dtype)
+                        gpu_kv_cache_scale = mem_manager.scale_buffer
+                    else:
+                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
+                        cpu_kv_cache_scale = None
+                        gpu_kv_cache_scale = None
+
                     # 将 cpu page 的内容拷贝到 gpu 页面中
                     load_cpu_kv_to_gpu(
                         gpu_mem_indexes=mem_indexes.cuda(non_blocking=True),
-                        gpu_kv_cache=self.backend.model.mem_manager.kv_buffer,
-                        cpu_kv_cache=self.cpu_cache_client.cpu_kv_cache_tensor,
+                        gpu_kv_cache=mem_manager.kv_buffer,
+                        gpu_kv_cache_scale=gpu_kv_cache_scale,
+                        cpu_kv_cache=cpu_kv_cache,
+                        cpu_kv_cache_scale=cpu_kv_cache_scale,
                         page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
                         tp_index=self.backend.rank_in_dp,
                         tp_world_size=self.backend.dp_world_size,
