@@ -332,9 +332,9 @@ Performance Optimization Parameters
 
     The inference backend will use flashinfer's attention kernel for decoding
     
-.. option:: --enable_fa3
+.. option:: --disable_fa3
 
-    The inference backend will use fa3 attention kernel for prefill and decoding
+    The inference backend will not use fa3 attention kernel for prefill and decoding (FA3 is enabled by default)
 
 .. option:: --disable_cudagraph
 
