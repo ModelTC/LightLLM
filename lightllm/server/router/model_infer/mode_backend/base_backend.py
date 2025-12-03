@@ -35,6 +35,7 @@ from lightllm.distributed import dist_group_manager
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
@@ -281,9 +282,12 @@ class ModeBackend:
             }
 
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
-            assert mtp_model_cfg["model_type"] == "deepseek_v3"
-            assert mtp_model_cfg["architectures"][0] == "DeepseekV3ForCausalLMNextN"
-            self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
+            if mtp_model_cfg["model_type"] == "deepseekv3":
+                self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
+            elif mtp_model_cfg["model_type"] == "qwen3_moe":
+                self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
+            else:
+                assert False, f"error mtp mode {mtp_model_cfg['model_type']}"
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return

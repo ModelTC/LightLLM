@@ -38,22 +38,29 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
             self.cu_seqlens_q = self.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
             max_seq_len_k = self.max_kv_seq_len
+            args_mtp_step = get_env_start_args().mtp_step
+            att_batch_size = self.batch_size // (args_mtp_step + 1)
             if self.batch_size <= model.graph_max_batch_size and self.max_len_in_batch <= model.graph_max_len_in_batch:
                 page_buffer = FlashAttentionStateInfo.get_page_table_buffer(
                     model.graph_max_batch_size, model.graph_max_len_in_batch
                 )
                 self.page_table = page_buffer[self.microbatch_index][
-                    : self.batch_size * model.graph_max_len_in_batch
-                ].reshape(self.batch_size, model.graph_max_len_in_batch)
+                    : att_batch_size * model.graph_max_len_in_batch
+                ].reshape(att_batch_size, model.graph_max_len_in_batch)
             else:
                 self.page_table = torch.empty(
-                    (self.batch_size, self.max_len_in_batch), dtype=torch.int32, device=input_ids.device
+                    (att_batch_size, self.max_len_in_batch), dtype=torch.int32, device=input_ids.device
                 )
+
             page_table_copy(
                 page_table=self.page_table[:, :max_seq_len_k],
                 req_to_token_indexs=model.req_manager.req_to_token_indexs,
-                b_req_idx=self.b_req_idx,
+                b_req_idx=self.b_req_idx[args_mtp_step :: (args_mtp_step + 1)],
             )
+            if args_mtp_step > 0:
+                self.b_att_seq_len = self.b_seq_len[args_mtp_step :: (args_mtp_step + 1)].contiguous()
+            else:
+                self.b_att_seq_len = self.b_seq_len
 
         if "offline_calibration_fp8kv" in model.mode:
             if self.is_prefill:
