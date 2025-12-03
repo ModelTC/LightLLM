@@ -296,6 +296,8 @@ class BMMWeightTpl(MMWeightTpl):
 class DeepGemmFP8W8A8B128MMWeight(MMWeightTpl):
     def __init__(
         self,
+        in_dim: int,
+        out_dims: Optional[Union[int, List[int]]],
         weight_names: Union[str, List[str]],
         data_type: torch.dtype,
         bias_names: Optional[Union[str, List[str]]] = None,
@@ -304,6 +306,8 @@ class DeepGemmFP8W8A8B128MMWeight(MMWeightTpl):
         tp_world_size: int = None,
     ) -> None:
         super().__init__(
+            in_dim=in_dim,
+            out_dims=out_dims,
             weight_names=weight_names,
             bias_names=bias_names,
             data_type=data_type,
@@ -329,6 +333,8 @@ class DeepGemmFP8W8A8B128MMWeight(MMWeightTpl):
 class AWQMMWeightTpl(MMWeightTpl):
     def __init__(
         self,
+        in_dim: int,
+        out_dims: Optional[Union[int, List[int]]],
         weight_names: Union[str, List[str]],
         bias_names: Optional[Union[str, List[str]]] = None,
         data_type: torch.dtype = None,
@@ -337,6 +343,8 @@ class AWQMMWeightTpl(MMWeightTpl):
         tp_world_size: int = None,
     ) -> None:
         super().__init__(
+            in_dim=in_dim,
+            out_dims=out_dims,
             weight_names=weight_names,
             bias_names=bias_names,
             data_type=data_type,
