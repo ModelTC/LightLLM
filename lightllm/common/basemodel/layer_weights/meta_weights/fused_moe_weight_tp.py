@@ -269,16 +269,6 @@ class FusedMoeWeightTP(BaseWeight):
                 delattr(self, "experts_gate_proj_scales")
 
     def load_hf_weights(self, weights):
-        # Check if we have pre-allocated weights (new paradigm)
-        if self.hidden_size is not None and self.w1[0] is not None:
-            # New paradigm: direct copy to pre-allocated GPU memory
-            self._load_weights_direct(weights)
-        else:
-            # Old paradigm: load to CPU lists then fuse
-            self._load_weights_legacy(weights)
-
-    def _load_weights_direct(self, weights):
-        """New loading paradigm: direct copy to pre-allocated GPU memory"""
         # Load bias
         if self.e_score_correction_bias_name in weights:
             self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
@@ -336,32 +326,6 @@ class FusedMoeWeightTP(BaseWeight):
                     self.w2[1][expert_idx].copy_(quantized_pack.weight_scale)
             else:
                 self.w2[0][expert_idx].copy_(w2_weight_tensor)
-
-    def _load_weights_legacy(self, weights):
-        """Legacy loading paradigm: load to CPU lists then fuse"""
-        if self.e_score_correction_bias_name in weights:
-            self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
-        for i_experts in range(self.n_routed_experts):
-            w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
-            w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"
-            w3_weight = f"{self.weight_prefix}.{i_experts}.{self.w3_weight_name}.weight"
-
-            if w1_weight in weights:
-                self.experts_gate_projs[i_experts] = weights[w1_weight][
-                    self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
-                ]
-            if w3_weight in weights:
-                self.experts_up_projs[i_experts] = weights[w3_weight][
-                    self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
-                ]
-
-            if w2_weight in weights:
-                self.w2_list[i_experts] = weights[w2_weight][
-                    :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
-                ]
-        if self.quant_method is not None:
-            self._load_weight_scale(weights)
-        self._fuse()
 
     def _load_weight_scale(self, weights: Dict[str, torch.Tensor]) -> None:
         block_size = 1
@@ -721,16 +685,7 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
                 delattr(self, "experts_gate_proj_zero_points")
 
     def load_hf_weights(self, weights):
-        # Check if we have pre-allocated weights (new paradigm)
-        if self.hidden_size is not None and self.w1[0] is not None:
-            # New paradigm: direct copy to pre-allocated GPU memory
-            self._load_weights_direct(weights)
-        else:
-            # Old paradigm: load to CPU lists then fuse
-            self._load_weights_legacy(weights)
-
-    def _load_weights_direct(self, weights):
-        """New loading paradigm: direct copy to pre-allocated GPU memory"""
+        # New loading paradigm: direct copy to pre-allocated GPU memory
         self._load_weight_direct(weights)
         self._load_weight_scale_direct(weights)
         self._load_weight_zero_point_direct(weights)
@@ -834,14 +789,6 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
                 self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
             ]  # [intermediate_size, hidden_size]
             self.w2[2][expert_idx].copy_(w2_zero_point_tensor)
-
-    def _load_weights_legacy(self, weights):
-        """Legacy loading paradigm: load to CPU lists then fuse"""
-        self._load_weight(weights)
-        self._load_weight_scale(weights)
-        self._load_weight_zero_point(weights)
-        self._fuse()
-        self._process_weight_after_loading()
 
     def _load_weight(self, weights: Dict[str, torch.Tensor]) -> None:
         # awq quantization weight shape: in x out

@@ -513,17 +513,6 @@ class FusedMoeWeightEP(BaseWeight):
                 delattr(self, "experts_gate_proj_scales")
 
     def load_hf_weights(self, weights):
-
-        # Check if we have pre-allocated weights (new paradigm)
-        if self.hidden_size is not None and self.w1[0] is not None:
-            # New paradigm: direct copy to pre-allocated GPU memory
-            self._load_weights_direct(weights)
-        else:
-            # Old paradigm: load to CPU lists then fuse
-            self._load_weights_legacy(weights)
-
-    def _load_weights_direct(self, weights):
-        """New loading paradigm: direct copy to pre-allocated GPU memory"""
         n_expert_ep = self.ep_n_routed_experts
 
         # Load bias
@@ -593,42 +582,6 @@ class FusedMoeWeightEP(BaseWeight):
                     self.w2[1][target_idx].copy_(quantized_pack.weight_scale)
             else:
                 self.w2[0][target_idx].copy_(w2_weight_tensor)
-
-    def _load_weights_legacy(self, weights):
-        """Legacy loading paradigm: load to CPU lists then fuse"""
-        n_expert_ep = self.ep_n_routed_experts
-        # tp to ep here
-        if self.e_score_correction_bias_name in weights:
-            self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
-
-        for i_experts_ep in range(n_expert_ep):
-            i_experts = i_experts_ep + n_expert_ep * self.global_rank_
-            w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
-            w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"
-            w3_weight = f"{self.weight_prefix}.{i_experts}.{self.w3_weight_name}.weight"
-            if w1_weight in weights:
-                self.experts_gate_projs[i_experts_ep] = weights[w1_weight]
-            if w3_weight in weights:
-                self.experts_up_projs[i_experts_ep] = weights[w3_weight]
-            if w2_weight in weights:
-                self.w2_list[i_experts_ep] = weights[w2_weight]
-
-        # Load weight parameters for redundant experts
-        for i, redundant_expert_id in enumerate(self.redundancy_expert_ids):
-            i_experts = redundant_expert_id
-            w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
-            w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"
-            w3_weight = f"{self.weight_prefix}.{i_experts}.{self.w3_weight_name}.weight"
-            if w1_weight in weights:
-                self.experts_gate_projs[n_expert_ep + i] = weights[w1_weight]
-            if w3_weight in weights:
-                self.experts_up_projs[n_expert_ep + i] = weights[w3_weight]
-            if w2_weight in weights:
-                self.w2_list[n_expert_ep + i] = weights[w2_weight]
-
-        if self.quantized_weight:
-            self._load_weight_scale(weights)
-        self._fuse()
 
     def _load_weight_scale(self, weights: Dict[str, torch.Tensor]) -> None:
         n_expert_ep = self.ep_n_routed_experts
