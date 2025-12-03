@@ -9,7 +9,7 @@ from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
 )
 from typing import TYPE_CHECKING, Optional
 
-from .quantize_method import QuantizedWeightPack
+from .quantize_method import WeightPack
 
 try:
     HAS_DEEPGEMM = True
@@ -26,14 +26,14 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         self.cache_manager = g_cache_manager
         assert HAS_DEEPGEMM, "deepgemm is not installed, you can't use quant api of it"
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
         """ """
-        return QuantizedWeightPack()
+        return WeightPack()
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: QuantizedWeightPack,
+        weight_pack: WeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
@@ -69,7 +69,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: QuantizedWeightPack,
+        weight_pack: WeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,

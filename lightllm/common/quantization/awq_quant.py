@@ -9,7 +9,7 @@ from typing import Any
 from typing import TYPE_CHECKING, Optional, Tuple
 from lightllm.utils.dist_utils import get_current_device_id
 
-from .quantize_method import QuantizedWeightPack
+from .quantize_method import WeightPack
 
 if HAS_VLLM:
     awq_dequantize = vllm_ops.awq_dequantize
@@ -38,13 +38,13 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: QuantizedWeightPack,
+        weight_pack: WeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
@@ -71,13 +71,13 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def method_name(self):
         return "awq"
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: QuantizedWeightPack,
+        weight_pack: WeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
@@ -119,7 +119,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def method_name(self):
         return "awq_marlin"
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def params_need_repack(self) -> bool:
@@ -175,7 +175,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: QuantizedWeightPack,
+        weight_pack: WeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,

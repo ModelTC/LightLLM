@@ -5,7 +5,7 @@ from typing import Optional, Tuple, List, Dict, Any, Union
 from .base_weight import BaseWeight
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
 from lightllm.common.quantization import Quantcfg
-from lightllm.common.quantization.quantize_method import QuantizedWeightPack
+from lightllm.common.quantization.quantize_method import WeightPack
 
 
 def create_tp_moe_wegiht_obj(

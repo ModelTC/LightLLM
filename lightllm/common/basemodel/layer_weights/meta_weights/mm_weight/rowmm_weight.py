@@ -1,8 +1,6 @@
 import torch
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import (
     MMWeightTpl,
-    DeepGemmFP8W8A8B128MMWeight,
-    AWQMMWeightTpl,
     BMMWeightTpl,
 )
 from lightllm.common.quantization import Quantcfg
@@ -37,32 +35,6 @@ class StandardROWMMWeight(MMWeightTpl):
         self.param_slicer = RowSliceMixin(tp_rank=tp_rank, tp_world_size=tp_world_size)
 
 
-class DeepGemmFP8W8A8B128ROWMMWeight(DeepGemmFP8W8A8B128MMWeight):
-    def __init__(
-        self,
-        in_dim: int,
-        out_dims: Optional[Union[int, List[int]]],
-        weight_names: Union[str, List[str]],
-        data_type: torch.dtype,
-        bias_names: Optional[Union[str, List[str]]] = None,
-        quant_method: QuantizationMethod = None,
-        tp_rank: int = None,
-        tp_world_size: int = None,
-    ) -> None:
-        super().__init__(
-            in_dim=in_dim,
-            out_dims=out_dims,
-            weight_names=weight_names,
-            data_type=data_type,
-            bias_names=bias_names,
-            quant_method=quant_method,
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-        )
-        self.param_slicer = QuantizedRowSliceMixin(tp_rank=tp_rank, tp_world_size=tp_world_size)
-        return
-
-
 class UnquantizedROWBMMWeight(BMMWeightTpl):
     def __init__(
         self,
@@ -84,58 +56,4 @@ class UnquantizedROWBMMWeight(BMMWeightTpl):
         self.param_slicer = RowSliceMixin(tp_rank=tp_rank, tp_world_size=tp_world_size)
 
 
-class AWQROWMMWeight(AWQMMWeightTpl):
-    def __init__(
-        self,
-        in_dim: int,
-        out_dims: Optional[Union[int, List[int]]],
-        weight_names: Union[str, List[str]],
-        data_type: torch.dtype,
-        bias_names: Optional[Union[str, List[str]]] = None,
-        quant_method: QuantizationMethod = None,
-        tp_rank: int = None,
-        tp_world_size: int = None,
-    ) -> None:
-        super().__init__(
-            in_dim=in_dim,
-            out_dims=out_dims,
-            weight_names=weight_names,
-            data_type=data_type,
-            bias_names=bias_names,
-            quant_method=quant_method,
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-        )
-
-        self.param_slicer = AwqQuantizedRowSliceMixin(tp_rank=tp_rank, tp_world_size=tp_world_size)
-
-
-class AWQMARLINROWMMWeight(AWQROWMMWeight):
-    def __init__(
-        self,
-        in_dim: int,
-        out_dims: Optional[Union[int, List[int]]],
-        weight_names: Union[str, List[str]],
-        data_type: torch.dtype,
-        bias_names: Optional[Union[str, List[str]]] = None,
-        quant_method: QuantizationMethod = None,
-        tp_rank: int = None,
-        tp_world_size: int = None,
-    ) -> None:
-        super().__init__(
-            in_dim=in_dim,
-            out_dims=out_dims,
-            weight_names=weight_names,
-            data_type=data_type,
-            bias_names=bias_names,
-            quant_method=quant_method,
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-        )
-
-
-ROWMM_WEIGHT_CLS_MAP = {
-    "deepgemm-fp8w8a8-b128": DeepGemmFP8W8A8B128ROWMMWeight,
-    "awq": AWQROWMMWeight,
-    "awq_marlin": AWQMARLINROWMMWeight,
-}
+ROWMM_WEIGHT_CLS_MAP = {}

@@ -5,7 +5,7 @@ from .registry import QUANTMETHODS
 import torch.nn.functional as F
 from typing import TYPE_CHECKING, Optional
 
-from .quantize_method import QuantizedWeightPack
+from .quantize_method import WeightPack
 
 try:
     HAS_TORCH_AO = True
@@ -33,17 +33,17 @@ class AOBaseQuantizationMethod(QuantizationMethod):
         assert TORCH_VERSION_AT_LEAST_2_4, "torchao requires torch >=2.4"
         self.quant_func = None
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
         """ """
         dummy_linear = torch.nn.Linear(weight.shape[1], weight.shape[0], bias=False)
         dummy_linear.weight = torch.nn.Parameter(weight.cuda(self.device_id_))
         quantize_(dummy_linear, self.quant_func)
-        return QuantizedWeightPack(weight=dummy_linear.weight, weight_scale=None, weight_zero_point=None)
+        return WeightPack(weight=dummy_linear.weight, weight_scale=None, weight_zero_point=None)
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: QuantizedWeightPack,
+        weight_pack: WeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,

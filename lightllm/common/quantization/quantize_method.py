@@ -6,31 +6,11 @@ from typing import Optional, Tuple, TYPE_CHECKING
 
 
 @dataclass
-class QuantizedWeightPack:
+class WeightPack:
     weight: Optional[torch.Tensor] = None
     bias: Optional[torch.Tensor] = None
     weight_scale: Optional[torch.Tensor] = None
     weight_zero_point: Optional[torch.Tensor] = None
-
-    has_bias: bool = False
-    has_weight_scale: bool = False
-    has_weight_zero_point: bool = False
-
-    def is_ready(self) -> bool:
-        return (
-            self.weight is not None
-            and (not self.has_bias or (self.has_bias and self.bias is not None))
-            and (not self.has_weight_scale or (self.has_weight_scale and self.weight_scale is not None))
-            and (not self.has_weight_zero_point or (self.has_weight_zero_point and self.weight_zero_point is not None))
-        )
-
-    def is_load_finished(self):
-        return (
-            (self.is_ready() and self.weight.is_cuda)
-            and ((self.has_bias and self.bias.is_cuda) or (not self.has_bias))
-            and ((self.has_weight_scale and self.weight_scale.is_cuda) or (not self.has_weight_scale))
-            and ((self.has_weight_zero_point and self.weight_zero_point.is_cuda) or (not self.has_weight_zero_point))
-        )
 
 
 class QuantizationMethod(ABC):
@@ -50,14 +30,19 @@ class QuantizationMethod(ABC):
         self.hf_quantization_config = None
 
     @abstractmethod
-    def quantize(self, weights: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
+    def quantize(
+        self,
+        weights: torch.Tensor,
+        output: WeightPack = None,
+        offset: int = 0,
+    ) -> None:
         pass
 
     @abstractmethod
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "QuantizedWeightPack",
+        weight_pack: "WeightPack",
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
@@ -72,7 +57,7 @@ class QuantizationMethod(ABC):
     # weight 不需要传递dtype，因为每个量化算法，量化后的weight的dtype是确定的
     # scale/zero_point暂时保留外部dtype接口，兼容部分根据weight dtype来动态确定scale/zero_point的dtype的情况
     @abstractmethod
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> QuantizedWeightPack:
+    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
         pass
 
     def weight_need_quanted(self, weight: torch.Tensor) -> bool:
