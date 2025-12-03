@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
 
+from lightllm.common.quantization.quantize_method import QuantizedWeightPack
+
 
 class TritonBaseQuantizationMethod(QuantizationMethod):
     def __init__(self):
@@ -18,8 +20,8 @@ class TritonBaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor):
-        pass
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
+        return QuantizedWeightPack()
 
     def apply(
         self,

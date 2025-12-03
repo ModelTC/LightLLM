@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
+
+from .quantize_method import QuantizedWeightPack
+
 try:
     HAS_DEEPGEMM = True
     import deep_gemm
@@ -26,9 +29,9 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         self.cache_manager = g_cache_manager
         assert HAS_DEEPGEMM, "deepgemm is not installed, you can't use quant api of it"
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
         """ """
-        pass
+        return QuantizedWeightPack()
 
     def apply(
         self,

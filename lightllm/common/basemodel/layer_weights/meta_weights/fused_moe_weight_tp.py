@@ -182,12 +182,12 @@ class FusedMoeWeightTP(BaseWeight):
                 inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
                 w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(len(self.w2_list), inter_shape, hidden_size)
                 if not self.quantized_weight and self.quant_method is not None:
-                    qw1, qw1_scale, qw1_zero_point = self.quant_method.quantize(w1)
-                    qw2, qw2_scale, qw2_zero_point = self.quant_method.quantize(w2)
-                    self.w1[0] = qw1
-                    self.w1[1] = qw1_scale
-                    self.w2[0] = qw2
-                    self.w2[1] = qw2_scale
+                    qw1_pack = self.quant_method.quantize(w1)
+                    qw2_pack = self.quant_method.quantize(w2)
+                    self.w1[0] = qw1_pack.weight
+                    self.w1[1] = qw1_pack.weight_scale
+                    self.w2[0] = qw2_pack.weight
+                    self.w2[1] = qw2_pack.weight_scale
                 else:
                     self.w1[0] = self._cuda(w1)
                     self.w2[0] = self._cuda(w2)

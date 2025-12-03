@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
 
+from .quantize_method import QuantizedWeightPack
+
 try:
     HAS_TORCH_AO = True
     from torchao.quantization import (
@@ -34,12 +36,12 @@ class AOBaseQuantizationMethod(QuantizationMethod):
         assert TORCH_VERSION_AT_LEAST_2_4, "torchao requires torch >=2.4"
         self.quant_func = None
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
         """ """
         dummy_linear = torch.nn.Linear(weight.shape[1], weight.shape[0], bias=False)
         dummy_linear.weight = torch.nn.Parameter(weight.cuda(self.device_id_))
         quantize_(dummy_linear, self.quant_func)
-        return dummy_linear.weight, None, None
+        return QuantizedWeightPack(weight=dummy_linear.weight, weight_scale=None, weight_zero_point=None)
 
     def apply(
         self,

@@ -212,7 +212,16 @@ class MMWeightTpl(BaseWeightTpl):
             start_idx = self.cusum_out_dims[sub_child_index]
             end_idx = start_idx + weight.shape[0]
             if self.quant_method is not None and self.quant_method.weight_need_quanted(weight):
-                self.quant_method.quantize(weight, output=self.mm_param, offset=start_idx)
+                quantized_pack = self.quant_method.quantize(weight, offset=start_idx)
+                self.mm_param.weight[:, start_idx:end_idx].copy_(quantized_pack.weight)
+                if quantized_pack.weight_scale is not None:
+                    self.mm_param.weight_scale[start_idx : start_idx + quantized_pack.weight_scale.shape[0]].copy_(
+                        quantized_pack.weight_scale
+                    )
+                if quantized_pack.weight_zero_point is not None:
+                    self.mm_param.weight_zero_point[
+                        start_idx : start_idx + quantized_pack.weight_zero_point.shape[0]
+                    ].copy_(quantized_pack.weight_zero_point)
             else:
                 self.mm_param.weight[:, start_idx:end_idx].copy_(weight.t())
         return

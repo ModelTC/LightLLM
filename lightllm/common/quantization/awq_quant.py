@@ -12,6 +12,8 @@ from lightllm.utils.dist_utils import get_current_device_id
 if TYPE_CHECKING:
     from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
 
+from .quantize_method import QuantizedWeightPack
+
 if HAS_VLLM:
     awq_dequantize = vllm_ops.awq_dequantize
     awq_gemm = vllm_ops.awq_gemm
@@ -39,7 +41,7 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
@@ -72,7 +74,7 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def method_name(self):
         return "awq"
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
@@ -120,7 +122,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def method_name(self):
         return "awq_marlin"
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def params_need_repack(self) -> bool:
