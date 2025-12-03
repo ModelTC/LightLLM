@@ -5,7 +5,7 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict, Union, Type
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from lightllm.common.quantization.quantize_method import QuantizationMethod
+from lightllm.common.quantization.quantize_method import QuantizationMethod, QuantizedWeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_current_device_id
@@ -13,34 +13,6 @@ from lightllm.utils.log_utils import init_logger
 from .mm_slicer import SliceMixinTpl
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class MMWeightPack:
-    weight: Optional[torch.Tensor] = None
-    bias: Optional[torch.Tensor] = None
-    weight_scale: Optional[torch.Tensor] = None
-    weight_zero_point: Optional[torch.Tensor] = None
-
-    has_bias: bool = False
-    has_weight_scale: bool = False
-    has_weight_zero_point: bool = False
-
-    def is_ready(self) -> bool:
-        return (
-            self.weight is not None
-            and (not self.has_bias or (self.has_bias and self.bias is not None))
-            and (not self.has_weight_scale or (self.has_weight_scale and self.weight_scale is not None))
-            and (not self.has_weight_zero_point or (self.has_weight_zero_point and self.weight_zero_point is not None))
-        )
-
-    def is_load_finished(self):
-        return (
-            (self.is_ready() and self.weight.is_cuda)
-            and ((self.has_bias and self.bias.is_cuda) or (not self.has_bias))
-            and ((self.has_weight_scale and self.weight_scale.is_cuda) or (not self.has_weight_scale))
-            and ((self.has_weight_zero_point and self.weight_zero_point.is_cuda) or (not self.has_weight_zero_point))
-        )
 
 
 class MMWeightTpl(BaseWeightTpl):
@@ -91,7 +63,7 @@ class MMWeightTpl(BaseWeightTpl):
 
         self.gen_weight_quant_param_names(quant_method=quant_method)
         self.quant_method = quant_method
-        self.mm_param: MMWeightPack = MMWeightPack(
+        self.mm_param: QuantizedWeightPack = QuantizedWeightPack(
             has_bias=has_bias,
             has_weight_scale=has_weight_scale,
             has_weight_zero_point=has_weight_zero_point,
@@ -113,13 +85,12 @@ class MMWeightTpl(BaseWeightTpl):
             )
         else:
             device_id = get_current_device_id()
-            self.mm_param.weight = self.quant_method.create_weight(out_dim, in_dim, device_id)
-            self.mm_param.weight_scale = self.quant_method.create_weight_scale(
-                out_dim, in_dim, dtype=self.data_type_, device_id=device_id
-            )
-            self.mm_param.weight_zero_point = self.quant_method.create_weight_zero_point(
-                out_dim, in_dim, dtype=self.data_type_, device_id=device_id
-            )
+            weight_pack = self.quant_method.create_weight(out_dim, in_dim, dtype=self.data_type_, device_id=device_id)
+            self.mm_param.weight = weight_pack.weight
+            self.mm_param.weight_scale = weight_pack.weight_scale
+            self.mm_param.weight_zero_point = weight_pack.weight_zero_point
+            self.mm_param.has_weight_scale = weight_pack.has_weight_scale
+            self.mm_param.has_weight_zero_point = weight_pack.has_weight_zero_point
         if self.mm_param.has_bias:
             self.mm_param.bias = torch.empty(out_dim, dtype=self.data_type_).cuda(get_current_device_id())
         return
