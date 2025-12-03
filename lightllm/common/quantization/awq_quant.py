@@ -9,9 +9,6 @@ from typing import Any
 from typing import TYPE_CHECKING, Optional, Tuple
 from lightllm.utils.dist_utils import get_current_device_id
 
-if TYPE_CHECKING:
-    from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
-
 from .quantize_method import QuantizedWeightPack
 
 if HAS_VLLM:
@@ -47,7 +44,7 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "MMWeightPack",
+        weight_pack: QuantizedWeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
@@ -80,7 +77,7 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "MMWeightPack",
+        weight_pack: QuantizedWeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
@@ -178,7 +175,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "MMWeightPack",
+        weight_pack: QuantizedWeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,

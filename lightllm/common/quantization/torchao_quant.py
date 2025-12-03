@@ -5,9 +5,6 @@ from .registry import QUANTMETHODS
 import torch.nn.functional as F
 from typing import TYPE_CHECKING, Optional
 
-if TYPE_CHECKING:
-    from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightPack
-
 from .quantize_method import QuantizedWeightPack
 
 try:
@@ -46,7 +43,7 @@ class AOBaseQuantizationMethod(QuantizationMethod):
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: "MMWeightPack",
+        weight_pack: QuantizedWeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,

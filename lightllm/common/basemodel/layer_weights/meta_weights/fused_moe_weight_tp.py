@@ -5,6 +5,7 @@ from typing import Optional, Tuple, List, Dict, Any, Union
 from .base_weight import BaseWeight
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
 from lightllm.common.quantization import Quantcfg
+from lightllm.common.quantization.quantize_method import QuantizedWeightPack
 
 
 def create_tp_moe_wegiht_obj(
@@ -20,6 +21,7 @@ def create_tp_moe_wegiht_obj(
     network_config: Dict[str, Any],
     layer_num: int,
     quant_cfg: Quantcfg = None,
+    hidden_size: Optional[int] = None,
 ) -> Union["FusedMoeWeightTP", "FusedAWQMARLINMoeWeightTP"]:
     quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
     if quant_method is not None and quant_method.method_name == "awq_marlin":
@@ -36,6 +38,7 @@ def create_tp_moe_wegiht_obj(
             network_config=network_config,
             layer_num=layer_num,
             quant_cfg=quant_cfg,
+            hidden_size=hidden_size,
         )
     else:
         return FusedMoeWeightTP(
@@ -51,6 +54,7 @@ def create_tp_moe_wegiht_obj(
             network_config=network_config,
             layer_num=layer_num,
             quant_cfg=quant_cfg,
+            hidden_size=hidden_size,
         )
 
 
@@ -69,6 +73,7 @@ class FusedMoeWeightTP(BaseWeight):
         network_config: Dict[str, Any],
         layer_num: int,
         quant_cfg: Quantcfg = None,
+        hidden_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
@@ -88,6 +93,7 @@ class FusedMoeWeightTP(BaseWeight):
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.split_inter_size = split_inter_size
         self.data_type_ = data_type
+        self.hidden_size = hidden_size
         self.tp_rank_ = get_current_rank_in_dp()
         self.experts_up_projs = [None] * self.n_routed_experts
         self.experts_gate_projs = [None] * self.n_routed_experts
@@ -100,6 +106,46 @@ class FusedMoeWeightTP(BaseWeight):
         self.w1 = [None, None]  # weight, weight_scale
         self.w2 = [None, None]  # weight, weight_scale
         self.lock = threading.Lock()
+
+        # Pre-allocate memory if hidden_size is provided
+        if self.hidden_size is not None:
+            self._create_weight()
+
+    def _create_weight(self):
+        """Pre-allocate GPU memory for fused MoE weights"""
+        if self.hidden_size is None:
+            return
+
+        total_expert_num = self.n_routed_experts
+        # For TP, we need split_inter_size for the first layer (w1) and split_inter_size for the second layer (w2)
+        intermediate_size = self.split_inter_size
+        device_id = get_current_device_id()
+
+        if not self.quantized_weight and self.quant_method is not None:
+            # Quantized weights
+            w1_pack = self.quant_method.create_weight(
+                total_expert_num * intermediate_size * 2, self.hidden_size, dtype=self.data_type_, device_id=device_id
+            )
+            self.w1[0] = w1_pack.weight.view(total_expert_num, intermediate_size * 2, self.hidden_size)
+            self.w1[1] = w1_pack.weight_scale.view(total_expert_num, intermediate_size * 2, self.hidden_size)
+
+            w2_pack = self.quant_method.create_weight(
+                total_expert_num * self.hidden_size, intermediate_size, dtype=self.data_type_, device_id=device_id
+            )
+            self.w2[0] = w2_pack.weight.view(total_expert_num, self.hidden_size, intermediate_size)
+            self.w2[1] = w2_pack.weight_scale.view(total_expert_num, self.hidden_size, intermediate_size)
+        else:
+            # Regular weights
+            self.w1[0] = torch.empty(
+                (total_expert_num, intermediate_size * 2, self.hidden_size),
+                dtype=self.data_type_,
+                device=f"cuda:{device_id}",
+            )
+            self.w2[0] = torch.empty(
+                (total_expert_num, self.hidden_size, intermediate_size),
+                dtype=self.data_type_,
+                device=f"cuda:{device_id}",
+            )
 
     def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
         from lightllm.common.fused_moe.topk_select import select_experts
@@ -227,6 +273,76 @@ class FusedMoeWeightTP(BaseWeight):
                 delattr(self, "experts_gate_proj_scales")
 
     def load_hf_weights(self, weights):
+        # Check if we have pre-allocated weights (new paradigm)
+        if self.hidden_size is not None and self.w1[0] is not None:
+            # New paradigm: direct copy to pre-allocated GPU memory
+            self._load_weights_direct(weights)
+        else:
+            # Old paradigm: load to CPU lists then fuse
+            self._load_weights_legacy(weights)
+
+    def _load_weights_direct(self, weights):
+        """New loading paradigm: direct copy to pre-allocated GPU memory"""
+        # Load bias
+        if self.e_score_correction_bias_name in weights:
+            self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
+
+        # Load each expert with TP slicing
+        for i_experts in range(self.n_routed_experts):
+            self._copy_expert_weights_tp(i_experts, weights)
+
+        if self.quant_method is not None:
+            self._load_weight_scale_direct(weights)
+
+    def _copy_expert_weights_tp(self, expert_idx, weights):
+        """Copy a single expert's weights to pre-allocated GPU memory with TP slicing"""
+        w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.weight"
+        w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.weight"
+        w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.weight"
+
+        intermediate_size = self.split_inter_size
+
+        if w1_weight in weights and w3_weight in weights:
+            # Get TP-sliced weights
+            gate_weight = weights[w1_weight][
+                self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
+            ]  # [intermediate_size, hidden_size]
+            up_weight = weights[w3_weight][
+                self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
+            ]  # [intermediate_size, hidden_size]
+
+            # Copy to pre-allocated memory
+            if not self.quantized_weight and self.quant_method is not None:
+                # Quantized path
+                combined_cpu = torch.empty((intermediate_size * 2, self.hidden_size), dtype=gate_weight.dtype)
+                combined_cpu[:intermediate_size, :] = gate_weight
+                combined_cpu[intermediate_size:, :] = up_weight
+                quantized_pack = self.quant_method.quantize(combined_cpu)
+                self.w1[0][expert_idx].copy_(quantized_pack.weight.view(intermediate_size * 2, self.hidden_size))
+                if quantized_pack.weight_scale is not None:
+                    self.w1[1][expert_idx].copy_(
+                        quantized_pack.weight_scale.view(intermediate_size * 2, self.hidden_size)
+                    )
+            else:
+                # Regular path
+                self.w1[0][expert_idx, :intermediate_size, :].copy_(gate_weight)
+                self.w1[0][expert_idx, intermediate_size:, :].copy_(up_weight)
+
+        if w2_weight in weights:
+            # Copy w2 (down projection) with TP slicing
+            w2_weight_tensor = weights[w2_weight][
+                :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
+            ]  # [hidden_size, intermediate_size] - already the correct shape
+            if not self.quantized_weight and self.quant_method is not None:
+                quantized_pack = self.quant_method.quantize(w2_weight_tensor)
+                self.w2[0][expert_idx].copy_(quantized_pack.weight)
+                if quantized_pack.weight_scale is not None:
+                    self.w2[1][expert_idx].copy_(quantized_pack.weight_scale)
+            else:
+                self.w2[0][expert_idx].copy_(w2_weight_tensor)
+
+    def _load_weights_legacy(self, weights):
+        """Legacy loading paradigm: load to CPU lists then fuse"""
         if self.e_score_correction_bias_name in weights:
             self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
         for i_experts in range(self.n_routed_experts):
@@ -288,6 +404,60 @@ class FusedMoeWeightTP(BaseWeight):
                     * (self.tp_rank_ + 1),
                 ]
 
+    def _load_weight_scale_direct(self, weights: Dict[str, torch.Tensor]) -> None:
+        """Load weight scales directly to pre-allocated GPU memory"""
+        block_size = 1
+        if hasattr(self.quant_method, "block_size"):
+            block_size = self.quant_method.block_size
+
+        for i_experts in range(self.n_routed_experts):
+            self._copy_expert_scales_tp(i_experts, weights, block_size)
+
+    def _copy_expert_scales_tp(self, expert_idx, weights, block_size):
+        """Copy a single expert's weight scales to pre-allocated GPU memory with TP slicing"""
+        w1_scale = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{self.weight_scale_suffix}"
+        w2_scale = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{self.weight_scale_suffix}"
+        w3_scale = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{self.weight_scale_suffix}"
+
+        intermediate_size = self.split_inter_size
+
+        if w1_scale in weights and w3_scale in weights:
+            # Get TP-sliced scales
+            gate_scale = weights[w1_scale][
+                self.split_inter_size
+                // block_size
+                * self.tp_rank_ : self.split_inter_size
+                // block_size
+                * (self.tp_rank_ + 1),
+                :,
+            ]  # [intermediate_size//block_size, hidden_size]
+            up_scale = weights[w3_scale][
+                self.split_inter_size
+                // block_size
+                * self.tp_rank_ : self.split_inter_size
+                // block_size
+                * (self.tp_rank_ + 1),
+                :,
+            ]  # [intermediate_size//block_size, hidden_size]
+
+            # Copy to pre-allocated memory
+            self.w1[1][expert_idx, : intermediate_size // block_size, :].copy_(gate_scale)
+            self.w1[1][expert_idx, intermediate_size // block_size : 2 * intermediate_size // block_size, :].copy_(
+                up_scale
+            )
+
+        if w2_scale in weights:
+            # Copy w2 scale (down projection) with TP slicing
+            w2_scale_tensor = weights[w2_scale][
+                :,
+                self.split_inter_size
+                // block_size
+                * self.tp_rank_ : self.split_inter_size
+                // block_size
+                * (self.tp_rank_ + 1),
+            ]  # [hidden_size, intermediate_size//block_size]
+            self.w2[1][expert_idx].copy_(w2_scale_tensor)
+
     def _cuda(self, cpu_tensor):
         device_id = get_current_device_id()
         if self.quantized_weight:
@@ -313,6 +483,7 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
         network_config: Dict[str, Any],
         layer_num: int,
         quant_cfg: Quantcfg = None,
+        hidden_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
@@ -340,6 +511,7 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.split_inter_size = split_inter_size
         self.data_type_ = data_type
+        self.hidden_size = hidden_size
         self.tp_rank_ = get_current_rank_in_dp()
         self.experts_up_projs = [None] * self.n_routed_experts
         self.experts_gate_projs = [None] * self.n_routed_experts
@@ -355,6 +527,46 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
         self.w1 = [None, None, None]  # weight, weight_scale, zero_point
         self.w2 = [None, None, None]  # weight, weight_scale, zero_point
         self.lock = threading.Lock()
+
+        # Pre-allocate memory if hidden_size is provided
+        if self.hidden_size is not None:
+            self._create_weight()
+
+    def _create_weight(self):
+        """Pre-allocate GPU memory for fused MoE weights"""
+        if self.hidden_size is None:
+            return
+
+        total_expert_num = self.n_routed_experts
+        intermediate_size = self.split_inter_size
+        device_id = get_current_device_id()
+
+        # For AWQ Marlin quantization, weights are already quantized and need different shapes
+        # w1: [total_expert_num, hidden_size, intermediate_size * 2]
+        # w2: [total_expert_num, hidden_size, intermediate_size]
+        self.w1[0] = torch.empty(
+            (total_expert_num, self.hidden_size, intermediate_size * 2), dtype=torch.int32, device=f"cuda:{device_id}"
+        )
+        self.w2[0] = torch.empty(
+            (total_expert_num, self.hidden_size, intermediate_size), dtype=torch.int32, device=f"cuda:{device_id}"
+        )
+
+        # Allocate scales and zero points
+        self.w1[1] = torch.empty(
+            (total_expert_num, self.hidden_size, intermediate_size * 2),
+            dtype=self.data_type_,
+            device=f"cuda:{device_id}",
+        )
+        self.w2[1] = torch.empty(
+            (total_expert_num, self.hidden_size, intermediate_size), dtype=self.data_type_, device=f"cuda:{device_id}"
+        )
+
+        self.w1[2] = torch.empty(
+            (total_expert_num, self.hidden_size, intermediate_size * 2), dtype=torch.int32, device=f"cuda:{device_id}"
+        )
+        self.w2[2] = torch.empty(
+            (total_expert_num, self.hidden_size, intermediate_size), dtype=torch.int32, device=f"cuda:{device_id}"
+        )
 
     def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
         from lightllm.common.fused_moe.topk_select import select_experts
@@ -513,6 +725,122 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
                 delattr(self, "experts_gate_proj_zero_points")
 
     def load_hf_weights(self, weights):
+        # Check if we have pre-allocated weights (new paradigm)
+        if self.hidden_size is not None and self.w1[0] is not None:
+            # New paradigm: direct copy to pre-allocated GPU memory
+            self._load_weights_direct(weights)
+        else:
+            # Old paradigm: load to CPU lists then fuse
+            self._load_weights_legacy(weights)
+
+    def _load_weights_direct(self, weights):
+        """New loading paradigm: direct copy to pre-allocated GPU memory"""
+        self._load_weight_direct(weights)
+        self._load_weight_scale_direct(weights)
+        self._load_weight_zero_point_direct(weights)
+        self._process_weight_after_loading()
+
+    def _load_weight_direct(self, weights: Dict[str, torch.Tensor]) -> None:
+        """Load AWQ quantized weights directly to pre-allocated GPU memory"""
+        # Load bias
+        if self.e_score_correction_bias_name in weights:
+            self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
+
+        # Load each expert with TP slicing
+        for i_experts in range(self.n_routed_experts):
+            self._copy_awq_expert_weights_tp(i_experts, weights)
+
+    def _copy_awq_expert_weights_tp(self, expert_idx, weights):
+        """Copy a single expert's AWQ quantized weights to pre-allocated GPU memory with TP slicing"""
+        w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.qweight"
+        w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.qweight"
+        w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.qweight"
+
+        if w1_weight in weights and w3_weight in weights:
+            # Get TP-sliced AWQ quantized weights (shape: in x out)
+            gate_weight = weights[w1_weight][
+                :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
+            ]  # [hidden_size, intermediate_size]
+            up_weight = weights[w3_weight][
+                :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
+            ]  # [hidden_size, intermediate_size]
+
+            # Copy to pre-allocated memory (already in correct quantized format)
+            self.w1[0][expert_idx, :, : self.split_inter_size].copy_(gate_weight)
+            self.w1[0][expert_idx, :, self.split_inter_size :].copy_(up_weight)
+
+        if w2_weight in weights:
+            # Copy w2 (down projection) with TP slicing
+            w2_weight_tensor = weights[w2_weight][
+                self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
+            ]  # [intermediate_size, hidden_size]
+            self.w2[0][expert_idx].copy_(w2_weight_tensor)
+
+    def _load_weight_scale_direct(self, weights: Dict[str, torch.Tensor]) -> None:
+        """Load weight scales directly to pre-allocated GPU memory"""
+        for i_experts in range(self.n_routed_experts):
+            self._copy_awq_expert_scales_tp(i_experts, weights)
+
+    def _copy_awq_expert_scales_tp(self, expert_idx, weights):
+        """Copy a single expert's AWQ scales to pre-allocated GPU memory with TP slicing"""
+        w1_scale = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{self.weight_scale_suffix}"
+        w2_scale = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{self.weight_scale_suffix}"
+        w3_scale = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{self.weight_scale_suffix}"
+
+        if w1_scale in weights and w3_scale in weights:
+            # Get TP-sliced scales
+            split_inter_size = self.split_inter_size * self.pack_factor
+            gate_scale = weights[w1_scale][
+                :, split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1)
+            ]  # [hidden_size, intermediate_size*pack_factor]
+            up_scale = weights[w3_scale][
+                :, split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1)
+            ]  # [hidden_size, intermediate_size*pack_factor]
+
+            # Copy to pre-allocated memory
+            self.w1[1][expert_idx, :, : split_inter_size // 2].copy_(gate_scale)
+            self.w1[1][expert_idx, :, split_inter_size // 2 :].copy_(up_scale)
+
+        if w2_scale in weights:
+            # Copy w2 scale (down projection) with TP slicing
+            w2_scale_tensor = weights[w2_scale][
+                split_inter_size * self.tp_rank_ : split_inter_size * (self.tp_rank_ + 1), :
+            ]  # [intermediate_size*pack_factor, hidden_size]
+            self.w2[1][expert_idx].copy_(w2_scale_tensor)
+
+    def _load_weight_zero_point_direct(self, weights: Dict[str, torch.Tensor]) -> None:
+        """Load weight zero points directly to pre-allocated GPU memory"""
+        for i_experts in range(self.n_routed_experts):
+            self._copy_awq_expert_zero_points_tp(i_experts, weights)
+
+    def _copy_awq_expert_zero_points_tp(self, expert_idx, weights):
+        """Copy a single expert's AWQ zero points to pre-allocated GPU memory with TP slicing"""
+        w1_zero_point = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{self.weight_zero_point_suffix}"
+        w2_zero_point = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{self.weight_zero_point_suffix}"
+        w3_zero_point = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{self.weight_zero_point_suffix}"
+
+        if w1_zero_point in weights and w3_zero_point in weights:
+            # Get TP-sliced zero points
+            gate_zero_point = weights[w1_zero_point][
+                :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
+            ]  # [hidden_size, intermediate_size]
+            up_zero_point = weights[w3_zero_point][
+                :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
+            ]  # [hidden_size, intermediate_size]
+
+            # Copy to pre-allocated memory
+            self.w1[2][expert_idx, :, : self.split_inter_size].copy_(gate_zero_point)
+            self.w1[2][expert_idx, :, self.split_inter_size :].copy_(up_zero_point)
+
+        if w2_zero_point in weights:
+            # Copy w2 zero point (down projection) with TP slicing
+            w2_zero_point_tensor = weights[w2_zero_point][
+                self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
+            ]  # [intermediate_size, hidden_size]
+            self.w2[2][expert_idx].copy_(w2_zero_point_tensor)
+
+    def _load_weights_legacy(self, weights):
+        """Legacy loading paradigm: load to CPU lists then fuse"""
         self._load_weight(weights)
         self._load_weight_scale(weights)
         self._load_weight_zero_point(weights)
