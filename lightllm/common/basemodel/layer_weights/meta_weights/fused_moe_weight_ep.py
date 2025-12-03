@@ -23,7 +23,7 @@ from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gathe
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.triton_utils.autotuner import Autotuner
-from lightllm.common.quantization.quantize_method import QuantizedWeightPack
+from lightllm.common.quantization.quantize_method import WeightPack
 
 
 logger = init_logger(__name__)

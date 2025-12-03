@@ -7,7 +7,7 @@ from .fp8.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from .fp8.fp8act_quant_kernel import per_token_group_quant_fp8
 from typing import TYPE_CHECKING, Optional
 
-from lightllm.common.quantization.quantize_method import QuantizedWeightPack
+from lightllm.common.quantization.quantize_method import WeightPack
 
 
 class TritonBaseQuantizationMethod(QuantizationMethod):
@@ -17,13 +17,13 @@ class TritonBaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> QuantizedWeightPack:
-        return QuantizedWeightPack()
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
+        return WeightPack()
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: QuantizedWeightPack,
+        weight_pack: WeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
@@ -50,7 +50,7 @@ class TritonFP8w8a8QuantizationMethod(TritonBaseQuantizationMethod):
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: QuantizedWeightPack,
+        weight_pack: WeightPack,
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
