@@ -131,7 +131,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
             qweights[i] = qweight
             weight_scales.append(weight_scale)
         weight_scale = torch.stack(weight_scales, dim=0).contiguous()
-        return qweights, weight_scale
+        return qweights, weight_scale, None
 
     def apply(
         self,
