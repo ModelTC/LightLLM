@@ -1,7 +1,7 @@
 import os
 import torch
 import threading
-from typing import Optional, Tuple, List, Dict, Any, Union
+from typing import Tuple, List, Dict, Any, Union
 from .base_weight import BaseWeight
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
 from lightllm.common.quantization import Quantcfg
@@ -9,6 +9,7 @@ from lightllm.common.quantization.quantize_method import WeightPack
 
 
 def create_tp_moe_wegiht_obj(
+    hidden_size: int,
     gate_proj_name: str,
     down_proj_name: str,
     up_proj_name: str,
@@ -21,11 +22,11 @@ def create_tp_moe_wegiht_obj(
     network_config: Dict[str, Any],
     layer_num: int,
     quant_cfg: Quantcfg = None,
-    hidden_size: Optional[int] = None,
 ) -> Union["FusedMoeWeightTP", "FusedAWQMARLINMoeWeightTP"]:
     quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
     if quant_method is not None and quant_method.method_name == "awq_marlin":
         return FusedAWQMARLINMoeWeightTP(
+            hidden_size=hidden_size,
             gate_proj_name=gate_proj_name,
             down_proj_name=down_proj_name,
             up_proj_name=up_proj_name,
@@ -38,10 +39,10 @@ def create_tp_moe_wegiht_obj(
             network_config=network_config,
             layer_num=layer_num,
             quant_cfg=quant_cfg,
-            hidden_size=hidden_size,
         )
     else:
         return FusedMoeWeightTP(
+            hidden_size=hidden_size,
             gate_proj_name=gate_proj_name,
             down_proj_name=down_proj_name,
             up_proj_name=up_proj_name,
@@ -54,13 +55,13 @@ def create_tp_moe_wegiht_obj(
             network_config=network_config,
             layer_num=layer_num,
             quant_cfg=quant_cfg,
-            hidden_size=hidden_size,
         )
 
 
 class FusedMoeWeightTP(BaseWeight):
     def __init__(
         self,
+        hidden_size: int,
         gate_proj_name: str,
         down_proj_name: str,
         up_proj_name: str,
@@ -73,7 +74,6 @@ class FusedMoeWeightTP(BaseWeight):
         network_config: Dict[str, Any],
         layer_num: int,
         quant_cfg: Quantcfg = None,
-        hidden_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
@@ -107,9 +107,7 @@ class FusedMoeWeightTP(BaseWeight):
         self.w2 = [None, None]  # weight, weight_scale
         self.lock = threading.Lock()
 
-        # Pre-allocate memory if hidden_size is provided
-        if self.hidden_size is not None:
-            self._create_weight()
+        self._create_weight()
 
     def _create_weight(self):
         """Pre-allocate GPU memory for fused MoE weights"""
@@ -120,6 +118,13 @@ class FusedMoeWeightTP(BaseWeight):
         # For TP, we need split_inter_size for the first layer (w1) and split_inter_size for the second layer (w2)
         intermediate_size = self.split_inter_size
         device_id = get_current_device_id()
+
+        # Create e_score_correction_bias
+        self.e_score_correction_bias = torch.empty(
+            (total_expert_num,),
+            dtype=self.data_type_,
+            device=f"cuda:{device_id}",
+        )
 
         if not self.quantized_weight and self.quant_method is not None:
             # Quantized weights
@@ -203,75 +208,10 @@ class FusedMoeWeightTP(BaseWeight):
         )
         return
 
-    def _fuse(self):
-        if self.quantized_weight:
-            self._fuse_weight_scale()
-        with self.lock:
-            if (
-                hasattr(self, "experts_up_projs")
-                and None not in self.experts_up_projs
-                and None not in self.experts_gate_projs
-                and None not in self.w2_list
-            ):
-                gate_out_dim, gate_in_dim = self.experts_gate_projs[0].shape
-                up_out_dim, up_in_dim = self.experts_up_projs[0].shape
-                assert gate_in_dim == up_in_dim
-                dtype = self.experts_gate_projs[0].dtype
-                total_expert_num = self.n_routed_experts
-
-                w1 = torch.empty((total_expert_num, gate_out_dim + up_out_dim, gate_in_dim), dtype=dtype, device="cpu")
-
-                for i_experts in range(self.n_routed_experts):
-                    w1[i_experts, 0:gate_out_dim:, :] = self.experts_gate_projs[i_experts]
-                    w1[i_experts, gate_out_dim:, :] = self.experts_up_projs[i_experts]
-
-                inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
-                w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(len(self.w2_list), inter_shape, hidden_size)
-                if not self.quantized_weight and self.quant_method is not None:
-                    self.w1 = self.quant_method.quantize(w1)
-                    self.w2 = self.quant_method.quantize(w2)
-                else:
-                    self.w1[0] = self._cuda(w1)
-                    self.w2[0] = self._cuda(w2)
-                delattr(self, "w2_list")
-                delattr(self, "experts_up_projs")
-                delattr(self, "experts_gate_projs")
-
-    def _fuse_weight_scale(self):
-        with self.lock:
-            if (
-                hasattr(self, "experts_up_proj_scales")
-                and None not in self.experts_up_proj_scales
-                and None not in self.experts_gate_proj_scales
-                and None not in self.w2_scale_list
-            ):
-                gate_out_dim, gate_in_dim = self.experts_gate_proj_scales[0].shape
-                up_out_dim, up_in_dim = self.experts_up_proj_scales[0].shape
-                assert gate_in_dim == up_in_dim
-                dtype = self.experts_gate_proj_scales[0].dtype
-                total_expert_num = self.n_routed_experts
-
-                w1_scale = torch.empty(
-                    (total_expert_num, gate_out_dim + up_out_dim, gate_in_dim), dtype=dtype, device="cpu"
-                )
-
-                for i_experts in range(self.n_routed_experts):
-                    w1_scale[i_experts, 0:gate_out_dim:, :] = self.experts_gate_proj_scales[i_experts]
-                    w1_scale[i_experts, gate_out_dim:, :] = self.experts_up_proj_scales[i_experts]
-                inter_shape, hidden_size = self.w2_scale_list[0].shape[0], self.w2_scale_list[0].shape[1]
-                w2_scale = torch._utils._flatten_dense_tensors(self.w2_scale_list).view(
-                    len(self.w2_scale_list), inter_shape, hidden_size
-                )
-                self.w1[1] = self._cuda(w1_scale)
-                self.w2[1] = self._cuda(w2_scale)
-                delattr(self, "w2_scale_list")
-                delattr(self, "experts_up_proj_scales")
-                delattr(self, "experts_gate_proj_scales")
-
     def load_hf_weights(self, weights):
         # Load bias
         if self.e_score_correction_bias_name in weights:
-            self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
+            self.e_score_correction_bias.copy_(weights[self.e_score_correction_bias_name])
 
         # Load each expert with TP slicing
         for i_experts in range(self.n_routed_experts):
@@ -431,6 +371,7 @@ class FusedMoeWeightTP(BaseWeight):
 class FusedAWQMARLINMoeWeightTP(BaseWeight):
     def __init__(
         self,
+        hidden_size: int,
         gate_proj_name: str,
         down_proj_name: str,
         up_proj_name: str,
@@ -443,7 +384,6 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
         network_config: Dict[str, Any],
         layer_num: int,
         quant_cfg: Quantcfg = None,
-        hidden_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
@@ -500,6 +440,13 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
         total_expert_num = self.n_routed_experts
         intermediate_size = self.split_inter_size
         device_id = get_current_device_id()
+
+        # Create e_score_correction_bias
+        self.e_score_correction_bias = torch.empty(
+            (total_expert_num,),
+            dtype=self.data_type_,
+            device=f"cuda:{device_id}",
+        )
 
         # For AWQ Marlin quantization, weights are already quantized and need different shapes
         # w1: [total_expert_num, hidden_size, intermediate_size * 2]
@@ -592,97 +539,6 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
         )
 
         return
-
-    def _fuse(self):
-        self._fuse_weight()
-        self._fuse_weight_scale()
-        self._fuse_weight_zero_point()
-
-    def _fuse_weight(self):
-        with self.lock:
-            if (
-                hasattr(self, "experts_up_projs")
-                and None not in self.experts_up_projs
-                and None not in self.experts_gate_projs
-                and None not in self.w2_list
-            ):
-                gate_in_dim, gate_out_dim = self.experts_gate_projs[0].shape
-                up_in_dim, up_out_dim = self.experts_up_projs[0].shape
-                assert gate_in_dim == up_in_dim
-                total_expert_num = self.n_routed_experts
-
-                w1 = torch.empty(
-                    (total_expert_num, gate_in_dim, gate_out_dim + up_out_dim), dtype=torch.int32, device="cpu"
-                )
-
-                for i_experts in range(self.n_routed_experts):
-                    w1[i_experts, :, 0:gate_out_dim] = self.experts_gate_projs[i_experts]
-                    w1[i_experts, :, gate_out_dim:] = self.experts_up_projs[i_experts]
-
-                inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
-                w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(len(self.w2_list), inter_shape, hidden_size)
-                self.w1[0] = self._cuda(w1)
-                self.w2[0] = self._cuda(w2)
-                delattr(self, "w2_list")
-                delattr(self, "experts_up_projs")
-                delattr(self, "experts_gate_projs")
-
-    def _fuse_weight_scale(self):
-        with self.lock:
-            if (
-                hasattr(self, "experts_up_proj_scales")
-                and None not in self.experts_up_proj_scales
-                and None not in self.experts_gate_proj_scales
-                and None not in self.w2_scale_list
-            ):
-                gate_in_dim, gate_out_dim = self.experts_gate_proj_scales[0].shape
-                up_in_dim, up_out_dim = self.experts_up_proj_scales[0].shape
-                dtype = self.experts_gate_proj_scales[0].dtype
-                assert gate_in_dim == up_in_dim
-                total_expert_num = self.n_routed_experts
-                w1_scale = torch.empty(
-                    (total_expert_num, gate_in_dim, gate_out_dim + up_out_dim), dtype=dtype, device="cpu"
-                )
-                for i_experts in range(self.n_routed_experts):
-                    w1_scale[i_experts, :, 0:gate_out_dim] = self.experts_gate_proj_scales[i_experts]
-                    w1_scale[i_experts, :, gate_out_dim:] = self.experts_up_proj_scales[i_experts]
-                inter_shape, hidden_size = self.w2_scale_list[0].shape[0], self.w2_scale_list[0].shape[1]
-                w2_scale = torch._utils._flatten_dense_tensors(self.w2_scale_list).view(
-                    len(self.w2_scale_list), inter_shape, hidden_size
-                )
-                self.w1[1] = self._cuda(w1_scale).to(self.data_type_)
-                self.w2[1] = self._cuda(w2_scale).to(self.data_type_)
-                delattr(self, "w2_scale_list")
-                delattr(self, "experts_up_proj_scales")
-                delattr(self, "experts_gate_proj_scales")
-
-    def _fuse_weight_zero_point(self):
-        with self.lock:
-            if (
-                hasattr(self, "experts_up_proj_zero_points")
-                and None not in self.experts_up_proj_zero_points
-                and None not in self.experts_gate_proj_zero_points
-                and None not in self.w2_zero_point_list
-            ):
-                gate_in_dim, gate_out_dim = self.experts_gate_proj_zero_points[0].shape
-                up_in_dim, up_out_dim = self.experts_up_proj_zero_points[0].shape
-                assert gate_in_dim == up_in_dim
-                total_expert_num = self.n_routed_experts
-                w1_zero_point = torch.empty(
-                    (total_expert_num, gate_in_dim, gate_out_dim + up_out_dim), dtype=torch.int32, device="cpu"
-                )
-                for i_experts in range(self.n_routed_experts):
-                    w1_zero_point[i_experts, :, 0:gate_out_dim] = self.experts_gate_proj_zero_points[i_experts]
-                    w1_zero_point[i_experts, :, gate_out_dim:] = self.experts_up_proj_zero_points[i_experts]
-                inter_shape, hidden_size = self.w2_zero_point_list[0].shape[0], self.w2_zero_point_list[0].shape[1]
-                w2_zero_point = torch._utils._flatten_dense_tensors(self.w2_zero_point_list).view(
-                    len(self.w2_zero_point_list), inter_shape, hidden_size
-                )
-                self.w1[2] = self._cuda(w1_zero_point)
-                self.w2[2] = self._cuda(w2_zero_point)
-                delattr(self, "w2_zero_point_list")
-                delattr(self, "experts_up_proj_zero_points")
-                delattr(self, "experts_gate_proj_zero_points")
 
     def load_hf_weights(self, weights):
         # New loading paradigm: direct copy to pre-allocated GPU memory
