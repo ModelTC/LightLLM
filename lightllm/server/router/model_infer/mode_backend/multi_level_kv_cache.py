@@ -50,11 +50,13 @@ class MultiLevelKvCacheModule(object):
             match_tokens = len(page_list) * token_page_size
             # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
             if is_master_in_dp:
-                req.shm_req.cpu_prompt_cache_len = match_tokens - req.cur_kv_len - req.shm_req.disk_prompt_cache_len
+                req.shm_req.cpu_prompt_cache_len = max(
+                    0, match_tokens - req.cur_kv_len - req.shm_req.disk_prompt_cache_len
+                )
 
             need_token_num = match_tokens - req.cur_kv_len
             # 多匹配了一定数量的token同时请求长度大于一定的长度，才进行复制操作，不然操作效率不高，代价过高
-            if need_token_num >= 256 and req.shm_req.input_len >= 512:
+            if need_token_num >= 128 and req.shm_req.input_len >= 256:
                 if need_token_num <= idle_token_num:
                     if self.backend.radix_cache is not None:
                         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
