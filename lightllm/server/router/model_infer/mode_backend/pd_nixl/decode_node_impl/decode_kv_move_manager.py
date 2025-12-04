@@ -14,9 +14,9 @@ from lightllm.utils.error_utils import log_exception
 logger = init_logger(__name__)
 
 
-def start_decode_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues: List[mp.Queue]):
+def start_decode_kv_move_manager_process(args, info_queue: mp.Queue):
     event = mp.Event()
-    proc = mp.Process(target=_init_env, args=(args, info_queue, mem_queues, event))
+    proc = mp.Process(target=_init_env, args=(args, info_queue, event))
     proc.start()
     event.wait()
     assert proc.is_alive()
@@ -24,7 +24,7 @@ def start_decode_kv_move_manager_process(args, info_queue: mp.Queue, mem_queues:
     return
 
 
-def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.Event):
+def _init_env(args, info_queue: mp.Queue, event: mp.Event):
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
@@ -40,7 +40,6 @@ def _init_env(args, info_queue: mp.Queue, mem_queues: List[mp.Queue], event: mp.
     manager = DecodeKVMoveManager(
         args=args,
         info_queue=info_queue,
-        mem_queues=mem_queues,
         start_trans_process_func=start_decode_trans_process,
         up_status_in_queue=up_status_in_queue,
     )
@@ -56,14 +55,12 @@ class DecodeKVMoveManager(BaseKVMoveManager):
         self,
         args: StartArgs,
         info_queue: mp.Queue,
-        mem_queues: List[mp.Queue],
         start_trans_process_func: Callable,
         up_status_in_queue: mp.SimpleQueue,
     ):
         super().__init__(
             args=args,
             info_queue=info_queue,
-            mem_queues=mem_queues,
             start_trans_process_func=start_trans_process_func,
             up_status_in_queue=up_status_in_queue,
         )

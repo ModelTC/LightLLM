@@ -100,7 +100,7 @@ sh multi_pd_master/pd_decode.sh <host> <config_server_host>
 
 - `LOADWORKER`: Model loading thread count, recommended 8-18
 - `MOE_MODE`: Expert parallelism mode, set to EP to enable expert parallelism
-- `KV_TRANS_USE_P2P`: Enable P2P communication optimization
+- `DISABLE_KV_TRANS_USE_P2P`: Disable P2P communication optimization to transfer kv data
 - `CUDA_VISIBLE_DEVICES`: Specify GPU devices to use
 
 ### Important Parameters

@@ -10,7 +10,7 @@ def create_or_link_shm(name, expected_size, force_mode=None, auto_cleanup=False)
     """
     Args:
         name: name of the shared memory
-        expected_size: expected size of the shared memory
+        expected_size: expected size of the shared memory, if expected_size == -1, no check for size linked.
         force_mode: force mode
             - 'create': force create new shared memory, if exists, delete and create
             - 'link': force link to existing shared memory, if not exists, raise exception
@@ -52,11 +52,12 @@ def _force_create_shm(name, expected_size, auto_cleanup):
 
 
 def _force_link_shm(name, expected_size):
-    """强制连接到已存在的共享内存"""
+    """强制连接到已存在的共享内存,
+    如果 expected_size 为 -1, 则不进行link的size校验比对"""
     try:
         shm = shared_memory.SharedMemory(name=name)
         # 验证大小
-        if shm.size != expected_size:
+        if expected_size != -1 and shm.size != expected_size:
             shm.close()
             raise ValueError(f"Shared memory {name} size mismatch: expected {expected_size}, got {shm.size}")
         # logger.info(f"Force linked to existing shared memory: {name} (size={expected_size})")

@@ -11,7 +11,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.infer_lock import g_router_lock, g_infer_state_lock
 from rpyc.utils.server import ThreadedServer
 from .prefill_task_cache import g_kv_move_task_cache
-from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
@@ -20,11 +19,10 @@ logger = init_logger(__name__)
 
 
 class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
-    def __init__(self, info_queue: mp.Queue, mem_queue: mp.Queue) -> None:
+    def __init__(self, info_queue: mp.Queue) -> None:
         super().__init__()
         self.support_overlap = False
         self.info_queue: mp.Queue = info_queue
-        self.mem_queue: mp.Queue = mem_queue
         self.classed_req_no_decode = True
 
     def init_custom(self):
@@ -42,12 +40,6 @@ class ChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
             PDPrefillInferRpcServer(self), socket_path=socket_path, protocol_config={"allow_pickle": True}
         )
         threading.Thread(target=lambda: t.start(), daemon=True).start()
-
-        if kv_trans_use_p2p():
-            from ..p2p_fix import reduce_tensor
-
-            mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
-
         return
 
     def _pre_handle_finished_reqs(self, finished_reqs):
