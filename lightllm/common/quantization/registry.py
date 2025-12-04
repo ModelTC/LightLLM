@@ -1,5 +1,4 @@
-from .quantize_method import QuantizationMethod, NoQuantization
-from typing import Type
+from .quantize_method import QuantizationMethod
 
 
 class QuantMethodFactory:
@@ -17,9 +16,7 @@ class QuantMethodFactory:
 
         return decorator
 
-    def get(self, key, *args, **kwargs) -> Type[QuantizationMethod]:
-        if key == "none":
-            return NoQuantization()
+    def get(self, key, *args, **kwargs) -> "QuantizationMethod":
         quant_method_class = self._quant_methods.get(key)
         if not quant_method_class:
             raise ValueError(f"QuantMethod '{key}' not supported.")

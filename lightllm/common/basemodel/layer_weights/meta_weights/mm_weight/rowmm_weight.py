@@ -7,10 +7,10 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from typing import Dict, List, Optional, Union
-from .mm_slicer import RowSliceMixin, QuantizedRowSliceMixin, AwqQuantizedRowSliceMixin
+from .mm_slicer import get_row_slice_mixin
 
 
-class StandardROWMMWeight(MMWeightTpl):
+class ROWMMWeight(MMWeightTpl):
     def __init__(
         self,
         in_dim: int,
@@ -32,10 +32,10 @@ class StandardROWMMWeight(MMWeightTpl):
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
         )
-        self.param_slicer = RowSliceMixin(tp_rank=tp_rank, tp_world_size=tp_world_size)
+        self.param_slicer = get_row_slice_mixin(quant_method.method_name, tp_rank=tp_rank, tp_world_size=tp_world_size)
 
 
-class UnquantizedROWBMMWeight(BMMWeightTpl):
+class ROWBMMWeight(BMMWeightTpl):
     def __init__(
         self,
         weight_names: Union[str, List[str]],
@@ -53,7 +53,5 @@ class UnquantizedROWBMMWeight(BMMWeightTpl):
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
         )
-        self.param_slicer = RowSliceMixin(tp_rank=tp_rank, tp_world_size=tp_world_size)
-
-
-ROWMM_WEIGHT_CLS_MAP = {}
+        # bmm 不支持量化运算操作
+        self.param_slicer = get_row_slice_mixin(quant_method_name="none", tp_rank=tp_rank, tp_world_size=tp_world_size)

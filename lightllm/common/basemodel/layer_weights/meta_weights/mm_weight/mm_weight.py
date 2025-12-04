@@ -51,26 +51,25 @@ class MMWeightTpl(BaseWeightTpl):
         # 同时存在 weight_names 和 quanted_weight_names 是为了兼容在线和离线两种加载方案
         self.weight_names = weight_names
         self.bias_names = bias_names
-        self.quant_method = quant_method
+        self.quant_method: QuantizationMethod = quant_method
         self.param_slicer: SliceMixinTpl = None
         self._create_weight()
         self.gen_weight_quant_param_names(quant_method=quant_method)
 
     def _create_weight(self):
-        quantized_metadata = self.quant_method.get_metadata(
-            in_dim=self.in_dim, out_dims=self.out_dims, data_type=self.data_type_
-        )
-        bias = None
+        self.bias = None
         if self.bias_names is not None:
-            bias = torch.empty(self.cusum_out_dims[-1], dtype=self.data_type_).cuda(get_current_device_id())
-        self.mm_param = quantized_metadata.create_weight_pack(bias=bias)
+            self.bias = torch.empty(self.cusum_out_dims[-1], dtype=self.data_type_).cuda(get_current_device_id())
+        self.mm_param: WeightPack = self.quant_method.create_weight(
+            in_dim=self.in_dim, out_dim=sum(self.out_dims), dtype=self.data_type_, device_id=get_current_device_id()
+        )
         return
 
     def mm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
     ) -> torch.Tensor:
         return self.quant_method.apply(
-            input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger
+            input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger, bias=self.bias
         )
 
     def gen_weight_quant_param_names(self, quant_method: Optional[QuantizationMethod]):
@@ -138,11 +137,12 @@ class MMWeightTpl(BaseWeightTpl):
         self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
     ) -> None:
         if param_name in weights:
-            pass
-            # weight = self.param_slicer._slice_weight(weights[param_name])
-            # start_idx = self.cusum_out_dims[sub_child_index]
-            # end_idx = start_idx + weight.shape[0]
-            # out_pack = self.quant_method.quantize(weight.t())
+            weight = self.param_slicer._slice_weight(weights[param_name])
+            start_idx = self.cusum_out_dims[sub_child_index]
+            if self.quant_method.weight_need_quanted(weight):
+                self.quant_method.quantize(weight, self.mm_param, offset=start_idx)
+            else:
+                self.mm_param.weight[start_idx : start_idx + weight.shape[0]].copy_(weight)
         return
 
     def _load_bias(

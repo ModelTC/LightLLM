@@ -2,35 +2,14 @@ import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from lightllm.utils.dist_utils import get_current_device_id
-from typing import Optional, Tuple, TYPE_CHECKING, List
+from typing import Optional, Tuple
 
 
 @dataclass
 class WeightPack:
     weight: Optional[torch.Tensor] = None
-    scale: Optional[torch.Tensor] = None
-    zero_point: Optional[torch.Tensor] = None
-
-
-@dataclass
-class TensorMeta:
-    shape: torch.Size
-    dtype: torch.dtype
-
-
-@dataclass
-class QuantizedMetadata:
-    weight: Optional[TensorMeta] = None
-    scale: Optional[TensorMeta] = None
-    zero_point: Optional[TensorMeta] = None
-
-    def create_weight_pack(self, device=None) -> WeightPack:
-        device = f"cuda:{get_current_device_id()}" if device is None else device
-        return WeightPack(
-            weight=torch.empty(self.weight.shape, dtype=self.weight.dtype, device=device),
-            scale=torch.empty(self.scale.shape, dtype=self.scale.dtype, device=device),
-            zero_point=torch.empty(self.zero_point.shape, dtype=self.zero_point.dtype, device=device),
-        )
+    weight_scale: Optional[torch.Tensor] = None
+    weight_zero_point: Optional[torch.Tensor] = None
 
 
 class QuantizationMethod(ABC):
@@ -52,8 +31,10 @@ class QuantizationMethod(ABC):
     @abstractmethod
     def quantize(
         self,
-        weights: torch.Tensor,
-    ) -> WeightPack:
+        weight: torch.Tensor,
+        output: WeightPack,
+        offset: int = 0,
+    ) -> None:
         pass
 
     @abstractmethod
@@ -64,6 +45,7 @@ class QuantizationMethod(ABC):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         pass
 
@@ -72,9 +54,7 @@ class QuantizationMethod(ABC):
     def method_name(self):
         pass
 
-    @abstractmethod
-    def get_metadata(self, in_dim: int, out_dims: List[int], data_type: torch.dtype) -> QuantizedMetadata:
-        # 针对一个数据类型和形状，返回量化后的元数据
+    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
         pass
 
     def weight_need_quanted(self, weight: torch.Tensor) -> bool:
@@ -94,49 +74,3 @@ class QuantizationMethod(ABC):
         一些量化方法在将参数完成量化后，为了加速性能，还需要将参数进行重拍，使算子性能达到最优，如awq方法。
         """
         return weight, weight_scale, weight_zero_point
-
-
-class NoQuantization(QuantizationMethod):
-    def quantize(
-        self,
-        weights: torch.Tensor,
-    ) -> WeightPack:
-        return WeightPack(
-            weight=weights,
-            scale=None,
-            zero_point=None,
-        )
-
-    def apply(
-        self,
-        input_tensor: torch.Tensor,
-        weight_pack: WeightPack,
-        out: Optional[torch.Tensor] = None,
-        workspace: Optional[torch.Tensor] = None,
-        use_custom_tensor_mananger: bool = True,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-
-        if out is None:
-            shape = (input_tensor.shape[0], weight_pack.weight.shape[1])
-            dtype = input_tensor.dtype
-            device = input_tensor.device
-            if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
-            else:
-                out = torch.empty(shape, dtype=dtype, device=device)
-        if bias is None:
-            return torch.mm(input_tensor, weight_pack.weight, out=out)
-        return torch.addmm(bias, input_tensor, weight_pack.weight, out=out)
-
-    @property
-    def method_name(self):
-        return "none"
-
-    def get_metadata(self, shape: Tuple[int, ...], data_type: torch.dtype) -> QuantizedMetadata:
-        return QuantizedMetadata(
-            weight=TensorMeta(shape=shape, dtype=data_type),
-            scale=None,
-            zero_point=None,
-        )
