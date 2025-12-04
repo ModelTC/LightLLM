@@ -77,14 +77,14 @@ def test_moe_align2():
     experts_token_num[2] = 60
     experts_token_num[3] = 16
 
-    blocks_to_expert_id, mblocks_to_m_index = moe_align2(100, experts_token_num, block_m=16)
-    assert blocks_to_expert_id.shape[0] == triton.cdiv(100 + 4 * (16 - 1), 16)
+    mblocks_to_tuple_info = moe_align2(100, experts_token_num, block_m=16)
+    assert mblocks_to_tuple_info.shape[0] == triton.cdiv(100 + 4 * (16 - 1), 16)
     assert torch.allclose(
-        blocks_to_expert_id,
+        mblocks_to_tuple_info[:, 0],
         torch.tensor([0, 2, 2, 2, 2, 3, -1, -1, -1, -1], device="cuda", dtype=torch.int32),
     )
     assert torch.allclose(
-        mblocks_to_m_index, torch.tensor([0, 0, 1, 2, 3, 0, 0, 0, 0, 0], device="cuda", dtype=torch.int32)
+        mblocks_to_tuple_info[:, 1], torch.tensor([0, 0, 1, 2, 3, 0, 0, 0, 0, 0], device="cuda", dtype=torch.int32)
     )
 
 

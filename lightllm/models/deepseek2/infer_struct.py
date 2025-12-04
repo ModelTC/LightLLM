@@ -17,5 +17,5 @@ class Deepseek2InferStateInfo(LlamaInferStateInfo):
 
         if self.is_prefill:
             self.b1_kv_start_loc = self.b1_cu_kv_seq_len
-            self.max_value_in_b_seq_len = self.b_seq_len.max().item()
+            self.max_value_in_b_seq_len = self.max_kv_seq_len
         return

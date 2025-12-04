@@ -110,6 +110,14 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             self._context_attention_kernel = partial(
                 LlamaTransformerLayerInfer._context_attention_kernel_ppl_int8kv, self
             )
+        elif "ppl_int8kv_flashdecoding_diverse" in self.mode:
+            self._token_attention_kernel = partial(
+                LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv_flashdecoding_diverse, self
+            )
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_ppl_int8kv, self)
+            self._context_attention_kernel = partial(
+                LlamaTransformerLayerInfer._context_attention_kernel_ppl_int8kv, self
+            )
         elif "ppl_int8kv_flashdecoding" in self.mode:
             self._token_attention_kernel = partial(
                 LlamaTransformerLayerInfer._token_decode_attention_ppl_int8kv_flashdecoding, self
@@ -197,10 +205,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         q = layer_weight.q_proj.mm(input)
-        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-        cache_kv = layer_weight.kv_proj.mm(
-            input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
-        ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
@@ -222,10 +227,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             input = gather_input[0 : len(infer_state.position_cos), :]
 
         q = layer_weight.q_proj.mm(input)
-        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-        cache_kv = layer_weight.kv_proj.mm(
-            input, out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_)
-        ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
@@ -233,6 +235,11 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.position_cos,
             infer_state.position_sin,
         )
+
+        if infer_state.need_dp_prefill_balance:
+            q = infer_state._all_to_all_unbalance_get(data=q)
+            cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
+
         return q, cache_kv
 
     def _context_attention_flashinfer_kernel_fp8(
@@ -402,10 +409,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _tpsp_get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
+        if infer_state.need_dp_prefill_balance:
+            input = infer_state._all_to_all_balance_get(data=input)
+
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
         o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
         layer_weight.o_proj.mm(input, out=o_tensor[0 : len(infer_state.position_cos), :])
+        e_o_tensor = o_tensor[len(infer_state.position_cos) :, :]
+        if e_o_tensor.shape[0] > 0:
+            e_o_tensor.fill_(0)
 
         if self.tp_world_size_ > 1:
             sp_token_num = o_tensor.shape[0] // self.tp_world_size_
@@ -757,6 +770,34 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None
     ):
         from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding import token_decode_attention_flash_decoding
+
+        cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
+        cache_k_scale = infer_state.mem_manager.scale_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
+        cache_v = infer_state.mem_manager.kv_buffer[self.layer_num_][
+            :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+        ]
+        cache_v_scale = infer_state.mem_manager.scale_buffer[self.layer_num_][
+            :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
+        ]
+        return token_decode_attention_flash_decoding(
+            q,
+            infer_state,
+            self.tp_q_head_num_,
+            self.head_dim_,
+            cache_k,
+            cache_k_scale,
+            cache_v,
+            cache_v_scale,
+            out=out,
+            alloc_tensor_func=self.alloc_tensor,
+        )
+
+    def _token_decode_attention_ppl_int8kv_flashdecoding_diverse(
+        self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None
+    ):
+        from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding_diverse import (
+            token_decode_attention_flash_decoding,
+        )
 
         cache_k = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
         cache_k_scale = infer_state.mem_manager.scale_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]

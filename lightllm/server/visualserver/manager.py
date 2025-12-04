@@ -3,12 +3,13 @@ import zmq.asyncio
 import asyncio
 import uvloop
 import rpyc
+import socket
 import pickle
 import inspect
 import setproctitle
 from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
-from lightllm.server.core.objs import ShmReqManager
+from lightllm.server.core.objs import ShmReqManager, StartArgs
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
@@ -26,20 +27,27 @@ logger = init_logger(__name__)
 class VisualManager:
     def __init__(
         self,
-        args,
-        next_module_port,
-        visual_port,
-        cache_port,
+        args: StartArgs,
         visual_model_rpc_ports,
     ):
         context = zmq.Context(2)
-        self.send_to_next_module = context.socket(zmq.PUSH)  # router or audio server (if --enable_multimodal_audio)
-        self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{next_module_port}")
 
-        self.recv_from_httpserver = context.socket(zmq.PULL)
-        self.recv_from_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{visual_port}")
-        self.cache_client = rpyc.connect("localhost", cache_port, config={"allow_pickle": True})
-        self.cache_port = cache_port
+        if args.enable_multimodal_audio:
+            self.send_to_next_module = context.socket(zmq.PUSH)
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+        else:
+            if args.enable_cpu_cache:
+                self.send_to_next_module = context.socket(zmq.PUSH)
+                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+            else:
+                self.send_to_next_module = context.socket(zmq.PUSH)
+                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+
+        self.zmq_recv_socket = context.socket(zmq.PULL)
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+        self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.cache_port = args.cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
@@ -49,6 +57,7 @@ class VisualManager:
         self.trust_remote_code = args.trust_remote_code
         self.args = args
         self.visual_model_rpc_ports = visual_model_rpc_ports
+        self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
 
     async def wait_to_model_ready(self):
@@ -109,6 +118,18 @@ class VisualManager:
             else:
                 processing_group_reqs = []
                 images_need_infer = []
+                ready_to_send = []
+
+                def flush_ready(force: bool = False):
+                    if not ready_to_send:
+                        return
+                    if not force and len(ready_to_send) < self.send_batch_size:
+                        return
+
+                    for group_req_indexes in ready_to_send:
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                    ready_to_send.clear()
+
                 while len(self.waiting_reqs) > 0:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
@@ -138,23 +159,24 @@ class VisualManager:
                         if len(images_need_infer) == self.infer_batch_size:
                             await self.infer_imgs(images_need_infer)
                             images_need_infer = []
-                            for _group_req_indexes in processing_group_reqs:
-                                self.send_to_next_module.send_pyobj(
-                                    _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
-                                )
+                            ready_to_send.extend(processing_group_reqs)
                             processing_group_reqs = []
+                            flush_ready(force=False)
 
                     if len(images_need_infer) == 0:
-                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        ready_to_send.append(group_req_indexes)
+                        flush_ready(force=False)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
                 if len(images_need_infer) > 0:
                     await self.infer_imgs(images_need_infer)
-                    for _group_req_indexes in processing_group_reqs:
-                        self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-                    processing_group_reqs = []
                     images_need_infer = []
+
+                    # 这些处理完 image 的 group 也 ready 了
+                    ready_to_send.extend(processing_group_reqs)
+                    processing_group_reqs = []
+                flush_ready(force=True)
 
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):
@@ -163,7 +185,7 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.recv_from_httpserver.recv_pyobj(zmq.NOBLOCK)
+                    recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
                         self.waiting_reqs.append(recv_req)
                     else:
@@ -182,13 +204,13 @@ class VisualManager:
         return
 
 
-def start_visual_process(args, next_module_port, visual_port, cache_port, model_rpc_ports, pipe_writer):
+def start_visual_process(args, model_rpc_ports, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
     start_parent_check_thread()
     try:
-        visualserver = VisualManager(args, next_module_port, visual_port, cache_port, model_rpc_ports)
+        visualserver = VisualManager(args=args, visual_model_rpc_ports=model_rpc_ports)
         asyncio.run(visualserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))

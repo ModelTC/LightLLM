@@ -93,12 +93,14 @@ def test_decode_attentions(
 
     graph.replay()
 
-    torch.cuda.synchronize()
-    start = time.time()
-    # graph.replay()
-    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    graph.replay()
+    end_event.record()
+    end_event.synchronize()
 
-    cost_time = (time.time() - start) * 1000
+    cost_time = start_event.elapsed_time(end_event=end_event)
 
     logger.info(f"fp16 {test_seq_len} cost time: {cost_time} ms")
     return cost_time
@@ -267,41 +269,38 @@ if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn")
 
     from lightllm.utils.tuning_utils import mp_tuning
-    from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding_config import MlaDecodeAttentionKernelConfig
-
     import collections
 
-    store_json_ans = collections.defaultdict(dict)
-
     def config_iter():
-        for q_head_num in [32]:
-            for q_head_dim in [64, 128]:
-                for group_size in [8, 16, 32]:
-                    for batch_size in [1, 8, 16, 32, 64, 128, 256]:
-                        for seq_len in [256, 512, 1024, 2048, 4096, 8192]:
-                            if batch_size * seq_len > 128 * 1024 * 4:
-                                continue
-                            yield q_head_num, q_head_dim, group_size, batch_size, seq_len
+        for batch_size in [1, 8, 16, 32, 64, 128, 256]:
+            for seq_len in [256, 512, 1024, 2048, 4096, 8192]:
+                if batch_size * seq_len > 128 * 1024 * 4:
+                    continue
+                yield batch_size, seq_len
 
-    for q_head_num, q_head_dim, group_size, batch_size, seq_len in config_iter():
+    for q_head_num in [32]:
+        for q_head_dim in [64, 128]:
+            for group_size in [8, 16, 32]:
+                store_json_ans = collections.defaultdict(dict)
+                for batch_size, seq_len in config_iter():
 
-        kv_head_num = q_head_num // group_size
-        ans = mp_tuning(
-            tuning_configs,
-            {
-                "q_shape": [batch_size, q_head_num, q_head_dim],
-                "kv_shape": [batch_size * seq_len, kv_head_num, q_head_dim],
-                "test_seq_len": seq_len,
-                "dtype": torch.half,
-                "test_count": 1,
-            },
-        )
-        store_json_ans[seq_len][batch_size] = ans
+                    kv_head_num = q_head_num // group_size
+                    ans = mp_tuning(
+                        tuning_configs,
+                        {
+                            "q_shape": [batch_size, q_head_num, q_head_dim],
+                            "kv_shape": [batch_size * seq_len, kv_head_num, q_head_dim],
+                            "test_seq_len": seq_len,
+                            "dtype": torch.half,
+                            "test_count": 1,
+                        },
+                    )
+                    store_json_ans[seq_len][batch_size] = ans
 
-        GQAVSMDecodeAttentionKernelConfig.save_config(
-            q_head_num=q_head_num,
-            q_head_dim=q_head_dim,
-            kv_head_num=kv_head_num,
-            out_dtype=str(torch.half),
-            config_json=store_json_ans,
-        )
+                    GQAVSMDecodeAttentionKernelConfig.save_config(
+                        q_head_num=q_head_num,
+                        q_head_dim=q_head_dim,
+                        kv_head_num=kv_head_num,
+                        out_dtype=str(torch.half),
+                        config_json=store_json_ans,
+                    )

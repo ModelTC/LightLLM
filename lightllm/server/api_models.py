@@ -1,8 +1,8 @@
 import time
+import uuid
 
 from pydantic import BaseModel, Field, field_validator
-from typing import Dict, List, Optional, Union, Literal
-import uuid
+from typing import Any, Dict, List, Optional, Union, Literal
 
 
 class ImageURL(BaseModel):
@@ -52,6 +52,21 @@ class StreamOptions(BaseModel):
     include_usage: Optional[bool] = False
 
 
+class JsonSchemaResponseFormat(BaseModel):
+    name: str
+    description: Optional[str] = None
+    # schema is the field in openai but that causes conflicts with pydantic so
+    # instead use json_schema with an alias
+    json_schema: Optional[dict[str, Any]] = Field(default=None, alias="schema")
+    strict: Optional[bool] = None
+
+
+class ResponseFormat(BaseModel):
+    # type must be "json_schema", "json_object", or "text"
+    type: Literal["text", "json_object", "json_schema"]
+    json_schema: Optional[JsonSchemaResponseFormat] = None
+
+
 class CompletionRequest(BaseModel):
     model: str
     # prompt: string or tokens
@@ -71,6 +86,14 @@ class CompletionRequest(BaseModel):
     best_of: Optional[int] = 1
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
+    response_format: Optional[ResponseFormat] = Field(
+        default=None,
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", or {'type': 'text' } is supported."
+        ),
+    )
 
     # Additional parameters supported by LightLLM
     do_sample: Optional[bool] = False
@@ -94,13 +117,21 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
-    response_format: Optional[Dict] = None
+    response_format: Optional[ResponseFormat] = Field(
+        default=None,
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", or {'type': 'text' } is supported."
+        ),
+    )
 
     # OpenAI Adaptive parameters for tool call
     tools: Optional[List[Tool]] = Field(default=None, examples=[None])
     tool_choice: Union[ToolChoice, Literal["auto", "required", "none"]] = Field(
         default="auto", examples=["none"]
     )  # noqa
+    parallel_tool_calls: Optional[bool] = True
 
     # Additional parameters supported by LightLLM
     do_sample: Optional[bool] = False
@@ -122,9 +153,34 @@ class FunctionResponse(BaseModel):
 class ToolCall(BaseModel):
     """Tool call response."""
 
-    id: str
+    id: Optional[str] = None
+    index: Optional[int] = None
     type: Literal["function"] = "function"
     function: FunctionResponse
+
+
+class ChatCompletionMessageGenericParam(BaseModel):
+    role: Literal["system", "assistant", "tool", "function"]
+    content: Union[str, List[MessageContent], None] = Field(default=None)
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _normalize_role(cls, v):
+        if isinstance(v, str):
+            v_lower = v.lower()
+            if v_lower not in {"system", "assistant", "tool", "function"}:
+                raise ValueError(
+                    "'role' must be one of 'system', 'assistant', 'tool', or 'function' (case-insensitive)."
+                )
+            return v_lower
+        raise ValueError("'role' must be a string")
+
+
+ChatCompletionMessageParam = Union[ChatCompletionMessageGenericParam, Message]
 
 
 class UsageInfo(BaseModel):
@@ -142,7 +198,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
-    finish_reason: Optional[Literal["stop", "length", "function_call"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -167,7 +223,7 @@ class DeltaMessage(BaseModel):
 class ChatCompletionStreamResponseChoice(BaseModel):
     index: int
     delta: DeltaMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):

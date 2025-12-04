@@ -76,5 +76,11 @@
     "BLOCK_M": 1,
     "NUM_STAGE": 1,
     "num_warps": 4
+  },
+  "8448": {
+    "BLOCK_DIM": 1024,
+    "BLOCK_M": 1,
+    "NUM_STAGE": 4,
+    "num_warps": 4
   }
 }

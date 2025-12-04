@@ -1,4 +1,5 @@
 import atomics
+import time
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_utils import create_or_link_shm
@@ -25,3 +26,24 @@ class AtomicShmLock:
             while not a.cmpxchg_weak(1, 0):
                 pass
         return False
+
+    # acquire_sleep1ms 和 release 是某些特定场景下主动使用进行锁获取的操作函数
+    def acquire_sleep1ms(self):
+        start_time = time.monotonic()
+        is_first = True
+        with atomics.atomicview(buffer=self.shm.buf, atype=atomics.INT) as a:
+            while not a.cmpxchg_weak(0, 1):
+                # 减少日志数量
+                if is_first:
+                    is_first = False
+                    logger.warning("acquire_sleep1ms wait for 1ms")
+                if time.monotonic() - start_time > 0.010:
+                    logger.warning("acquire_sleep1ms wait more than 10ms")
+                time.sleep(0.001)
+                pass
+
+    def release(self):
+        with atomics.atomicview(buffer=self.shm.buf, atype=atomics.INT) as a:
+            while not a.cmpxchg_weak(1, 0):
+                pass
+        return

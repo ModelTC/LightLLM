@@ -13,7 +13,7 @@ class BaseWeight(ABC):
         pass
 
     @abstractmethod
-    def verify_load(self):
+    def verify_load(self) -> bool:
         pass
 
 
@@ -24,30 +24,8 @@ class BaseWeightTpl(BaseWeight):
         self.device_id_ = get_current_device_id()
         self.data_type_ = data_type
 
-    def _slice_weight(self, weight: torch.Tensor):
-        # slice weight
-        return weight.to(self.data_type_)
-
-    def _slice_bias(self, bias: torch.Tensor):
-        # slice bias
-        return bias.to(self.data_type_)
-
-    def _slice_weight_scale(self, weight_scale: torch.Tensor):
-        # slice weight scale and zero point
-        return weight_scale
-
-    def _load_weights(self, weights: Dict[str, torch.Tensor]) -> None:
-        # load weight
-        pass
-
-    def _load_scales(self, weights: Dict[str, torch.Tensor]) -> None:
-        # load quantization scale
-        pass
-
     def load_hf_weights(self, weights):
-        self._load_weights(weights)
-        self._load_scales(weights)
-        return
+        raise NotImplementedError("load_hf_weights must implement this method")
 
-    def verify_load(self):
-        pass
+    def verify_load(self) -> bool:
+        raise NotImplementedError("verify_load must implement this method")

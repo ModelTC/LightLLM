@@ -16,10 +16,14 @@ def _silu_and_mul_kernel_fast(
     stride_output_n,
     size_m,
     size_n,
+    limit: tl.constexpr,
+    alpha: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     NUM_STAGES: tl.constexpr,
     NEED_MASK: tl.constexpr,
+    layout: tl.constexpr = "blocked",  # "blocked" or "interleaved"
+    USE_LIMIT_AND_ALPHA: tl.constexpr = False,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
     stride_output_m = tl.cast(stride_output_m, dtype=tl.int64)
@@ -38,8 +42,15 @@ def _silu_and_mul_kernel_fast(
         other = None
 
     for m_index in tl.range(m_start_index, m_end_index, num_stages=NUM_STAGES):
-        gate_offsets = m_index * stride_input_m + n_offsets[None, :]
-        up_offsets = m_index * stride_input_m + (n_offsets[None, :] + size_n)
+        if layout == "interleaved":
+            # [gate0, up0, gate1, up1, ...]
+            base_offsets = m_index * stride_input_m + n_offsets[None, :] * 2
+            gate_offsets = base_offsets
+            up_offsets = base_offsets + 1
+        elif layout == "blocked":
+            # [gate0, gate1, ..., up0, up1, ...]
+            gate_offsets = m_index * stride_input_m + n_offsets[None, :]
+            up_offsets = m_index * stride_input_m + (n_offsets[None, :] + size_n)
         out_offsets = m_index * stride_output_m + n_offsets[None, :]
 
         up = tl.load(
@@ -53,14 +64,25 @@ def _silu_and_mul_kernel_fast(
             other=other,
         ).to(tl.float32)
 
-        gate = gate / (1 + tl.exp(-gate))
-        gate = gate.to(input_ptr.dtype.element_ty)
+        if USE_LIMIT_AND_ALPHA:
+            gate = tl.minimum(gate, limit)
+            up = tl.minimum(tl.maximum(up, -limit), limit)
+            gate = 1 / (1 + tl.exp(-gate * alpha)) * gate
+            gate = gate.to(input_ptr.dtype.element_ty)
+            tl.store(
+                output_ptr + out_offsets,
+                (up + 1) * gate,
+                mask=mask,
+            )
+        else:
+            gate = gate / (1 + tl.exp(-gate))
+            gate = gate.to(input_ptr.dtype.element_ty)
 
-        tl.store(
-            output_ptr + out_offsets,
-            up * gate,
-            mask=mask,
-        )
+            tl.store(
+                output_ptr + out_offsets,
+                up * gate,
+                mask=mask,
+            )
 
 
 def _get_silu_and_mul_configs():
@@ -84,9 +106,12 @@ def _get_silu_and_mul_static_key(input: torch.Tensor, output: torch.Tensor):
     run_key_func=lambda input: input.shape[0],
     mutates_args=["output"],
 )
-def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None):
+def silu_and_mul_fwd(
+    input: torch.Tensor, output: torch.Tensor, layout="blocked", limit=None, alpha=None, run_config=None
+):
     assert input.is_contiguous()
     assert output.is_contiguous()
+    assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
 
     stride_input_m = input.stride(0)
     stride_input_n = input.stride(1)
@@ -105,6 +130,7 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None)
     # limit the grid size to avoid the invalid argument error of triton
     while triton.cdiv(size_m, BLOCK_M) > 8192:
         BLOCK_M *= 2
+    USE_LIMIT_AND_ALPHA = limit is not None and alpha is not None
 
     grid = (
         triton.cdiv(size_n, BLOCK_N),
@@ -120,10 +146,14 @@ def silu_and_mul_fwd(input: torch.Tensor, output: torch.Tensor, run_config=None)
         stride_output_n=stride_output_n,
         size_m=size_m,
         size_n=size_n,
+        limit=limit,
+        alpha=alpha,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         NUM_STAGES=NUM_STAGES,
         NEED_MASK=NEED_MASK,
         num_warps=num_warps,
+        layout=layout,
+        USE_LIMIT_AND_ALPHA=USE_LIMIT_AND_ALPHA,
     )
     return

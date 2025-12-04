@@ -128,10 +128,23 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool_call_parser",
         type=str,
-        choices=["qwen25", "llama3", "mistral"],
+        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31"],
         default=None,
         help="tool call parser type",
     )
+    parser.add_argument(
+        "--chat_template",
+        type=str,
+        default=None,
+        help=(
+            "chat template jinja file path. For example:\n"
+            "- /test/chat_template/tool_chat_template_deepseekv31.jinja\n"
+            "- /test/chat_template/tool_chat_template_deepseekv32.jinja\n"
+            "- /test/chat_template/tool_chat_template_qwen.jinja\n"
+            "- /test/chat_template/tool_chat_template_deepseekr1.jinja"
+        ),
+    )
+
     parser.add_argument(
         "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
     )
@@ -191,7 +204,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         default=[],
         nargs="+",
-        help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_fp16 | triton_flashdecoding
+        help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_int8kv_flashdecoding | ppl_int8kv_flashdecoding_diverse
+                        | ppl_fp16 | triton_flashdecoding
                         | triton_gqa_attention | triton_gqa_flashdecoding | triton_fp8kv | offline_calibration_fp8kv
                         | export_fp8kv_calibration
                         triton_flashdecoding mode is for long context, current support llama llama2 qwen;
@@ -241,14 +255,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""aggressive schedule can lead to frequent prefill interruptions during decode.
                 disabling it allows the router_max_wait_tokens parameter to work more effectively.""",
     )
-    parser.add_argument(
-        "--dp_prefill_wait_step",
-        type=int,
-        default=0,
-        help="""dp_prefill_wait_step is used to control the pacing of dp chunked prefill mode, aiming to reduce
-                computational waste during prefill. However, higher values can negatively impact the
-                first token latency. It is generally recommended to set this value between 0 and 12.""",
-    )
 
     parser.add_argument(
         "--use_dynamic_prompt_cache", action="store_true", help="This argument is deprecated and no longer in use."
@@ -291,6 +297,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="""inference backend will use TP SP Mixed running mode.
         only llama and deepseek v3 model supported now.""",
+    )
+    parser.add_argument(
+        "--enable_dp_prefill_balance",
+        action="store_true",
+        help="inference backend will use dp balance, need set --enable_tpsp_mix_mode first",
     )
     parser.add_argument(
         "--enable_prefill_microbatch_overlap",
@@ -357,6 +368,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--push_interval", type=int, default=10, help="interval of pushing monitoring metrics")
     parser.add_argument(
         "--visual_infer_batch_size", type=int, default=1, help="number of images to process in each inference batch"
+    )
+    parser.add_argument(
+        "--visual_send_batch_size",
+        type=int,
+        default=1,
+        help="""
+        number of images embedding to send to llm process in each batch,
+        bigger size can improve throughput but increase latency possibly in some cases
+        """,
     )
     parser.add_argument(
         "--visual_gpu_ids", nargs="+", type=int, default=None, help="List of GPU IDs to use, e.g., 0 1 2"
@@ -486,7 +506,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mtp_mode",
-        choices=["deepseekv3", None],
+        choices=["deepseekv3_vanilla", "deepseekv3_eagle", None],
         default=None,
         help="""supported mtp mode, None is not enable mtp, """,
     )
@@ -518,5 +538,32 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.03,
         help="""The interval of the schedule time, default is 30ms.""",
+    )
+    parser.add_argument(
+        "--enable_cpu_cache",
+        action="store_true",
+        help="""enable cpu cache to store kv cache. prefer to use hugepages for better performance.""",
+    )
+    parser.add_argument(
+        "--cpu_cache_storage_size",
+        type=float,
+        default=2,
+        help="""The capacity of cpu cache. GB used.""",
+    )
+    parser.add_argument(
+        "--cpu_cache_token_page_size",
+        type=int,
+        default=256,
+        help="""The token page size of cpu cache""",
+    )
+    parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
+    parser.add_argument(
+        "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
+    )
+    parser.add_argument(
+        "--disk_cache_dir",
+        type=str,
+        default=None,
+        help="""Directory used to persist disk cache data. Defaults to a temp directory when not set.""",
     )
     return parser

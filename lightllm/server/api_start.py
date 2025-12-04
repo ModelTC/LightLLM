@@ -61,6 +61,10 @@ def setup_signal_handlers(http_server_process, process_manager):
 
 
 def normal_or_p_d_start(args):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    args: StartArgs = args
+
     set_unique_server_name(args)
 
     if not args.disable_shm_warning:
@@ -73,6 +77,10 @@ def normal_or_p_d_start(args):
 
     if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
         return
+
+    if args.enable_cpu_cache:
+        # 生成一个用于创建cpu kv cache的共享内存id。
+        args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
     # 确保单机上多实列不冲突
@@ -130,6 +138,9 @@ def normal_or_p_d_start(args):
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
+
+    if args.enable_dp_prefill_balance:
+        assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     # mtp params check
     if args.mtp_mode is not None:
@@ -214,19 +225,20 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=7 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=8 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
         router_port,
         detokenization_port,
-        detokenization_pub_port,
+        http_server_port,
         visual_port,
         audio_port,
         cache_port,
         metric_port,
-    ) = can_use_ports[0:7]
-    can_use_ports = can_use_ports[7:]
+        multi_level_kv_cache_port,
+    ) = can_use_ports[0:8]
+    can_use_ports = can_use_ports[8:]
 
     visual_model_tp_ports = []
     for _ in range(args.visual_dp):
@@ -237,11 +249,12 @@ def normal_or_p_d_start(args):
     # 将申请好的端口放入args参数中
     args.router_port = router_port
     args.detokenization_port = detokenization_port
-    args.detokenization_pub_port = detokenization_pub_port
+    args.http_server_port = http_server_port
     args.visual_port = visual_port
     args.audio_port = audio_port
     args.cache_port = cache_port
     args.metric_port = metric_port
+    args.multi_level_kv_cache_port = multi_level_kv_cache_port
 
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
@@ -268,50 +281,51 @@ def normal_or_p_d_start(args):
             start_funcs=[
                 start_cache_manager,
             ],
-            start_args=[(cache_port, args)],
+            start_args=[(args,)],
         )
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_visual_process,
+            ],
+            start_args=[
+                (args, visual_model_tp_ports),
+            ],
+        )
+
         if args.enable_multimodal_audio:
             from .audioserver.manager import start_audio_process
 
             process_manager.start_submodule_processes(
                 start_funcs=[
-                    start_visual_process,
-                ],
-                start_args=[
-                    (args, audio_port, visual_port, cache_port, visual_model_tp_ports),
-                ],
-            )
-            process_manager.start_submodule_processes(
-                start_funcs=[
                     start_audio_process,
                 ],
                 start_args=[
-                    (args, router_port, audio_port, cache_port),
+                    (args,),
                 ],
             )
 
-        else:
-            process_manager.start_submodule_processes(
-                start_funcs=[
-                    start_visual_process,
-                ],
-                start_args=[
-                    (args, router_port, visual_port, cache_port, visual_model_tp_ports),
-                ],
-            )
+    if args.enable_cpu_cache:
+        from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
+
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_multi_level_kv_cache_manager,
+            ],
+            start_args=[(args,)],
+        )
 
     process_manager.start_submodule_processes(
         start_funcs=[
             start_metric_manager,
         ],
-        start_args=[(metric_port, args)],
+        start_args=[(args,)],
     )
 
     process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[
-            (args, router_port, detokenization_port, metric_port),
-            (args, detokenization_port, detokenization_pub_port),
+            (args,),
+            (args,),
         ],
     )
 
@@ -381,7 +395,7 @@ def pd_master_start(args):
         start_funcs=[
             start_metric_manager,
         ],
-        start_args=[(metric_port, args)],
+        start_args=[(args,)],
     )
 
     command = [

@@ -143,11 +143,23 @@
     "NUM_STAGES": 4,
     "num_warps": 1
   },
+  "67584": {
+    "BLOCK_M": 32,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
+  },
   "72": {
     "BLOCK_M": 1,
     "BLOCK_N": 256,
     "NUM_STAGES": 4,
     "num_warps": 4
+  },
+  "76032": {
+    "BLOCK_M": 32,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
   },
   "8": {
     "BLOCK_M": 1,
@@ -166,6 +178,12 @@
     "BLOCK_N": 256,
     "NUM_STAGES": 1,
     "num_warps": 4
+  },
+  "8448": {
+    "BLOCK_M": 8,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
   },
   "9": {
     "BLOCK_M": 1,

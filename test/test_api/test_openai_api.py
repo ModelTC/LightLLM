@@ -635,6 +635,72 @@ def test_multiple_token_arrays():
         print(f"错误: {e}")
 
 
+def test_structured_generation():
+    """测试结构化生成功能"""
+    client = LightLLMClient()
+
+    try:
+        print("=== 测试结构化生成 ===")
+        prompt = "请以JSON格式提供一个包含姓名、年龄和职业的人的信息。"
+
+        # 测试JSON生成
+        result = client.completions(prompt, max_tokens=150, response_format={"type": "json_object"})
+        print("提示:", prompt)
+        print("助手:", result["choices"][0]["text"])
+
+        # 测试JSON Schema生成
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"},
+                "occupation": {"type": "string"},
+            },
+            "required": ["name", "age", "occupation"],
+        }
+        result = client.completions(
+            prompt,
+            max_tokens=150,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "PersonInfo",
+                    "description": "包含姓名、年龄和职业的人的信息",
+                    "schema": schema,
+                },
+            },
+        )
+        print("提示:", prompt)
+        print("助手:", result["choices"][0]["text"])
+
+        # 测试/v1/chat/completions端点的JSON生成
+        result = client.simple_chat(
+            prompt,
+            max_tokens=150,
+            response_format={"type": "json_object"},
+        )
+        print("提示:", prompt)
+        print("助手:", result["choices"][0]["message"]["content"])
+
+        # 测试/v1/chat/completions端点的JSON Schema生成
+        result = client.simple_chat(
+            prompt,
+            max_tokens=150,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "PersonInfo",
+                    "description": "包含姓名、年龄和职业的人的信息",
+                    "schema": schema,
+                },
+            },
+        )
+        print("提示:", prompt)
+        print("助手:", result["choices"][0]["message"]["content"])
+    except Exception as e:
+        print(f"错误: {e}")
+
+
 def main():
     # 基础功能测试
     test_completions()
@@ -651,6 +717,7 @@ def main():
     test_logprobs()
     test_echo()
     test_stop_parameter()
+    test_structured_generation()
 
 
 if __name__ == "__main__":

@@ -44,13 +44,11 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
     def _get_qkv(
         self, input, infer_state: InferStateInfo, layer_weight
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        cache_kv = self._pre_cache_kv(infer_state=infer_state, layer_weight=layer_weight)
-        q = torch.mm(input.view(-1, self.embed_dim_), layer_weight.q_weight_)
-        torch.mm(
-            input.view(-1, self.embed_dim_),
-            layer_weight.kv_weight_,
-            out=cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_),
+        q = layer_weight.q_proj.mm(input.view(-1, self.embed_dim_))
+        cache_kv = layer_weight.kv_proj.mm(input.view(-1, self.embed_dim_)).view(
+            -1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_
         )
+
         if self.use_qk_norm_:
             q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
             k = cache_kv[:, 0 : self.tp_k_head_num_, :]

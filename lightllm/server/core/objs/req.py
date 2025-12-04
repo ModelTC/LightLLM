@@ -2,13 +2,19 @@ import os
 import math
 import ctypes
 import numpy as np
+import time
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
+from .token_chunck_hash_list import TokenHashList, CpuCachePageList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class FinishStatus(ctypes.Structure):
@@ -66,6 +72,7 @@ class Req(ctypes.Structure):
     _fields_ = [
         ("index_in_shm_mem", ctypes.c_int),
         ("ref_count", ctypes.c_int),  # 个人不要操作这个计数  # 个人不要操作这个引用计数
+        ("recv_time", ctypes.c_double),  # 用于记录请求到达服务的时间，主要用于调试
         ("request_id", ctypes.c_int64),  # 引用计数
         ("group_req_id", ctypes.c_int64),
         ("input_len", ctypes.c_int),
@@ -77,7 +84,9 @@ class Req(ctypes.Structure):
         # 虽然某种程度上 cur_output_len 也有同样的功能，但是为了避免多进程访问导致的问题，添加
         # candetoken_out_len 变量单独传输这个信息。
         ("candetoken_out_len", ctypes.c_int),
-        ("prompt_cache_len", ctypes.c_int),  # 用于记录prompt cache 的命中长度，用于统计
+        ("prompt_cache_len", ctypes.c_int),  # 用于记录prompt cache 的命中长度，用于统计,这里指gpu kv cache命中长度
+        ("cpu_prompt_cache_len", ctypes.c_int),  # 用于记录在 enable_cpu_cache 的场景下,命中的 cpu kv cache 的长度
+        ("disk_prompt_cache_len", ctypes.c_int),  # 用于记录从磁盘命中的长度
         ("is_paused", ctypes.c_bool),  # 标记一个Req因为显存资源管理的原因被临时暂停了。
         ("finish_status", FinishStatus),
         # 这个标记变量是http_server 写入，其他进程读取，用于标记该请求是否因为断网被aborted。
@@ -107,6 +116,12 @@ class Req(ctypes.Structure):
         # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。
         # 该变量为 detokenization 进程写入，http_server 读取
         ("stop_str_matched_token_index", ctypes.c_int),
+        # 用于在开启cpu cache 或者 硬盘 cache时，预先计算，分块输入token的hash值。
+        ("token_hash_list", TokenHashList),
+        # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
+        ("cpu_cache_match_page_indexes", CpuCachePageList),
+        # 分块hash的块大小
+        ("cpu_cache_token_page_size", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -128,6 +143,7 @@ class Req(ctypes.Structure):
         # 只是为了有更好的编码辅助类型提示
         self.index_in_shm_mem: int = self.index_in_shm_mem
         self.ref_count: int = self.ref_count
+        self.recv_time: float = time.time()
 
         self.request_id = request_id
         self.group_req_id = convert_sub_id_to_group_id(request_id)
@@ -139,6 +155,8 @@ class Req(ctypes.Structure):
         self.shm_cur_output_len = 0
         self.candetoken_out_len = 0
         self.prompt_cache_len = 0
+        self.cpu_prompt_cache_len = 0
+        self.disk_prompt_cache_len = 0
         self.finish_token_index = -1
         self.can_released_mark = False
         self.reward_score = math.nan
@@ -164,9 +182,22 @@ class Req(ctypes.Structure):
 
         self.post_init()
 
+        self.cpu_cache_token_page_size = get_env_start_args().cpu_cache_token_page_size
+        if get_env_start_args().enable_cpu_cache:
+            self._fill_input_token_hash()
+        return
+
     def post_init(self):
         # 子类继承进行一些额外的初始化操作
         pass
+
+    def _fill_input_token_hash(self):
+        self.token_hash_list = TokenHashList()
+        self.token_hash_list.clear()
+        hash_values = compute_token_list_hash(self.get_prompt_ids(), self.cpu_cache_token_page_size)
+        self.token_hash_list.fill(hash_values)
+        self.cpu_cache_match_page_indexes = CpuCachePageList()
+        return
 
     def create_prompt_ids_shm_array(self):
         service_uni_name = get_unique_server_name()
@@ -267,6 +298,10 @@ class Req(ctypes.Structure):
         else:
             return False
 
+    def print_time_log(self, log_info: str):
+        logger.info(f"req_id: {self.request_id} cost_time {time.time() - self.recv_time} s log_info: {log_info}")
+        return
+
 
 # 由于目前加入了很多异步调度的方法，为了缓解异步调度带来的很多
 # 估计不准确的问题，通过加长输出的长度，进行偏向保守一些的调度
@@ -287,7 +322,7 @@ class ChunkedPrefillReq(Req):
         # 就是通过模拟加长其输出token长度，来延长其在估计阶段的生命周期。max_waiting_token
         # 的计算是保守的，每次chuncked prefill 延迟的最大步数为两种模式之合，因为
         # 这个并不会导致预估的token占用量大幅增加，所以可以放心使用。
-        max_waiting_token = args.router_max_wait_tokens + args.dp_prefill_wait_step
+        max_waiting_token = args.router_max_wait_tokens
         has_out_len = self.shm_cur_output_len
         if self.sample_params.ignore_eos:
             cur_max_new_token_len = self.sample_params.max_new_tokens
@@ -317,8 +352,12 @@ class ChunkedPrefillReq(Req):
         """
         # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
         need_tokens = min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
-        if need_tokens == 1:
-            need_tokens = self._mtp_step + 1
+        if need_tokens == 1 and self._mtp_step > 0:
+            # self._mtp_step > 0 时，说明开启了mtp 模式，每次decode需要额外的mem token 资源
+            # "deepseekv3_vanilla" 模式需要的 mem 用量为 self._mtp_step + 1
+            # "deepseekv3_eagle" 模式需要的 mem 用量为 （self._mtp_step + 1）* 2
+            # 为了简化统一 返回 （self._mtp_step + 1）* 2
+            need_tokens = (self._mtp_step + 1) * 2
 
         return need_tokens
 

@@ -442,9 +442,10 @@ MTP Multi-Prediction Parameters
 
 .. option:: --mtp_mode
 
-    Supported mtp modes, optional values:
+    Supported mtp modes, it is recommended to use deepseekv3_eagle for better performance, optional values:
     
-    * ``deepseekv3``
+    * ``deepseekv3_vanilla``
+    * ``deepseekv3_eagle``
     * ``None``: Do not enable mtp (default)
 
 .. option:: --mtp_draft_model_dir

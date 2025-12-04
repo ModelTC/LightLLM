@@ -101,7 +101,7 @@ class ModelRpcServer:
                 logger.exception(str(e))
                 error_count += 1
 
-            if error_count >= 3:
+            if error_count >= 1:
                 logger.error("infer process error to exit")
                 os._exit(-1)
 

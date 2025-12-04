@@ -19,6 +19,7 @@ from lightllm.models.internvl.layer_weights.pre_and_post_layer_weight import (
 )
 from lightllm.models.internvl.layer_weights.pre_and_post_layer_weight import InternVLInternlm2PreAndPostLayerWeight
 from lightllm.models.vit import get_image_patch_func
+from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
 
 IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
@@ -46,6 +47,9 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
         self.audio_end_tag = AUDIO_END_TOKEN
         self.audio_end_id = tokenizer.convert_tokens_to_ids(self.audio_end_tag)
         self.get_image_patch_func = get_image_patch_func(kwargs["weight_dir"])
+
+        self.audio_min_length = MIN_AUDIO_LEN
+        self.audio_max_length = 16000 * 30
 
     def init_imageitem_extral_params(
         self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams
@@ -81,16 +85,35 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
 
     def get_audio_token_length(self, audio: AudioItem):
         L = audio.audio_length
-        L = L if L <= 480000 else 480000  # max_length < 30s
-        mel_len = L // 160
-        dilation = 1
-        L_in = mel_len
-        for (padding, kernel_size, stride) in eval("[(1,3,1)] + [(1,3,2)] "):
-            L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
-            L_out = 1 + L_out // stride
-            L_in = L_out
-        audio_len_after_cnn = L_out
-        audio_token_num = (audio_len_after_cnn - 2) // 2 + 1
+        audio_token_num = 0
+        chunk_lens = []
+        if L <= self.audio_max_length:
+            cur_len = L
+            if cur_len < self.audio_min_length:
+                cur_len = self.audio_min_length
+            chunk_lens.append(cur_len)
+        else:
+            start = 0
+            while start < L:
+                end = min(start + self.audio_max_length, L)
+                cur_len = end - start
+
+                if cur_len < self.audio_min_length:
+                    cur_len = self.audio_min_length
+
+                chunk_lens.append(cur_len)
+                start = end
+        for chunk_len in chunk_lens:
+            mel_len = chunk_len // 160
+            dilation = 1
+            L_in = mel_len
+            for (padding, kernel_size, stride) in eval("[(1,3,1)] + [(1,3,2)] "):
+                L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
+                L_out = 1 + L_out // stride
+                L_in = L_out
+            audio_len_after_cnn = L_out
+            chunk_token_num = (audio_len_after_cnn - 2) // 2 + 1
+            audio_token_num += int(chunk_token_num)
         return audio_token_num
 
     # only change the impl of the encode func:
