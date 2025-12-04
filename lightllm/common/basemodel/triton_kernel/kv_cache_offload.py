@@ -173,9 +173,9 @@ def _offload_gpu_kv_to_cpu(
 def offload_gpu_kv_to_cpu(
     token_indexes: torch.Tensor,
     gpu_kv_cache: torch.Tensor,
-    gpu_kv_cache_scale: torch.Tensor,
+    gpu_kv_cache_scale: Optional[torch.Tensor],
     cpu_kv_cache: torch.Tensor,
-    cpu_kv_cache_scale: torch.Tensor,
+    cpu_kv_cache_scale: Optional[torch.Tensor],
     page_indexes: torch.Tensor,
     page_readies: torch.Tensor,
     tp_index: int,
