@@ -12,6 +12,7 @@ from tqdm import tqdm
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
@@ -179,7 +180,7 @@ class TpPartBaseModel:
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        self.mem_manager = MemoryManager(
+        self.mem_manager: MemoryManager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=self.config["num_attention_heads"] // self.tp_world_size_,
