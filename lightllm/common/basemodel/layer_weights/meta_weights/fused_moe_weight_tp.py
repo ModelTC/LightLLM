@@ -95,16 +95,8 @@ class FusedMoeWeightTP(BaseWeight):
         self.data_type_ = data_type
         self.hidden_size = hidden_size
         self.tp_rank_ = get_current_rank_in_dp()
-        self.experts_up_projs = [None] * self.n_routed_experts
-        self.experts_gate_projs = [None] * self.n_routed_experts
-        self.experts_up_proj_scales = [None] * self.n_routed_experts
-        self.experts_gate_proj_scales = [None] * self.n_routed_experts
         self.e_score_correction_bias = None
-        self.w2_list = [None] * self.n_routed_experts
-        self.w2_scale_list = [None] * self.n_routed_experts
         self.scoring_func = network_config.get("scoring_func", "softmax")
-        self.w1 = [None, None]  # weight, weight_scale
-        self.w2 = [None, None]  # weight, weight_scale
         self.lock = threading.Lock()
 
         self._create_weight()
@@ -120,37 +112,19 @@ class FusedMoeWeightTP(BaseWeight):
         device_id = get_current_device_id()
 
         # Create e_score_correction_bias
-        self.e_score_correction_bias = torch.empty(
-            (total_expert_num,),
-            dtype=self.data_type_,
-            device=f"cuda:{device_id}",
+        if self.e_score_correction_bias is not None:
+            self.e_score_correction_bias = torch.empty(
+                (total_expert_num,),
+                dtype=self.data_type_,
+                device=f"cuda:{device_id}",
+            )
+
+        self.w1_weight_pack = self.quant_method.create_weight(
+            total_expert_num * intermediate_size * 2, self.hidden_size, dtype=self.data_type_, device_id=device_id
         )
-
-        if not self.quantized_weight and self.quant_method is not None:
-            # Quantized weights
-            w1_pack = self.quant_method.create_weight(
-                total_expert_num * intermediate_size * 2, self.hidden_size, dtype=self.data_type_, device_id=device_id
-            )
-            self.w1[0] = w1_pack.weight.view(total_expert_num, intermediate_size * 2, self.hidden_size)
-            self.w1[1] = w1_pack.weight_scale.view(total_expert_num, intermediate_size * 2, self.hidden_size)
-
-            w2_pack = self.quant_method.create_weight(
-                total_expert_num * self.hidden_size, intermediate_size, dtype=self.data_type_, device_id=device_id
-            )
-            self.w2[0] = w2_pack.weight.view(total_expert_num, self.hidden_size, intermediate_size)
-            self.w2[1] = w2_pack.weight_scale.view(total_expert_num, self.hidden_size, intermediate_size)
-        else:
-            # Regular weights
-            self.w1[0] = torch.empty(
-                (total_expert_num, intermediate_size * 2, self.hidden_size),
-                dtype=self.data_type_,
-                device=f"cuda:{device_id}",
-            )
-            self.w2[0] = torch.empty(
-                (total_expert_num, self.hidden_size, intermediate_size),
-                dtype=self.data_type_,
-                device=f"cuda:{device_id}",
-            )
+        self.w2_weight_pack = self.quant_method.create_weight(
+            total_expert_num * self.hidden_size, intermediate_size, dtype=self.data_type_, device_id=device_id
+        )
 
     def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
         from lightllm.common.fused_moe.topk_select import select_experts
@@ -238,7 +212,7 @@ class FusedMoeWeightTP(BaseWeight):
             ]  # [intermediate_size, hidden_size]
 
             # Copy to pre-allocated memory
-            if not self.quantized_weight and self.quant_method is not None:
+            if self.quant_method is not None:
                 # Quantized path
                 combined_cpu = torch.empty((intermediate_size * 2, self.hidden_size), dtype=gate_weight.dtype)
                 combined_cpu[:intermediate_size, :] = gate_weight
@@ -259,7 +233,7 @@ class FusedMoeWeightTP(BaseWeight):
             w2_weight_tensor = weights[w2_weight][
                 :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
             ]  # [hidden_size, intermediate_size] - already the correct shape
-            if not self.quantized_weight and self.quant_method is not None:
+            if self.quant_method is not None:
                 quantized_pack = self.quant_method.quantize(w2_weight_tensor)
                 self.w2[0][expert_idx].copy_(quantized_pack.weight)
                 if quantized_pack.weight_scale is not None:
