@@ -94,7 +94,7 @@ LightLLM 提供了与 OpenAI API 完全兼容的接口，支持所有标准的 O
         print("错误:", response.status_code, response.text)
 
 Function Calling 示例
---------------------
+---------------------
 
 LightLLM 支持 OpenAI 的 function calling 功能，提供了三种模型的函数调用解析，启动服务的时候指定 --tool_call_parser 参数来选择。启动服务命令为：
 
