@@ -11,7 +11,8 @@ from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
@@ -22,7 +23,7 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
@@ -68,7 +69,7 @@ class TpPartBaseModel:
         self.is_token_healing = kvargs.get("is_token_healing", False)
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
-        self.data_type = kvargs.get("data_type", "float16")
+        self.data_type = get_llm_data_type()
         mtp_step = get_env_start_args().mtp_step
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         self.graph_max_batch_size = (
@@ -89,7 +90,6 @@ class TpPartBaseModel:
 
         self.is_deepseekv3_mtp_mode = self.args.mtp_mode in ["deepseekv3_vanilla", "deepseekv3_eagle"]
 
-        self._init_datatype()
         self._init_config()
         self._verify_must()
         self._verify_params()
@@ -180,7 +180,7 @@ class TpPartBaseModel:
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        self.mem_manager = MemoryManager(
+        self.mem_manager: MemoryManager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=self.config["num_attention_heads"] // self.tp_world_size_,
@@ -229,16 +229,6 @@ class TpPartBaseModel:
         self.layers_num = self.config["n_layer"]
         self.vocab_size = self.config["vocab_size"]
         return
-
-    def _init_datatype(self):
-        if self.data_type in ["fp16", "float16"]:
-            self.data_type = torch.float16
-        elif self.data_type in ["bf16", "bfloat16"]:
-            self.data_type = torch.bfloat16
-        elif self.data_type in ["fp32", "float32"]:
-            self.data_type = torch.float32
-        else:
-            raise ValueError(f"Unsupport datatype {self.data_type}!")
 
     def _init_cudagraph(self):
         self.graph = (

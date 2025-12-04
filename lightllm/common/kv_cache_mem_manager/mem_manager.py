@@ -93,7 +93,7 @@ class MemoryManager:
         """
         pd 分离模式使用的特殊接口
         """
-        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
         self.kv_move_buffer = torch.empty(
             (1, max_req_total_len + 8, 2 * self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
@@ -103,7 +103,7 @@ class MemoryManager:
         return
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
 
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)

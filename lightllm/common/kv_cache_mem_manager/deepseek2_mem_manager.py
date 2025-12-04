@@ -23,12 +23,6 @@ class Deepseek2MemoryManager(MemoryManager):
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda")
 
-        # todo, etp or edp use the same work buffer here
-        # also it can be used for any kernels for work buffer witout save info only
-        if os.environ.get("ETP_MODE_ENABLED") == "true":
-            self.work_buffer = torch.empty(1024 * 1024 * 1024, dtype=torch.bfloat16, device="cuda")
-            self.work_buffer.share_memory_()
-
     def alloc_kv_move_buffer(self, max_req_total_len):
         self.kv_move_buffer = torch.empty(
             (1, max_req_total_len + 8, self.head_num, self.head_dim), dtype=self.dtype, device="cuda"

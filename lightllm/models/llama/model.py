@@ -15,7 +15,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.flashattention_infer_struct import FlashAttentionStateInfo
 from lightllm.models.llama.flashinfer_struct import LlamaFlashInferStateInfo
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.mem_utils import select_mem_manager_class
+from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
@@ -86,7 +86,7 @@ class LlamaTpPartModel(TpPartBaseModel):
     def _init_mem_manager(self):
         head_dim_ = self.config["hidden_size"] // self.config["num_attention_heads"]
         head_dim_ = self.config.get("head_dim", head_dim_)
-        self.mem_manager = select_mem_manager_class(self.mode)(
+        self.mem_manager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=self.config["num_key_value_heads"] // self.tp_world_size_,

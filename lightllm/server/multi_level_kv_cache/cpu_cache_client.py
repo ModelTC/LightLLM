@@ -285,9 +285,11 @@ class CpuKvCacheClient(object):
             self.kv_cache_tensor_meta.layer_num,
             self.kv_cache_tensor_meta.token_page_size,
             self.kv_cache_tensor_meta.num_heads,
-            self.kv_cache_tensor_meta.head_dim,
+            self.kv_cache_tensor_meta.get_merged_head_dim(),
         )
-        self.cpu_kv_cache_tensor = torch.from_numpy(numpy_array).view(dtype=torch.bfloat16).view(shape)
+        self.cpu_kv_cache_tensor = (
+            torch.from_numpy(numpy_array).view(dtype=self.kv_cache_tensor_meta.data_type).view(shape)
+        )
         return
 
     def _attach_shm_cpu_kv_cache(self):
@@ -301,9 +303,11 @@ class CpuKvCacheClient(object):
             self.kv_cache_tensor_meta.layer_num,
             self.kv_cache_tensor_meta.token_page_size,
             self.kv_cache_tensor_meta.num_heads,
-            self.kv_cache_tensor_meta.head_dim,
+            self.kv_cache_tensor_meta.get_merged_head_dim(),
         )
-        self.cpu_kv_cache_tensor = torch.from_numpy(numpy_array).view(dtype=torch.bfloat16).view(shape)
+        self.cpu_kv_cache_tensor = (
+            torch.from_numpy(numpy_array).view(dtype=self.kv_cache_tensor_meta.data_type).view(shape)
+        )
         assert shm_ptr == self.cpu_kv_cache_tensor.data_ptr()
 
         # test code

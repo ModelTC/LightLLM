@@ -1,7 +1,7 @@
 import torch
 import triton
 import collections
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
