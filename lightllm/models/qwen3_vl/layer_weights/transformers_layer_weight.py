@@ -1,18 +1,4 @@
-import os
-import torch
-import math
-import numpy as np
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
-from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import (
-    ROWMMWeight,
-    MultiROWMMWeight,
-    COLMMWeight,
-    NormWeight,
-    FusedMoeWeightTP,
-    FusedMoeWeightEP,
-    ROWBMMWeight,
-)
 
 
 class Qwen3VLTransformerLayerWeight(Qwen3TransformerLayerWeight):  # 后面看要不要改

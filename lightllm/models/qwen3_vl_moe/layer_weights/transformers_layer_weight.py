@@ -1,18 +1,6 @@
 import os
-import torch
-import math
-import numpy as np
-from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import (
-    ROWMMWeight,
-    MultiROWMMWeight,
-    COLMMWeight,
-    NormWeight,
-    FusedMoeWeightTP,
-    FusedMoeWeightEP,
-    ROWBMMWeight,
-)
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, FusedMoeWeightEP, create_tp_moe_wegiht_obj
 
 
 class Qwen3VLMOETransformerLayerWeight(Qwen3MOETransformerLayerWeight):
@@ -39,7 +27,7 @@ class Qwen3VLMOETransformerLayerWeight(Qwen3MOETransformerLayerWeight):
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
         self.moe_gate = ROWMMWeight(
-            weight_name=f"model.language_model.layers.{self.layer_num_}.mlp.gate.weight",
+            weight_names=f"model.language_model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
             layer_num=self.layer_num_,
             name="moe_gate",
@@ -50,10 +38,10 @@ class Qwen3VLMOETransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         assert moe_mode in ["EP", "TP"]
 
         if moe_mode == "TP":
-            self.experts = FusedMoeWeightTP(
-                gate_proj_name="gate_up_proj",
+            self.experts = create_tp_moe_wegiht_obj(
+                gate_proj_name="gate_proj",
                 down_proj_name="down_proj",
-                up_proj_name=None,
+                up_proj_name="up_proj",
                 e_score_correction_bias_name="",
                 weight_prefix=f"model.language_model.layers.{self.layer_num_}.mlp.experts",
                 n_routed_experts=self.n_routed_experts,
@@ -63,12 +51,14 @@ class Qwen3VLMOETransformerLayerWeight(Qwen3MOETransformerLayerWeight):
                 layer_num=self.layer_num_,
                 quant_cfg=self.quant_cfg,
                 num_fused_shared_experts=0,
+                fused_gate_up=True,
+                gate_up_proj_name="gate_up_proj",
             )
         elif moe_mode == "EP":
             self.experts = FusedMoeWeightEP(
-                gate_proj_name="gate_up_proj",
+                gate_proj_name="gate_proj",
                 down_proj_name="down_proj",
-                up_proj_name=None,
+                up_proj_name="up_proj",
                 e_score_correction_bias_name="",
                 weight_prefix=f"model.language_model.layers.{self.layer_num_}.mlp.experts",
                 n_routed_experts=self.n_routed_experts,
@@ -76,6 +66,8 @@ class Qwen3VLMOETransformerLayerWeight(Qwen3MOETransformerLayerWeight):
                 network_config=self.network_config_,
                 layer_num=self.layer_num_,
                 quant_cfg=self.quant_cfg,
+                fused_gate_up=True,
+                gate_up_proj_name="gate_up_proj",
             )
         else:
             raise ValueError(f"Unsupported moe mode: {moe_mode}")

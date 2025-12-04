@@ -20,6 +20,8 @@ def create_tp_moe_wegiht_obj(
     network_config: Dict[str, Any],
     layer_num: int,
     quant_cfg: Quantcfg = None,
+    fused_gate_up: bool = False,
+    gate_up_proj_name: str = None,
 ) -> Union["FusedMoeWeightTP", "FusedAWQMARLINMoeWeightTP"]:
     quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
     if quant_method is not None and quant_method.method_name == "awq_marlin":
@@ -36,6 +38,8 @@ def create_tp_moe_wegiht_obj(
             network_config=network_config,
             layer_num=layer_num,
             quant_cfg=quant_cfg,
+            fused_gate_up=fused_gate_up,
+            gate_up_proj_name=gate_up_proj_name,
         )
     else:
         return FusedMoeWeightTP(
@@ -51,6 +55,8 @@ def create_tp_moe_wegiht_obj(
             network_config=network_config,
             layer_num=layer_num,
             quant_cfg=quant_cfg,
+            fused_gate_up=fused_gate_up,
+            gate_up_proj_name=gate_up_proj_name,
         )
 
 
@@ -69,6 +75,8 @@ class FusedMoeWeightTP(BaseWeight):
         network_config: Dict[str, Any],
         layer_num: int,
         quant_cfg: Quantcfg = None,
+        fused_gate_up: bool = False,
+        gate_up_proj_name: str = None,
     ) -> None:
         super().__init__()
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
@@ -79,6 +87,8 @@ class FusedMoeWeightTP(BaseWeight):
         self.w1_weight_name = gate_proj_name
         self.w2_weight_name = down_proj_name
         self.w3_weight_name = up_proj_name
+        self.fused_gate_up = fused_gate_up
+        self.gate_up_proj_name = gate_up_proj_name
 
         self.e_score_correction_bias_name = e_score_correction_bias_name
         self.weight_prefix = weight_prefix
@@ -181,8 +191,6 @@ class FusedMoeWeightTP(BaseWeight):
 
                 inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
                 w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(len(self.w2_list), inter_shape, hidden_size)
-                if self.fused_gate_up:
-                    w2 = w2.transpose(1, 2).contiguous()
                 if not self.quantized_weight and self.quant_method is not None:
                     qw1, qw1_scale, qw1_zero_point = self.quant_method.quantize(w1)
                     qw2, qw2_scale, qw2_zero_point = self.quant_method.quantize(w2)
@@ -228,51 +236,49 @@ class FusedMoeWeightTP(BaseWeight):
                 delattr(self, "experts_up_proj_scales")
                 delattr(self, "experts_gate_proj_scales")
 
+    def fused_gate_up_weights_load(self, weights):
+        key_gate_up = f"{self.weight_prefix}.{self.gate_up_proj_name}"  # ...experts.gate_up_proj
+        key_down = f"{self.weight_prefix}.{self.w2_weight_name}"
+        if (key_gate_up not in weights) or (key_down not in weights):
+            return
+        gate_up = weights[key_gate_up]
+        down = weights[key_down]
+        _, _, I_double = gate_up.shape
+        I_single = I_double // 2
+        start = self.tp_rank_ * self.split_inter_size
+        end = (self.tp_rank_ + 1) * self.split_inter_size
+
+        for i_experts in range(self.n_routed_experts):
+            gate_up_2d = gate_up[i_experts]
+            self.experts_gate_projs[i_experts] = gate_up_2d[:, :I_single][:, start:end].t().contiguous()
+            self.experts_up_projs[i_experts] = gate_up_2d[:, I_single:][:, start:end].t().contiguous()
+            self.w2_list[i_experts] = down[i_experts].t()[:, start:end].contiguous()
+
+    def normal_weights_load(self, weights):
+        for i_experts in range(self.n_routed_experts):
+
+            w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
+            w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"
+            w3_weight = f"{self.weight_prefix}.{i_experts}.{self.w3_weight_name}.weight"
+
+            start = self.tp_rank_ * self.split_inter_size
+            end = (self.tp_rank_ + 1) * self.split_inter_size
+
+            if w1_weight in weights:
+                self.experts_gate_projs[i_experts] = weights[w1_weight][start:end, :]
+            if w3_weight in weights:
+                self.experts_up_projs[i_experts] = weights[w3_weight][start:end, :]
+            if w2_weight in weights:
+                self.w2_list[i_experts] = weights[w2_weight][start:end]
+
     def load_hf_weights(self, weights):
         if self.e_score_correction_bias_name in weights:
             self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
-        self.fused_gate_up = self.w3_weight_name is None  # gate_up: [E,H,2I] down: [E,I,H]
-        key_gateup_3d = f"{self.weight_prefix}.{self.w1_weight_name}"  # ...experts.gate_up_proj
-        key_down_3d = f"{self.weight_prefix}.{self.w2_weight_name}"
-
-        if self.fused_gate_up and (key_gateup_3d in weights) and (key_down_3d in weights):
-            gate_up_3d = weights[key_gateup_3d]
-            down_3d = weights[key_down_3d]
-            assert gate_up_3d.dim() == 3 and down_3d.dim() == 3
-
-            E_ckpt, H_, twoE = gate_up_3d.shape
-            assert E_ckpt == self.n_routed_experts, f"experts mismatch: ckpt {E_ckpt} vs cfg {self.n_routed_experts}"
-            Eint_total = twoE // 2
-            start, end = self.tp_rank_ * self.split_inter_size, (self.tp_rank_ + 1) * self.split_inter_size
-            assert end <= Eint_total, "TP split exceeds total expert-intermediate size"
-
-            for i in range(self.n_routed_experts):
-                gu2d = gate_up_3d[i]
-                gate2d = gu2d[:, :Eint_total][:, start:end].t().contiguous()
-                up2d = gu2d[:, Eint_total:][:, start:end].t().contiguous()
-                self.experts_gate_projs[i] = gate2d
-                self.experts_up_projs[i] = up2d
-
-                self.w2_list[i] = down_3d[i][start:end, :].contiguous()
+        if self.fused_gate_up:  # gate_up: [E,H,2I] down: [E,I,H]
+            self.fused_gate_up_weights_load(weights)
         else:
-            for i_experts in range(self.n_routed_experts):
-                w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
-                w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"
-                w3_weight = f"{self.weight_prefix}.{i_experts}.{self.w3_weight_name}.weight"
+            self.normal_weights_load(weights)
 
-                if w1_weight in weights:
-                    self.experts_gate_projs[i_experts] = weights[w1_weight][
-                        self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
-                    ]
-                if w3_weight in weights:
-                    self.experts_up_projs[i_experts] = weights[w3_weight][
-                        self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :
-                    ]
-
-                if w2_weight in weights:
-                    self.w2_list[i_experts] = weights[w2_weight][
-                        :, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1)
-                    ]
         if self.quant_method is not None:
             if self.fused_gate_up:
                 raise ValueError("qwen3_vl_moe not support quant now")
@@ -342,6 +348,8 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
         network_config: Dict[str, Any],
         layer_num: int,
         quant_cfg: Quantcfg = None,
+        fused_gate_up: bool = False,
+        gate_up_proj_name: str = None,
     ) -> None:
         super().__init__()
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
