@@ -37,7 +37,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 
 ## Performance
 
-Learn more in the release blogs: [v1.0.0 blog](https://www.light-ai.top/lightllm-blog//by%20mtc%20team/2025/02/16/lightllm/).
+Learn more in the release blogs: [v1.1.0 blog](https://www.light-ai.top/lightllm-blog/2025/09/03/lightllm.html).
 
 ## FAQ
 
