@@ -102,12 +102,15 @@ class FusedMoeWeightEPAutoRedundancy:
                 inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
                 w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(len(self.w2_list), inter_shape, hidden_size)
                 if not self._ep_w.quantized_weight and self._ep_w.quant_method is not None:
-                    self.w1 = self._ep_w.quant_method.quantize(w1)
-                    self.w2 = self._ep_w.quant_method.quantize(w2)
+                    qw1, qw1_scale, qw1_zero_point = self._ep_w.quant_method.quantize(w1)
+                    qw2, qw2_scale, qw2_zero_point = self._ep_w.quant_method.quantize(w2)
+                    self.w1[0] = qw1
+                    self.w1[1] = qw1_scale
+                    self.w2[0] = qw2
+                    self.w2[1] = qw2_scale
                 else:
                     self.w1[0] = w1
                     self.w2[0] = w2
-
                 delattr(self, "w2_list")
                 delattr(self, "experts_up_projs")
                 delattr(self, "experts_gate_projs")

@@ -1,0 +1,34 @@
+{
+  "257": {
+    "BLOCK_K": 64,
+    "BLOCK_M": 32,
+    "BLOCK_N": 128,
+    "GROUP_M": 8,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "32130": {
+    "BLOCK_K": 128,
+    "BLOCK_M": 128,
+    "BLOCK_N": 128,
+    "GROUP_M": 16,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "512": {
+    "BLOCK_K": 128,
+    "BLOCK_M": 128,
+    "BLOCK_N": 128,
+    "GROUP_M": 8,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "75348": {
+    "BLOCK_K": 128,
+    "BLOCK_M": 128,
+    "BLOCK_N": 128,
+    "GROUP_M": 8,
+    "num_stages": 2,
+    "num_warps": 4
+  }
+}

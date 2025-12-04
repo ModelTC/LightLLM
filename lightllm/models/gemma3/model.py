@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.common.mem_utils import select_mem_manager_class
+from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.models.gemma3.infer_struct import Gemma3InferStateInfo
 from lightllm.models.gemma3.layer_infer.post_layer_infer import Gemma3PostLayerInfer
 from lightllm.models.gemma3.layer_infer.pre_layer_infer import Gemma3PreLayerInfer
@@ -143,7 +143,7 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         self._init_to_get_rotary()
 
     def _init_mem_manager(self):
-        self.mem_manager = select_mem_manager_class(self.mode)(
+        self.mem_manager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=torch.bfloat16,
             head_num=self.config["num_key_value_heads"] // self.tp_world_size_,

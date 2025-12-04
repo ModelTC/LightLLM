@@ -79,7 +79,7 @@ def _fwd_kernel_flash_decode_stage1(
         ).to(tl.int64)
         off_k = k_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None]
         k = tl.load(K + off_k, mask=offs_n_new[None, :] < cur_batch_end_index, other=0.0)
-        att_value = tl.dot(q, k)
+        att_value = tl.dot(q, k.to(q.dtype))
         att_value *= sm_scale
         att_value = tl.where(offs_n_new[None, :] < cur_batch_end_index, att_value, float("-inf"))
         v = tl.load(

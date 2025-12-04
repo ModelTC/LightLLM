@@ -1,7 +1,7 @@
 import torch
 import collections
 from lightllm.utils.log_utils import init_logger
-from .mem_manager import MemoryManager
+from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter

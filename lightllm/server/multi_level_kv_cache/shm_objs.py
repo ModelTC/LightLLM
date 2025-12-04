@@ -37,6 +37,13 @@ class IntList(object):
         self.arr[-1] += 1
         return
 
+    def add_items(self, values: List[int]):
+        write_index = self.arr[-1]
+        n = len(values)
+        self.arr[write_index : write_index + n] = values
+        self.arr[-1] += n
+        return
+
     def pop_all_item(self) -> Optional[List[int]]:
         if self.size() == 0:
             return None
@@ -93,6 +100,15 @@ class ShmLinkedList(object):
         item.pre_index = pre_node.self_index
         item.next_index = self.tail.self_index
         self.tail.pre_index = item.self_index
+        return
+
+    def add_item_to_head(self, index: int):
+        item = self.linked_items[index]
+        next_node = self.linked_items[self.head.next_index]
+        next_node.pre_index = item.self_index
+        item.next_index = next_node.self_index
+        item.pre_index = self.head.self_index
+        self.head.next_index = item.self_index
         return
 
     def get_item_by_index(self, index: int) -> "_LinkedListItem":

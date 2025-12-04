@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight

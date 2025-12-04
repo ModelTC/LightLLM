@@ -42,9 +42,11 @@ The easiest way to install Lightllm is using the official image. You can directl
 You can also manually build the image from source and run it:
 
 .. code-block:: console
-
+    
+    $ # move into lightllm root dir
+    $ cd /lightllm
     $ # Manually build the image
-    $ docker build -t <image_name> .
+    $ docker build -t <image_name> -f ./docker/Dockerfile .
     $
     $ # Run, 
     $ docker run -it --gpus all -p 8080:8080            \

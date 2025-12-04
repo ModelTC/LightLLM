@@ -76,5 +76,11 @@
     "BLOCK_N": 64,
     "NUM_STAGES": 2,
     "num_warps": 4
+  },
+  "8448": {
+    "BLOCK_M": 32,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
   }
 }

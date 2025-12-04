@@ -1,0 +1,8 @@
+{
+  "2048": {
+    "BLOCK_M": 256,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
+  }
+}

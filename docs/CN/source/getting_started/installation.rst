@@ -35,12 +35,14 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $   --shm-size 2g -v your_local_path:/data/         \
     $   ghcr.io/modeltc/lightllm:main /bin/bash
 
-你也可以使用源码手动构建镜像并运行：
+你也可以使用源码手动构建镜像并运行,建议手动构建镜像,因为更新比较频繁：
 
 .. code-block:: console
-
-    $ # 手动构建镜像
-    $ docker build -t <image_name> .
+    
+    $ # 进入代码仓库的根目录
+    $ cd /lightllm
+    $ # 手动构建镜像, docker 目录下有不同功能场景的镜像构建文件，按需构建。
+    $ docker build -t <image_name> -f ./docker/Dockerfile .
     $
     $ # 运行
     $ docker run -it --gpus all -p 8080:8080            \

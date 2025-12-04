@@ -8,7 +8,7 @@ import queue
 import pickle
 from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import (
     NIXLChunckedTransTask,
     NIXLChunckedTransTaskGroup,

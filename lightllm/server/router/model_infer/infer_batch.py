@@ -434,6 +434,9 @@ class InferReq:
         else:
             logger.warning(f"try to remove master req, but related_master_req is None, req id {self.req_id}")
 
+    def get_radix_cache_shared_len(self):
+        return 0 if self.shared_kv_node is None else self.shared_kv_node.node_prefix_total_len
+
     def get_output_len(self):
         return self.cur_output_len
 

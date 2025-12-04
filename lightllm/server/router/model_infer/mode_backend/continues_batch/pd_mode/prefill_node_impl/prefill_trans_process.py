@@ -9,7 +9,7 @@ from torch.distributed import TCPStore
 from datetime import timedelta
 from typing import List, Dict, Union
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import KVMoveTask, PDTransJoinInfo, PDTransLeaveInfo, KVMoveTaskGroup
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry

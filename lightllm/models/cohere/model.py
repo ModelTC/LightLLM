@@ -4,7 +4,7 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_cohere_template import (
     TransformerLayerCohereInferTpl,
 )
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.cohere.infer_struct import CohereInferStateInfo
 from lightllm.models.cohere.layer_infer.post_layer_infer import CoherePostLayerInfer

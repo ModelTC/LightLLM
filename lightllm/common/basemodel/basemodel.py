@@ -11,7 +11,8 @@ from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
@@ -22,12 +23,12 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status
+from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
 
@@ -68,7 +69,7 @@ class TpPartBaseModel:
         self.is_token_healing = kvargs.get("is_token_healing", False)
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
-        self.data_type = kvargs.get("data_type", "float16")
+        self.data_type = get_llm_data_type()
         mtp_step = get_env_start_args().mtp_step
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         self.graph_max_batch_size = (
@@ -89,7 +90,6 @@ class TpPartBaseModel:
 
         self.is_deepseekv3_mtp_mode = self.args.mtp_mode in ["deepseekv3_vanilla", "deepseekv3_eagle"]
 
-        self._init_datatype()
         self._init_config()
         self._verify_must()
         self._verify_params()
@@ -180,7 +180,7 @@ class TpPartBaseModel:
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        self.mem_manager = MemoryManager(
+        self.mem_manager: MemoryManager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=self.config["num_attention_heads"] // self.tp_world_size_,
@@ -230,16 +230,6 @@ class TpPartBaseModel:
         self.vocab_size = self.config["vocab_size"]
         return
 
-    def _init_datatype(self):
-        if self.data_type in ["fp16", "float16"]:
-            self.data_type = torch.float16
-        elif self.data_type in ["bf16", "bfloat16"]:
-            self.data_type = torch.bfloat16
-        elif self.data_type in ["fp32", "float32"]:
-            self.data_type = torch.float32
-        else:
-            raise ValueError(f"Unsupport datatype {self.data_type}!")
-
     def _init_cudagraph(self):
         self.graph = (
             None if self.disable_cudagraph else CudaGraph(self.graph_max_batch_size, self.graph_max_len_in_batch)
@@ -283,6 +273,10 @@ class TpPartBaseModel:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
             else:
                 infer_state.b_ready_cache_len = torch.zeros_like(input=infer_state.b_seq_len)
+        else:
+            if enable_diverse_mode_gqa_decode_fast_kernel():
+                infer_state.b_shared_seq_len = model_input.b_shared_seq_len
+                infer_state.b_mark_shared_group = model_input.b_mark_shared_group
 
         infer_state.multimodal_params = model_input.multimodal_params
 
@@ -319,6 +313,15 @@ class TpPartBaseModel:
             mode="constant",
             value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
         )
+        if enable_diverse_mode_gqa_decode_fast_kernel():
+            if new_model_input.b_shared_seq_len is not None:
+                new_model_input.b_shared_seq_len = F.pad(
+                    new_model_input.b_shared_seq_len, (0, padded_batch_size), mode="constant", value=0
+                )
+            if new_model_input.b_mark_shared_group is not None:
+                new_model_input.b_mark_shared_group = F.pad(
+                    new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=1
+                )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.deepseekv3_mtp_draft_input_hiddens is not None:
