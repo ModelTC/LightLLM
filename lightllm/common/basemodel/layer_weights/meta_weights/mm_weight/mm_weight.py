@@ -57,41 +57,21 @@ class MMWeightTpl(BaseWeightTpl):
         self.gen_weight_quant_param_names(quant_method=quant_method)
 
     def _create_weight(self):
-        self.mm_param = WeightPack()
-        in_dim = self.in_dim
-        out_dim = sum(self.out_dims)
-        if self.quant_method is None:
-            self.mm_param.weight = (
-                torch.empty((out_dim, in_dim), dtype=self.data_type_).cuda(get_current_device_id()).t()
-            )
-        else:
-            device_id = get_current_device_id()
-            weight_pack = self.quant_method.create_weight(out_dim, in_dim, dtype=self.data_type_, device_id=device_id)
-            self.mm_param.weight = weight_pack.weight
-            self.mm_param.weight_scale = weight_pack.weight_scale
-            self.mm_param.weight_zero_point = weight_pack.weight_zero_point
+        quantized_metadata = self.quant_method.get_metadata(
+            in_dim=self.in_dim, out_dims=self.out_dims, data_type=self.data_type_
+        )
+        bias = None
         if self.bias_names is not None:
-            self.mm_param.bias = torch.empty(out_dim, dtype=self.data_type_).cuda(get_current_device_id())
+            bias = torch.empty(self.cusum_out_dims[-1], dtype=self.data_type_).cuda(get_current_device_id())
+        self.mm_param = quantized_metadata.create_weight_pack(bias=bias)
         return
 
     def mm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
     ) -> torch.Tensor:
-        if self.quant_method is not None:
-            return self.quant_method.apply(
-                input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger
-            )
-        if out is None:
-            shape = (input_tensor.shape[0], self.mm_param.weight.shape[1])
-            dtype = input_tensor.dtype
-            device = input_tensor.device
-            if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
-            else:
-                out = torch.empty(shape, dtype=dtype, device=device)
-        if self.mm_param.bias is None:
-            return torch.mm(input_tensor, self.mm_param.weight, out=out)
-        return torch.addmm(self.mm_param.bias, input_tensor, self.mm_param.weight, out=out)
+        return self.quant_method.apply(
+            input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger
+        )
 
     def gen_weight_quant_param_names(self, quant_method: Optional[QuantizationMethod]):
         if quant_method is None:
@@ -158,13 +138,11 @@ class MMWeightTpl(BaseWeightTpl):
         self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
     ) -> None:
         if param_name in weights:
-            weight = self.param_slicer._slice_weight(weights[param_name])
-            start_idx = self.cusum_out_dims[sub_child_index]
-            end_idx = start_idx + weight.shape[0]
-            if self.quant_method is not None and self.quant_method.weight_need_quanted(weight):
-                self.quant_method.quantize(weight, output=self.mm_param, offset=start_idx)
-            else:
-                self.mm_param.weight[:, start_idx:end_idx].copy_(weight.t())
+            pass
+            # weight = self.param_slicer._slice_weight(weights[param_name])
+            # start_idx = self.cusum_out_dims[sub_child_index]
+            # end_idx = start_idx + weight.shape[0]
+            # out_pack = self.quant_method.quantize(weight.t())
         return
 
     def _load_bias(
