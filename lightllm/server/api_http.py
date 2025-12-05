@@ -137,7 +137,7 @@ def get_server_info():
     from dataclasses import asdict
 
     server_info: dict[str, Any] = asdict(g_objs.args)
-    return {**server_info}
+    return server_info
 
 
 @app.get("/get_weight_version")
