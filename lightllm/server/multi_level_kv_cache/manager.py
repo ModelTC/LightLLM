@@ -8,6 +8,7 @@ import pickle
 import time
 import threading
 import concurrent.futures
+import setproctitle
 from queue import Queue
 from typing import List
 from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
@@ -15,6 +16,8 @@ from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from .cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -89,7 +92,7 @@ class MultiLevelKVCacheManager:
             (finded_page_indexes, disk_page_num): 最终匹配到的页面索引列表(最长前缀)和从disk加载的页面数量
         """
         cpu_hit_len = len(all_pages)
-        loadable_len = self.disk_cache_worker.query_loadable_pages(tokens=token_hash_list, start_pos=cpu_hit_len)
+        loadable_len = self.disk_cache_worker.query_loadable_pages(hashs=token_hash_list, start_pos=cpu_hit_len)
         if loadable_len == 0:
             return all_pages, 0
 
@@ -116,8 +119,8 @@ class MultiLevelKVCacheManager:
         start_block = cpu_hit_len // block_size
         load_start_pos = start_block * block_size
 
-        load_tokens = token_hash_list[: cpu_hit_len + len(new_page_indexes)]
-        if not self.disk_cache_worker.load_pages(tokens=load_tokens, page_indexes=all_pages, start_pos=load_start_pos):
+        hashs = token_hash_list[: cpu_hit_len + len(new_page_indexes)]
+        if not self.disk_cache_worker.load_pages(hashs=hashs, page_indexes=all_pages, start_pos=load_start_pos):
             self.cpu_cache_client.lock.acquire_sleep1ms()
             self.cpu_cache_client.recycle_pages(new_page_indexes)
             self.cpu_cache_client.lock.release()
@@ -225,6 +228,8 @@ class MultiLevelKVCacheManager:
 def start_multi_level_kv_cache_manager(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::multi_level_kv_cache")
+    start_parent_check_thread()
 
     try:
         manager = MultiLevelKVCacheManager(

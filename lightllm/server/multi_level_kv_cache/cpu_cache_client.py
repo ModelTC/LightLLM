@@ -318,7 +318,12 @@ class CpuKvCacheClient(object):
 
 class _CpuPageStatus(_LinkedListItem):
     _pack_ = 4
-    _fields_ = [("status", ctypes.c_int), ("ref_count", ctypes.c_int), ("hash_key", ctypes.c_uint64)]
+    _fields_ = [
+        ("status", ctypes.c_int),
+        ("ref_count", ctypes.c_int),
+        ("hash_key_low", ctypes.c_uint64),  # 128位key的低64位
+        ("hash_key_high", ctypes.c_uint64),  # 128位key的高64位
+    ]
 
     EMPTY = 0  # 空闲
     LOADING = 1  # 从 gpu buffer 加载到 cpu 的状态，或者是从磁盘加载到 cpu 的状态
@@ -333,6 +338,17 @@ class _CpuPageStatus(_LinkedListItem):
         self.status = self.EMPTY
         self.hash_key = 0
         return
+
+    @property
+    def hash_key(self) -> int:
+        """获取完整的128位key"""
+        return (self.hash_key_high << 64) | self.hash_key_low
+
+    @hash_key.setter
+    def hash_key(self, value: int):
+        """设置128位key"""
+        self.hash_key_low = value & 0xFFFFFFFFFFFFFFFF
+        self.hash_key_high = (value >> 64) & 0xFFFFFFFFFFFFFFFF
 
     def is_empty(self):
         return self.status == self.EMPTY

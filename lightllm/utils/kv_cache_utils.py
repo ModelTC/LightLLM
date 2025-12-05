@@ -36,7 +36,7 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
         return []
 
     chunks_hash_value = []
-    hsum = xxhash.xxh3_64()
+    hsum = xxhash.xxh3_128()
 
     # 计算每个分块的哈希值, 但是输入token需要少一个，因为
     # 如果计算所有的token，会导致输入input_len 命中全长的
@@ -49,7 +49,6 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
         chunk = tokens[start_index:end_index]
         chunk_np = np.array(chunk, dtype=np.uint64)
         hsum.update(chunk_np.tobytes())
-
         hash_value = hsum.intdigest()
         chunks_hash_value.append(hash_value)
 
