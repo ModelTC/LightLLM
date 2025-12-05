@@ -16,6 +16,7 @@ from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.shm_size_check import check_recommended_shm_size
+from lightllm.server.core.objs.start_args_type import StartArgs
 
 logger = init_logger(__name__)
 
@@ -51,20 +52,38 @@ def setup_signal_handlers(http_server_process, process_manager):
             process_manager.terminate_all_processes()
             logger.info("All processes have been terminated gracefully.")
             sys.exit(0)
+        elif sig == signal.SIGHUP:
+            logger.info("Received SIGHUP (terminal closed), shutting down gracefully...")
+            if http_server_process and http_server_process.poll() is None:
+                http_server_process.send_signal(signal.SIGTERM)
+
+                start_time = time.time()
+                while (time.time() - start_time) < 60:
+                    if not is_process_active(http_server_process.pid):
+                        logger.info("httpserver exit")
+                        break
+                    time.sleep(1)
+
+                if time.time() - start_time < 60:
+                    logger.info("HTTP server has exited gracefully")
+                else:
+                    logger.warning("HTTP server did not exit in time, killing it...")
+                    kill_recursive(http_server_process)
+
+            process_manager.terminate_all_processes()
+            logger.info("All processes have been terminated gracefully due to terminal closure.")
+            sys.exit(0)
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGHUP, signal_handler)
 
     logger.info(f"start process pid {os.getpid()}")
     logger.info(f"http server pid {http_server_process.pid}")
     return
 
 
-def normal_or_p_d_start(args):
-    from lightllm.server.core.objs.start_args_type import StartArgs
-
-    args: StartArgs = args
-
+def normal_or_p_d_start(args: StartArgs):
     set_unique_server_name(args)
 
     if not args.disable_shm_warning:
@@ -368,7 +387,7 @@ def normal_or_p_d_start(args):
     return
 
 
-def pd_master_start(args):
+def pd_master_start(args: StartArgs):
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
@@ -431,7 +450,7 @@ def pd_master_start(args):
     http_server_process.wait()
 
 
-def config_server_start(args):
+def config_server_start(args: StartArgs):
     set_unique_server_name(args)
     if args.run_mode != "config_server":
         return
