@@ -27,6 +27,7 @@ class ReqIDGenerator:
         self.current_id.arr[0] = 0
         self.current_id.arr[1] = 0
         self.lock = AtomicShmLock(f"{get_unique_server_name()}_req_id_gen_lock")
+        self.alloced_max_req_id: int = 0
 
     def _check_and_set_new_id_range(self):
         need_update_range = self.current_id.arr[0] + MAX_BEST_OF >= self.current_id.arr[1]
@@ -61,6 +62,13 @@ class ReqIDGenerator:
             self._check_and_set_new_id_range()
             id = self.current_id.arr[0]
             self.current_id.arr[0] += MAX_BEST_OF
+
+        # 请求 id 在 多 httpserver worker情况的极端启动情况下，可能存在请求id对应的共享内存被重新修改
+        # 导致请求 id 错乱的问题。
+        self.alloced_max_req_id = max(self.alloced_max_req_id, id)
+        if id < self.alloced_max_req_id:
+            logger.error(f"alloc req_id error, current alloc id {id} < max alloced id {self.alloced_max_req_id}")
+
         return id
 
 
