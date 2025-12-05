@@ -95,48 +95,17 @@ class QuantizationMethod(ABC):
         """
         return weight, weight_scale, weight_zero_point
 
-
-class NoQuantization(QuantizationMethod):
-    def quantize(
-        self,
-        weights: torch.Tensor,
-    ) -> WeightPack:
-        return WeightPack(
-            weight=weights,
-            scale=None,
-            zero_point=None,
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        raise NotImplementedError(
+            f"quantization method {self.method_name} is not supported to load offline quantized weight"
         )
 
-    def apply(
-        self,
-        input_tensor: torch.Tensor,
-        weight_pack: WeightPack,
-        out: Optional[torch.Tensor] = None,
-        workspace: Optional[torch.Tensor] = None,
-        use_custom_tensor_mananger: bool = True,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        raise NotImplementedError(
+            f"quantization method {self.method_name} is not supported to load offline quantized weight scale"
+        )
 
-        if out is None:
-            shape = (input_tensor.shape[0], weight_pack.weight.shape[1])
-            dtype = input_tensor.dtype
-            device = input_tensor.device
-            if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
-            else:
-                out = torch.empty(shape, dtype=dtype, device=device)
-        if bias is None:
-            return torch.mm(input_tensor, weight_pack.weight, out=out)
-        return torch.addmm(bias, input_tensor, weight_pack.weight, out=out)
-
-    @property
-    def method_name(self):
-        return "none"
-
-    def get_metadata(self, shape: Tuple[int, ...], data_type: torch.dtype) -> QuantizedMetadata:
-        return QuantizedMetadata(
-            weight=TensorMeta(shape=shape, dtype=data_type),
-            scale=None,
-            zero_point=None,
+    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        raise NotImplementedError(
+            f"quantization method {self.method_name} is not supported to load offline quantized weight zero point"
         )
