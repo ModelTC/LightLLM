@@ -46,6 +46,8 @@ class ChunkedPrefillBackend(ModeBackend):
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
+
+        self.classed_req_strict_prefill = False
         return
 
     def infer_loop(self):

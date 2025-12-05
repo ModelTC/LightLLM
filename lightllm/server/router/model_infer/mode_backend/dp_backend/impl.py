@@ -58,6 +58,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 self.decode = self.decode_overlap
             else:
                 self.decode = self.decode_normal
+
+        self.classed_req_strict_prefill = False
         return
 
     def infer_loop(self):
