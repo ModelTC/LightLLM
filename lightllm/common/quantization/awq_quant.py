@@ -38,7 +38,7 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
+    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
@@ -48,6 +48,7 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
@@ -71,7 +72,7 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def method_name(self):
         return "awq"
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
+    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
@@ -81,11 +82,11 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
         qzeros = weight_pack.weight_zero_point
-        bias = weight_pack.bias
 
         NEED_DEQUANT_WEIGHT = input_tensor.shape[:-1].numel() >= 256
         if NEED_DEQUANT_WEIGHT:
@@ -97,6 +98,30 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         if bias is not None:
             out.add_(bias)
         return out
+
+    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
+        group_size = self.hf_quantization_config["group_size"]
+        weight = torch.empty((in_dim, out_dim // self.pack_factor), dtype=torch.int32).cuda(device_id)
+        weight_scale = torch.empty((in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
+        weight_zero_point = torch.empty((in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32).cuda(
+            device_id
+        )
+        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        start_idx = start_idx // self.pack_factor
+        weight_pack.weight[:, start_idx : start_idx + weight.shape[1]].copy_(weight)
+        return
+
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        weight_pack.weight_scale[:, start_idx : start_idx + weight_scale.shape[1]].copy_(weight_scale)
+        return
+
+    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        start_idx = start_idx // self.pack_factor
+        end_idx = start_idx + weight_zero_point.shape[1]
+        weight_pack.weight_zero_point[:, start_idx:end_idx].copy_(weight_zero_point)
+        return
 
 
 @QUANTMETHODS.register("awq_marlin")
@@ -179,11 +204,11 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
         qzeros = weight_pack.weight_zero_point
-        bias = weight_pack.bias
         reshaped_x = input_tensor.reshape(-1, input_tensor.shape[-1])
 
         use_atomic_add = should_use_atomic_add_reduce(

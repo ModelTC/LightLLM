@@ -142,7 +142,7 @@ class MMWeightTpl(BaseWeightTpl):
             if self.quant_method.weight_need_quanted(weight):
                 self.quant_method.quantize(weight, self.mm_param, offset=start_idx)
             else:
-                self.mm_param.weight[start_idx : start_idx + weight.shape[0]].copy_(weight)
+                self.quant_method.load_weight(weight, self.mm_param, start_idx)
         return
 
     def _load_bias(
@@ -160,7 +160,9 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             weight_scale = self.param_slicer._slice_weight_scale(weights[param_name])
-            self.sub_child_mm_params[sub_child_index].weight_scale = weight_scale
+            start_idx = self.cusum_out_dims[sub_child_index]
+            print(self.param_slicer.__class__.__name__)
+            self.quant_method.load_weight_scale(weight_scale, self.mm_param, start_idx)
         return
 
     def _load_weight_zero_point(
@@ -168,7 +170,8 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             weight_zero_point = self.param_slicer._slice_weight_zero_point(weights[param_name])
-            self.sub_child_mm_params[sub_child_index].weight_zero_point = weight_zero_point
+            start_idx = self.cusum_out_dims[sub_child_index]
+            self.quant_method.load_weight_zero_point(weight_zero_point, self.mm_param, start_idx)
         return
 
 
@@ -191,22 +194,6 @@ class BMMWeightTpl(MMWeightTpl):
                 out = g_cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
             else:
                 out = torch.empty(shape, dtype=dtype, device=device)
-        if self.mm_param.bias is None:
+        if self.bias is None:
             return torch.bmm(input_tensor, fpweight, out=out)
-        return torch.addbmm(self.mm_param.bias, input_tensor, fpweight, out=out)
-
-    def _to_gpu_device(self) -> None:
-        if self.mm_param.weight is not None:
-            if self.quant_method is not None:
-                self.mm_param.weight = self.mm_param.weight.cuda(get_current_device_id())
-            else:
-                # bmm 不需要 transpose 操作
-                self.mm_param.weight = self.mm_param.weight.to(self.data_type_).cuda(get_current_device_id())
-        if self.mm_param.weight_scale is not None:
-            self.mm_param.weight_scale = self.mm_param.weight_scale.cuda(get_current_device_id())
-        if self.mm_param.weight_zero_point is not None:
-            self.mm_param.weight_zero_point = self.mm_param.weight_zero_point.cuda(get_current_device_id())
-        if self.mm_param.bias is not None:
-            # TODO 是不是所有的bias都需要转换为全局设置的数据类型吗，会不会影响精度
-            self.mm_param.bias = self.mm_param.bias.to(self.data_type_).cuda(get_current_device_id())
-        return
+        return torch.addbmm(self.bias, input_tensor, fpweight, out=out)

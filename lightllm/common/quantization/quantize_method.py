@@ -74,3 +74,18 @@ class QuantizationMethod(ABC):
         一些量化方法在将参数完成量化后，为了加速性能，还需要将参数进行重拍，使算子性能达到最优，如awq方法。
         """
         return weight, weight_scale, weight_zero_point
+
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        raise NotImplementedError(
+            f"quantization method {self.method_name} is not supported to load offline quantized weight"
+        )
+
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        raise NotImplementedError(
+            f"quantization method {self.method_name} is not supported to load offline quantized weight scale"
+        )
+
+    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        raise NotImplementedError(
+            f"quantization method {self.method_name} is not supported to load offline quantized weight zero point"
+        )

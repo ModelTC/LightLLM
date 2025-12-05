@@ -27,9 +27,8 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         self.cache_manager = g_cache_manager
         assert HAS_DEEPGEMM, "deepgemm is not installed, you can't use quant api of it"
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
-        """ """
-        return WeightPack()
+    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
+        raise NotImplementedError("Not implemented")
 
     def apply(
         self,
@@ -38,6 +37,7 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError("Not implemented")
 
@@ -106,6 +106,22 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
             device_id
         )
         return WeightPack(weight=weight, weight_scale=weight_scale)
+
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        weight_pack.weight[start_idx : start_idx + weight.shape[0]].copy_(weight)
+        return
+
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        weight_pack.weight_scale[
+            start_idx // self.block_size : start_idx + weight_scale.shape[0] // self.block_size
+        ].copy_(weight_scale)
+        return
+
+    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        weight_pack.weight_zero_point[
+            start_idx // self.block_size : start_idx + weight_zero_point.shape[0] // self.block_size
+        ].copy_(weight_zero_point)
+        return
 
 
 def _deepgemm_fp8_nt(a_tuple, b_tuple, out):
