@@ -8,6 +8,8 @@ from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_
 from lightllm.distributed import all_reduce
 from typing import Tuple
 
+from lightllm.utils.flashinfer_utils import FLASHINFER_AVAILABLE, flashinfer
+
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
     """ """
@@ -73,10 +75,16 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
-        o = None
+        if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            input1 = o.view(-1, self.embed_dim_)
+            flashinfer.norm.fused_add_rmsnorm(
+                input1, input_embdings, layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(o.view(-1, self.embed_dim_))
+            input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
 
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        o = None
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
         if self.tp_world_size_ > 1:
@@ -94,10 +102,16 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
-        o = None
+        if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            input1 = o.view(-1, self.embed_dim_)
+            flashinfer.norm.fused_add_rmsnorm(
+                input1, input_embdings, layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(o.view(-1, self.embed_dim_))
+            input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
 
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        o = None
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
         if self.tp_world_size_ > 1:
@@ -113,10 +127,16 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
         o = self._tpsp_get_o(o, infer_state, layer_weight)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
-        o = None
+        if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            input1 = o.view(-1, self.embed_dim_)
+            flashinfer.norm.fused_add_rmsnorm(
+                input1, input_embdings, layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(o.view(-1, self.embed_dim_))
+            input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
 
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        o = None
         ffn_out = self._tpsp_ffn(input1, infer_state, layer_weight)
         input1 = None
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
@@ -130,10 +150,16 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._tpsp_get_o(o, infer_state, layer_weight)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
-        o = None
+        if FLASHINFER_AVAILABLE and layer_weight.norm_type == "rms_norm":
+            input1 = o.view(-1, self.embed_dim_)
+            flashinfer.norm.fused_add_rmsnorm(
+                input1, input_embdings, layer_weight.ffn_norm_weight_.weight, eps=self.eps_
+            )
+        else:
+            input_embdings.add_(o.view(-1, self.embed_dim_))
+            input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
 
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        o = None
         ffn_out = self._tpsp_ffn(input1, infer_state, layer_weight)
         input1 = None
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
