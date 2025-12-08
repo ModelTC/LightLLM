@@ -1,8 +1,10 @@
 ARG CUDA_VERSION=12.8.0
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
+
 ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
 ARG TARGETPLATFORM
+
 ENV PATH=/opt/conda/bin:$PATH \
     CONDA_PREFIX=/opt/conda
 
@@ -26,7 +28,8 @@ RUN case ${TARGETPLATFORM} in \
 RUN case ${TARGETPLATFORM} in \
     "linux/arm64")  exit 1 ;; \
     *)              /opt/conda/bin/conda update -y conda &&  \
-    /opt/conda/bin/conda install -y "python=${PYTHON_VERSION}" ;; \
+    /opt/conda/bin/conda install -y "python=${PYTHON_VERSION}" && \
+    /opt/conda/bin/conda install -y boost ;; \
     esac && \
     /opt/conda/bin/conda clean -ya
 
@@ -39,6 +42,7 @@ COPY ./requirements.txt /lightllm/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r /lightllm/requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
 
 RUN --mount=type=cache,target=/root/.cache/pip pip install --no-deps -v 'git+https://github.com/ModelTC/LightKernel.git@07f2f62af5deb41f10a22660f9f42dba9273361e#egg=lightllm_kernel'
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-deps -v 'git+https://github.com/ModelTC/LightMem.git@5900baf92d85ef4dbda6124093506b0af906011a#egg=light_mem'
 
 RUN apt-get update && apt-get install -y libnuma-dev wget devscripts debhelper dh-make build-essential dkms
 RUN apt-get install -y ibverbs-providers infiniband-diags perftest rdma-core libibverbs-dev librdmacm-dev
@@ -52,6 +56,31 @@ RUN mkdir -p /tmp/gdrcopy && cd /tmp \
  && CUDA=/usr/local/cuda ./build-deb-packages.sh \
  && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb \
  && cd / && rm -rf /tmp/gdrcopy
+
+ # Fix DeepEP IBGDA symlink
+RUN ln -sf /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
+
+RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+ && tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz && mv nvshmem_src nvshmem \
+ && cd nvshmem \
+ && rm -f /root/nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
+ && NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=/root/nvshmem/install -DCMAKE_CUDA_ARCHITECTURES=90 \
+ && cmake --build build --target install -j64
+
+ARG DEEPEP_COMMIT=b6ce310bb0b75079682d09bc2ebc063a074fbd58
+RUN git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && git checkout ${DEEPEP_COMMIT} && cd ..
+
+WORKDIR /root/DeepEP
+ENV NVSHMEM_DIR=/root/nvshmem/install
+RUN NVSHMEM_DIR=/root/nvshmem/install python setup.py install
 
 RUN apt-get update && apt-get install -y cmake automake autotools-dev  libtool libz-dev && \
     DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev; \
@@ -78,7 +107,7 @@ RUN apt-get update && apt-get install -y cmake automake autotools-dev  libtool l
     make -j install-strip &&        \
     ldconfig;
 
-RUN apt-get update && apt-get install -y  pkg-config tmux net-tools ;  \
+RUN apt-get update && apt-get install -y  pkg-config tmux net-tools libaio-dev ;  \
     cd /usr/local/src; \
     pip install --upgrade meson pybind11 patchelf; \
     git clone https://github.com/ai-dynamo/nixl.git -b main && \
