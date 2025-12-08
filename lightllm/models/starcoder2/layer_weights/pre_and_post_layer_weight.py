@@ -1,3 +1,4 @@
+import torch
 import numpy as np
 from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, NoTpNormWeight

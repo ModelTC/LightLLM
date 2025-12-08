@@ -62,6 +62,7 @@ class MixtralTransformerLayerWeight(LlamaTransformerLayerWeight):
                 layer_num=self.layer_num_,
                 quant_cfg=self.quant_cfg,
                 num_fused_shared_experts=0,
+                hidden_size=self.network_config_.get("hidden_size"),
             )
         else:
             raise ValueError(f"Unsupported moe mode: {moe_mode}")

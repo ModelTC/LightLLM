@@ -3,7 +3,7 @@ import torch
 import threading
 from typing import Optional, Tuple, List, Dict, Any
 
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe_weight_tp import FusedMoeWeightTP
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight_tp import FusedMoeWeightTP
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.log_utils import init_logger

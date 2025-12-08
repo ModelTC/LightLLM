@@ -11,15 +11,6 @@ class Qwen2TransformerLayerWeight(LlamaTransformerLayerWeight):
         self._k_bias_name = f"model.layers.{self.layer_num_}.self_attn.k_proj.bias"
         self._v_bias_name = f"model.layers.{self.layer_num_}.self_attn.v_proj.bias"
 
-    def _parse_config(self):
-        self.tp_q_head_num_ = self.network_config_["num_attention_heads"] // self.tp_world_size_
-        self.tp_k_head_num_ = max(self.network_config_["num_key_value_heads"] // self.tp_world_size_, 1)
-        self.tp_v_head_num_ = self.tp_k_head_num_
-        self.tp_o_head_num_ = self.tp_q_head_num_
-        head_dim = self.network_config_["hidden_size"] // self.network_config_["num_attention_heads"]
-        self.head_dim = self.network_config_.get("head_dim", head_dim)
-        assert (self.tp_k_head_num_ * self.tp_world_size_) % self.network_config_["num_key_value_heads"] == 0
-
     def _repeat_weight(self, name, weights):
         # for tp_world_size_ > num_key_value_heads
         if name not in weights:

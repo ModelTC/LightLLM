@@ -3,7 +3,7 @@ import torch
 import threading
 from typing import Optional, Tuple, List, Dict, Any
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_device_id
-from .base_weight import BaseWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeight
 from lightllm.common.fused_moe.grouped_fused_moe_ep import (
     fused_experts_impl,
     masked_group_gemm,
@@ -23,6 +23,7 @@ from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gathe
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.triton_utils.autotuner import Autotuner
+from lightllm.common.quantization.quantize_method import WeightPack
 
 
 logger = init_logger(__name__)
@@ -41,6 +42,7 @@ class FusedMoeWeightEP(BaseWeight):
         network_config: Dict[str, Any],
         layer_num: int,
         quant_cfg=None,
+        hidden_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -62,6 +64,7 @@ class FusedMoeWeightEP(BaseWeight):
         self.e_score_correction_bias_name = e_score_correction_bias_name
         self.n_routed_experts = n_routed_experts
         self.data_type_ = data_type
+        self.hidden_size = hidden_size
 
         global_world_size = get_global_world_size()
         self.global_rank_ = get_global_rank()
@@ -78,6 +81,7 @@ class FusedMoeWeightEP(BaseWeight):
         assert self.n_routed_experts % global_world_size == 0
         self.ep_n_routed_experts = self.n_routed_experts // global_world_size
         ep_load_expert_num = self.ep_n_routed_experts + self.redundancy_expert_num
+        self.ep_load_expert_num = ep_load_expert_num
         self.experts_up_projs = [None] * ep_load_expert_num
         self.experts_gate_projs = [None] * ep_load_expert_num
         self.experts_up_proj_scales = [None] * ep_load_expert_num
@@ -104,6 +108,51 @@ class FusedMoeWeightEP(BaseWeight):
 
         # auto update redundancy expert vars
         self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
+
+        # Pre-allocate memory if hidden_size is provided
+        if self.hidden_size is not None:
+            self._create_weight()
+
+    def _create_weight(self):
+        """Pre-allocate GPU memory for fused MoE weights"""
+        if self.hidden_size is None:
+            return
+
+        total_expert_num = self.ep_load_expert_num
+        # We need to determine intermediate size from network config or use a default
+        # This will be updated when first weight is loaded if needed
+        intermediate_size = getattr(self, "intermediate_size", None)
+        if intermediate_size is None:
+            # Default fallback - this will be corrected during load
+            intermediate_size = self.hidden_size * 4
+
+        device_id = get_current_device_id()
+
+        if not self.quantized_weight and self.quant_method is not None:
+            # Quantized weights
+            w1_pack = self.quant_method.create_weight(
+                total_expert_num * intermediate_size * 2, self.hidden_size, dtype=self.data_type_, device_id=device_id
+            )
+            self.w1[0] = w1_pack.weight.view(total_expert_num, intermediate_size * 2, self.hidden_size)
+            self.w1[1] = w1_pack.weight_scale.view(total_expert_num, intermediate_size * 2, self.hidden_size)
+
+            w2_pack = self.quant_method.create_weight(
+                total_expert_num * self.hidden_size, intermediate_size, dtype=self.data_type_, device_id=device_id
+            )
+            self.w2[0] = w2_pack.weight.view(total_expert_num, self.hidden_size, intermediate_size)
+            self.w2[1] = w2_pack.weight_scale.view(total_expert_num, self.hidden_size, intermediate_size)
+        else:
+            # Regular weights
+            self.w1[0] = torch.empty(
+                (total_expert_num, intermediate_size * 2, self.hidden_size),
+                dtype=self.data_type_,
+                device=f"cuda:{device_id}",
+            )
+            self.w2[0] = torch.empty(
+                (total_expert_num, self.hidden_size, intermediate_size),
+                dtype=self.data_type_,
+                device=f"cuda:{device_id}",
+            )
 
     def experts(
         self,
@@ -422,12 +471,12 @@ class FusedMoeWeightEP(BaseWeight):
                 inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
                 w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(len(self.w2_list), inter_shape, hidden_size)
                 if not self.quantized_weight and self.quant_method is not None:
-                    qw1, qw1_scale, qw1_zero_point = self.quant_method.quantize(w1)
-                    qw2, qw2_scale, qw2_zero_point = self.quant_method.quantize(w2)
-                    self.w1[0] = qw1
-                    self.w1[1] = qw1_scale
-                    self.w2[0] = qw2
-                    self.w2[1] = qw2_scale
+                    qw1_pack = self.quant_method.quantize(w1)
+                    qw2_pack = self.quant_method.quantize(w2)
+                    self.w1[0] = qw1_pack.weight
+                    self.w1[1] = qw1_pack.weight_scale
+                    self.w2[0] = qw2_pack.weight
+                    self.w2[1] = qw2_pack.weight_scale
                 else:
                     self.w1[0] = self._cuda(w1)
                     self.w2[0] = self._cuda(w2)
@@ -469,38 +518,74 @@ class FusedMoeWeightEP(BaseWeight):
 
     def load_hf_weights(self, weights):
         n_expert_ep = self.ep_n_routed_experts
-        # tp to ep here
+
+        # Load bias
         if self.e_score_correction_bias_name in weights:
             self.e_score_correction_bias = self._cuda(weights[self.e_score_correction_bias_name])
 
+        # Get weight shapes from first expert to determine intermediate size
+        first_expert_idx = 0 + n_expert_ep * self.global_rank_
+        w1_weight_name = f"{self.weight_prefix}.{first_expert_idx}.{self.w1_weight_name}.weight"
+        if w1_weight_name in weights:
+            intermediate_size = weights[w1_weight_name].shape[0]
+            self.intermediate_size = intermediate_size
+
+            # Re-create weights with correct size if needed
+            if self.w1[0].shape[1] != intermediate_size * 2:
+                self._create_weight()
+
+        # Load regular experts
         for i_experts_ep in range(n_expert_ep):
             i_experts = i_experts_ep + n_expert_ep * self.global_rank_
-            w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
-            w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"
-            w3_weight = f"{self.weight_prefix}.{i_experts}.{self.w3_weight_name}.weight"
-            if w1_weight in weights:
-                self.experts_gate_projs[i_experts_ep] = weights[w1_weight]
-            if w3_weight in weights:
-                self.experts_up_projs[i_experts_ep] = weights[w3_weight]
-            if w2_weight in weights:
-                self.w2_list[i_experts_ep] = weights[w2_weight]
+            self._copy_expert_weights(i_experts_ep, i_experts, weights)
 
-        # Load weight parameters for redundant experts
+        # Load redundant experts
         for i, redundant_expert_id in enumerate(self.redundancy_expert_ids):
-            i_experts = redundant_expert_id
-            w1_weight = f"{self.weight_prefix}.{i_experts}.{self.w1_weight_name}.weight"
-            w2_weight = f"{self.weight_prefix}.{i_experts}.{self.w2_weight_name}.weight"
-            w3_weight = f"{self.weight_prefix}.{i_experts}.{self.w3_weight_name}.weight"
-            if w1_weight in weights:
-                self.experts_gate_projs[n_expert_ep + i] = weights[w1_weight]
-            if w3_weight in weights:
-                self.experts_up_projs[n_expert_ep + i] = weights[w3_weight]
-            if w2_weight in weights:
-                self.w2_list[n_expert_ep + i] = weights[w2_weight]
+            self._copy_expert_weights(n_expert_ep + i, redundant_expert_id, weights)
 
         if self.quantized_weight:
-            self._load_weight_scale(weights)
-        self._fuse()
+            self._load_weight_scale_direct(weights)
+
+    def _copy_expert_weights(self, target_idx, expert_id, weights):
+        """Copy a single expert's weights to pre-allocated GPU memory"""
+        w1_weight = f"{self.weight_prefix}.{expert_id}.{self.w1_weight_name}.weight"
+        w2_weight = f"{self.weight_prefix}.{expert_id}.{self.w2_weight_name}.weight"
+        w3_weight = f"{self.weight_prefix}.{expert_id}.{self.w3_weight_name}.weight"
+
+        intermediate_size = self.intermediate_size
+
+        if w1_weight in weights and w3_weight in weights:
+            # Combine gate and up projections into w1
+            gate_weight = weights[w1_weight]  # [intermediate_size, hidden_size]
+            up_weight = weights[w3_weight]  # [intermediate_size, hidden_size]
+
+            # Copy to pre-allocated memory
+            if not self.quantized_weight and self.quant_method is not None:
+                # Quantized path
+                combined_cpu = torch.empty((intermediate_size * 2, self.hidden_size), dtype=gate_weight.dtype)
+                combined_cpu[:intermediate_size, :] = gate_weight
+                combined_cpu[intermediate_size:, :] = up_weight
+                quantized_pack = self.quant_method.quantize(combined_cpu)
+                self.w1[0][target_idx].copy_(quantized_pack.weight.view(intermediate_size * 2, self.hidden_size))
+                if quantized_pack.weight_scale is not None:
+                    self.w1[1][target_idx].copy_(
+                        quantized_pack.weight_scale.view(intermediate_size * 2, self.hidden_size)
+                    )
+            else:
+                # Regular path
+                self.w1[0][target_idx, :intermediate_size, :].copy_(gate_weight)
+                self.w1[0][target_idx, intermediate_size:, :].copy_(up_weight)
+
+        if w2_weight in weights:
+            # Copy w2 (down projection)
+            w2_weight_tensor = weights[w2_weight]  # [hidden_size, intermediate_size] - already the correct shape
+            if not self.quantized_weight and self.quant_method is not None:
+                quantized_pack = self.quant_method.quantize(w2_weight_tensor)
+                self.w2[0][target_idx].copy_(quantized_pack.weight)
+                if quantized_pack.weight_scale is not None:
+                    self.w2[1][target_idx].copy_(quantized_pack.weight_scale)
+            else:
+                self.w2[0][target_idx].copy_(w2_weight_tensor)
 
     def _load_weight_scale(self, weights: Dict[str, torch.Tensor]) -> None:
         n_expert_ep = self.ep_n_routed_experts
@@ -529,6 +614,41 @@ class FusedMoeWeightEP(BaseWeight):
                 self.experts_up_proj_scales[n_expert_ep + i] = weights[w3_scale]
             if w2_scale in weights:
                 self.w2_scale_list[n_expert_ep + i] = weights[w2_scale]
+
+    def _load_weight_scale_direct(self, weights: Dict[str, torch.Tensor]) -> None:
+        """Load weight scales directly to pre-allocated GPU memory"""
+        n_expert_ep = self.ep_n_routed_experts
+
+        # Load regular expert scales
+        for i_experts_ep in range(n_expert_ep):
+            i_experts = i_experts_ep + n_expert_ep * self.global_rank_
+            self._copy_expert_scales(i_experts_ep, i_experts, weights)
+
+        # Load redundant expert scales
+        for i, redundant_expert_id in enumerate(self.redundancy_expert_ids):
+            self._copy_expert_scales(n_expert_ep + i, redundant_expert_id, weights)
+
+    def _copy_expert_scales(self, target_idx, expert_id, weights):
+        """Copy a single expert's weight scales to pre-allocated GPU memory"""
+        w1_scale = f"{self.weight_prefix}.{expert_id}.{self.w1_weight_name}.{self.weight_scale_suffix}"
+        w2_scale = f"{self.weight_prefix}.{expert_id}.{self.w2_weight_name}.{self.weight_scale_suffix}"
+        w3_scale = f"{self.weight_prefix}.{expert_id}.{self.w3_weight_name}.{self.weight_scale_suffix}"
+
+        intermediate_size = self.intermediate_size
+
+        if w1_scale in weights and w3_scale in weights:
+            # Combine gate and up projection scales into w1 scale
+            gate_scale = weights[w1_scale]  # [intermediate_size, hidden_size]
+            up_scale = weights[w3_scale]  # [intermediate_size, hidden_size]
+
+            # Copy to pre-allocated memory
+            self.w1[1][target_idx, :intermediate_size, :].copy_(gate_scale)
+            self.w1[1][target_idx, intermediate_size:, :].copy_(up_scale)
+
+        if w2_scale in weights:
+            # Copy w2 scale (down projection)
+            w2_scale_tensor = weights[w2_scale]  # [hidden_size, intermediate_size]
+            self.w2[1][target_idx].copy_(w2_scale_tensor)
 
     def _cuda(self, cpu_tensor):
         device_id = get_current_device_id()

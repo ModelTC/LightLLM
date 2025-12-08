@@ -6,6 +6,7 @@ from .w8a8_quant import *
 from .triton_quant.triton_quant import *
 from .deepgemm_quant import *
 from .awq_quant import *
+from .no_quant import *
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -78,4 +79,6 @@ class Quantcfg:
 
     def get_quant_method(self, layer_num, name):
         quant_type = self.get_quant_type(layer_num, name)
-        return QUANTMETHODS.get(quant_type)
+        quant_method = QUANTMETHODS.get(quant_type)
+        quant_method.hf_quantization_config = self.hf_quantization_config
+        return quant_method
