@@ -127,19 +127,6 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         output.weight_scale[offset : offset + weight_scale.shape[0]].copy_(weight_scale.view(-1))
         return
 
-    def quantize_moe(self, weight: torch.Tensor) -> WeightPack:
-        num_experts = weight.shape[0]
-        qweights = torch.empty_like(weight, dtype=torch.float8_e4m3fn).cuda(self.device_id_)
-        weight_scales = []
-        for i in range(num_experts):
-            qweight, weight_scale = scaled_fp8_quant(
-                weight[i].contiguous().cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
-            )
-            qweights[i] = qweight
-            weight_scales.append(weight_scale)
-        weight_scale = torch.stack(weight_scales, dim=0).contiguous()
-        return WeightPack(weight=qweights, weight_scale=weight_scale)
-
     def apply(
         self,
         input_tensor: torch.Tensor,

@@ -181,13 +181,13 @@ def normal_or_p_d_start(args: StartArgs):
         args.visual_gpu_ids = args.visual_gpu_ids[:total_required_gpus]
 
     # 检查visual_nccl_port数量是否足够
-    if len(args.visual_nccl_ports) < args.visual_dp:
-        raise ValueError(
-            f"Not enough visual_nccl_ports specified. You need at least {args.visual_dp}, "
-            f"but got ({len(args.visual_nccl_ports)})."
-        )
-    else:
-        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
+    # if len(args.visual_nccl_ports) < args.visual_dp:
+    #     raise ValueError(
+    #         f"Not enough visual_nccl_ports specified. You need at least {args.visual_dp}, "
+    #         f"but got ({len(args.visual_nccl_ports)})."
+    #     )
+    # else:
+    #     args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
     if args.visual_dp <= 0:
         raise ValueError("visual_dp must be a positive integer.")

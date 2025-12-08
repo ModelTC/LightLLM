@@ -146,26 +146,6 @@ class LlamaTpPartModel(TpPartBaseModel):
             )
             for i in range(self.config["n_layer"])
         ]
-        if self.load_way == "HF":
-            load_hf_weights(
-                self.data_type,
-                weight_dir=self.weight_dir_,
-                pre_post_layer=self.pre_post_weight,
-                transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict,
-            )
-        else:
-            load_ds_weights(
-                self.data_type,
-                weight_dir=self.weight_dir_,
-                pre_post_layer=self.pre_post_weight,
-                transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict,
-                prefix="model.layers.",
-                num_layer=self.config["n_layer"],
-            )
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
         return
 
     def _init_to_get_rotary(self, default_base=10000):
