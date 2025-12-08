@@ -13,13 +13,13 @@ class CoherePreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
         split_end = split_indexes[self.tp_rank_ + 1]
         if "model.embed_tokens.weight" in weights:
             # print(weights['model.embed_tokens.weight'].shape)
-            self.wte_weight_ = self._cuda(weights["model.embed_tokens.weight"][split_start:split_end, :])
+            self.wte_weight_.copy_(weights["model.embed_tokens.weight"][split_start:split_end, :])
             if tie_weight:
                 self.lm_head_weight_ = self.wte_weight_
         if "model.norm.weight" in weights:
-            self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
+            self.final_norm_weight_.copy_(weights["model.norm.weight"])
         if "model.lm_head.weight" in weights:
-            self.lm_head_weight_ = self._cuda(weights["model.lm_head.weight"])
+            self.lm_head_weight_.copy_(weights["model.lm_head.weight"])
         return
 
     def verify_load(self):

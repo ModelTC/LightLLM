@@ -53,10 +53,11 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
         self.moe_gate = ROWMMWeight(
+            in_dim=self.network_config_["hidden_size"],
+            out_dims=[self.n_routed_experts],
             weight_names=f"model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
-            layer_num=self.layer_num_,
-            name="moe_gate",
+            quant_method=None,
             tp_rank=0,
             tp_world_size=1,
         )

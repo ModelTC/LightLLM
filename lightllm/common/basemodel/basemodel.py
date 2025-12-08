@@ -120,6 +120,7 @@ class TpPartBaseModel:
         self._check_mem_size()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             self._init_req_manager()
+        self.load_weights(self.weight_dict)
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
@@ -181,15 +182,6 @@ class TpPartBaseModel:
             )
             for i in range(self.config["n_layer"])
         ]
-        load_hf_weights(
-            self.data_type,
-            weight_dir=self.weight_dir_,
-            pre_post_layer=self.pre_post_weight,
-            transformer_layer_list=self.trans_layers_weight,
-            weight_dict=self.weight_dict,
-        )
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
         return
 
     def load_weights(self, weight_dict: dict):

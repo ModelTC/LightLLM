@@ -2,7 +2,9 @@ import os
 import torch
 import numpy as np
 
-from lightllm.common.basemodel.layer_weights.meta_weights.gpt_oss_fused_moe_weight_tp import GPTOSSFusedMoeWeightTP
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.gpt_oss_fused_moe_weight_tp import (
+    GPTOSSFusedMoeWeightTP,
+)
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMMWeight
 from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import NormWeight, TpNormWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
@@ -71,7 +73,7 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
         super()._init_weight()
 
         n_split_head = self.network_config_["num_attention_heads"] // self.tp_world_size_
-        self.attn_sinks = TpNormWeight(self._attn_sink_name, torch.bfloat16, n_split_head)
+        self.attn_sinks = TpNormWeight(n_split_head, self._attn_sink_name, torch.bfloat16)
 
     def _init_ffn(self):
         self._init_moe()
