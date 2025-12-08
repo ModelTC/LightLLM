@@ -205,7 +205,7 @@ class FusedMoeWeightTP(BaseWeight):
 
         # Load each expert with TP slicing
         for i_experts in range(self.n_routed_experts):
-            self._load_expert(i_experts, weights, type="weight", suffix="weight")
+            self._load_expert(i_experts, weights, type="weight", suffix=self.quant_method.weight_suffix)
             if self.w13.weight_scale is not None:
                 self._load_expert(i_experts, weights, type="weight_scale", suffix=self.quant_method.weight_scale_suffix)
             if self.w13.weight_zero_point is not None:

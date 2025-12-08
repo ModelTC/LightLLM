@@ -23,7 +23,7 @@ class QuantizationMethod(ABC):
     def __init__(self):
         super().__init__()
         self.device_id_ = get_current_device_id()
-        self.weight_suffix = None
+        self.weight_suffix = "weight"
         self.weight_scale_suffix = None
         self.weight_zero_point_suffix = None
         self.act_scale_suffix = None
