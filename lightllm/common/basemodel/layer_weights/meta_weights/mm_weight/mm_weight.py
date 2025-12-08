@@ -162,7 +162,6 @@ class MMWeightTpl(BaseWeightTpl):
         if param_name in weights:
             weight_scale = self.param_slicer._slice_weight_scale(weights[param_name])
             start_idx = self.cusum_out_dims[sub_child_index]
-            print(self.param_slicer.__class__.__name__)
             self.quant_method.load_weight_scale(weight_scale, self.mm_param, start_idx)
         return
 
