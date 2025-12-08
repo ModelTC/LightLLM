@@ -2,42 +2,28 @@ import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from lightllm.utils.dist_utils import get_current_device_id
-from typing import Optional, Tuple, TYPE_CHECKING, List
+from typing import Optional, Tuple
 
 
 @dataclass
 class WeightPack:
     weight: Optional[torch.Tensor] = None
-    scale: Optional[torch.Tensor] = None
-    zero_point: Optional[torch.Tensor] = None
+    weight_scale: Optional[torch.Tensor] = None
+    weight_zero_point: Optional[torch.Tensor] = None
 
-
-@dataclass
-class TensorMeta:
-    shape: torch.Size
-    dtype: torch.dtype
-
-
-@dataclass
-class QuantizedMetadata:
-    weight: Optional[TensorMeta] = None
-    scale: Optional[TensorMeta] = None
-    zero_point: Optional[TensorMeta] = None
-
-    def create_weight_pack(self, device=None) -> WeightPack:
-        device = f"cuda:{get_current_device_id()}" if device is None else device
-        return WeightPack(
-            weight=torch.empty(self.weight.shape, dtype=self.weight.dtype, device=device),
-            scale=torch.empty(self.scale.shape, dtype=self.scale.dtype, device=device),
-            zero_point=torch.empty(self.zero_point.shape, dtype=self.zero_point.dtype, device=device),
-        )
+    def get_expert(self, expert_idx: int):
+        assert self.weight.ndim == 3, f"weight must be a 3D tensor, but got {self.weight.ndim}"
+        weight = self.weight[expert_idx]
+        weight_scale = self.weight_scale[expert_idx] if self.weight_scale is not None else None
+        weight_zero_point = self.weight_zero_point[expert_idx] if self.weight_zero_point is not None else None
+        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
 
 
 class QuantizationMethod(ABC):
     def __init__(self):
         super().__init__()
         self.device_id_ = get_current_device_id()
-        self.weight_suffix = None
+        self.weight_suffix = "weight"
         self.weight_scale_suffix = None
         self.weight_zero_point_suffix = None
         self.act_scale_suffix = None
@@ -52,8 +38,10 @@ class QuantizationMethod(ABC):
     @abstractmethod
     def quantize(
         self,
-        weights: torch.Tensor,
-    ) -> WeightPack:
+        weight: torch.Tensor,
+        output: WeightPack,
+        offset: int = 0,
+    ) -> None:
         pass
 
     @abstractmethod
@@ -64,6 +52,7 @@ class QuantizationMethod(ABC):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         pass
 
@@ -72,9 +61,9 @@ class QuantizationMethod(ABC):
     def method_name(self):
         pass
 
-    @abstractmethod
-    def get_metadata(self, in_dim: int, out_dims: List[int], data_type: torch.dtype) -> QuantizedMetadata:
-        # 针对一个数据类型和形状，返回量化后的元数据
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
         pass
 
     def weight_need_quanted(self, weight: torch.Tensor) -> bool:

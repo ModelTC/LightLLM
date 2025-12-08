@@ -6,10 +6,10 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from typing import Dict, List, Optional, Union
-from .mm_slicer import ColSliceMixin, QuantizedColSliceMixin, AwqQuantizedColSliceMixin
+from .mm_slicer import get_col_slice_mixin
 
 
-class StandardCOLMMWeight(MMWeightTpl):
+class COLMMWeight(MMWeightTpl):
     def __init__(
         self,
         in_dim: int,
@@ -31,7 +31,6 @@ class StandardCOLMMWeight(MMWeightTpl):
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
         )
-        self.param_slicer = ColSliceMixin(tp_rank=tp_rank, tp_world_size=tp_world_size)
-
-
-COLMM_WEIGHT_CLS_MAP = {}
+        self.param_slicer = get_col_slice_mixin(
+            self.quant_method.method_name, tp_rank=tp_rank, tp_world_size=tp_world_size
+        )

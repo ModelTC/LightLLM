@@ -1,5 +1,7 @@
 import os
 import torch
+
+from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
 import torch.nn.functional as F
@@ -20,6 +22,12 @@ else:
     if HAS_VLLM:
         scaled_fp8_quant = vllm_ops.scaled_fp8_quant
 
+LIGHTLLM_USE_TRITON_FP8_SCALED_MM = os.getenv("LIGHTLLM_USE_TRITON_FP8_SCALED_MM", "False").upper() in [
+    "ON",
+    "TRUE",
+    "1",
+]
+
 
 class BaseQuantizationMethod(QuantizationMethod):
     def __init__(self):
@@ -39,6 +47,7 @@ class BaseQuantizationMethod(QuantizationMethod):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError("Not implemented")
 
@@ -46,7 +55,9 @@ class BaseQuantizationMethod(QuantizationMethod):
     def method_name(self):
         return "w8a8-base"
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
         raise NotImplementedError("Not implemented")
 
 
@@ -60,10 +71,10 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
     def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0) -> None:
         weight = weight.float().cuda(self.device_id_)
         scale = weight.abs().max(dim=-1)[0] / 127
-        weight = weight.transpose(0, 1) / scale.reshape(1, -1)
+        weight = weight / scale.reshape(-1, 1)
         weight = torch.round(weight.clamp(min=-128, max=127)).to(dtype=torch.int8)
-        output.weight[:, offset : offset + weight.shape[1]].copy_(weight)
-        output.weight_scale[offset : offset + weight.shape[1]].copy_(scale)
+        output.weight[offset : offset + weight.shape[0]].copy_(weight)
+        output.weight_scale[offset : offset + weight.shape[0]].copy_(scale)
         return
 
     def apply(
@@ -73,11 +84,11 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         input_scale = None
-        qweight = weight_pack.weight
+        qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
-        bias = weight_pack.bias
         input_scale = None  # dynamic quantization for input tensor
         x_q, x_scale, x_zp = vllm_ops.scaled_int8_quant(input_tensor, scale=input_scale, azp=None, symmetric=True)
         m = input_tensor.shape[0]
@@ -96,9 +107,12 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
     def method_name(self):
         return "vllm-w8a8"
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
-        weight = torch.empty((out_dim, in_dim), dtype=torch.int8).cuda(device_id).t()
-        weight_scale = torch.empty((out_dim,), dtype=torch.float32).cuda(device_id)
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).cuda(device_id)
+        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale)
 
 
@@ -116,7 +130,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         qweight, weight_scale = scaled_fp8_quant(
             weight.cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
         )
-        output.weight[:, offset : offset + qweight.shape[0]].copy_(qweight.t())
+        output.weight[offset : offset + qweight.shape[0], :].copy_(qweight)
         output.weight_scale[offset : offset + weight_scale.shape[0]].copy_(weight_scale.view(-1))
         return
 
@@ -140,10 +154,10 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight = weight_pack.weight
+        qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
-        bias = weight_pack.bias
         x_q, x_scale = scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
         m = input_tensor.shape[0]
         n = qweight.shape[1]
@@ -154,16 +168,22 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
                 )
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
+        if LIGHTLLM_USE_TRITON_FP8_SCALED_MM:
+            out = fp8_scaled_mm_per_token(x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out)
+        else:
+            cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
         return out
 
     @property
     def method_name(self):
         return "vllm-fp8w8a8"
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
-        weight = torch.empty((out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id).t()
-        weight_scale = torch.empty((out_dim,), dtype=torch.float32).cuda(device_id)
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
+        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale)
 
 
@@ -176,9 +196,14 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0) -> None:
+        from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_quant_kernel import weight_quant
 
-        raise Exception("Not implemented")
+        device = output.weight.device
+        weight, scale = weight_quant(weight.cuda(device), self.block_size)
+        output.weight[offset : offset + weight.shape[0], :].copy_(weight)
+        output.weight_scale[offset // self.block_size : offset + weight.shape[0] // self.block_size].copy_(scale)
+        return
 
     def apply(
         self,
@@ -187,10 +212,10 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight = weight_pack.weight
-        weight_scale = weight_pack.weight_scale
-        bias = weight_pack.bias
+        qweight = weight_pack.weight.t()
+        weight_scale = weight_pack.weight_scale.t()
         input_scale = None  # dynamic quantization for input tensor
         m, k = input_tensor.shape
         n = qweight.shape[1]
@@ -220,7 +245,12 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     def method_name(self):
         return "vllm-fp8w8a8-b128"
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
-        weight = torch.empty((out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id).t()
-        weight_scale = torch.empty((out_dim,), dtype=torch.float32).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=weight_scale, has_weight_scale=True, has_weight_zero_point=False)
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
+        weight_scale = torch.empty(
+            expert_prefix + (out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32
+        ).cuda(device_id)
+        return WeightPack(weight=weight, weight_scale=weight_scale)

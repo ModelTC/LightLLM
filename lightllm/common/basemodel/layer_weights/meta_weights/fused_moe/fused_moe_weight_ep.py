@@ -3,7 +3,7 @@ import torch
 import threading
 from typing import Optional, Tuple, List, Dict, Any
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_device_id
-from .base_weight import BaseWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeight
 from lightllm.common.fused_moe.grouped_fused_moe_ep import (
     fused_experts_impl,
     masked_group_gemm,
@@ -471,8 +471,12 @@ class FusedMoeWeightEP(BaseWeight):
                 inter_shape, hidden_size = self.w2_list[0].shape[0], self.w2_list[0].shape[1]
                 w2 = torch._utils._flatten_dense_tensors(self.w2_list).view(len(self.w2_list), inter_shape, hidden_size)
                 if not self.quantized_weight and self.quant_method is not None:
-                    self.w1 = self.quant_method.quantize(w1)
-                    self.w2 = self.quant_method.quantize(w2)
+                    qw1_pack = self.quant_method.quantize(w1)
+                    qw2_pack = self.quant_method.quantize(w2)
+                    self.w1[0] = qw1_pack.weight
+                    self.w1[1] = qw1_pack.weight_scale
+                    self.w2[0] = qw2_pack.weight
+                    self.w2[1] = qw2_pack.weight_scale
                 else:
                     self.w1[0] = self._cuda(w1)
                     self.w2[0] = self._cuda(w2)

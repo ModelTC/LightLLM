@@ -55,4 +55,4 @@ def weight_quant(x: torch.Tensor, block_size: int = 128) -> tuple[torch.Tensor, 
         return y_quant, s_scales
     else:
         y_quant, s_scales = mm_weight_quant(x, block_size)
-        return y_quant.t(), s_scales.t()
+        return y_quant, s_scales

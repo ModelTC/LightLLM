@@ -1,5 +1,6 @@
 import os
 import torch
+from torch.types import Device
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
 import torch.nn.functional as F
@@ -60,25 +61,30 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def method_name(self):
         return "deepgemm-fp8w8a8-b128"
 
-    def quantize(self, weight: torch.Tensor):
+    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
         from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_quant_kernel import weight_quant
 
-        return weight_quant(weight, self.block_size)
+        device = output.weight.device
+        weight, scale = weight_quant(weight.cuda(device), self.block_size)
+        output.weight[offset : offset + weight.shape[0], :].copy_(weight)
+        output.weight_scale[offset // self.block_size : offset + weight.shape[0] // self.block_size].copy_(scale)
+        return
 
     def apply(
         self,
         input_tensor: torch.Tensor,
-        weight_pack: WeightPack,
+        weight_pack: "WeightPack",
         out: Optional[torch.Tensor] = None,
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
         input_scale = None
         alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         m, k = input_tensor.shape
-        n = qweight.shape[1]
+        n = qweight.shape[0]
         if input_scale is None:
             qinput_tensor, input_scale = per_token_group_quant_fp8(
                 input_tensor,
@@ -91,14 +97,17 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
 
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight.t(), weight_scale.t()), out)
+        _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight, weight_scale), out)
         return out
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
-        weight = torch.empty((out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-        weight_scale = torch.empty((out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32).cuda(
-            device_id
-        )
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
+        weight_scale = torch.empty(
+            expert_prefix + (out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32
+        ).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale)
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
