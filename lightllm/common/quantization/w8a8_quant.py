@@ -55,7 +55,9 @@ class BaseQuantizationMethod(QuantizationMethod):
     def method_name(self):
         return "w8a8-base"
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
         raise NotImplementedError("Not implemented")
 
 
@@ -105,9 +107,12 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
     def method_name(self):
         return "vllm-w8a8"
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
-        weight = torch.empty((out_dim, in_dim), dtype=torch.int8).cuda(device_id)
-        weight_scale = torch.empty((out_dim,), dtype=torch.float32).cuda(device_id)
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).cuda(device_id)
+        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale)
 
 
@@ -173,9 +178,12 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     def method_name(self):
         return "vllm-fp8w8a8"
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
-        weight = torch.empty((out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-        weight_scale = torch.empty((out_dim,), dtype=torch.float32).cuda(device_id)
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
+        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale)
 
 
@@ -237,9 +245,12 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     def method_name(self):
         return "vllm-fp8w8a8-b128"
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
-        weight = torch.empty((out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-        weight_scale = torch.empty((out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32).cuda(
-            device_id
-        )
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
+        weight_scale = torch.empty(
+            expert_prefix + (out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32
+        ).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale)

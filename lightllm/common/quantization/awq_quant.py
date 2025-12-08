@@ -99,13 +99,16 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             out.add_(bias)
         return out
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
         group_size = self.hf_quantization_config["group_size"]
-        weight = torch.empty((in_dim, out_dim // self.pack_factor), dtype=torch.int32).cuda(device_id)
-        weight_scale = torch.empty((in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
-        weight_zero_point = torch.empty((in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32).cuda(
-            device_id
-        )
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (in_dim, out_dim // self.pack_factor), dtype=torch.int32).cuda(device_id)
+        weight_scale = torch.empty(expert_prefix + (in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
+        weight_zero_point = torch.empty(
+            expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
+        ).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
@@ -209,17 +212,20 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             out.add_(bias)
         return out
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
         self.n = out_dim
         self.k = in_dim
         group_size = self.hf_quantization_config["group_size"]
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(
-            (in_dim // self.tile_size, out_dim * self.tile_size // self.pack_factor), dtype=torch.int32
+            expert_prefix + (in_dim // self.tile_size, out_dim * self.tile_size // self.pack_factor), dtype=torch.int32
         ).cuda(device_id)
-        weight_scale = torch.empty((in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
-        weight_zero_point = torch.empty((in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32).cuda(
-            device_id
-        )
+        weight_scale = torch.empty(expert_prefix + (in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
+        weight_zero_point = torch.empty(
+            expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
+        ).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:

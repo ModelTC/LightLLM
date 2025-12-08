@@ -54,7 +54,9 @@ class QuantizationMethod(ABC):
     def method_name(self):
         pass
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
         pass
 
     def weight_need_quanted(self, weight: torch.Tensor) -> bool:

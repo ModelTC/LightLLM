@@ -30,8 +30,11 @@ class NoQuantization(QuantizationMethod):
             return torch.mm(input_tensor, weight, out=out)
         return torch.addmm(bias, input_tensor, weight, out=out)
 
-    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
-        weight = torch.empty((out_dim, in_dim), dtype=dtype).cuda(device_id)
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=None, weight_zero_point=None)
 
     def weight_need_quanted(self, weight: torch.Tensor) -> bool:
