@@ -11,6 +11,7 @@ class StarcoderPreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)
 
+    def _create_weight(self):
         self.wte_weight_ = EmbeddingWeight(
             weight_name="transformer.wte.weight",
             data_type=self.data_type_,

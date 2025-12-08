@@ -132,3 +132,21 @@ class AwqQuantizedColSliceMixin(QuantizedRowSliceMixin):
 
     def _slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         return bias / self.tp_world_size_
+
+
+def get_row_slice_mixin(quant_method_name: str, tp_rank: int = None, tp_world_size: int = None) -> SliceMixinTpl:
+    if quant_method_name.startswith("awq"):
+        return AwqQuantizedRowSliceMixin(tp_rank, tp_world_size)
+    elif quant_method_name == "none":
+        return RowSliceMixin(tp_rank, tp_world_size)
+    else:
+        return QuantizedRowSliceMixin(tp_rank, tp_world_size)
+
+
+def get_col_slice_mixin(quant_method_name: str, tp_rank: int = None, tp_world_size: int = None) -> SliceMixinTpl:
+    if quant_method_name.startswith("awq"):
+        return AwqQuantizedColSliceMixin(tp_rank, tp_world_size)
+    elif quant_method_name == "none":
+        return ColSliceMixin(tp_rank, tp_world_size)
+    else:
+        return QuantizedColSliceMixin(tp_rank, tp_world_size)
