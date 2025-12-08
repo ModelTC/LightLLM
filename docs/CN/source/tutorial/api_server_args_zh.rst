@@ -1,3 +1,5 @@
+.. _tutorial/api_server_args_zh:
+
 APIServer 参数详解
 ==================
 
@@ -87,9 +89,9 @@ PD 分离模式参数
 
 .. option:: --load_way
 
-    模型权重加载方式，默认为 ``HF``（Huggingface 格式）
+    模型权重加载方式，默认为 ``HF`` (Huggingface 格式)
     
-    llama 模型还支持 ``DS``（Deepspeed）格式
+    llama 模型还支持 ``DS`` (Deepspeed) 格式
 
 .. option:: --trust_remote_code
 
@@ -382,7 +384,7 @@ attention类型选择参数
     * ``vllm-fp8w8a8``
     * ``vllm-fp8w8a8-b128``
     * ``triton-fp8w8a8-block128``
-    * ``none``（默认）
+    * ``none`` (默认)
 
 .. option:: --quant_cfg
 
@@ -402,7 +404,7 @@ attention类型选择参数
     * ``ao-fp6w6a16``
     * ``vllm-w8a8``
     * ``vllm-fp8w8a8``
-    * ``none``（默认）
+    * ``none`` (默认)
 
 .. option:: --vit_quant_cfg
 

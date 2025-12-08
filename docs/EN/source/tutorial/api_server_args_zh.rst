@@ -1,10 +1,12 @@
+.. _tutorial/api_server_args_zh:
+
 APIServer Parameter Details
-==========================
+===========================
 
 This document provides detailed information about all startup parameters and their usage for LightLLM APIServer.
 
 Basic Configuration Parameters
------------------------------
+------------------------------
 
 .. option:: --run_mode
 
@@ -38,7 +40,7 @@ Basic Configuration Parameters
     Can only choose from ``['tcp://', 'ipc:///tmp/']``
 
 PD disaggregation Mode Parameters
-----------------------------
+----------------------------------
 
 .. option:: --pd_master_ip
 
@@ -65,7 +67,7 @@ PD disaggregation Mode Parameters
     Port number in configuration server mode
 
 Model Configuration Parameters
------------------------------
+------------------------------
 
 .. option:: --model_name
 
@@ -96,7 +98,7 @@ Model Configuration Parameters
     Whether to allow using custom model definition files on Hub
 
 Memory and Batch Processing Parameters
-------------------------------------
+---------------------------------------
 
 .. option:: --max_total_token_num
 
@@ -135,7 +137,7 @@ Memory and Batch Processing Parameters
     * ``mistral``
 
 Different Parallel Mode Setting Parameters
-----------------------------------------
+-------------------------------------------
 
 .. option:: --nnodes
 
@@ -182,7 +184,7 @@ Different Parallel Mode Setting Parameters
     do not use the same nccl_port for different inference nodes, this will be a serious error
 
 Attention Type Selection Parameters
----------------------------------
+------------------------------------
 
 .. option:: --mode
 
@@ -199,7 +201,7 @@ Attention Type Selection Parameters
     Need to read source code to confirm specific modes supported by all models 
 
 Scheduling Parameters
---------------------
+---------------------
 
 .. option:: --router_token_ratio
 
@@ -241,7 +243,7 @@ Scheduling Parameters
     Schedule time interval, default is ``0.03``, unit is seconds
 
 Output Constraint Parameters
----------------------------
+----------------------------
 
 .. option:: --token_healing_mode
 
@@ -259,7 +261,7 @@ Output Constraint Parameters
     Use environment variable FIRST_ALLOWED_TOKENS to set the range, e.g., FIRST_ALLOWED_TOKENS=1,2
 
 Multimodal Parameters
---------------------
+---------------------
 
 .. option:: --enable_multimodal
 
@@ -298,7 +300,7 @@ Multimodal Parameters
     List of NCCL ports for ViT, e.g., 29500 29501 29502, default is [29500]
 
 Performance Optimization Parameters
-----------------------------------
+-----------------------------------
 
 .. option:: --disable_custom_allreduce
 
@@ -363,7 +365,7 @@ Performance Optimization Parameters
     Maximum sequence length that can be captured by cuda graph in the decoding phase, default is ``max_req_total_len``
 
 Quantization Parameters
-----------------------
+-----------------------
 
 .. option:: --quant_type
 
@@ -408,7 +410,7 @@ Quantization Parameters
     Examples can be found in lightllm/common/quantization/configs.
 
 Sampling and Generation Parameters
---------------------------------
+----------------------------------
 
 .. option:: --sampling_backend
 
@@ -438,7 +440,7 @@ Sampling and Generation Parameters
     Use tgi input and output format
 
 MTP Multi-Prediction Parameters
-------------------------------
+-------------------------------
 
 .. option:: --mtp_mode
 
@@ -463,7 +465,7 @@ MTP Multi-Prediction Parameters
     Currently deepseekv3/r1 models only support 1 step
 
 DeepSeek Redundant Expert Parameters
------------------------------------
+------------------------------------
 
 .. option:: --ep_redundancy_expert_config_path
 
@@ -474,7 +476,7 @@ DeepSeek Redundant Expert Parameters
     Whether to update redundant experts for deepseekv3 models through online expert usage counters.
 
 Monitoring and Logging Parameters
---------------------------------
+---------------------------------
 
 .. option:: --disable_log_stats
 

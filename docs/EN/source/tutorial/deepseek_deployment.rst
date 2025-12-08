@@ -6,7 +6,7 @@ DeepSeek Model Deployment Guide
 LightLLM supports various deployment solutions for DeepSeek models, including DeepSeek-R1, DeepSeek-V2, DeepSeek-V3, etc. This document provides detailed information on various deployment modes and configuration solutions.
 
 Deployment Mode Overview
------------------------
+------------------------
 
 LightLLM supports the following deployment modes:
 
@@ -157,7 +157,7 @@ Suitable for deploying MoE models across multiple nodes.
 - `--enable_decode_microbatch_overlap`: Enable decode microbatch overlap
 
 3. PD disaggregation Deployment Solutions
-------------------------------------
+------------------------------------------
 
 PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for deployment, which can better utilize hardware resources.
 
@@ -328,7 +328,7 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
               }'
 
 4.2 Performance Benchmark Testing
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 

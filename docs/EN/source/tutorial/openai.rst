@@ -6,7 +6,7 @@ LightLLM OpenAI API Usage Examples
 LightLLM provides an interface that is fully compatible with OpenAI API, supporting all standard OpenAI features including function calling. This document provides detailed information on how to use LightLLM's OpenAI interface.
 
 Basic Configuration
-------------------
+-------------------
 
 First, ensure that the LightLLM service is started:
 
@@ -19,7 +19,7 @@ First, ensure that the LightLLM service is started:
         --tp 1
 
 Basic Conversation Examples
---------------------------
+---------------------------
 
 1. Simple Conversation
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -94,7 +94,7 @@ Basic Conversation Examples
         print("Error:", response.status_code, response.text)
 
 Function Calling Examples
-------------------------
+-------------------------
 
 LightLLM supports OpenAI's function calling functionality, providing function call parsing for three models. Specify the --tool_call_parser parameter when starting the service to choose. The service launch command is:
 
