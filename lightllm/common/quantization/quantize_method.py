@@ -61,20 +61,6 @@ class QuantizationMethod(ABC):
         # 判断一个 weight 是否需要进行量化操作。
         return weight.dtype in [torch.bfloat16, torch.float16, torch.float32, torch.float64]
 
-    def params_need_repack(self) -> bool:
-        """
-        用于说明是否需要对量化后的权重进行repack操作，目前只有awq支持
-        """
-        return False
-
-    def params_repack(
-        self, weight: torch.Tensor, weight_scale: torch.Tensor, weight_zero_point: torch.Tensor, dtype_type: torch.dtype
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        一些量化方法在将参数完成量化后，为了加速性能，还需要将参数进行重拍，使算子性能达到最优，如awq方法。
-        """
-        return weight, weight_scale, weight_zero_point
-
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
         raise NotImplementedError(
             f"quantization method {self.method_name} is not supported to load offline quantized weight"

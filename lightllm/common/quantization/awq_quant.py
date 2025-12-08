@@ -139,6 +139,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         self.vllm_quant_type = TYPE_MAP[self.nbits]
         self.has_weight_scale = True
         self.has_weight_zero_point = True
+        self.tile_size = 16
 
     @property
     def method_name(self):
@@ -146,12 +147,6 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
 
     def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
-
-    def params_need_repack(self) -> bool:
-        """
-        用于说明是否需要对量化后的权重进行repack操作，目前只有awq支持
-        """
-        return True
 
     def params_repack(
         self, weight: torch.Tensor, weight_scale: torch.Tensor, weight_zero_point: torch.Tensor, dtype_type: torch.dtype
@@ -167,35 +162,6 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             weight_zero_point.cuda(get_current_device_id())
         )
         return weight, weight_scale, weight_zero_point
-
-    def _process_weight_after_loading(self, weight: torch.Tensor) -> torch.Tensor:
-        assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
-        self.k = weight.shape[0]
-        self.n = weight.shape[1] * self.pack_factor
-        return vllm_ops.awq_marlin_repack(
-            weight,
-            size_k=weight.shape[0],
-            size_n=weight.shape[1] * self.pack_factor,
-            num_bits=self.hf_quantization_config["bits"],
-        )
-
-    def _process_weight_scale_after_loading(self, weight_scale: torch.Tensor) -> torch.Tensor:
-        assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
-        group_size = self.hf_quantization_config["group_size"]
-        return marlin_permute_scales(
-            weight_scale,
-            size_k=weight_scale.shape[0] * group_size,
-            size_n=weight_scale.shape[1],
-            group_size=self.hf_quantization_config["group_size"],
-        )
-
-    def _process_weight_zero_point_after_loading(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
-        return awq_to_marlin_zero_points(
-            weight_zero_point,
-            size_k=weight_zero_point.shape[0],
-            size_n=weight_zero_point.shape[1] * self.pack_factor,
-            num_bits=self.hf_quantization_config["bits"],
-        )
 
     def apply(
         self,
@@ -242,6 +208,59 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         if bias is not None:
             out.add_(bias)
         return out
+
+    def create_weight(self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int) -> WeightPack:
+        self.n = out_dim
+        self.k = in_dim
+        group_size = self.hf_quantization_config["group_size"]
+        weight = torch.empty(
+            (in_dim // self.tile_size, out_dim * self.tile_size // self.pack_factor), dtype=torch.int32
+        ).cuda(device_id)
+        weight_scale = torch.empty((in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
+        weight_zero_point = torch.empty((in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32).cuda(
+            device_id
+        )
+        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
+        device_id = get_current_device_id()
+        repack_weight = vllm_ops.awq_marlin_repack(
+            weight.cuda(device_id),
+            size_k=weight.shape[0],
+            size_n=weight.shape[1] * self.pack_factor,
+            num_bits=self.hf_quantization_config["bits"],
+        )
+        start_idx = start_idx // self.pack_factor * self.tile_size
+        weight_pack.weight[:, start_idx : start_idx + repack_weight.shape[1]].copy_(repack_weight)
+        return
+
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
+        group_size = self.hf_quantization_config["group_size"]
+        device_id = get_current_device_id()
+        repack_weight_scale = marlin_permute_scales(
+            weight_scale.cuda(device_id),
+            size_k=weight_scale.shape[0] * group_size,
+            size_n=weight_scale.shape[1],
+            group_size=self.hf_quantization_config["group_size"],
+        )
+        weight_pack.weight_scale[:, start_idx : start_idx + repack_weight_scale.shape[1]].copy_(repack_weight_scale)
+        return
+
+    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        device_id = get_current_device_id()
+        repack_weight_zero_point = awq_to_marlin_zero_points(
+            weight_zero_point.cuda(device_id),
+            size_k=weight_zero_point.shape[0],
+            size_n=weight_zero_point.shape[1] * self.pack_factor,
+            num_bits=self.hf_quantization_config["bits"],
+        )
+        start_idx = start_idx // self.pack_factor
+        weight_pack.weight_zero_point[:, start_idx : start_idx + repack_weight_zero_point.shape[1]].copy_(
+            repack_weight_zero_point
+        )
+        return
 
 
 # adapted from
