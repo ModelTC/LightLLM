@@ -57,8 +57,7 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
             out_dims=[self.n_routed_experts],
             weight_names=f"model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
-            layer_num=self.layer_num_,
-            name="moe_gate",
+            quant_method=None,
             tp_rank=0,
             tp_world_size=1,
         )
@@ -78,7 +77,6 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
                 layer_num=self.layer_num_,
                 quant_cfg=self.quant_cfg,
                 num_fused_shared_experts=0,
-                hidden_size=self.network_config_.get("hidden_size"),
             )
         elif moe_mode == "EP":
             self.experts = FusedMoeWeightEP(
@@ -92,7 +90,6 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
                 network_config=self.network_config_,
                 layer_num=self.layer_num_,
                 quant_cfg=self.quant_cfg,
-                hidden_size=self.network_config_.get("hidden_size"),
             )
         else:
             raise ValueError(f"Unsupported moe mode: {moe_mode}")

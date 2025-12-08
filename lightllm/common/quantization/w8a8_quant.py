@@ -1,7 +1,5 @@
 import os
 import torch
-
-from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
 import torch.nn.functional as F
@@ -10,6 +8,7 @@ from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import pe
 from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
+
 
 from .quantize_method import WeightPack
 
@@ -21,12 +20,6 @@ if HAS_LIGHTLLM_KERNEL:
 else:
     if HAS_VLLM:
         scaled_fp8_quant = vllm_ops.scaled_fp8_quant
-
-LIGHTLLM_USE_TRITON_FP8_SCALED_MM = os.getenv("LIGHTLLM_USE_TRITON_FP8_SCALED_MM", "False").upper() in [
-    "ON",
-    "TRUE",
-    "1",
-]
 
 
 class BaseQuantizationMethod(QuantizationMethod):
@@ -168,10 +161,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
                 )
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        if LIGHTLLM_USE_TRITON_FP8_SCALED_MM:
-            out = fp8_scaled_mm_per_token(x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out)
-        else:
-            cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
+        cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
         return out
 
     @property

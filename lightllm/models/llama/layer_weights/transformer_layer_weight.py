@@ -72,9 +72,7 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
             weight_names=self._q_weight_name,
             data_type=self.data_type_,
             bias_names=self._q_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="q_proj",
+            quant_method=self.get_quant_method("q_proj"),
         )
         self.kv_proj = ROWMMWeight(
             in_dim=in_dim,
@@ -82,9 +80,7 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
             weight_names=[self._k_weight_name, self._v_weight_name],
             data_type=self.data_type_,
             bias_names=[self._k_bias_name, self._v_bias_name],
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="kv_proj",
+            quant_method=self.get_quant_method("kv_proj"),
         )
 
     def _init_o(self):
@@ -96,9 +92,7 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
             weight_names=self._o_weight_name,
             data_type=self.data_type_,
             bias_names=self._o_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="o_proj",
+            quant_method=self.get_quant_method("o_proj"),
         )
 
     def _init_ffn(self):
@@ -110,9 +104,7 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
             weight_names=[self._gate_weight_name, self._up_weight_name],
             data_type=self.data_type_,
             bias_names=[self._gate_bias_name, self._up_bias_name],
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="gate_up_proj",
+            quant_method=self.get_quant_method("gate_up_proj"),
         )
         self.down_proj = COLMMWeight(
             in_dim=out_dim,
@@ -120,9 +112,7 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
             weight_names=self._down_weight_name,
             data_type=self.data_type_,
             bias_names=self._down_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="down_proj",
+            quant_method=self.get_quant_method("down_proj"),
         )
 
     def _init_norm(self):
