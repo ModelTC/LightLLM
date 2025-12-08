@@ -4,9 +4,9 @@ API Call Details
 :code:`GET /health`
 ~~~~~~~~~~~~~~~~~~~
 :code:`HEAD /health`
-~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
 :code:`GET /healthz`
-~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
 
 Get the current server running status
 
@@ -23,7 +23,7 @@ Get the current server running status
     {"message":"Ok"}
 
 :code:`GET /token_load`
-~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
 
 Get the current server token usage status
 

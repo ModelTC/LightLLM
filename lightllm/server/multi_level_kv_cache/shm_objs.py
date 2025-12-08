@@ -264,7 +264,8 @@ class _LinkedListItem(ctypes.Structure):
 class _HashLinkItem(_LinkedListItem):
     _pack_ = 4
     _fields_ = [
-        ("key", ctypes.c_uint64),
+        ("key_low", ctypes.c_uint64),  # 128位key的低64位
+        ("key_high", ctypes.c_uint64),  # 128位key的高64位
         ("value", ctypes.c_int),
     ]
 
@@ -273,8 +274,20 @@ class _HashLinkItem(_LinkedListItem):
 
     def init(self):
         super().init()
-        self.key = 0
+        self.key_low = 0
+        self.key_high = 0
         self.value = -1
+
+    @property
+    def key(self) -> int:
+        """获取完整的128位key"""
+        return (self.key_high << 64) | self.key_low
+
+    @key.setter
+    def key(self, value: int):
+        """设置128位key"""
+        self.key_low = value & 0xFFFFFFFFFFFFFFFF
+        self.key_high = (value >> 64) & 0xFFFFFFFFFFFFFFFF
 
 
 def _create_shm(name: str, byte_size: int, auto_cleanup: bool = False):

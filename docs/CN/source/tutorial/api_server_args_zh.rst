@@ -1,10 +1,12 @@
+.. _tutorial/api_server_args_zh:
+
 APIServer 参数详解
-================
+==================
 
 本文档详细介绍了 LightLLM APIServer 的所有启动参数及其用法。
 
 基础配置参数
------------
+------------
 
 .. option:: --run_mode
 
@@ -38,7 +40,7 @@ APIServer 参数详解
     只能在 ``['tcp://', 'ipc:///tmp/']`` 中选择
 
 PD 分离模式参数
---------------
+---------------
 
 .. option:: --pd_master_ip
 
@@ -65,7 +67,7 @@ PD 分离模式参数
     配置服务器模式下的端口号
 
 模型配置参数
------------
+------------
 
 .. option:: --model_name
 
@@ -87,16 +89,16 @@ PD 分离模式参数
 
 .. option:: --load_way
 
-    模型权重加载方式，默认为 ``HF``（Huggingface 格式）
+    模型权重加载方式，默认为 ``HF`` (Huggingface 格式)
     
-    llama 模型还支持 ``DS``（Deepspeed）格式
+    llama 模型还支持 ``DS`` (Deepspeed) 格式
 
 .. option:: --trust_remote_code
 
     是否允许在 Hub 上使用自定义模型定义的文件
 
 内存和批处理参数
---------------
+----------------
 
 .. option:: --max_total_token_num
 
@@ -135,7 +137,7 @@ PD 分离模式参数
     * ``mistral``
 
 不同并行模式设置参数
-------------------
+--------------------
 
 .. option:: --nnodes
 
@@ -182,7 +184,7 @@ PD 分离模式参数
     不要为不同的推理节点使用相同的 nccl_port，这将是严重错误
 
 attention类型选择参数
---------------------
+---------------------
 
 .. option:: --mode
 
@@ -199,7 +201,7 @@ attention类型选择参数
     需要阅读源代码以确认所有模型支持的具体模式
 
 调度参数
-------------
+--------
 
 .. option:: --router_token_ratio
 
@@ -242,7 +244,7 @@ attention类型选择参数
 
 
 输出约束参数
------------
+------------
 
 .. option:: --token_healing_mode
 
@@ -260,7 +262,7 @@ attention类型选择参数
     使用环境变量 FIRST_ALLOWED_TOKENS 设置范围，例如 FIRST_ALLOWED_TOKENS=1,2
 
 多模态参数
---------
+----------
 
 .. option:: --enable_multimodal
 
@@ -299,7 +301,7 @@ attention类型选择参数
     为 ViT 构建分布式环境的 NCCL 端口列表，例如 29500 29501 29502，默认为 [29500]
 
 性能优化参数
------------
+------------
 
 .. option:: --disable_custom_allreduce
 
@@ -366,7 +368,7 @@ attention类型选择参数
     默认值为 8192。如果遇到更大的值，将转为 eager 模式。
 
 量化参数
--------
+--------
 
 .. option:: --quant_type
 
@@ -382,7 +384,7 @@ attention类型选择参数
     * ``vllm-fp8w8a8``
     * ``vllm-fp8w8a8-b128``
     * ``triton-fp8w8a8-block128``
-    * ``none``（默认）
+    * ``none`` (默认)
 
 .. option:: --quant_cfg
 
@@ -402,7 +404,7 @@ attention类型选择参数
     * ``ao-fp6w6a16``
     * ``vllm-w8a8``
     * ``vllm-fp8w8a8``
-    * ``none``（默认）
+    * ``none`` (默认)
 
 .. option:: --vit_quant_cfg
 
@@ -411,7 +413,7 @@ attention类型选择参数
     示例可以在 lightllm/common/quantization/configs 中找到。
 
 采样和生成参数
-------------
+--------------
 
 .. option:: --sampling_backend
 
@@ -441,7 +443,7 @@ attention类型选择参数
     使用 tgi 输入和输出格式
 
 MTP 多预测参数
-------------
+--------------
 
 .. option:: --mtp_mode
 
@@ -466,7 +468,7 @@ MTP 多预测参数
     目前 deepseekv3/r1 模型仅支持 1 步
 
 DeepSeek 冗余专家参数
-----------
+---------------------
 
 .. option:: --ep_redundancy_expert_config_path
 
@@ -477,7 +479,7 @@ DeepSeek 冗余专家参数
     是否通过在线专家使用计数器为 deepseekv3 模型更新冗余专家。
 
 监控和日志参数
-------------
+--------------
 
 .. option:: --disable_log_stats
 

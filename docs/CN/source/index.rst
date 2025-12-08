@@ -49,6 +49,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    :caption: 部署教程
 
    DeepSeek R1 部署 <tutorial/deepseek_deployment>
+   多级缓存部署 <tutorial/multi_level_cache_deployment>
    多模态部署 <tutorial/multimodal>
    奖励模型部署 <tutorial/reward_model>
    OpenAI 接口使用 <tutorial/openai>

@@ -1,3 +1,4 @@
+import numpy as np
 import os
 import ctypes
 from typing import List
@@ -11,8 +12,8 @@ LIGHTLLM_TOKEN_HASH_LIST_SIZE = int(os.getenv("LIGHTLLM_TOKEN_HASH_LIST_SIZE", 2
 class TokenHashList(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
-        ("items", ctypes.c_uint64 * LIGHTLLM_TOKEN_HASH_LIST_SIZE),  # 元素静态数组
-        ("size", ctypes.c_int),  # 队列大小
+        ("items", ctypes.c_uint64 * (LIGHTLLM_TOKEN_HASH_LIST_SIZE * 2)),  # 存储128位哈希,每个哈希用2个uint64
+        ("size", ctypes.c_int),  # 队列大小(表示哈希的数量,非uint64数量)
     ]
 
     def __init__(self):
@@ -33,7 +34,14 @@ class TokenHashList(ctypes.Structure):
                 f"remove tail to write"
             )
             data = data[0:LIGHTLLM_TOKEN_HASH_LIST_SIZE]
-        self.items[0 : len(data)] = data
+        if len(data) == 0:
+            self.size = 0
+            return
+        hash_array = np.asarray(data, dtype=object)
+        low_bits = (hash_array & 0xFFFFFFFFFFFFFFFF).astype(np.uint64)
+        high_bits = (hash_array >> 64).astype(np.uint64)
+        self.items[0 : len(data) * 2 : 2] = low_bits
+        self.items[1 : len(data) * 2 : 2] = high_bits
         self.size = len(data)
         return
 
@@ -41,7 +49,13 @@ class TokenHashList(ctypes.Structure):
         self.size = 0
 
     def get_all(self):
-        return list(self.items[0 : self.size])
+        if self.size == 0:
+            return []
+        items_array = np.array(self.items[0 : self.size * 2], dtype=np.uint64)
+        low = items_array[0::2]
+        high = items_array[1::2]
+        result = (high.astype(object) << 64) | low.astype(object)
+        return result.tolist()
 
 
 class CpuCachePageList(ctypes.Structure):

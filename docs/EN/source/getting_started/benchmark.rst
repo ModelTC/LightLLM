@@ -4,7 +4,7 @@ Benchmark Testing Guide
 LightLLM provides multiple performance testing tools, including service performance testing and static inference performance testing. This document will detailedly introduce how to use these tools for performance evaluation.
 
 Service Performance Testing (Service Benchmark)
-----------------------------------------------
+-----------------------------------------------
 
 Service performance testing is mainly used to evaluate LightLLM's performance in real service scenarios, including key metrics such as throughput and latency.
 
@@ -55,7 +55,7 @@ QPS (Queries Per Second) testing is the core tool for evaluating service perform
 - decode_token_time P{25,50,75,90,95,99,100}: Decode token latency percentiles
 
 Fixed Concurrency Testing (benchmark_client.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Used to evaluate performance under different client concurrency levels.
 
@@ -73,7 +73,7 @@ Used to evaluate performance under different client concurrency levels.
         --server_api lightllm
 
 ShareGPT Dataset Testing (benchmark_sharegpt.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Performance testing using ShareGPT real conversation data.
 
@@ -99,7 +99,7 @@ Performance testing using ShareGPT real conversation data.
 - ``--request_rate``: Request rate (requests/s)
 
 Prompt Cache Testing
-~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
 
 Evaluate prompt cache performance under different hit rates by adjusting --first_input_len, --output_len --subsequent_input_len to control hit rate.
 Hit rate per round = (first_input_len + (output_len + subsequent_input_len) * (num_turns - 1)) / (first_input_len + (output_len + subsequent_input_len) * num_turns)
@@ -129,12 +129,12 @@ Parameter Description:
 - ``--num_users``: Number of users
 
 Static Inference Performance Testing (Static Inference Benchmark)
----------------------------------------------------------------
+------------------------------------------------------------------
 
 Static inference testing is used to evaluate model inference performance under fixed input conditions, mainly evaluating operator quality.
 
 Model Inference Testing (model_infer.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Main Features:**
 

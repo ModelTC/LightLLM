@@ -1,10 +1,10 @@
 Multimodal Model Launch Configuration
-====================================
+=====================================
 
 LightLLM supports inference for various multimodal models. Below, using InternVL as an example, we explain the launch commands for multimodal services.
 
 Basic Launch Command
--------------------
+--------------------
 
 .. code-block:: bash
 
@@ -19,16 +19,16 @@ Basic Launch Command
     --enable_multimodal
 
 Core Parameter Description
--------------------------
+--------------------------
 
 Environment Variables
-^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^
 
 - **INTERNVL_IMAGE_LENGTH**: Set the image token length for InternVL model, default is 256
 - **LOADWORKER**: Set the number of worker processes for model loading
 
 Basic Service Parameters
-^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^
 
 - **--port 8080**: API server listening port
 - **--tp 2**: Tensor parallelism degree
@@ -38,7 +38,7 @@ Basic Service Parameters
 - **--enable_multimodal**: Enable multimodal functionality
 
 Advanced Configuration Parameters
---------------------------------
+---------------------------------
 
 .. code-block:: bash
 
@@ -58,20 +58,20 @@ ViT Deployment Methods
 ----------------------
 
 ViT TP (Tensor Parallel)
-^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Default usage
 - --visual_tp tp_size enables tensor parallelism
 
 ViT DP (Data Parallel)
-^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^
 
 - Distribute different image batches to multiple GPUs
 - Each GPU runs a complete ViT model copy
 - --visual_dp dp_size enables data parallelism
 
 Image Caching Mechanism
-----------------------
+-----------------------
 LightLLM caches embeddings of input images. In multi-turn conversations, if the images are the same, cached embeddings can be used directly, avoiding repeated inference.
 
 - **--cache_capacity**: Controls the number of cached image embeds

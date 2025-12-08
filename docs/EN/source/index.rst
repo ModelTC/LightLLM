@@ -48,6 +48,7 @@ Documentation List
    :caption: Deployment Tutorials
 
    DeepSeek R1 Deployment <tutorial/deepseek_deployment>
+   Multi-Level Cache Deployment <tutorial/multi_level_cache_deployment>
    Multimodal Deployment <tutorial/multimodal>
    Reward Model Deployment <tutorial/reward_model>
    OpenAI api Usage <tutorial/openai>
