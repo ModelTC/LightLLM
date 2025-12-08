@@ -8,10 +8,10 @@ import threading
 import json
 from typing import List
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe_weight_ep_redundancy import (
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight_ep_redundancy import (
     FusedMoeWeightEPAutoRedundancy,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe_weight_ep import FusedMoeWeightEP
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight_ep import FusedMoeWeightEP
 from lightllm.utils.envs_utils import get_env_start_args, get_redundancy_expert_update_interval
 from lightllm.utils.envs_utils import get_redundancy_expert_update_max_load_count
 from lightllm.utils.envs_utils import get_redundancy_expert_num

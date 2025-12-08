@@ -32,7 +32,9 @@ class ROWMMWeight(MMWeightTpl):
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
         )
-        self.param_slicer = get_row_slice_mixin(quant_method.method_name, tp_rank=tp_rank, tp_world_size=tp_world_size)
+        self.param_slicer = get_row_slice_mixin(
+            self.quant_method.method_name, tp_rank=tp_rank, tp_world_size=tp_world_size
+        )
 
 
 class ROWBMMWeight(BMMWeightTpl):

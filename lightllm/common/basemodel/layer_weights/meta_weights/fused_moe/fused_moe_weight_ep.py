@@ -3,7 +3,7 @@ import torch
 import threading
 from typing import Optional, Tuple, List, Dict, Any
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_device_id
-from .base_weight import BaseWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeight
 from lightllm.common.fused_moe.grouped_fused_moe_ep import (
     fused_experts_impl,
     masked_group_gemm,

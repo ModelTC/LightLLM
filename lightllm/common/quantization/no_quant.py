@@ -47,6 +47,6 @@ class NoQuantization(QuantizationMethod):
     def method_name(self):
         return "none"
 
-    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        weight_pack.weight[start_idx : start_idx + weight.shape[0]].copy_(weight)
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int = 0) -> None:
+        weight_pack.weight[start_idx : start_idx + weight.shape[0], :].copy_(weight)
         return

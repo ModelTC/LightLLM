@@ -8,6 +8,7 @@ from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_m
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization import Quantcfg
+from lightllm.common.quantization.no_quant import NoQuantization
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.log_utils import init_logger
 from .mm_slicer import SliceMixinTpl
@@ -51,7 +52,7 @@ class MMWeightTpl(BaseWeightTpl):
         # 同时存在 weight_names 和 quanted_weight_names 是为了兼容在线和离线两种加载方案
         self.weight_names = weight_names
         self.bias_names = bias_names
-        self.quant_method: QuantizationMethod = quant_method
+        self.quant_method: QuantizationMethod = NoQuantization() if quant_method is None else quant_method
         self.param_slicer: SliceMixinTpl = None
         self._create_weight()
         self.gen_weight_quant_param_names(quant_method=quant_method)
