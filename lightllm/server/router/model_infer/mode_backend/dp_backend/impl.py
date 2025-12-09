@@ -29,11 +29,11 @@ from .control_state import DPControlState
 from lightllm.common.mem_manager import MemoryManager
 import torch.multiprocessing as mp
 
-min_trans_token_num = os.getenv("MIN_TRANS_TOKEN_NUM", 0)
+min_trans_token_num = os.getenv("MIN_TRANS_TOKEN_NUM", 1)
 
 
 class DPChunkedPrefillBackend(ModeBackend):
-    def __init__(self, mem_queues=None) -> None:
+    def __init__(self, mem_queue: mp.Queue, mem_queues: List[mp.Queue] = None) -> None:
         super().__init__()
 
         # 用于控制每一步是执行prefill 和 decode 还是跳过
@@ -71,13 +71,31 @@ class DPChunkedPrefillBackend(ModeBackend):
         self.classed_req_strict_prefill = False
         if not self.disable_dp_prompt_cache_fetch and self.dp_size_in_node > 1 and mem_queues is not None:
             self._init_dp_cache_fetch(mem_queues)
+        self.mem_queues = mem_queues
+        self.mem_queue = mem_queue
         return
 
-    def _init_dp_cache_fetch(self, mem_queues):
-        from .p2p_fix import reduce_tensor
+    def init_custom(self):
+        if not self.disable_dp_prompt_cache_fetch and self.dp_size_in_node > 1 and self.mem_queues is not None:
+            torch.cuda.set_device(get_current_device_id())
 
-        mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
-        self.mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
+            from .p2p_fix import reduce_tensor
+
+            mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
+
+            # 必须先设置 CUDA 设备上下文，因为序列化和反序列化 CUDA tensor 时
+            # reduce_tensor 和 p2p_fix_rebuild_cuda_tensor 都会调用 torch.cuda.current_device()
+
+            for _ in range(self.node_world_size - 1):
+                self.mem_queue.put(self.model.mem_manager)
+
+            self.mem_managers = []
+            for queue_index in range(len(self.mem_queues)):
+                if queue_index != self.rank_in_node:
+                    self.mem_managers.append(self.mem_queues[queue_index].get(timeout=60))
+                else:
+                    self.mem_managers.append(self.model.mem_manager)
+            return
 
     # 一些可以复用的通用功能函数
     def _init_reqs(self, reqs: List[Tuple]):
@@ -92,6 +110,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         infer_reqs = g_infer_context.add_reqs(my_reqs, init_prefix_cache=False)
         if self.dp_size_in_node != 1 and not self.disable_dp_prompt_cache_fetch:
             self._post_init_reqs(infer_reqs, other_reqs=other_reqs)
+            for r in infer_reqs:
+                r._match_radix_cache()
 
         g_infer_state_lock.release()
         req_ids = [e[0] for e in my_reqs]
@@ -120,7 +140,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     if kv_len > shm_req.dp_max_kv_len:
                         shm_req.dp_max_kv_len = kv_len
                         shm_req.dp_max_kv_rank = self.dp_rank_in_node  # 单机
-            my_match.append(shm_req, kv_len, value_tensor)
+            my_match.append((shm_req, kv_len, value_tensor))
 
         # match all the reqs in other dp ranks.
         if self.rank_in_dp == 0:
@@ -138,7 +158,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     if kv_len > shm_req.dp_max_kv_len:
                         shm_req.dp_max_kv_len = kv_len
                         shm_req.dp_max_kv_rank = self.dp_rank_in_node  # 单机
-                    other_match.append(shm_req, kv_len, value_tensor)
+                    other_match.append((shm_req, kv_len, value_tensor))
 
         # wait all the ranks to finish the match
         dist.barrier()
@@ -174,7 +194,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         try:
             mem_indexes = self.model.mem_manager.alloc(alloc_size).cuda()
         except Exception as e:
-            self.logger.error(f"error alloc mem manager: {str(e)}")
+            self.logger.error(f"dp_i {self.dp_rank_in_node} error alloc mem manager: {str(e)}")
             return
 
         move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
@@ -198,15 +218,14 @@ class DPChunkedPrefillBackend(ModeBackend):
             if trans_len > 0 and shm_req.dp_max_kv_rank != self.dp_rank_in_node:
                 new_value_tensor = mem_indexes[start_index : start_index + trans_len].cpu()
                 start_index += trans_len
+                key = torch.tensor(
+                    shm_req.shm_prompt_ids.arr[0 : shm_req.dp_max_kv_len], dtype=torch.int64, device="cpu"
+                )
                 if value_tensor is not None:
                     value_tensor = torch.cat((value_tensor, new_value_tensor), dim=0)
                 else:
                     value_tensor = new_value_tensor
-                g_infer_context.radix_cache.insert(shm_req.shm_prompt_ids.arr[0 : shm_req.dp_max_kv_len], value_tensor)
-
-        # 更新infer_req的状态
-        for r in infer_reqs:
-            r._match_radix_cache()
+                g_infer_context.radix_cache.insert(key, value_tensor)
 
     def release_all_shm_reqs(self, shm_reqs):
         for shm_req in shm_reqs:

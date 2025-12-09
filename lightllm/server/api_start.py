@@ -269,6 +269,15 @@ def normal_or_p_d_start(args):
         args.router_max_wait_tokens = 0
 
     send_and_receive_node_ip(args)  # 多机用于收发node ip
+    # PD 分离模式下必须禁用 DP prompt cache fetch，且 dp 必须 > 1
+    if not args.disable_dp_prompt_cache_fetch:
+        if args.run_mode != "normal" or args.dp <= 1:
+            args.disable_dp_prompt_cache_fetch = True
+            logger.warning(
+                """PD split mode or dp <= 1 does not support dp_prompt_cache_fetch;
+                overriding disable_dp_prompt_cache_fetch to True"""
+            )
+
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
 
