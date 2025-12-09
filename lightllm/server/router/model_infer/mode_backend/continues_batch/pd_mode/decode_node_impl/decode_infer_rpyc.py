@@ -166,9 +166,9 @@ class PDDecodeInferRpcServer(rpyc.Service):
         release_acquired_lock()
         return
 
-    def exposed_put_mem_manager_to_mem_queue(self):
-        self.backend.mem_queue.put(self.backend.model.mem_manager)
-        logger.info("put mem manager to info_queues ok")
+    def exposed_put_mem_manager_to_shm(self):
+        self.backend.model.mem_manager.create_shm()
+        logger.info("put mem manager to shm ok")
         return
 
     def exposed_unfrozen_time_out_reqs_tokens(self):

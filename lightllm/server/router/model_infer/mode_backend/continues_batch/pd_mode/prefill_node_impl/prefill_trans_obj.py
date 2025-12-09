@@ -353,10 +353,9 @@ class KVTransProcess:
                 device_id,
                 self.task_in_queue,
                 self.task_out_queue,
-                manager.mem_queues,
             )
             assert self.task_out_queue.get(timeout=30) == "proc_start"
-            manager._put_mem_manager_to_mem_queue()
+            manager._put_mem_manager_to_shm()
             assert self.task_out_queue.get(timeout=60) == "get_mem_managers_ok"
 
             return True

@@ -33,7 +33,7 @@ min_trans_token_num = os.getenv("MIN_TRANS_TOKEN_NUM", 512)
 
 
 class DPChunkedPrefillBackend(ModeBackend):
-    def __init__(self, mem_queue: mp.Queue, mem_queues: List[mp.Queue] = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
 
         # 用于控制每一步是执行prefill 和 decode 还是跳过
@@ -69,10 +69,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 self.decode = self.decode_normal
 
         self.classed_req_strict_prefill = False
-        if not self.disable_dp_prompt_cache_fetch and self.dp_size_in_node > 1 and mem_queues is not None:
-            self._init_dp_cache_fetch(mem_queues)
-        self.mem_queues = mem_queues
-        self.mem_queue = mem_queue
         return
 
     def init_custom(self):
@@ -83,13 +79,14 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 
-            for _ in range(self.node_world_size - 1):
-                self.mem_queue.put(self.model.mem_manager)
+            # 每个rank创建自己的共享内存并写入mem_manager
+            self.model.mem_manager.create_shm()
 
+            # 读取所有rank的mem_manager
             self.mem_managers = []
-            for queue_index in range(len(self.mem_queues)):
-                if queue_index != self.rank_in_node:
-                    self.mem_managers.append(self.mem_queues[queue_index].get(timeout=60))
+            for rank_idx in range(self.node_world_size):
+                if rank_idx != self.rank_in_node:
+                    self.mem_managers.append(MemoryManager.from_shm(rank_idx))
                 else:
                     self.mem_managers.append(self.model.mem_manager)
             return
@@ -105,7 +102,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         g_infer_state_lock.acquire()
         infer_reqs = g_infer_context.add_reqs(my_reqs, init_prefix_cache=not self.enable_dp_prompt_cache_fetch)
         if self.enable_dp_prompt_cache_fetch:
-            self._post_init_reqs(infer_reqs, other_reqs=other_reqs)
+            self._fetch_dp_prompt_cache(infer_reqs, other_reqs=other_reqs)
             for r in infer_reqs:
                 r._match_radix_cache()
 
@@ -120,7 +117,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         _, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=False)
         return kv_len, value_tensor
 
-    def _post_init_reqs(self, infer_reqs: List[InferReq], other_reqs: List[Tuple] = []):
+    def _fetch_dp_prompt_cache(self, infer_reqs: List[InferReq], other_reqs: List[Tuple] = []):
         my_match = []
         other_match = []
         # match all the reqs in this dp rank.
