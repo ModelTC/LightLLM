@@ -1,11 +1,8 @@
 import torch
 import time
-import numpy as np
-import os
 import torch.nn.functional as F
 import torch.distributed as dist
 from typing import List, Tuple, Optional, Callable
-from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.server.router.model_infer.infer_batch import InferSamplingParams, g_infer_context, InferReq
@@ -26,8 +23,6 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids
 from .control_state import DPControlState
-from lightllm.common.mem_manager import MemoryManager
-from .dp_shared_kv_trans import DPKVSharedMoudle
 
 
 class DPChunkedPrefillBackend(ModeBackend):

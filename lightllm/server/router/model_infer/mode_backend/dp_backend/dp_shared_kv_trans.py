@@ -4,7 +4,7 @@ import numpy as np
 import dataclasses
 import torch
 from typing import List
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.server.core.objs.shm_array import ShmArray
