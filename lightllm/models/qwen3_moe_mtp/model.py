@@ -1,6 +1,8 @@
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3_moe_mtp.layer_weights.pre_and_post_layer_weight import Qwen3MOEMTPPreAndPostLayerWeight
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
+from lightllm.models.qwen3_moe_mtp.layer_infer.transformer_layer_infer import Qwen3MOEMTPTransformerLayerInfer
+from lightllm.models.qwen3_moe_mtp.layer_weights.transformer_layer_weight import Qwen3MOEMTPTransformerLayerWeight
 from lightllm.common.basemodel import TpPartBaseModel
 
 
@@ -8,6 +10,9 @@ class Qwen3MOEMTPModel(Qwen3MOEModel):
 
     pre_and_post_weight_class = Qwen3MOEMTPPreAndPostLayerWeight
     pre_layer_infer_class = Deepseek3MTPPreLayerInfer
+
+    transformer_weight_class = Qwen3MOEMTPTransformerLayerWeight
+    transformer_layer_infer_class = Qwen3MOEMTPTransformerLayerInfer
 
     def __init__(self, kvargs: dict):
         self._pre_init(kvargs)
