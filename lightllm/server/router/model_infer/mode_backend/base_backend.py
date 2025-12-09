@@ -10,7 +10,6 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
@@ -41,6 +40,8 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+
+logger = init_logger(__name__)
 
 
 class ModeBackend:
@@ -165,11 +166,8 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
-        is_hybrid_model = model_cfg.get("model_type", "") in ["qwen3_next"]
-        # Use HybridRadixCacheV2 as default for hybrid models
-        radix_cache_class = RadixCache if not is_hybrid_model else HybridRadixCache
         self.radix_cache = (
-            radix_cache_class(
+            RadixCache(
                 get_unique_server_name(),
                 self.model.mem_manager.size,
                 self.rank_in_node,
