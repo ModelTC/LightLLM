@@ -9,6 +9,7 @@ class Qwen3MOEMTPTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         return
 
     def _init_weight(self):
+        self._init_norm()
         if self.is_moe:
             self._init_moe()
         else:
