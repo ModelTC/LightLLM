@@ -47,6 +47,9 @@ class HaveStateBuffer(Protocol):
     def get_state_cache_can_use_size(self):
         ...
 
+    def copy_state_cache_buffer(self, src_idx, tgt_idx):
+        pass
+
 
 class Qwen3NextMemoryManager(MemoryManager, HaveStateBuffer):
     def __init__(
