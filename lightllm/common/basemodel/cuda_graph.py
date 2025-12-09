@@ -3,6 +3,7 @@ import torch
 import copy
 import bisect
 from typing import Optional
+from tqdm import tqdm
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
@@ -191,7 +192,12 @@ class CudaGraph:
         model: TpPartBaseModel = model
 
         # decode cuda graph init
-        for batch_size in self.cuda_graph_batch_sizes[::-1]:
+        progress_bar = tqdm(self.cuda_graph_batch_sizes[::-1], desc="Capturing CUDA graphs")
+        for batch_size in progress_bar:
+            # Get available memory info
+            avail_mem, total_mem = torch.cuda.mem_get_info()
+            avail_mem_gb = avail_mem / (1024 ** 3)
+            progress_bar.set_description(f"Capturing CUDA graphs - Batch: {batch_size}, AvailMem: {avail_mem_gb:.2f}GB")
             seq_len = 2
             total_token_num = batch_size * seq_len
             max_len_in_batch = self.graph_max_len_in_batch
@@ -246,7 +252,14 @@ class CudaGraph:
 
         model: TpPartBaseModel = model
 
-        for batch_size in self.cuda_graph_batch_sizes[::-1]:
+        progress_bar = tqdm(self.cuda_graph_batch_sizes[::-1], desc="Capturing overlap CUDA graphs")
+        for batch_size in progress_bar:
+            # Get available memory info
+            avail_mem, total_mem = torch.cuda.mem_get_info()
+            avail_mem_gb = avail_mem / (1024 ** 3)
+            progress_bar.set_description(
+                f"Capturing overlap CUDA graphs - Batch: {batch_size}, AvailMem: {avail_mem_gb:.2f}GB"
+            )
             decode_batches = []
             for micro_batch_index in [0, 1]:
                 # dummy decoding, capture the cudagraph

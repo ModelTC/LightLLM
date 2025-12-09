@@ -111,7 +111,10 @@ class InferenceContext:
             # .cpu() 是 流内阻塞操作
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
 
-            prefix_len, _ = self.radix_cache.insert(key, value)
+            buffer_idx = None
+            if hasattr(self.req_manager, "req_to_buffer_indexes"):
+                buffer_idx = self.req_manager.req_to_buffer_indexes[req.req_idx].cpu()
+            prefix_len, _ = self.radix_cache.insert(key, value, buffer_idx)
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
@@ -399,6 +402,12 @@ class InferReq:
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                # NOTE 仅用于 Qwen3Next 的 HybridRadixCache.
+                if hasattr(share_node, "buffer_idx") and share_node.buffer_idx is not None:
+                    cur_buffer_idx = g_infer_context.req_manager.req_to_buffer_indexes[self.req_idx]
+                    g_infer_context.req_manager.mem_manager.copy_state_cache_buffer(
+                        share_node.buffer_idx, cur_buffer_idx
+                    )
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return

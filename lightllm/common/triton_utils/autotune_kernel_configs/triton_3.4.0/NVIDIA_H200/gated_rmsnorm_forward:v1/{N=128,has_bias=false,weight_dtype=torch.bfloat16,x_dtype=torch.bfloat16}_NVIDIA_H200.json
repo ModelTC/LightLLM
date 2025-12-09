@@ -1,0 +1,38 @@
+{
+  "1024": {
+    "BLOCK_N": 256,
+    "num_warps": 2
+  },
+  "128": {
+    "BLOCK_N": 256,
+    "num_warps": 1
+  },
+  "2048": {
+    "BLOCK_N": 64,
+    "num_warps": 1
+  },
+  "256": {
+    "BLOCK_N": 256,
+    "num_warps": 1
+  },
+  "512": {
+    "BLOCK_N": 512,
+    "num_warps": 4
+  },
+  "64": {
+    "BLOCK_N": 256,
+    "num_warps": 1
+  },
+  "8": {
+    "BLOCK_N": 512,
+    "num_warps": 8
+  },
+  "800": {
+    "BLOCK_N": 64,
+    "num_warps": 1
+  },
+  "8192": {
+    "BLOCK_N": 128,
+    "num_warps": 2
+  }
+}

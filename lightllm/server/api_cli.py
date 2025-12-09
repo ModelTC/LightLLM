@@ -581,4 +581,5 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
+    parser.add_argument("--linear_attn_cache_size", type=int, default=2000, help="""The size of linear attn cache. """)
     return parser
