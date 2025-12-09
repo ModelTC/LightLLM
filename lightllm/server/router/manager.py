@@ -139,6 +139,7 @@ class RouterManager:
                     info_queue=self.info_queue,
                     mem_queue=self.mem_queues[(rank_id % node_world_size)],
                     router_lock=self.router_lock,
+                    mem_queues=self.mem_queues,
                 )
             )
             tasks.append(task)

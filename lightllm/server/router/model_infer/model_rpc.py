@@ -48,12 +48,14 @@ class ModelRpcServer:
         rpc_finished_event: multiprocessing.Event,
         info_queue: mp.Queue,
         mem_queue: mp.Queue,
+        mem_queues: List[mp.Queue] = None,
     ):
         super().__init__()
         self.args: StartArgs = args
         self.node_world_size = node_world_size
         self.info_queue = info_queue
         self.mem_queue = mem_queue
+        self.mem_queues = mem_queues
         self.rpc_event = rpc_event
         self.rpc_finished_event = rpc_finished_event
 
@@ -149,7 +151,7 @@ class ModelRpcServer:
                 self.backend = NIXLDecodeNode(self.info_queue, self.mem_queue)
 
         elif self.args.dp > 1:
-            self.backend = DPChunkedPrefillBackend()
+            self.backend = DPChunkedPrefillBackend(mem_queues=self.mem_queues)
         elif use_reward_model:
             self.backend = RewardModelBackend()
         elif return_all_prompt_logprobs:
@@ -223,6 +225,7 @@ def _init_env(
     rpc_event: mp.Event,
     rpc_finished_event: mp.Event,
     success_event: mp.Event,
+    mem_queues: List[mp.Queue] = None,
 ):
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -237,7 +240,7 @@ def _init_env(
     g_router_lock.obj = router_lock
 
     model_rpc_server = ModelRpcServer(
-        args, rank, rank_in_node, node_world_size, rpc_event, rpc_finished_event, info_queue, mem_queue
+        args, rank, rank_in_node, node_world_size, rpc_event, rpc_finished_event, info_queue, mem_queue, mem_queues
     )
     success_event.set()
 
@@ -255,6 +258,7 @@ async def start_model_process(
     info_queue: mp.Queue,
     mem_queue: mp.Queue,
     router_lock: mp.Queue,
+    mem_queues: List[mp.Queue] = None,
 ):
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -272,6 +276,7 @@ async def start_model_process(
             rpc_event,
             rpc_finished_event,
             success_event,
+            mem_queues,
         ),
     )
     proc.start()

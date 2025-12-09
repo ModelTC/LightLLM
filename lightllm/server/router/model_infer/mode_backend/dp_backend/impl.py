@@ -1,11 +1,14 @@
 import torch
 import time
 import numpy as np
+import os
 import torch.nn.functional as F
+import torch.distributed as dist
 from typing import List, Tuple, Optional, Callable
+from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
+from lightllm.server.router.model_infer.infer_batch import InferSamplingParams, g_infer_context, InferReq
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.pre import (
     padded_prepare_prefill_inputs,
@@ -23,14 +26,20 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids
 from .control_state import DPControlState
+from lightllm.common.mem_manager import MemoryManager
+import torch.multiprocessing as mp
+
+min_trans_token_num = os.getenv("MIN_TRANS_TOKEN_NUM", 0)
 
 
 class DPChunkedPrefillBackend(ModeBackend):
-    def __init__(self) -> None:
+    def __init__(self, mem_queues=None) -> None:
         super().__init__()
 
         # 用于控制每一步是执行prefill 和 decode 还是跳过
         self.control_state_machine = DPControlState(backend=self)
+        self.disable_dp_prompt_cache_fetch = get_env_start_args().disable_dp_prompt_cache_fetch
+        self.min_trans_token_num = min_trans_token_num
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
@@ -60,7 +69,148 @@ class DPChunkedPrefillBackend(ModeBackend):
                 self.decode = self.decode_normal
 
         self.classed_req_strict_prefill = False
+        if not self.disable_dp_prompt_cache_fetch and self.dp_size_in_node > 1 and mem_queues is not None:
+            self._init_dp_cache_fetch(mem_queues)
         return
+
+    def _init_dp_cache_fetch(self, mem_queues):
+        from .p2p_fix import reduce_tensor
+
+        mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
+        self.mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
+
+    # 一些可以复用的通用功能函数
+    def _init_reqs(self, reqs: List[Tuple]):
+        my_reqs = reqs
+        other_reqs = []
+        if self.dp_size_in_node != 1:
+            dp_rank_in_node = self.dp_rank_in_node
+            my_reqs = [req for req in reqs if req[3] == dp_rank_in_node]
+            other_reqs = [req for req in reqs if req[3] != dp_rank_in_node]
+
+        g_infer_state_lock.acquire()
+        infer_reqs = g_infer_context.add_reqs(my_reqs, init_prefix_cache=False)
+        if self.dp_size_in_node != 1 and not self.disable_dp_prompt_cache_fetch:
+            self._post_init_reqs(infer_reqs, other_reqs=other_reqs)
+
+        g_infer_state_lock.release()
+        req_ids = [e[0] for e in my_reqs]
+        return req_ids
+
+    def _match_radix_cache(self, shm_req):
+        input_token_ids = shm_req.shm_prompt_ids.arr[0 : shm_req.input_len]
+        key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
+        key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
+        share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+        return share_node, kv_len, value_tensor
+
+    def _post_init_reqs(self, infer_reqs: List[InferReq], other_reqs: List[Tuple] = []):
+        my_match = []
+        other_match = []
+        # match all the reqs in this dp rank.
+        for r in infer_reqs:
+            if r.sampling_param.disable_prompt_cache:
+                continue
+            shm_req = r.shm_req
+
+            _, kv_len, value_tensor = self._match_radix_cache(shm_req)
+            # only the first rank is ok
+            if self.rank_in_dp == 0:
+                with g_infer_context.shm_req_manager.get_req_lock_by_index(shm_req.index_in_shm_mem):
+                    if kv_len > shm_req.dp_max_kv_len:
+                        shm_req.dp_max_kv_len = kv_len
+                        shm_req.dp_max_kv_rank = self.dp_rank_in_node  # 单机
+            my_match.append(shm_req, kv_len, value_tensor)
+
+        # match all the reqs in other dp ranks.
+        if self.rank_in_dp == 0:
+            for r in other_reqs:
+                _, shm_index, _, _ = r
+                shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(shm_index)
+                sampling_param = InferSamplingParams(shm_req, g_infer_context.vocab_size)
+                if sampling_param.disable_prompt_cache:
+                    continue
+                shm_req.link_prompt_ids_shm_array()
+                shm_req.link_kv_indexes_shm_array()
+
+                _, kv_len, value_tensor = self._match_radix_cache(shm_req)
+                with g_infer_context.shm_req_manager.get_req_lock_by_index(shm_req.index_in_shm_mem):
+                    if kv_len > shm_req.dp_max_kv_len:
+                        shm_req.dp_max_kv_len = kv_len
+                        shm_req.dp_max_kv_rank = self.dp_rank_in_node  # 单机
+                    other_match.append(shm_req, kv_len, value_tensor)
+
+        # wait all the ranks to finish the match
+        dist.barrier()
+
+        # Copy the kv_indexes of this dp rank to other required req
+        for match in other_match:
+            shm_req, kv_len, value_tensor = match
+            if shm_req.dp_max_kv_rank == self.dp_rank_in_node:
+                shm_req.shm_kv_indexes.arr[0:kv_len] = value_tensor
+        # release other dp_rank's shm_req
+        self.release_all_shm_reqs([match[0] for match in other_match])
+
+        # wait all the ranks to finish the copy
+        dist.barrier()
+
+        # Perform a kv transfer, get all indexes and the corresponding dp_rank
+        move_token_indexes = []
+        token_dp_indexes = []
+        alloc_size = 0
+        for r in my_match:
+            shm_req, kv_len, value_tensor = r
+            trans_len = shm_req.dp_max_kv_len - kv_len
+            if trans_len > 0 and shm_req.dp_max_kv_rank != self.dp_rank_in_node:
+                # Only copy kv_indexes that are not in this dp rank.
+                move_token_indexes.extend(shm_req.shm_kv_indexes.arr[kv_len : shm_req.dp_max_kv_len])
+                token_dp_indexes.extend([shm_req.dp_max_kv_rank for _ in range(trans_len)])
+            alloc_size += trans_len
+
+        if alloc_size < self.min_trans_token_num:
+            return
+
+        # Exit if alloc fails
+        try:
+            mem_indexes = self.model.mem_manager.alloc(alloc_size).cuda()
+        except Exception as e:
+            self.logger.error(f"error alloc mem manager: {str(e)}")
+            return
+
+        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
+        token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device="cuda")
+
+        # transfer kv
+        self.model.mem_manager.copy_kv_from_other_dp_ranks(
+            mem_managers=self.mem_managers,
+            move_token_indexes=move_token_indexes,
+            token_dp_indexes=token_dp_indexes,
+            mem_indexes=mem_indexes,
+            dp_size_in_node=self.dp_size_in_node,
+            rank_in_dp=self.rank_in_dp,
+        )
+
+        # 更新radix cache
+        start_index = 0
+        for r in my_match:
+            shm_req, kv_len, value_tensor = r
+            trans_len = shm_req.dp_max_kv_len - kv_len
+            if trans_len > 0 and shm_req.dp_max_kv_rank != self.dp_rank_in_node:
+                new_value_tensor = mem_indexes[start_index : start_index + trans_len].cpu()
+                start_index += trans_len
+                if value_tensor is not None:
+                    value_tensor = torch.cat((value_tensor, new_value_tensor), dim=0)
+                else:
+                    value_tensor = new_value_tensor
+                g_infer_context.radix_cache.insert(shm_req.shm_prompt_ids.arr[0 : shm_req.dp_max_kv_len], value_tensor)
+
+        # 更新infer_req的状态
+        for r in infer_reqs:
+            r._match_radix_cache()
+
+    def release_all_shm_reqs(self, shm_reqs):
+        for shm_req in shm_reqs:
+            g_infer_context.shm_req_manager.put_back_req_obj(shm_req)
 
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())

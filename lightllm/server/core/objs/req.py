@@ -122,6 +122,10 @@ class Req(ctypes.Structure):
         ("cpu_cache_match_page_indexes", CpuCachePageList),
         # 分块hash的块大小
         ("cpu_cache_token_page_size", ctypes.c_int),
+        # 所有DP中的最大kv cache的长度
+        ("dp_max_kv_len", ctypes.c_int),
+        # 拥有最大kv cache长度的dp_rank
+        ("dp_max_kv_rank", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -173,6 +177,7 @@ class Req(ctypes.Structure):
         self.alloc_shm_numpy_len = self.input_len + self.sample_params.max_new_tokens + 1024  # + 1024 for safe
         self.create_logprobs_shm_array()
         self.create_prompt_ids_shm_array()
+        self.create_kv_indexes_shm_array()
         self.chunked_prefill_size = chunked_prefill_size
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
         self.mtp_accepted_token_num = 0
@@ -183,6 +188,9 @@ class Req(ctypes.Structure):
         self.post_init()
 
         self.cpu_cache_token_page_size = get_env_start_args().cpu_cache_token_page_size
+        # 初始化DP模式相关字段
+        self.dp_max_kv_len = 0
+        self.dp_max_kv_rank = -1
         if get_env_start_args().enable_cpu_cache:
             self._fill_input_token_hash()
         return
@@ -227,11 +235,31 @@ class Req(ctypes.Structure):
         self.shm_logprobs.link_shm()
         return
 
+    def create_kv_indexes_shm_array(self):
+        service_uni_name = get_unique_server_name()
+        name = f"{service_uni_name}_shm_kv_indexes_{self.index_in_shm_mem}"
+        self.shm_kv_indexes = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.int64)
+        self.shm_kv_indexes.create_shm()
+        return
+
+    def link_kv_indexes_shm_array(self):
+        service_uni_name = get_unique_server_name()
+        name = f"{service_uni_name}_shm_kv_indexes_{self.index_in_shm_mem}"
+        self.shm_kv_indexes = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.int64)
+        self.shm_kv_indexes.link_shm()
+        return
+
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
 
     def get_prompt_ids_numpy(self):
         return self.shm_prompt_ids.arr[: self.input_len]
+
+    def get_kv_indexes(self):
+        return self.shm_kv_indexes.arr[: self.input_len].tolist()
+
+    def get_kv_indexes_numpy(self):
+        return self.shm_kv_indexes.arr[: self.input_len]
 
     def to_router_rpc_obj(self):
         if hasattr(self, "multimodal_params"):
