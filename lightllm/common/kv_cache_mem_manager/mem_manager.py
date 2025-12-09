@@ -19,6 +19,7 @@ from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.shm_utils import create_or_link_shm
 from multiprocessing.reduction import ForkingPickler
+from filelock import FileLock
 
 logger = init_logger(__name__)
 
@@ -450,25 +451,39 @@ class MemoryManager:
         # 避免过多无用的数据复制和传输开销。
         self.req_to_token_indexs: torch.Tensor = req_manager.req_to_token_indexs
 
-        shm_name = f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}"
-        for rank_in_node in range(0, get_node_world_size() * 2):
-            obj_bytes = ForkingPickler.dumps(self).tobytes()
+        lock = FileLock(f"/tmp/{get_unique_server_name()}_mem_manager_lock")
+        with lock:
+            node_world_size = get_node_world_size()
+            shm_name = f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}"
+            obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
+            obj_size = len(obj_bytes_array[0])
             shm = create_or_link_shm(
-                name=f"{shm_name}_{rank_in_node}", expected_size=len(obj_bytes) + 4, force_mode="create"
+                name=shm_name, expected_size=obj_size * (node_world_size * 2) + 4 + 4, force_mode="create"
             )
             logger.info(f"create shm {shm.name} size {shm.size} for mem manger shared buffer")
-            shm.buf[0:4] = len(obj_bytes).to_bytes(4, "little")
-            shm.buf[4 : 4 + len(obj_bytes)] = obj_bytes
+            shm.buf[0:4] = (node_world_size * 2).to_bytes(4, "little")
+            shm.buf[4:8] = obj_size.to_bytes(4, "little")
+            start_index = 8
+            for obj_bytes in obj_bytes_array:
+                shm.buf[start_index : start_index + obj_size] = obj_bytes
+                start_index += obj_size
 
     @staticmethod
-    def loads_from_shm(rank_in_node: int, current_rank_in_node: int) -> "MemoryManager":
-        shm_name = f"{get_unique_server_name()}_mem_manager_{rank_in_node}_{current_rank_in_node}"
+    def loads_from_shm(rank_in_node: int) -> "MemoryManager":
+        shm_name = f"{get_unique_server_name()}_mem_manager_{rank_in_node}"
+        lock = FileLock(f"/tmp/{get_unique_server_name()}_mem_manager_lock")
         logger.info(f"get memmanager from shm {shm_name}")
-        shm = create_or_link_shm(name=shm_name, expected_size=-1, force_mode="link")
-        bytes_len = int.from_bytes(shm.buf[0:4], "little")
-        obj_bytes = shm.buf[4 : 4 + bytes_len].tobytes()
-        shm.close()
-        return ForkingPickler.loads(obj_bytes)
+        with lock:
+            shm = create_or_link_shm(name=shm_name, expected_size=-1, force_mode="link")
+            left_num = int.from_bytes(shm.buf[0:4], "little")
+            obj_size = int.from_bytes(shm.buf[4:8], "little")
+            assert left_num > 0
+            end_index = 8 + left_num * obj_size
+            start_index = 8 + (left_num - 1) * obj_size
+            obj_bytes = shm.buf[start_index:end_index].tobytes()
+            shm.buf[0:4] = (left_num - 1).to_bytes(4, byteorder="little")
+            shm.close()
+            return ForkingPickler.loads(obj_bytes)
 
 
 class ReadOnlyStaticsMemoryManager:

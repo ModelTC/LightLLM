@@ -245,7 +245,7 @@ class ModeBackend:
 
     def init_dp_kv_shared(self):
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
-        from lightllm.common.mem_manager import MemoryManager
+        from lightllm.common.kv_cache_mem_manager import MemoryManager
 
         torch.cuda.set_device(get_current_device_id())
 
@@ -260,7 +260,7 @@ class ModeBackend:
         self.mem_managers = []
         for rank_idx in range(self.node_world_size):
             if rank_idx != self.rank_in_node:
-                self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx, self.rank_in_node))
+                self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
             else:
                 self.mem_managers.append(self.model.mem_manager)
         return
