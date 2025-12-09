@@ -33,12 +33,11 @@ RUN case ${TARGETPLATFORM} in \
 
 WORKDIR /root
 
+RUN pip install --no-cache-dir vllm==0.11.0 --pre --extra-index-url https://wheels.vllm.ai/nightly
+
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r /lightllm/requirements.txt --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu128
-
-RUN pip install --no-cache-dir vllm --pre --extra-index-url https://wheels.vllm.ai/nightly 
-
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r /lightllm/requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
 # TODO: offline compile
 # RUN git clone https://github.com/ModelTC/LightKernel.git && cd LightKernel && pip install --no-deps -v .
 

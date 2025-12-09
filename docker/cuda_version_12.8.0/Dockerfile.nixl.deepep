@@ -35,11 +35,12 @@ RUN case ${TARGETPLATFORM} in \
 
 WORKDIR /root
 
-COPY ./requirements.txt /lightllm/requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r /lightllm/requirements.txt --ignore-installed --extra-index-url https://download.pytorch.org/whl/cu128
+RUN --mount=type=cache,target=/root/.cache/pip pip install vllm==0.11.0 --pre --extra-index-url https://wheels.vllm.ai/nightly
 
-RUN --mount=type=cache,target=/root/.cache/pip pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
-RUN --mount=type=cache,target=/root/.cache/pip git clone https://github.com/ModelTC/LightKernel.git && cd LightKernel &&  pip install --no-deps -v .
+COPY ./requirements.txt /lightllm/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r /lightllm/requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
+
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-deps -v 'git+https://github.com/ModelTC/LightKernel.git@07f2f62af5deb41f10a22660f9f42dba9273361e#egg=lightllm_kernel'
 
 RUN apt-get update && apt-get install -y libnuma-dev wget devscripts debhelper dh-make build-essential dkms
 RUN apt-get install -y ibverbs-providers infiniband-diags perftest rdma-core libibverbs-dev librdmacm-dev
