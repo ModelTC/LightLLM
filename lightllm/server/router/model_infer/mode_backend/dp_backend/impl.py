@@ -38,7 +38,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # 用于控制每一步是执行prefill 和 decode 还是跳过
         self.control_state_machine = DPControlState(backend=self)
-        self.disable_dp_prompt_cache_fetch = get_env_start_args().disable_dp_prompt_cache_fetch
+        self.enable_dp_prompt_cache_fetch = get_env_start_args().enable_dp_prompt_cache_fetch
         self.min_trans_token_num = min_trans_token_num
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
@@ -76,9 +76,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         return
 
     def init_custom(self):
-        self.enable_dp_prompt_cache_fetch = (
-            not self.disable_dp_prompt_cache_fetch and self.dp_size_in_node > 1 and self.mem_queues is not None
-        )
         if self.enable_dp_prompt_cache_fetch:
             torch.cuda.set_device(get_current_device_id())
 
@@ -120,7 +117,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         input_token_ids = shm_req.shm_prompt_ids.arr[0 : shm_req.input_len]
         key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
         key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-        _, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+        _, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=False)
         return kv_len, value_tensor
 
     def _post_init_reqs(self, infer_reqs: List[InferReq], other_reqs: List[Tuple] = []):
