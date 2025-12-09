@@ -267,7 +267,7 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
-
+    logger.info(f"completions request: {request}")
     resp = await completions_impl(request, raw_request)
     return resp
 

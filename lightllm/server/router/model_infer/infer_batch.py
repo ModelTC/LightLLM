@@ -34,6 +34,8 @@ class InferenceContext:
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
 
+    use_hybrid_radix_cache: bool = False
+
     def register(
         self, backend, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int
     ):
@@ -114,7 +116,7 @@ class InferenceContext:
             buffer_idx = None
             if hasattr(self.req_manager, "req_to_buffer_indexes"):
                 buffer_idx = self.req_manager.req_to_buffer_indexes[req.req_idx].cpu()
-            prefix_len, _ = self.radix_cache.insert(key, value, buffer_idx)
+            prefix_len, _ = self.radix_cache.insert(key, value, buffer_idx=buffer_idx)
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
@@ -395,6 +397,13 @@ class InferReq:
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+
+            if share_node is not None:
+                if g_infer_context.use_hybrid_radix_cache:
+                    if share_node.buffer_idx is None:
+                        g_infer_context.radix_cache.dec_node_ref_counter(share_node)
+                        share_node = None
+
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
@@ -402,8 +411,8 @@ class InferReq:
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-                # NOTE 仅用于 Qwen3Next 的 HybridRadixCache.
-                if hasattr(share_node, "buffer_idx") and share_node.buffer_idx is not None:
+
+                if g_infer_context.use_hybrid_radix_cache:
                     cur_buffer_idx = g_infer_context.req_manager.req_to_buffer_indexes[self.req_idx]
                     g_infer_context.req_manager.mem_manager.copy_state_cache_buffer(
                         share_node.buffer_idx, cur_buffer_idx

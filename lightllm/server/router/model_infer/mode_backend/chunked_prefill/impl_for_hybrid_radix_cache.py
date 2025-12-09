@@ -1,6 +1,9 @@
+from numpy import ndarray
+
+
 import torch
 from .impl import ChunkedPrefillBackend
-from typing import List
+from typing import Any, List
 from typing_extensions import override
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
@@ -17,6 +20,7 @@ class HybridRadixCacheBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
         logger.info("Using HybridRadixCacheBackend for hybrid attention model.")
+        g_infer_context.use_hybrid_radix_cache = True
 
     @override
     def init_model(self, kvargs):
@@ -65,48 +69,43 @@ class HybridRadixCacheBackend(ChunkedPrefillBackend):
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
 
-        # 对于 Qwen3Next 模型，在 chunked_prefill 过程中调用 radix_cache.insert 保存中间状态
         if not self.disable_chunked_prefill:
             for req in run_reqs:
-                if not req.is_multi_chat_req and req.cur_kv_len < req.get_cur_total_len():
-                    self._handle_qwen3next_radix_cache_insert(req)
+                # NOTE 忽略完整的prefill, 因为请求文本全是system prompt 的情况应该比较小
+                if req.cur_kv_len < req.get_cur_total_len() - 1:
+                    self._handle_radix_cache_insert(req)
 
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
 
-    def _handle_qwen3next_radix_cache_insert(self, req: "InferReq"):
-        # 在 chunked_prefill 过程中，为 Qwen3Next 模型保存 state buffer 中间状态到 radix cache
-        from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
+    def _handle_radix_cache_insert(self, req: "InferReq"):
+        from lightllm.models.qwen3next.mem_manager import HaveStateBuffer
+        from lightllm.models.qwen3next.req_manager import Qwen3NextReqManager
 
-        is_qwen3next = isinstance(self.radix_cache, HybridRadixCache)
+        assert isinstance(self.model.req_manager.mem_manager, HaveStateBuffer)
+        assert isinstance(self.model.req_manager, Qwen3NextReqManager)
 
-        if not is_qwen3next or self.radix_cache is None:
-            return
+        # 获取当前 chunked_prefill 处理的 token IDs
+        input_token_ids: Any | ndarray[Any, Any] = req.get_input_token_ids()
+        key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
 
-        g_infer_state_lock.acquire()
-        try:
-            # 获取当前 chunked_prefill 处理的 token IDs
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+        # 获取对应的 token 索引
+        value = self.model.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
 
-            # 获取对应的 token 索引
-            value = self.model.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+        buffer_idx = self.model.req_manager.req_to_buffer_indexes[req.req_idx].cpu()
 
-            buffer_idx = self.model.req_manager.req_to_buffer_indexes[req.req_idx].cpu()
+        # 确保有足够的空间用于新的 buffer
+        release_buffers = self.radix_cache.free_radix_cache_to_get_enough_token(0, 1)
 
-            # 确保有足够的空间用于新的 buffer
-            self.radix_cache.free_radix_cache_to_get_enough_token(0, 1)
+        # 分配新的 buffer 并复制当前 buffer 的内容
+        self.model.req_manager.mem_manager.free_state_cache_buffer(release_buffers)
+        new_buffer_idx = self.model.req_manager.mem_manager.alloc_state_cache_buffer(1)[0]
+        self.model.req_manager.mem_manager.copy_state_cache_buffer(buffer_idx, new_buffer_idx)
+        self.model.req_manager.req_to_buffer_indexes[req.req_idx] = new_buffer_idx
 
-            # 分配新的 buffer 并复制当前 buffer 的内容
-            new_buffer_idx = self.model.req_manager.mem_manager.alloc_state_cache_buffer(1)[0]
-            self.model.req_manager.mem_manager.copy_state_cache_buffer(buffer_idx, new_buffer_idx)
-            self.model.req_manager.req_to_buffer_indexes[req.req_idx] = new_buffer_idx
+        _, new_shared_kv_node = self.radix_cache.insert(key, value, buffer_idx)
 
-            _, new_shared_kv_node = self.radix_cache.insert(key, value, buffer_idx)
-
-            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-            self.radix_cache.add_node_ref_counter(new_shared_kv_node)
-            req.shared_kv_node = new_shared_kv_node
-        finally:
-            g_infer_state_lock.release()
+        self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+        self.radix_cache.add_node_ref_counter(new_shared_kv_node)
+        req.shared_kv_node = new_shared_kv_node
