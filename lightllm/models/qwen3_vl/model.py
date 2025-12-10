@@ -62,7 +62,6 @@ class QWen3VLTokenizer(BaseMultiModalTokenizer):
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
         token_num = (grid_h * grid_w) // (self.merge_size ** 2)
-        print(f"token_num is {token_num}")
         return token_num
 
     def get_audio_token_length(self, audio: AudioItem):

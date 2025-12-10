@@ -16,6 +16,7 @@ from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 from lightllm.distributed import all_reduce
 from lightllm.utils.dist_utils import get_global_world_size
+from lightllm.models.qwen3_vl.triton_kernel.deepstack_multimodal_emb import apply_deepstack_features
 
 
 class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
@@ -75,20 +76,9 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
-        if infer_state.deepstack_features:
-            for i in range(len(infer_state.img_first_token_locs)):
-                start = infer_state.img_first_token_locs[i]
-                end = infer_state.img_last_token_locs[i]
-                deepstack_features = infer_state.deepstack_features[i]
-                if end <= input_embdings.shape[0] and self.layer_num_ in range(len(deepstack_features)):
-                    deepstack_features_cur_layer = deepstack_features[self.layer_num_].to(
-                        device=input_embdings.device, non_blocking=True
-                    )
-                    input_embdings[
-                        start:end,
-                    ].add_(deepstack_features_cur_layer)
-            if self.layer_num_ == len(deepstack_features):
-                infer_state.img_first_token_locs = []
-                infer_state.img_last_token_locs = []
-                infer_state.deepstack_features = []
+        apply_deepstack_features(
+            input_embeddings=input_embdings,
+            infer_state=infer_state,
+            layer_num=self.layer_num_,
+        )
         return input_embdings

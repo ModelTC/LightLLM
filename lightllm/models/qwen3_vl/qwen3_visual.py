@@ -68,13 +68,7 @@ class Qwen3VLPatchEmbed(nn.Module):
         hidden_states = hidden_states.view(
             -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
         )
-        # num_patches = hidden_states.shape[0]
-        # print(f"num_patches is {num_patches}")
-        # torch.cuda.synchronize()
-        # time0 = time.perf_counter()
         hidden_states = self.proj(hidden_states).view(-1, self.embed_dim)
-        # torch.cuda.synchronize()
-        # print(f"patch embed time is {time.perf_counter()-time0}")
         return hidden_states
 
 
@@ -385,7 +379,6 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                     hidden_states
                 )
                 deepstack_feature_lists.append(deepstack_feature)
-                # print(f"ds time is {time.perf_counter()-time0}")
 
         hidden_states = self.merger(hidden_states)
 

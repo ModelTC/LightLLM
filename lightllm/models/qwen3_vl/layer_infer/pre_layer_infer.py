@@ -3,6 +3,7 @@ import torch.distributed as dist
 
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 
 from lightllm.server.embed_cache.utils import (
     bytes2tensor,
@@ -20,13 +21,14 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         super().__init__(network_config, mode)
         return
 
-    def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
-
+    def context_forward(self, input_ids, infer_state: Qwen3VLInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
         img_weight = []
-        img_start_token_ids = []
-        img_token_lens = []
         img_start_loc = 0
-        img_start_locs = []
+
+        infer_state.input_ids = input_ids
+        infer_state.img_start_token_ids = []
+        infer_state.img_token_lens = []
+        infer_state.img_start_locs = []
 
         device = layer_weight.wte_weight_.device
         dtype = layer_weight.wte_weight_.dtype
@@ -37,12 +39,9 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
                 # skip the same image
-                if img["token_id"] in img_start_token_ids or img["_prefill_"] is False:
+                if img["token_id"] in infer_state.img_start_token_ids or img["_prefill_"] is False:
                     continue
-                pos = (input_ids == img["token_id"]).nonzero(as_tuple=True)
-                if pos[0].numel() == 0:
-                    continue
-                # pull the img_embeds by uid from shm
+
                 all_img_embed_df = bytes2tensor(read_shm(get_shm_name_embed(img["uuid"])))
                 per_image_deepstack = []
 
@@ -55,12 +54,9 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
                     per_image_deepstack.append(all_img_embed_df[start:end])
 
                 infer_state.deepstack_features.append(per_image_deepstack)
-                img_insert_locs = int(pos[0][0])
-                infer_state.img_first_token_locs.append(img_insert_locs)
-                infer_state.img_last_token_locs.append(img_insert_locs + img["token_num"])
-                img_start_token_ids.append(img["token_id"])
-                img_token_lens.append(img["token_num"])
-                img_start_locs.append(img_start_loc)
+                infer_state.img_start_token_ids.append(img["token_id"])
+                infer_state.img_token_lens.append(img["token_num"])
+                infer_state.img_start_locs.append(img_start_loc)
                 img_start_loc += img["token_num"]
         out = torch.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
 
@@ -74,9 +70,9 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         )
         # each tp will fill the img embeds, should divide by world_size
         img_weight = img_weight / self.tp_world_size_
-        img_start_token_ids = torch.Tensor(img_start_token_ids).to(device=device, dtype=torch.long)
-        img_token_lens = torch.Tensor(img_token_lens).to(device=device, dtype=torch.long)
-        img_start_locs = torch.Tensor(img_start_locs).to(device=device, dtype=torch.long)
+        img_start_token_ids = torch.Tensor(infer_state.img_start_token_ids).to(device=device, dtype=torch.long)
+        img_token_lens = torch.Tensor(infer_state.img_token_lens).to(device=device, dtype=torch.long)
+        img_start_locs = torch.Tensor(infer_state.img_start_locs).to(device=device, dtype=torch.long)
 
         multimodal_emb(
             out,

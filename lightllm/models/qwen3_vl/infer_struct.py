@@ -7,9 +7,12 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 class Qwen3VLInferStateInfo(LlamaInferStateInfo):
     def __init__(self):
         super().__init__()
+        self.input_ids = None
         self.deepstack_features = []
-        self.img_first_token_locs = []
-        self.img_last_token_locs = []
+        self.deepstack_end_layer = None
+        self.img_start_token_ids = []
+        self.img_token_lens = []
+        self.img_start_locs = []
 
     def apply_interleaved_mrope(self, freqs, mrope_section):
         """Apply interleaved MRoPE to 3D rotary embeddings.
