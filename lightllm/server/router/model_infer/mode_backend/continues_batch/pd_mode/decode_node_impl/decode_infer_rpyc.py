@@ -166,11 +166,6 @@ class PDDecodeInferRpcServer(rpyc.Service):
         release_acquired_lock()
         return
 
-    def exposed_put_mem_manager_to_mem_queue(self):
-        self.backend.mem_queue.put(self.backend.model.mem_manager)
-        logger.info("put mem manager to info_queues ok")
-        return
-
     def exposed_unfrozen_time_out_reqs_tokens(self):
         acquire_lock_until_ready(self.backend.lock_nccl_group)
         if self.backend.dp_world_size == 1:

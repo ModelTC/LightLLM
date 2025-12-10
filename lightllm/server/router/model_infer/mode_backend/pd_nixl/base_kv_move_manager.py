@@ -20,7 +20,6 @@ class BaseKVMoveManager:
         self,
         args: StartArgs,
         info_queue: mp.Queue,
-        mem_queues: List[mp.Queue],
         start_trans_process_func: Callable,
         up_status_in_queue: Optional[mp.SimpleQueue] = None,
     ):
@@ -33,7 +32,6 @@ class BaseKVMoveManager:
         assert self.dp_world_size <= self.node_world_size
 
         self.info_queue = info_queue
-        self.mem_queues = mem_queues
         self.ret_obj_queue = queue.Queue()
 
         self.kv_trans_processes: List[KVTransProcess] = [None] * self.node_world_size

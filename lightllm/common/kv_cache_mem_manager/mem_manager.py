@@ -2,18 +2,24 @@ import re
 import os
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 from typing import List, Union
+from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
-from lightllm.utils.dist_utils import get_current_rank_in_node
+from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
+from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.utils.shm_utils import create_or_link_shm
+from multiprocessing.reduction import ForkingPickler
+from filelock import FileLock
 
 logger = init_logger(__name__)
 
@@ -400,6 +406,84 @@ class MemoryManager:
 
     def load_index_kv_buffer(self, index, load_tensor_dict):
         self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
+
+    def copy_kv_from_other_dp_ranks(
+        self,
+        mem_managers: List["MemoryManager"],
+        move_token_indexes: torch.Tensor,
+        token_dp_indexes: torch.Tensor,
+        mem_indexes: torch.Tensor,
+        dp_size_in_node: int,
+        rank_in_dp: int,
+    ):
+        if not hasattr(self, "mem_ptrs_tensor"):
+            # 构建一个2D tensor，shape为(layer_num, mem_num)
+            mems_ptr_list = []
+            for i in range(0, len(mem_managers)):
+                mems_ptr_list.append(mem_managers[i].kv_buffer.data_ptr())
+            self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cpu", pin_memory=True)
+
+        # 一次性传输所有层
+        kv_trans_for_dp(
+            input_mems=self.mem_ptrs_tensor.cuda(non_blocking=True),
+            input_idx=move_token_indexes,
+            input_dp_idx=token_dp_indexes,
+            output=self.kv_buffer,
+            output_idx=mem_indexes,
+            dp_size_in_node=dp_size_in_node,
+            rank_in_dp=rank_in_dp,
+        )
+
+    def write_to_shm(self, req_manager):
+        """
+        将 mem manager 写入到 shm中，方便pd分离等特性直接从中读取，不依赖进程间队列。
+        """
+        if kv_trans_use_p2p():
+            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import reduce_tensor
+
+            mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
+
+        from lightllm.common.req_manager import ReqManager
+
+        req_manager: ReqManager = req_manager
+
+        # 这个地方是一个不太优雅的设计，但是暂时这么做，可以让dp shared kv swap模块直接访问 req_manager 中的 req_to_token_indexs
+        # 避免过多无用的数据复制和传输开销。
+        self.req_to_token_indexs: torch.Tensor = req_manager.req_to_token_indexs
+
+        lock = FileLock(f"/tmp/{get_unique_server_name()}_mem_manager_lock")
+        with lock:
+            node_world_size = get_node_world_size()
+            shm_name = f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}"
+            obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
+            obj_size = len(obj_bytes_array[0])
+            shm = create_or_link_shm(
+                name=shm_name, expected_size=obj_size * (node_world_size * 2) + 4 + 4, force_mode="create"
+            )
+            logger.info(f"create shm {shm.name} size {shm.size} for mem manger shared buffer")
+            shm.buf[0:4] = (node_world_size * 2).to_bytes(4, "little")
+            shm.buf[4:8] = obj_size.to_bytes(4, "little")
+            start_index = 8
+            for obj_bytes in obj_bytes_array:
+                shm.buf[start_index : start_index + obj_size] = obj_bytes
+                start_index += obj_size
+
+    @staticmethod
+    def loads_from_shm(rank_in_node: int) -> "MemoryManager":
+        shm_name = f"{get_unique_server_name()}_mem_manager_{rank_in_node}"
+        lock = FileLock(f"/tmp/{get_unique_server_name()}_mem_manager_lock")
+        logger.info(f"get memmanager from shm {shm_name}")
+        with lock:
+            shm = create_or_link_shm(name=shm_name, expected_size=-1, force_mode="link")
+            left_num = int.from_bytes(shm.buf[0:4], "little")
+            obj_size = int.from_bytes(shm.buf[4:8], "little")
+            assert left_num > 0
+            end_index = 8 + left_num * obj_size
+            start_index = 8 + (left_num - 1) * obj_size
+            obj_bytes = shm.buf[start_index:end_index].tobytes()
+            shm.buf[0:4] = (left_num - 1).to_bytes(4, byteorder="little")
+            shm.close()
+            return ForkingPickler.loads(obj_bytes)
 
 
 class ReadOnlyStaticsMemoryManager:

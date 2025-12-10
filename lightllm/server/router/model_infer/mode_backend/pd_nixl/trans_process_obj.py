@@ -35,7 +35,6 @@ class KVTransProcess:
                 device_id,
                 self.task_in_queue,
                 self.task_out_queue,
-                manager.mem_queues,
                 up_status_in_queue,
             )
             assert self.task_out_queue.get(timeout=30) == "proc_start"

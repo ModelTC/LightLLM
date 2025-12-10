@@ -116,9 +116,6 @@ class RouterManager:
         self.model_rpc_servers = []
         # 用于 kv move 管理进程 和 推理进程进行task信息的交互。
         self.info_queue: mp.Queue = mp.Queue()
-        self.mem_queues: List[torch.multiprocessing.Queue] = [
-            torch.multiprocessing.Queue() for _ in range(self.node_world_size)
-        ]
         self.rpc_event = multiprocessing.Event()
         self.rpc_finished_event = multiprocessing.Event()
 
@@ -137,7 +134,6 @@ class RouterManager:
                     rpc_event=self.rpc_event,
                     rpc_finished_event=self.rpc_finished_event,
                     info_queue=self.info_queue,
-                    mem_queue=self.mem_queues[(rank_id % node_world_size)],
                     router_lock=self.router_lock,
                 )
             )
@@ -205,14 +201,14 @@ class RouterManager:
                 start_prefill_kv_move_manager_process,
             )
 
-            start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+            start_prefill_kv_move_manager_process(self.args, self.info_queue)
 
         if self.args.run_mode == "nixl_prefill":
             from lightllm.server.router.model_infer.mode_backend.pd_nixl.prefill_node_impl import (
                 start_prefill_kv_move_manager_process,
             )
 
-            start_prefill_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+            start_prefill_kv_move_manager_process(self.args, self.info_queue)
 
         if self.args.run_mode == "decode":
             # 启动 decode kv move 管理进程
@@ -220,14 +216,14 @@ class RouterManager:
                 start_decode_kv_move_manager_process,
             )
 
-            start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+            start_decode_kv_move_manager_process(self.args, self.info_queue)
 
         if self.args.run_mode == "nixl_decode":
             from lightllm.server.router.model_infer.mode_backend.pd_nixl.decode_node_impl import (
                 start_decode_kv_move_manager_process,
             )
 
-            start_decode_kv_move_manager_process(self.args, self.info_queue, self.mem_queues)
+            start_decode_kv_move_manager_process(self.args, self.info_queue)
 
         return
 

@@ -31,12 +31,9 @@ def start_decode_trans_process(
     device_id,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
-    mem_queues: List[mp.Queue],
     up_status_in_queue: Optional[mp.SimpleQueue],
 ):
-    proc = mp.Process(
-        target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, mem_queues, up_status_in_queue)
-    )
+    proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, up_status_in_queue))
     proc.start()
     assert proc.is_alive()
     logger.info(f"prefill trans kv process for device: {device_id} started!")
@@ -48,7 +45,6 @@ def _init_env(
     device_id: int,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
-    mem_queues: List[mp.Queue],
     up_status_in_queue: Optional[mp.SimpleQueue],
 ):
     torch.backends.cudnn.enabled = False
@@ -58,7 +54,13 @@ def _init_env(
         graceful_registry(inspect.currentframe().f_code.co_name)
 
         task_out_queue.put("proc_start")
-        mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
+
+        # 从共享内存读取所有rank的mem_manager
+        node_world_size = args.tp // args.nnodes
+        mem_managers: List[MemoryManager] = [
+            MemoryManager.loads_from_shm(rank_in_node=rank) for rank in range(node_world_size)
+        ]
+
         task_out_queue.put("get_mem_managers_ok")
 
         manager = _DecodeTransModule(
