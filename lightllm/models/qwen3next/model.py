@@ -11,6 +11,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.models.qwen3next.req_manager import Qwen3NextReqManager
 
 logger = init_logger(__name__)
 
@@ -83,18 +84,42 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
                 self.head_linear_k_dim,
                 self.head_linear_v_dim,
             ),
+            max_req_num=self.max_req_num,
             mem_fraction=self.mem_fraction,
         )
 
+    @override
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         from lightllm.common.basemodel.infer_lock import g_infer_state_lock
-        from lightllm.common.basemodel.infer_context import g_infer_context
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
         infer_state = super()._create_inferstate(model_input, microbatch_index)
+
+        buffer_indexes = self.req_manager.req_to_buffer_indexes[model_input.b_req_idx]
+        empty_indexes = buffer_indexes == self.req_manager.EMPTY_BUFFER_INDEX
+        num_empty = empty_indexes.sum()
+        if num_empty == 0:
+            return infer_state
+
         g_infer_state_lock.acquire()
         if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_buffer(infer_state.batch_size)
-        buffer_indexes = self.mem_manager.alloc_buffer(infer_state.batch_size)
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_buffer(num_empty)
+        new_buffer_indexes = self.mem_manager.alloc_buffer(num_empty).cuda()
         g_infer_state_lock.release()
+
+        buffer_indexes[empty_indexes] = new_buffer_indexes
+        self.req_manager.req_to_buffer_indexes[model_input.b_req_idx] = buffer_indexes
         infer_state.buffer_indexes = buffer_indexes
         return infer_state
+
+    @override
+    def _init_req_manager(self):
+        create_max_seq_len = 0
+
+        if self.batch_max_tokens is not None:
+            create_max_seq_len = max(create_max_seq_len, self.batch_max_tokens)
+        if self.max_seq_length is not None:
+            create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
+
+        self.req_manager = Qwen3NextReqManager(self.max_req_num, create_max_seq_len, self.mem_manager)
+        return

@@ -50,6 +50,7 @@ class Qwen3NextMemoryManager(HybridMemManager):
         conv_state_shape: Tuple[int, ...],
         ssm_state_dtype: torch.dtype,
         ssm_state_shape: Tuple[int, ...],
+        max_req_num: int,
         always_copy=False,
         mem_fraction=0.9,
     ):
@@ -80,8 +81,6 @@ class Qwen3NextMemoryManager(HybridMemManager):
             f"Ssm state use : "
             f"{self.ssm_state_mem_manager.get_cell_size() * linear_attn_cache_size / 1024 ** 3} GB Memory.\n"
         )
-        self.EMPTY_BUFFER_INDEX = -1
-        self.HOLD_BUFFER_INDEX = self.conv_state_mem_manager.HOLD_TOKEN_MEMINDEX
         super().__init__(full_attn_cache_size, dtype, num_kv_heads, head_dim, layer_num, always_copy, mem_fraction)
 
     @override

@@ -7,6 +7,7 @@ from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.utils.config_utils import get_vocab_size
+from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridMemManager
 
 logger = init_logger(__name__)
 

@@ -5,7 +5,6 @@ from sortedcontainers import SortedSet
 
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
-from lightllm.server.router.model_infer.infer_batch import InferReq
 
 
 class HybridMemManager(MemoryManager):
@@ -69,7 +68,7 @@ class HybridRadixCache(RadixCache):
                     self._remove_leaf_node(node)
         return
 
-    def insert_for_hybrid_radix_cache(self, reqs: List["InferReq"]):
+    def insert_for_hybrid_radix_cache(self, reqs):
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
         from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 
