@@ -21,12 +21,8 @@ from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrain
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
 from lightllm.server.embed_cache.utils import (
     tensor2bytes,
-    read_shm,
     create_shm,
-    get_shm_name_data,
     get_shm_name_embed,
-    get_shm_name_deepstack,
-    list2bytes,
 )
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
@@ -111,8 +107,7 @@ class VisualModelRpcServer(rpyc.Service):
     # @calculate_time(show=False, min_cost_ms=300)
     def exposed_encode(self, images: List[ImageItem]):
         images = obtain(images)
-        all_img_embeds, uuids, valid_ids, *deepstack_features = self.forward(images)
-        deepstack_feature_lists = deepstack_features[0] if deepstack_features else None
+        all_img_embeds, uuids, valid_ids = self.forward(images)
         all_img_embeds = all_img_embeds.to(torch.device("cpu"))
 
         if self.tp_rank_id == 0:
@@ -125,10 +120,6 @@ class VisualModelRpcServer(rpyc.Service):
                 start, end = valid_ids[i]
                 cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
                 create_shm(get_shm_name_embed(uid), cur_embed_bytes)
-                if deepstack_feature_lists is not None:
-                    per_image_deepstack = [feat[start:end] for feat in deepstack_feature_lists]
-                    deepstack_features_bytes = list2bytes(per_image_deepstack)
-                    create_shm(get_shm_name_deepstack(uid), deepstack_features_bytes)
                 ids_to_set.append(uid)
             if ids_to_set:
                 self.cache_client.root.set_items_embed(ids_to_set)

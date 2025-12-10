@@ -87,7 +87,8 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
                     input_embdings[
                         start:end,
                     ].add_(deepstack_features_cur_layer)
-            infer_state.img_first_token_locs = []
-            infer_state.img_last_token_locs = []
-            infer_state.deepstack_features = []
+            if self.layer_num_ == len(deepstack_features):
+                infer_state.img_first_token_locs = []
+                infer_state.img_last_token_locs = []
+                infer_state.deepstack_features = []
         return input_embdings

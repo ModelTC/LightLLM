@@ -55,10 +55,15 @@ class Qwen3VLTransformerLayerInfer(Qwen3TransformerLayerInfer):
                     deepstack_features_cur_layer = deepstack_features[self.layer_num_].to(
                         device=input_embdings.device, non_blocking=True
                     )
+                    print(
+                        f"self.layer_num_ is {self.layer_num_}, i is{i} ,"
+                        f"deepstack_features_cur_layer is {deepstack_features_cur_layer}"
+                    )
                     input_embdings[
                         start:end,
                     ].add_(deepstack_features_cur_layer)
-            infer_state.img_first_token_locs = []
-            infer_state.img_last_token_locs = []
-            infer_state.deepstack_features = []
+            if self.layer_num_ == len(deepstack_features):
+                infer_state.img_first_token_locs = []
+                infer_state.img_last_token_locs = []
+                infer_state.deepstack_features = []
         return input_embdings

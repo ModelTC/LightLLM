@@ -15,6 +15,7 @@
 
 import os
 import json
+import time
 from PIL import Image
 from io import BytesIO
 from typing import List
@@ -67,7 +68,13 @@ class Qwen3VLPatchEmbed(nn.Module):
         hidden_states = hidden_states.view(
             -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
         )
+        # num_patches = hidden_states.shape[0]
+        # print(f"num_patches is {num_patches}")
+        # torch.cuda.synchronize()
+        # time0 = time.perf_counter()
         hidden_states = self.proj(hidden_states).view(-1, self.embed_dim)
+        # torch.cuda.synchronize()
+        # print(f"patch embed time is {time.perf_counter()-time0}")
         return hidden_states
 
 
@@ -193,6 +200,39 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
         else:
             raise ValueError(f"Unsupport datatype {self.data_type}!")
         return
+
+    def concat_img_embed_and_deepstack_features(self, image_embed, deepstack_feature_lists, valid_ids):
+        # input: image_embed: [img_embed1, img_embed2, img_embed3]
+        #        deepstack_feature_lists:[df1-1, df1-2, df1-3,
+        #                                 df2-1, df2-2, df2-3,
+        #                                 df3-1, df3-2, df3-3]
+        #        valid_ids:[[start_1, end_1], [start_2, end_2], [start_3, end_3]]
+        #
+        # return: all_img_embeds_ds: [img_embed1, df1-1, df1-2, df1-3,
+        #                             img_embed2, df2-1, df2-2, df2-3,
+        #                             img_embed3, df3-1, df3-2, df3-3]
+        #         valid_ids:[[start_1, end_1], [start_2, end_2], [start_3, end_3]] # image_embed的start和end
+        all_chunks = []
+        new_valid_ids = []
+
+        row_offset = 0
+
+        for start, end in valid_ids:
+            hs_i = image_embed[start:end]
+            ds_i_list = [feat[start:end] for feat in deepstack_feature_lists]
+
+            combined_i = torch.cat([hs_i, *ds_i_list], dim=0)
+
+            new_start = row_offset
+            new_end = row_offset + combined_i.size(0)
+            new_valid_ids.append([new_start, new_end])
+
+            all_chunks.append(combined_i)
+
+            row_offset += new_end
+
+        all_img_embeds_ds = torch.cat(all_chunks, dim=0)
+        return all_img_embeds_ds, new_valid_ids
 
     def load_model(self, weight_dir):
 
@@ -320,21 +360,17 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs) -> torch.Tensor:
         hidden_states = self.patch_embed(hidden_states)
-
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         hidden_states = hidden_states + pos_embeds
-
         rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw)
         rotary_cos = rotary_cos.to("cuda", non_blocking=True)
         rotary_sin = rotary_sin.to("cuda", non_blocking=True)
-
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0,
             dtype=torch.int32,
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0).to("cuda", non_blocking=True)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
@@ -349,6 +385,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                     hidden_states
                 )
                 deepstack_feature_lists.append(deepstack_feature)
+                # print(f"ds time is {time.perf_counter()-time0}")
 
         hidden_states = self.merger(hidden_states)
 
@@ -391,7 +428,9 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
 
         pixel_values = imgs.to("cuda", dtype=self.data_type, non_blocking=True)
         image_grid_thw = grid_thw.to("cuda", non_blocking=True)
+        img_embeds, deepstack_feature_lists = self.forward(pixel_values, grid_thw=image_grid_thw)
+        all_img_embeds_df, valid_ids = self.concat_img_embed_and_deepstack_features(
+            img_embeds, deepstack_feature_lists, valid_ids
+        )
 
-        all_img_embeds, deepstack_feature_lists = self.forward(pixel_values, grid_thw=image_grid_thw)
-
-        return all_img_embeds, uuids, valid_ids, deepstack_feature_lists
+        return all_img_embeds_df, uuids, valid_ids
