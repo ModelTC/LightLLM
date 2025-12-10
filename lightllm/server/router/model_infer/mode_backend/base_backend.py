@@ -10,7 +10,7 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-
+from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
@@ -100,6 +100,7 @@ class ModeBackend:
         self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
         self.is_nixl_pd_mode = self.run_mode in ["nixl_prefill", "nixl_decode"]
         self.is_nixl_decode_mode = self.run_mode == "nixl_decode"
+        self.is_hybrid_model = kvargs.get("is_hybrid_model", False)
 
         self.logger = init_logger(__name__)
 
@@ -141,6 +142,7 @@ class ModeBackend:
             wait_events.append(self.multi_level_cache_module)
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
+        self.is_hybrid_model = model_cfg.get("model_type", "") in ["qwen3_next"]
 
         model_kvargs = {
             "weight_dir": self.weight_dir,
@@ -166,8 +168,9 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
+        radix_cache_class = HybridRadixCache if self.is_hybrid_model else RadixCache
         self.radix_cache = (
-            RadixCache(
+            radix_cache_class(
                 get_unique_server_name(),
                 self.model.mem_manager.size,
                 self.rank_in_node,

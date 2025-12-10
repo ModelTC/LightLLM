@@ -9,6 +9,7 @@ from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridMemManager
 
 logger = init_logger(__name__)
 
@@ -34,24 +35,7 @@ class LayerCacheMemoryManager(BaseAllocator):
         return np.prod(self.shape) * self.layer_num * torch._utils._element_size(self.dtype)
 
 
-class HaveStateBuffer(Protocol):
-    def alloc_state_cache_buffer(self, need_size):
-        ...
-
-    def free_state_cache_buffer(self, free_buffer_indexes):
-        ...
-
-    def get_state_cache_buffer(self, layer_index):
-        ...
-
-    def get_state_cache_can_use_size(self):
-        ...
-
-    def copy_state_cache_buffer(self, src_idx, tgt_idx):
-        pass
-
-
-class Qwen3NextMemoryManager(MemoryManager, HaveStateBuffer):
+class Qwen3NextMemoryManager(HybridMemManager):
     def __init__(
         self,
         full_attn_cache_size,
@@ -121,14 +105,14 @@ class Qwen3NextMemoryManager(MemoryManager, HaveStateBuffer):
         return
 
     @override
-    def get_state_cache_buffer(self, layer_index) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get_buffer(self, layer_index) -> Tuple[torch.Tensor, torch.Tensor]:
         assert layer_index < self.layer_num, "layer_index is out of range"
         assert (layer_index + 1) % self.full_attention_interval != 0, "layer_index is not linear attention layer"
         real_layer_index = layer_index - layer_index // self.full_attention_interval
         return self.conv_state_mem_manager.buffer[real_layer_index], self.ssm_state_mem_manager.buffer[real_layer_index]
 
     @override
-    def free_state_cache_buffer(self, free_buffer_indexes: List[int], reset=True):
+    def free_buffer(self, free_buffer_indexes: List[int], reset=True):
         # conv_state 和 ssm_state 共享buffer_idx
         self.conv_state_mem_manager.free(free_buffer_indexes)
         if reset:
@@ -136,17 +120,17 @@ class Qwen3NextMemoryManager(MemoryManager, HaveStateBuffer):
             self.ssm_state_mem_manager.buffer[:, free_buffer_indexes] = 0
 
     @override
-    def alloc_state_cache_buffer(self, need_size):
+    def alloc_buffer(self, need_size):
         # conv_state 和 ssm_state 共享buffer_idx
         buffer_indexes = self.conv_state_mem_manager.alloc(need_size)
         return buffer_indexes
 
     @override
-    def get_state_cache_can_use_size(self):
+    def get_buffer_can_use_size(self):
         return self.conv_state_mem_manager.can_use_mem_size
 
     @override
-    def copy_state_cache_buffer(self, src_idx, tgt_idx):
+    def copy_buffer(self, src_idx, tgt_idx):
         assert src_idx is not None and tgt_idx is not None
         assert src_idx != tgt_idx
         # Use slice operation and in-place copy for better performance

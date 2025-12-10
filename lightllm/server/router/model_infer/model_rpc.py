@@ -7,12 +7,10 @@ import inspect
 import setproctitle
 from datetime import timedelta
 from typing import Dict, List, Tuple
-from transformers import PretrainedConfig
 from lightllm.server.router.model_infer.mode_backend import (
     ChunkedPrefillBackend,
     FirstTokenConstraintBackend,
     OutlinesConstraintBackend,
-    HybridRadixCacheBackend,
     ReturnPromptLogProbBackend,
     RewardModelBackend,
     TokenHealingBackend,
@@ -125,13 +123,7 @@ class ModelRpcServer:
         is_nixl_prefill_node = self.args.run_mode == "nixl_prefill"
         is_nixl_decode_node = self.args.run_mode == "nixl_decode"
 
-        model_cfg, _ = PretrainedConfig.get_config_dict(kvargs["weight_dir"])
-        is_hybrid_model = model_cfg.get("model_type", "") in ["qwen3_next"]
-        use_hybrid_radix_cache = is_hybrid_model and not self.args.disable_dynamic_prompt_cache
-
-        if use_hybrid_radix_cache:
-            self.backend = HybridRadixCacheBackend()
-        elif is_prefill_node:
+        if is_prefill_node:
             if self.args.dp > 1:
                 self.backend = DPChunkedForPrefillNode(self.info_queue)
             else:

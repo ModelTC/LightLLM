@@ -24,6 +24,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 from .control_state import ControlState
 
 logger = init_logger(__name__)
@@ -138,6 +139,10 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
+
+        if isinstance(g_infer_context.radix_cache, HybridRadixCache):
+            g_infer_context.radix_cache.insert_for_hybrid_radix_cache(run_reqs)
+
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return

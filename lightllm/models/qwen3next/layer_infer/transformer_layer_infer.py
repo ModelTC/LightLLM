@@ -7,7 +7,6 @@ from functools import partial
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager
-from lightllm.models.qwen3next.req_manager import Qwen3NextReqManager
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from typing import Tuple
 from typing_extensions import override
@@ -250,7 +249,7 @@ class Qwen3NextGatedDeltaNetInfer:
     ):
         assert layer_weight.is_linear, "layer_weight must be linear"
         assert isinstance(infer_state.mem_manager, Qwen3NextMemoryManager)
-        assert isinstance(infer_state.req_manager, Qwen3NextReqManager)
+
         input = input.view(-1, infer_cls.embed_dim_)
         buffer_idx = infer_state.req_manager.req_to_buffer_indexes[infer_state.b_req_idx]
         conv_states, ssm_states = infer_state.mem_manager.get_state_cache_buffer(self.layer_idx_)
