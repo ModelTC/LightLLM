@@ -31,11 +31,6 @@ class TreeNode:
         self.node_value_len = 0
         self.node_prefix_total_len = 0
 
-        # 用于混合线性注意力模型， 例如Qwen3Next
-        # 在混合线性注意力情景中，buffer_idx 可以有值也可以为None
-        # 但是如果为None则不能作为最终改的匹配节点
-        self.buffer_idx = None
-
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 
@@ -129,16 +124,6 @@ class RadixCache:
             f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
         )
         self.tree_total_tokens_num.arr[0] = 0
-
-        # Hit rate tracking
-        self.match_prefix_total_calls = SharedArray(
-            f"{unique_name}_match_prefix_total_calls_{rank_in_node}", (1,), dtype=np.int64
-        )
-        self.match_prefix_total_calls.arr[0] = 0
-        self.match_prefix_hit_tokens = SharedArray(
-            f"{unique_name}_match_prefix_hit_tokens_{rank_in_node}", (1,), dtype=np.int64
-        )
-        self.match_prefix_hit_tokens.arr[0] = 0
 
     def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
         if value is None:
@@ -247,10 +232,6 @@ class RadixCache:
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
-
-        # Track total calls
-        self.match_prefix_total_calls.arr[0] += 1
-
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
         if tree_node != self.root_node:
@@ -258,10 +239,6 @@ class RadixCache:
                 value = torch.concat(ans_value_list)
             else:
                 value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
-
-            # Track hit tokens
-            self.match_prefix_hit_tokens.arr[0] += len(value)
-
             return tree_node, len(value), value
         else:
             self.dec_node_ref_counter(self.root_node)
@@ -343,13 +320,12 @@ class RadixCache:
             else:
                 assert False, "error state"
 
-    def evict(self, need_remove_tokens, need_remove_buffers, evict_callback):
+    def evict(self, need_remove_tokens, evict_callback):
         if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < need_remove_tokens:
             assert False, f"""can not free tree tokens {need_remove_tokens},
                               tree_total_tokens_num {self.tree_total_tokens_num.arr[0]},
                               refed_tokens_num {self.refed_tokens_num.arr[0]}"""
         num_evicted = 0
-        release_buffers = []
         while num_evicted < need_remove_tokens:
             node: TreeNode = self.evict_tree_set.pop(0)
             assert (
@@ -357,7 +333,6 @@ class RadixCache:
             ), "error evict tree node state"
             num_evicted += len(node.token_mem_index_value)
             evict_callback(node.token_mem_index_value)
-            release_buffers.append(node.buffer_idx)
             # update total token num
             self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
             parent_node: TreeNode = node.parent
@@ -365,7 +340,7 @@ class RadixCache:
             if parent_node.is_leaf():
                 self.evict_tree_set.add(parent_node)
 
-        return release_buffers
+        return
 
     def _try_merge(self, child_node: TreeNode) -> Optional[TreeNode]:
         """
@@ -519,9 +494,9 @@ class RadixCache:
             self._print_helper(child, indent=indent + 2)
         return
 
-    def free_radix_cache_to_get_enough_token(self, need_token_num, need_evict_buffer_num=0):
+    def free_radix_cache_to_get_enough_token(self, need_token_num):
         assert self.mem_manager is not None
-        if need_token_num > self.mem_manager.can_use_mem_size or need_evict_buffer_num > 0:
+        if need_token_num > self.mem_manager.can_use_mem_size:
             need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size
             release_mems = []
 
@@ -529,28 +504,10 @@ class RadixCache:
                 release_mems.append(mem_index)
                 return
 
-            release_buffers = self.evict(need_evict_token_num, need_evict_buffer_num, release_mem)
+            self.evict(need_evict_token_num, release_mem)
             mem_index = torch.concat(release_mems)
             self.mem_manager.free(mem_index)
-        return release_buffers
-
-    def get_match_prefix_hit_rate(self):
-        """Get the hit rate as a ratio of hit tokens to total requested tokens"""
-        total_calls = self.match_prefix_total_calls.arr[0]
-        if total_calls == 0:
-            return 0.0
-        # We calculate hit rate as the average hit tokens per call
-        # Note: This is a simplified metric. For true hit rate, you might want to track total requested tokens
-        total_hit_tokens = self.match_prefix_hit_tokens.arr[0]
-        return total_hit_tokens / total_calls if total_calls > 0 else 0.0
-
-    def get_match_prefix_stats(self):
-        """Get detailed match_prefix statistics"""
-        return {
-            "total_calls": self.match_prefix_total_calls.arr[0],
-            "total_hit_tokens": self.match_prefix_hit_tokens.arr[0],
-            "hit_rate": self.get_match_prefix_hit_rate(),
-        }
+        return
 
 
 class _RadixCacheReadOnlyClient:
@@ -563,13 +520,6 @@ class _RadixCacheReadOnlyClient:
         self.tree_total_tokens_num = SharedArray(
             f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
         )
-        # Hit rate tracking
-        self.match_prefix_total_calls = SharedArray(
-            f"{unique_name}_match_prefix_total_calls_{rank_in_node}", (1,), dtype=np.int64
-        )
-        self.match_prefix_hit_tokens = SharedArray(
-            f"{unique_name}_match_prefix_hit_tokens_{rank_in_node}", (1,), dtype=np.int64
-        )
 
     def get_refed_tokens_num(self):
         return self.refed_tokens_num.arr[0]
@@ -579,22 +529,6 @@ class _RadixCacheReadOnlyClient:
 
     def get_unrefed_tokens_num(self):
         return self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0]
-
-    def get_match_prefix_hit_rate(self):
-        """Get the hit rate as a ratio of hit tokens to total calls"""
-        total_calls = self.match_prefix_total_calls.arr[0]
-        if total_calls == 0:
-            return 0.0
-        total_hit_tokens = self.match_prefix_hit_tokens.arr[0]
-        return total_hit_tokens / total_calls if total_calls > 0 else 0.0
-
-    def get_match_prefix_stats(self):
-        """Get detailed match_prefix statistics"""
-        return {
-            "total_calls": self.match_prefix_total_calls.arr[0],
-            "total_hit_tokens": self.match_prefix_hit_tokens.arr[0],
-            "hit_rate": self.get_match_prefix_hit_rate(),
-        }
 
 
 class RadixCacheReadOnlyClient:
@@ -612,9 +546,3 @@ class RadixCacheReadOnlyClient:
 
     def get_unrefed_tokens_num(self, dp_rank_in_node):
         return self.dp_rank_clients[dp_rank_in_node].get_unrefed_tokens_num()
-
-    def get_match_prefix_hit_rate(self, dp_rank_in_node):
-        return self.dp_rank_clients[dp_rank_in_node].get_match_prefix_hit_rate()
-
-    def get_match_prefix_stats(self, dp_rank_in_node):
-        return self.dp_rank_clients[dp_rank_in_node].get_match_prefix_stats()
