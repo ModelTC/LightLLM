@@ -113,10 +113,8 @@ class InferenceContext:
             # .cpu() 是 流内阻塞操作
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
 
-            buffer_idx = None
-            if hasattr(self.req_manager, "req_to_buffer_indexes"):
-                buffer_idx = self.req_manager.req_to_buffer_indexes[req.req_idx].cpu()
-            prefix_len, _ = self.radix_cache.insert(key, value, buffer_idx=buffer_idx)
+            prefix_len, node = self.radix_cache.insert(key, value)
+            node.buffer_idx = req.buffer_idx
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
@@ -345,6 +343,10 @@ class InferReq:
         self.nixl_pd_task_failed_num: int = 0
         self.nixl_trans_device_id: int = -1
 
+        # 可以用于请求在整个生命周期维护单一大小的buffer的场景
+        # 例如混合注意力模型 Qwen3Next
+        self.buffer_idx = -1
+
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
@@ -397,13 +399,6 @@ class InferReq:
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
-
-            if share_node is not None:
-                if g_infer_context.use_hybrid_radix_cache:
-                    if share_node.buffer_idx is None:
-                        g_infer_context.radix_cache.dec_node_ref_counter(share_node)
-                        share_node = None
-
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
@@ -411,12 +406,7 @@ class InferReq:
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-
-                if g_infer_context.use_hybrid_radix_cache:
-                    cur_buffer_idx = g_infer_context.req_manager.req_to_buffer_indexes[self.req_idx]
-                    g_infer_context.req_manager.mem_manager.copy_state_cache_buffer(
-                        share_node.buffer_idx, cur_buffer_idx
-                    )
+                self.buffer_idx = share_node.buffer_idx
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return

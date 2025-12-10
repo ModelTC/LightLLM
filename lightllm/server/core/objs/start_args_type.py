@@ -63,8 +63,6 @@ class StartArgs:
     token_healing_mode: bool = field(default=False)
     output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
     first_token_constraint_mode: bool = field(default=False)
-    enable_multimodal: bool = field(default=False)
-    enable_multimodal_audio: bool = field(default=False)
     enable_tpsp_mix_mode: bool = field(default=False)
     enable_dp_prefill_balance: bool = field(default=False)
     enable_decode_microbatch_overlap: bool = field(default=False)
