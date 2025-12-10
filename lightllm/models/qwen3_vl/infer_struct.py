@@ -32,6 +32,8 @@ class Qwen3VLInferStateInfo(LlamaInferStateInfo):
         return freqs_t
 
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
+        rope_scaling = model.config.get("rope_scaling", {})
+        self.mrope_section = rope_scaling.get("mrope_section", None)
         InferStateInfo.init_some_extra_state(self, model, input_ids)
         pos = self.position_ids[None, :].expand(3, -1)
         cos_T = torch.index_select(model._cos_cached, 0, pos[0])  # [L, d/2]
@@ -41,10 +43,10 @@ class Qwen3VLInferStateInfo(LlamaInferStateInfo):
         sin_H = torch.index_select(model._sin_cached, 0, pos[1])
         sin_W = torch.index_select(model._sin_cached, 0, pos[2])
         cos_half = self.apply_interleaved_mrope(
-            torch.stack([cos_T, cos_H, cos_W], dim=0), model.mrope_section
+            torch.stack([cos_T, cos_H, cos_W], dim=0), self.mrope_section
         )  # [L, d/2]
         sin_half = self.apply_interleaved_mrope(
-            torch.stack([sin_T, sin_H, sin_W], dim=0), model.mrope_section
+            torch.stack([sin_T, sin_H, sin_W], dim=0), self.mrope_section
         )  # [L, d/2]
 
         self.position_cos = torch.cat([cos_half, cos_half], dim=-1).contiguous()  # [L, d]
