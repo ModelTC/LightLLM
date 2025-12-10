@@ -183,8 +183,10 @@ class InferenceContext:
         if pause_reqs:
             g_infer_state_lock.acquire()
 
+            pause_req_ids = []
             free_token_index = []
             for req in pause_reqs:
+                pause_req_ids.append(req.req_id)
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
@@ -200,6 +202,9 @@ class InferenceContext:
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
+
+            if hasattr(self.req_manager, "free_buffer"):
+                self.req_manager.free_buffer(pause_req_ids)
 
             g_infer_state_lock.release()
         return self

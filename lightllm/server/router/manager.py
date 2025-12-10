@@ -251,14 +251,6 @@ class RouterManager:
                         estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(d_i)
                         paused_req_num = self._get_paused_req_num_in_dp_index(dp_index=d_i)
 
-                        # Get hit rate from radix cache if available
-                        hit_rate = 0.0
-                        if self.radix_cache_client is not None:
-                            try:
-                                hit_rate = self.radix_cache_client.get_match_prefix_hit_rate(d_i)
-                            except Exception as e:
-                                logger.warning(f"Failed to get hit rate from radix cache: {e}")
-
                         logger.debug(
                             f"dp_i {d_i} current batch size: {len(self.running_batch.reqs)} \n"
                             f"dp_i {d_i} paused req num: {paused_req_num} \n"
@@ -266,7 +258,6 @@ class RouterManager:
                             f"dp_i {d_i} estimated_peak_token_count: {estimated_peak_token_count} \n"
                             f"dp_i {d_i} token used ratio: {token_ratio1} not contain prompt cache tree unrefed token\n"
                             f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token\n"
-                            f"dp_i {d_i} match_prefix hit_rate: {hit_rate:.4f}"
                         )
                         self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
                 # pd decode mode need to update token_load more frequently
