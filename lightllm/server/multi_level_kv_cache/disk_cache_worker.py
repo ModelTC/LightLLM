@@ -113,12 +113,12 @@ class DiskCacheWorker:
         if not payloads:
             return
         page_indexes = [payload.index for payload in payloads]
-        tokens = [payload.hash_key for payload in payloads]
+        hashs = [payload.hash_key for payload in payloads]
         if not page_indexes:
             return
 
         kv_indexer = torch.tensor(page_indexes, dtype=torch.int32, device="cpu")
-        query_result = self.service.query(tokens)
+        query_result = self.service.query(hashs)
         if not all(query_result):
             # 限制写入并发量，给读取操作留资源
             while (
@@ -126,7 +126,7 @@ class DiskCacheWorker:
             ):
                 time.sleep(0.001)
 
-            task = self.service.create(tokens=tokens, kv_page_indexer=kv_indexer, mode="w")
+            task = self.service.create(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="w")
             # 立即释放已经在disk cache中的页面
             if task.page_already_list:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
@@ -148,30 +148,30 @@ class DiskCacheWorker:
             self.cpu_cache_client.deref_pages(page_list=page_indexes)
             self.cpu_cache_client.lock.release()
 
-    def query_loadable_pages(self, tokens: List[int], start_pos: int) -> int:
+    def query_loadable_pages(self, hashs: List[int], start_pos: int) -> int:
         """
         查询从start_pos位置开始,可以从disk cache加载的最长前缀长度
         Returns:
             loadable_len: 从start_pos开始可以加载的长度
         """
-        if not tokens or start_pos < 0 or start_pos >= len(tokens):
+        if not hashs or start_pos < 0 or start_pos >= len(hashs):
             return 0
 
-        query_result = self.service.query(tokens)
+        query_result = self.service.query(hashs)
         n = self.service._n
         start_block = start_pos // n
         try:
             first_false_idx = start_block + query_result[start_block:].index(False)
         except ValueError:
-            return len(tokens) - start_pos
+            return len(hashs) - start_pos
         first_missing_pos = first_false_idx * n
         return max(0, first_missing_pos - start_pos)
 
     # 从磁盘读取数据到内存
-    def load_pages(self, tokens: List[int], page_indexes: List[int], start_pos: int = 0) -> bool:
-        if not tokens or not page_indexes or len(tokens) != len(page_indexes):
+    def load_pages(self, hashs: List[int], page_indexes: List[int], start_pos: int = 0) -> bool:
+        if not hashs or not page_indexes or len(hashs) != len(page_indexes):
             return False
-        if start_pos < 0 or start_pos >= len(tokens):
+        if start_pos < 0 or start_pos >= len(hashs):
             return False
 
         # 检测当前是否有写操作在进行，若有则跳过本次load请求，暂时不用
@@ -180,7 +180,7 @@ class DiskCacheWorker:
         #     return False
 
         kv_indexer = torch.tensor(page_indexes, dtype=torch.int32, device="cpu")
-        task = self.service.create(tokens=tokens, kv_page_indexer=kv_indexer, mode="r", start_pos=start_pos)
+        task = self.service.create(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="r", start_pos=start_pos)
         while not task.ready():
             time.sleep(0.001)
         return all(state == PyState.Finished for state in task.state())

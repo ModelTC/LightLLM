@@ -50,6 +50,20 @@ def get_env_start_args():
 
 
 @lru_cache(maxsize=None)
+def get_llm_data_type() -> torch.dtype:
+    data_type: str = get_env_start_args().data_type
+    if data_type in ["fp16", "float16"]:
+        data_type = torch.float16
+    elif data_type in ["bf16", "bfloat16"]:
+        data_type = torch.bfloat16
+    elif data_type in ["fp32", "float32"]:
+        data_type = torch.float32
+    else:
+        raise ValueError(f"Unsupport datatype {data_type}!")
+    return data_type
+
+
+@lru_cache(maxsize=None)
 def enable_env_vars(args):
     return os.getenv(args, "False").upper() in ["ON", "TRUE", "1"]
 

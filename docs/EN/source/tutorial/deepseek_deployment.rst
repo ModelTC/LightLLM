@@ -6,7 +6,7 @@ DeepSeek Model Deployment Guide
 LightLLM supports various deployment solutions for DeepSeek models, including DeepSeek-R1, DeepSeek-V2, DeepSeek-V3, etc. This document provides detailed information on various deployment modes and configuration solutions.
 
 Deployment Mode Overview
------------------------
+------------------------
 
 LightLLM supports the following deployment modes:
 
@@ -157,7 +157,7 @@ Suitable for deploying MoE models across multiple nodes.
 - `--enable_decode_microbatch_overlap`: Enable decode microbatch overlap
 
 3. PD disaggregation Deployment Solutions
-------------------------------------
+------------------------------------------
 
 PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for deployment, which can better utilize hardware resources.
 
@@ -187,7 +187,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d 
-    MOE_MODE=EP KV_TRANS_USE_P2P=1 LOADWORKER=18 python -m lightllm.server.api_server \
+    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
     --tp 8 \
@@ -208,7 +208,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d
-    MOE_MODE=EP KV_TRANS_USE_P2P=1 LOADWORKER=18 python -m lightllm.server.api_server \
+    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
     --tp 8 \
@@ -328,7 +328,7 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
               }'
 
 4.2 Performance Benchmark Testing
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 

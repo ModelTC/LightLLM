@@ -1,5 +1,5 @@
 Reward Model Deployment Configuration
-====================================
+=====================================
 
 LightLLM supports inference for various reward models, used for evaluating conversation quality and generating reward scores. Currently supported reward models include InternLM2 Reward and Qwen2 Reward, etc.
 
@@ -18,7 +18,7 @@ Testing Examples
 ----------------
 
 Python Testing Code
-^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: python
 
@@ -48,7 +48,7 @@ Python Testing Code
         print(f"Error: {response.status_code}, {response.text}")
 
 cURL Testing Command
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: bash
 

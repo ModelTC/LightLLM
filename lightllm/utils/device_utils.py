@@ -112,7 +112,7 @@ def init_p2p(device_index):
 
 @lru_cache(maxsize=None)
 def kv_trans_use_p2p():
-    return os.getenv("KV_TRANS_USE_P2P", "False").upper() in ["1", "TRUE", "ON"]
+    return not (os.getenv("DISABLE_KV_TRANS_USE_P2P", "False").upper() in ["1", "TRUE", "ON"])
 
 
 def has_nvlink():

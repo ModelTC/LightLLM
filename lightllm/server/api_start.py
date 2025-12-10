@@ -269,6 +269,14 @@ def normal_or_p_d_start(args):
         args.router_max_wait_tokens = 0
 
     send_and_receive_node_ip(args)  # 多机用于收发node ip
+    # dp 必须 > 1
+    if args.enable_dp_prompt_cache_fetch and args.dp <= 1:
+        args.enable_dp_prompt_cache_fetch = False
+        logger.warning(
+            """dp <= 1 does not support dp_prompt_cache_fetch;
+            overriding enable_dp_prompt_cache_fetch to False"""
+        )
+
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
 

@@ -67,6 +67,27 @@ class _ModelRegistries:
         is_multimodal = matches[0].is_multimodal
         return model, is_multimodal
 
+    def get_model_class(self, model_cfg: dict):
+        """Get model"""
+        model_type = model_cfg.get("model_type", "")
+        configs = self._registry.get(model_type, [])
+        matches = []
+        for cfg in configs:
+            if cfg.condition is None or cfg.condition(model_cfg):
+                matches.append(cfg)
+
+        if len(matches) == 0:
+            raise ValueError(f"Model type {model_type} is not supported.")
+
+        if len(matches) > 1:
+            # Keep conditionally matched models
+            matches = [m for m in matches if m.condition is not None]
+
+        assert (
+            len(matches) == 1
+        ), "Existence of coupled conditon, inability to determine the class of models instantiated"
+        return matches[0].model_class
+
 
 ModelRegistry = _ModelRegistries()
 
@@ -75,6 +96,15 @@ def get_model(model_cfg: dict, model_kvargs: dict):
     try:
         model, is_multimodal = ModelRegistry.get_model(model_cfg, model_kvargs)
         return model, is_multimodal
+    except Exception as e:
+        logger.exception(str(e))
+        raise
+
+
+def get_model_class(model_cfg: dict):
+    try:
+        model_class = ModelRegistry.get_model_class(model_cfg)
+        return model_class
     except Exception as e:
         logger.exception(str(e))
         raise

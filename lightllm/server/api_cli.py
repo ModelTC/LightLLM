@@ -566,4 +566,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="""Directory used to persist disk cache data. Defaults to a temp directory when not set.""",
     )
+    parser.add_argument(
+        "--enable_dp_prompt_cache_fetch",
+        action="store_true",
+        default=False,
+        help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
+    )
     return parser
