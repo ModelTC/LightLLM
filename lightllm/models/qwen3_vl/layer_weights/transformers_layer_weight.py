@@ -1,7 +1,7 @@
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
 
 
-class Qwen3VLTransformerLayerWeight(Qwen3TransformerLayerWeight):  # 后面看要不要改
+class Qwen3VLTransformerLayerWeight(Qwen3TransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
         super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
 
