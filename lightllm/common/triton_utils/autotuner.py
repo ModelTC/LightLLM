@@ -168,7 +168,7 @@ class Autotuner:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
                 logger.warning(
                     f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)},"
-                    f"the performance may be suboptimal!"
+                    f"the performance may be suboptimal! "
                     f"You can use LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 to enable autotune.",
                 )
             self.cached_configs[static_key] = {}
@@ -215,7 +215,7 @@ class Autotuner:
 
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
-            logger.info(f"Loading cached configs for {self.kernel_name} - {static_key}")
+            logger.info(f"Loading cached configs for {self.kernel_name} - {static_key.items()}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
         return True
