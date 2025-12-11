@@ -15,6 +15,7 @@ import triton.language as tl
 
 from .index import prepare_chunk_indices
 from .op import exp
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.heuristics(
@@ -22,15 +23,6 @@ from .op import exp
         "USE_G": lambda args: args["g"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
-)
-@triton.autotune(
-    configs=[
-        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64, 128]
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "BT", "IS_VARLEN"],
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_scaled_dot_kkt_fwd_kernel(
@@ -95,6 +87,31 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
+def _get_chunk_scaled_dot_kkt_configs():
+    return [
+        {"BK": BK, "num_warps": num_warps, "num_stages": num_stages}
+        for BK in [32, 64, 128]
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ]
+
+
+def _get_chunk_scaled_dot_kkt_static_key(H, K, BT, cu_seqlens, **kwargs):
+    IS_VARLEN = cu_seqlens is not None
+    return {"H": H, "K": K, "BT": BT, "IS_VARLEN": IS_VARLEN}
+
+
+def _get_chunk_scaled_dot_kkt_run_key(H, K, BT, cu_seqlens, **kwargs):
+    IS_VARLEN = cu_seqlens is not None
+    return f"{H}_{K}_{BT}_{IS_VARLEN}"
+
+
+@autotune(
+    kernel_name="chunk_scaled_dot_kkt_fwd",
+    configs_gen_func=_get_chunk_scaled_dot_kkt_configs,
+    static_key_func=_get_chunk_scaled_dot_kkt_static_key,
+    run_key_func=_get_chunk_scaled_dot_kkt_run_key,
+)
 def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
     g: torch.Tensor | None = None,
@@ -102,6 +119,7 @@ def chunk_scaled_dot_kkt_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
+    run_config=None,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -132,6 +150,14 @@ def chunk_scaled_dot_kkt_fwd(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
+    # Extract config parameters
+    if run_config is None:
+        run_config = {"BK": 64, "num_warps": 2, "num_stages": 2}
+
+    BK = run_config.get("BK", 64)
+    num_warps = run_config.get("num_warps", 2)
+    num_stages = run_config.get("num_stages", 2)
+
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](
         k=k,
@@ -145,5 +171,8 @@ def chunk_scaled_dot_kkt_fwd(
         Hg=Hg,
         K=K,
         BT=BT,
+        BK=BK,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return A

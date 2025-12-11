@@ -18,6 +18,7 @@ import triton.language as tl
 from .index import prepare_chunk_indices
 from .op import make_tensor_descriptor
 from .utils import input_guard, is_amd, is_tma_supported
+from lightllm.common.triton_utils.autotuner import autotune
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32"] if is_amd else ["ieee", "tf32", "tf32x3"]
@@ -27,14 +28,6 @@ assert (
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4, 8]
-        for num_stages in [2, 3, 4, 5]
-    ],
-    key=["BT"],
-)
 @triton.jit(do_not_specialize=["T"])
 def solve_tril_16x16_kernel(
     A,
@@ -98,14 +91,6 @@ def solve_tril_16x16_kernel(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4, 8]
-        for num_stages in [2, 3, 4, 5]
-    ],
-    key=["H", "BT", "IS_VARLEN"],
-)
 @triton.jit(do_not_specialize=["T"])
 def merge_16x16_to_32x32_inverse_kernel(
     A,
@@ -205,14 +190,6 @@ def merge_16x16_to_32x32_inverse_kernel(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4, 5]
-    ],
-    key=["H", "BT", "IS_VARLEN"],
-)
 @triton.jit(do_not_specialize=["T"])
 def merge_16x16_to_64x64_inverse_kernel(
     A,
