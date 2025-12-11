@@ -111,9 +111,6 @@ class ChunkedPrefillBackend(ModeBackend):
             prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
         )
 
-        if hasattr(g_infer_context.req_manager, "req_to_buffer_indexes"):
-            g_infer_context.req_manager.alloc_buffer(model_input.b_req_idx)
-
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
@@ -132,6 +129,9 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
+        if isinstance(g_infer_context.radix_cache, HybridRadixCache):
+            g_infer_context.radix_cache.insert_for_hybrid_radix_cache(run_reqs)
+
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
@@ -143,10 +143,6 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
-
-        if isinstance(g_infer_context.radix_cache, HybridRadixCache):
-            g_infer_context.radix_cache.insert_for_hybrid_radix_cache(run_reqs)
-
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
