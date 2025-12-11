@@ -11,7 +11,8 @@ class Qwen3NextReqManager(ReqManager):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.EMPTY_BUFFER_INDEX = -1
         self.req_to_buffer_indexes = torch.zeros((self.max_request_num + 1), dtype=torch.int32, device="cuda")
-        self.req_to_buffer_indexes[:] = self.EMPTY_BUFFER_INDEX
+        self.req_to_buffer_indexes[:-1] = self.EMPTY_BUFFER_INDEX
+        self.req_to_buffer_indexes[-1] = self.mem_manager.HOLD_BUFFER_INDEX
 
     @override
     def free(self, free_req_indexes: List[int], free_token_index):
@@ -20,7 +21,7 @@ class Qwen3NextReqManager(ReqManager):
 
     @override
     def free_all(self):
-        self.req_to_buffer_indexes[:] = self.EMPTY_BUFFER_INDEX
+        self.req_to_buffer_indexes[:-1] = self.EMPTY_BUFFER_INDEX
         super().free_all()
         return
 
