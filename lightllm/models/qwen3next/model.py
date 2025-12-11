@@ -90,25 +90,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     @override
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
-        from lightllm.common.basemodel.infer_lock import g_infer_state_lock
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
         infer_state = super()._create_inferstate(model_input, microbatch_index)
 
         buffer_indexes = self.req_manager.req_to_buffer_indexes[model_input.b_req_idx]
-        empty_indexes = buffer_indexes == self.req_manager.EMPTY_BUFFER_INDEX
-        num_empty = empty_indexes.sum()
-        if num_empty == 0:
-            return infer_state
-
-        g_infer_state_lock.acquire()
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_buffer(num_empty)
-        new_buffer_indexes = self.mem_manager.alloc_buffer(num_empty).cuda()
-        g_infer_state_lock.release()
-
-        buffer_indexes[empty_indexes] = new_buffer_indexes
-        self.req_manager.req_to_buffer_indexes[model_input.b_req_idx] = buffer_indexes
         infer_state.buffer_indexes = buffer_indexes
         return infer_state
 
