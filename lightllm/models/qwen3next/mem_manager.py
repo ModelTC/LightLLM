@@ -68,6 +68,7 @@ class Qwen3NextMemoryManager(HybridMemManager):
         self.ssm_state_shape = ssm_state_shape
 
         assert linear_attn_cache_size is not None
+        self.HOLD_BUFFER_INDEX = linear_attn_cache_size
         self.conv_state_mem_manager = LayerCacheMemoryManager(
             linear_attn_cache_size, conv_state_dtype, conv_state_shape, self.linear_attn_layer_num, "conv_state"
         )
