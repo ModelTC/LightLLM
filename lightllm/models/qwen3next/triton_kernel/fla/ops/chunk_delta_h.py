@@ -237,12 +237,16 @@ def _get_chunk_delta_h_configs():
     ]
 
 
-def _get_chunk_delta_h_static_key(H, K, V, BT, **kwargs):
-    return {"H": H, "K": K, "V": V, "BT": BT}
+def _get_chunk_delta_h_static_key(k, u, chunk_size, **kwargs):
+    B, T, Hg, K = k.shape
+    V = u.shape[-1]
+    H = u.shape[-2]
+    return {"H": H, "K": K, "V": V, "BT": chunk_size}
 
 
-def _get_chunk_delta_h_run_key(H, K, V, BT, **kwargs):
-    return f"{H}_{K}_{V}_{BT}"
+def _get_chunk_delta_h_run_key(k, u, **kwargs):
+    # Return batch * heads as run key
+    return k.shape[0] * k.shape[2]
 
 
 @autotune(
