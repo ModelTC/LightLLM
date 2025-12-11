@@ -31,3 +31,23 @@ class Qwen3NextReqManager(ReqManager):
             self.mem_manager.free_buffer(self.req_to_buffer_indexes[free_req_indexes])
         self.req_to_buffer_indexes[free_req_indexes] = self.EMPTY_BUFFER_INDEX
         return
+
+    def alloc_buffer(self, req_indexes: List[int]):
+        from lightllm.common.basemodel.infer_lock import g_infer_state_lock
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        cur_buffer_indexes = self.req_to_buffer_indexes[req_indexes]
+        empty_indexes = cur_buffer_indexes == self.EMPTY_BUFFER_INDEX
+        num_empty = empty_indexes.sum()
+        if num_empty == 0:
+            return
+
+        g_infer_state_lock.acquire()
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(num_empty)
+        new_buffer_indexes = self.mem_manager.alloc_buffer(num_empty).cuda()
+        g_infer_state_lock.release()
+
+        cur_buffer_indexes[empty_indexes] = new_buffer_indexes
+        self.req_to_buffer_indexes[req_indexes] = cur_buffer_indexes
+        return
