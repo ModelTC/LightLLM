@@ -15,17 +15,10 @@ import triton
 import triton.language as tl
 
 from .index import prepare_chunk_indices
+from lightllm.common.triton_utils.autotuner import autotune
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
-)
 @triton.jit(do_not_specialize=["T"])
 def recompute_w_u_fwd_kernel(
     k,

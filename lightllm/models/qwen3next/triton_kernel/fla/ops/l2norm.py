@@ -13,16 +13,13 @@ import torch
 
 import triton
 import triton.language as tl
+from lightllm.common.triton_utils.autotuner import autotune
 
 BT_LIST = [8, 16, 32, 64, 128]
 
 USE_DEFAULT_FLA_NORM = int(os.getenv("USE_DEFAULT_FLA_NORM", "0"))
 
 
-@triton.autotune(
-    configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16, 32]],
-    key=["D"],
-)
 @triton.jit
 def l2norm_fwd_kernel1(
     x,
@@ -46,10 +43,6 @@ def l2norm_fwd_kernel1(
     tl.store(y + cols, b_y, mask=mask)
 
 
-@triton.autotune(
-    configs=[triton.Config({"BT": BT}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16] for BT in BT_LIST],
-    key=["D"],
-)
 @triton.jit(do_not_specialize=["NB"])
 def l2norm_fwd_kernel(
     x,
@@ -83,6 +76,63 @@ def l2norm_fwd_kernel2(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr):
     tl.store(Y + (rindex + N * row_idx), xs * rsqrt, xmask)
 
 
+def _get_l2norm_kernel1_configs():
+    return [{"num_warps": num_warps} for num_warps in [1, 2, 4, 8, 16, 32]]
+
+
+def _get_l2norm_kernel1_static_key(D, **kwargs):
+    return {"D": D}
+
+
+def _get_l2norm_kernel1_run_key(D, **kwargs):
+    return f"{D}"
+
+
+@autotune(
+    kernel_name="l2norm_fwd_kernel1",
+    configs_gen_func=_get_l2norm_kernel1_configs,
+    static_key_func=_get_l2norm_kernel1_static_key,
+    run_key_func=_get_l2norm_kernel1_run_key,
+)
+def _l2norm_fwd_kernel1_wrapper(x, y, eps, D, BD, run_config=None):
+    if run_config is None:
+        run_config = {"num_warps": 4}
+
+    num_warps = run_config.get("num_warps", 4)
+    T = x.shape[0]
+
+    l2norm_fwd_kernel1[(T,)](x, y, eps=eps, D=D, BD=BD, num_warps=num_warps)
+
+
+def _get_l2norm_kernel_configs():
+    return [{"BT": BT, "num_warps": num_warps} for num_warps in [1, 2, 4, 8, 16] for BT in BT_LIST]
+
+
+def _get_l2norm_kernel_static_key(D, **kwargs):
+    return {"D": D}
+
+
+def _get_l2norm_kernel_run_key(D, **kwargs):
+    return f"{D}"
+
+
+@autotune(
+    kernel_name="l2norm_fwd_kernel",
+    configs_gen_func=_get_l2norm_kernel_configs,
+    static_key_func=_get_l2norm_kernel_static_key,
+    run_key_func=_get_l2norm_kernel_run_key,
+)
+def _l2norm_fwd_kernel_wrapper(x, y, eps, T, D, BD, NB, run_config=None):
+    if run_config is None:
+        run_config = {"BT": 32, "num_warps": 4}
+
+    BT = run_config.get("BT", 32)
+    num_warps = run_config.get("num_warps", 4)
+
+    grid = (triton.cdiv(T, BT),)
+    l2norm_fwd_kernel[grid](x, y, eps, NB=NB, T=T, D=D, BT=BT, BD=BD, num_warps=num_warps)
+
+
 def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -114,26 +164,8 @@ def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | N
     else:
         if D <= 512:
             NB = triton.cdiv(T, 2048)
-
-            def grid(meta):
-                return (triton.cdiv(T, meta["BT"]),)
-
-            l2norm_fwd_kernel[grid](
-                x,
-                y,
-                eps,
-                NB=NB,
-                T=T,
-                D=D,
-                BD=BD,
-            )
+            _l2norm_fwd_kernel_wrapper(x, y, eps, T, D, BD, NB)
         else:
-            l2norm_fwd_kernel1[(T,)](
-                x,
-                y,
-                eps=eps,
-                D=D,
-                BD=BD,
-            )
+            _l2norm_fwd_kernel1_wrapper(x, y, eps, D, BD)
 
     return y.view(x_shape_og)

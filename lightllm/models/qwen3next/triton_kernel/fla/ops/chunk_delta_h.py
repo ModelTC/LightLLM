@@ -16,6 +16,7 @@ import triton.language as tl
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp
 from .utils import use_cuda_graph
+from lightllm.common.triton_utils.autotuner import autotune
 
 NUM_WARPS = [2, 4, 8, 16]
 
@@ -29,16 +30,6 @@ NUM_WARPS = [2, 4, 8, 16]
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
-)
-@triton.autotune(
-    configs=[
-        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
-        for BV in [32, 64]
-    ],
-    key=["H", "K", "V", "BT"],
-    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
@@ -237,6 +228,29 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             tl.store(p_ht, b_h4.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
 
 
+def _get_chunk_delta_h_configs():
+    return [
+        {"BV": BV, "num_warps": num_warps, "num_stages": num_stages}
+        for num_warps in [2, 4]
+        for num_stages in [2, 3, 4]
+        for BV in [32, 64]
+    ]
+
+
+def _get_chunk_delta_h_static_key(H, K, V, BT, **kwargs):
+    return {"H": H, "K": K, "V": V, "BT": BT}
+
+
+def _get_chunk_delta_h_run_key(H, K, V, BT, **kwargs):
+    return f"{H}_{K}_{V}_{BT}"
+
+
+@autotune(
+    kernel_name="chunk_gated_delta_rule_fwd_h",
+    configs_gen_func=_get_chunk_delta_h_configs,
+    static_key_func=_get_chunk_delta_h_static_key,
+    run_key_func=_get_chunk_delta_h_run_key,
+)
 def chunk_gated_delta_rule_fwd_h(
     k: torch.Tensor,
     w: torch.Tensor,
@@ -248,6 +262,7 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
+    run_config=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
@@ -272,8 +287,15 @@ def chunk_gated_delta_rule_fwd_h(
 
     v_new = torch.empty_like(u) if save_new_value else None
 
-    def grid(meta):
-        return (triton.cdiv(V, meta["BV"]), N * H)
+    # Extract config parameters
+    if run_config is None:
+        run_config = {"BV": 64, "num_warps": 2, "num_stages": 2}
+
+    BV = run_config.get("BV", 64)
+    num_warps = run_config.get("num_warps", 2)
+    num_stages = run_config.get("num_stages", 2)
+
+    grid = (triton.cdiv(V, BV), N * H)
 
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
@@ -293,5 +315,8 @@ def chunk_gated_delta_rule_fwd_h(
         K=K,
         V=V,
         BT=BT,
+        BV=BV,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return h, v_new, final_state
