@@ -148,14 +148,18 @@ def _get_cumsum_scalar_configs():
     return [{"num_warps": num_warps} for num_warps in [1, 2, 4, 8]]
 
 
-def _get_cumsum_scalar_static_key(B, H, BT, REVERSE, cu_seqlens, **kwargs):
+def _get_cumsum_scalar_static_key(g, chunk_size, reverse, cu_seqlens, head_first, **kwargs):
+    if head_first:
+        B, H, T = g.shape
+    else:
+        B, T, H = g.shape
     IS_VARLEN = cu_seqlens is not None
-    return {"B": B, "H": H, "BT": BT, "IS_VARLEN": IS_VARLEN, "REVERSE": REVERSE}
+    return {"B": B, "H": H, "BT": chunk_size, "IS_VARLEN": IS_VARLEN, "REVERSE": reverse}
 
 
-def _get_cumsum_scalar_run_key(B, H, BT, REVERSE, cu_seqlens, **kwargs):
-    IS_VARLEN = cu_seqlens is not None
-    return f"{B}_{H}_{BT}_{IS_VARLEN}_{REVERSE}"
+def _get_cumsum_scalar_run_key(g, **kwargs):
+    # Return total number of elements as run key
+    return g.shape[0] * g.shape[1]
 
 
 @autotune(
@@ -210,14 +214,18 @@ def _get_cumsum_vector_configs():
     return [{"BS": BS, "num_warps": num_warps} for BS in BS_LIST for num_warps in [2, 4, 8]]
 
 
-def _get_cumsum_vector_static_key(B, H, S, BT, REVERSE, cu_seqlens, **kwargs):
+def _get_cumsum_vector_static_key(g, chunk_size, reverse, cu_seqlens, head_first, **kwargs):
+    if head_first:
+        B, H, T, S = g.shape
+    else:
+        B, T, H, S = g.shape
     IS_VARLEN = cu_seqlens is not None
-    return {"B": B, "H": H, "S": S, "BT": BT, "IS_VARLEN": IS_VARLEN, "REVERSE": REVERSE}
+    return {"B": B, "H": H, "S": S, "BT": chunk_size, "IS_VARLEN": IS_VARLEN, "REVERSE": reverse}
 
 
-def _get_cumsum_vector_run_key(B, H, S, BT, REVERSE, cu_seqlens, **kwargs):
-    IS_VARLEN = cu_seqlens is not None
-    return f"{B}_{H}_{S}_{BT}_{IS_VARLEN}_{REVERSE}"
+def _get_cumsum_vector_run_key(g, **kwargs):
+    # Return batch * heads as run key
+    return g.shape[0] * g.shape[2] if len(g.shape) == 4 else g.shape[0]
 
 
 @autotune(

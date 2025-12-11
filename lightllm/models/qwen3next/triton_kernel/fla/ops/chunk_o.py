@@ -130,12 +130,17 @@ def _get_chunk_o_configs():
     ]
 
 
-def _get_chunk_o_static_key(H, K, V, BT, **kwargs):
+def _get_chunk_o_static_key(q, v, chunk_size, **kwargs):
+    B, T, Hg, K = q.shape
+    V = v.shape[-1]
+    H = v.shape[-2]
+    BT = 64 if FLA_GDN_FIX_BT else min(chunk_size, max(16, triton.next_power_of_2(T)))
     return {"H": H, "K": K, "V": V, "BT": BT}
 
 
-def _get_chunk_o_run_key(H, K, V, BT, **kwargs):
-    return f"{H}_{K}_{V}_{BT}"
+def _get_chunk_o_run_key(q, v, **kwargs):
+    # Return batch * heads as run key
+    return q.shape[0] * q.shape[2]
 
 
 @autotune(
