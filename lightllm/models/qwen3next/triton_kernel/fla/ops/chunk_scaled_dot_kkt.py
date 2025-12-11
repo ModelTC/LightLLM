@@ -96,14 +96,16 @@ def _get_chunk_scaled_dot_kkt_configs():
     ]
 
 
-def _get_chunk_scaled_dot_kkt_static_key(H, K, BT, cu_seqlens, **kwargs):
+def _get_chunk_scaled_dot_kkt_static_key(k, beta, chunk_size, cu_seqlens, **kwargs):
+    B, T, Hg, K = k.shape
+    H = beta.shape[-1]
     IS_VARLEN = cu_seqlens is not None
-    return {"H": H, "K": K, "BT": BT, "IS_VARLEN": IS_VARLEN}
+    return {"H": H, "K": K, "BT": chunk_size, "IS_VARLEN": IS_VARLEN}
 
 
-def _get_chunk_scaled_dot_kkt_run_key(H, K, BT, cu_seqlens, **kwargs):
-    IS_VARLEN = cu_seqlens is not None
-    return f"{H}_{K}_{BT}_{IS_VARLEN}"
+def _get_chunk_scaled_dot_kkt_run_key(k, beta, **kwargs):
+    # Return batch * heads as run key
+    return k.shape[0] * k.shape[2]
 
 
 @autotune(
