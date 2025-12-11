@@ -130,7 +130,7 @@ def _get_chunk_o_configs():
     ]
 
 
-def _get_chunk_o_static_key(q, v, chunk_size, **kwargs):
+def _get_chunk_o_static_key(q, v, chunk_size):
     B, T, Hg, K = q.shape
     V = v.shape[-1]
     H = v.shape[-2]
@@ -138,7 +138,7 @@ def _get_chunk_o_static_key(q, v, chunk_size, **kwargs):
     return {"H": H, "K": K, "V": V, "BT": BT}
 
 
-def _get_chunk_o_run_key(q, v, **kwargs):
+def _get_chunk_o_run_key(q, v):
     # Return batch * heads as run key
     return q.shape[0] * q.shape[2]
 

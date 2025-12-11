@@ -1,6 +1,6 @@
 {
-  "2048": {
-    "BLOCK_SIZE": 4096,
+  "4": {
+    "BV": 32,
     "num_stages": 4,
     "num_warps": 4
   }

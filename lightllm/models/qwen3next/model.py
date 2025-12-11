@@ -1,5 +1,7 @@
 import torch
+from typing import Optional
 from typing_extensions import override
+import triton
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import Qwen3NextTransformerLayerWeight
@@ -16,6 +18,10 @@ from lightllm.models.qwen3next.req_manager import Qwen3NextReqManager
 logger = init_logger(__name__)
 
 
+def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
+    return torch.empty(size, device="cuda", dtype=torch.int8)
+
+
 @ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
     # weight class
@@ -27,6 +33,12 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def __init__(self, kvargs) -> None:
         self.mem_manager: Qwen3NextMemoryManager = None
+
+        # Set Triton allocator for TMA descriptors
+        # This is required for kernels in qwen3next/triton_kernel/fla/ops/solve_tril.py
+        triton.set_allocator(_triton_allocator)
+        logger.info("Triton allocator set for Qwen3Next model")
+
         super().__init__(kvargs)
 
     @override
