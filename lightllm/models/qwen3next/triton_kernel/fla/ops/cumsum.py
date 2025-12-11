@@ -16,15 +16,12 @@ import triton.language as tl
 
 from .index import prepare_chunk_indices
 from .utils import check_shared_mem, input_guard
+from lightllm.common.triton_utils.autotuner import autotune
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
-    key=["B", "H", "BT", "IS_VARLEN", "REVERSE"],
-)
 @triton.jit(do_not_specialize=["T"])
 def chunk_local_cumsum_scalar_kernel(
     s,
@@ -70,10 +67,6 @@ def chunk_local_cumsum_scalar_kernel(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.autotune(
-    configs=[triton.Config({"BS": BS}, num_warps=num_warps) for BS in BS_LIST for num_warps in [2, 4, 8]],
-    key=["B", "H", "S", "BT", "IS_VARLEN", "REVERSE"],
-)
 @triton.jit(do_not_specialize=["T"])
 def chunk_local_cumsum_vector_kernel(
     s,
@@ -151,6 +144,26 @@ def chunk_local_cumsum_vector_kernel(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
+def _get_cumsum_scalar_configs():
+    return [{"num_warps": num_warps} for num_warps in [1, 2, 4, 8]]
+
+
+def _get_cumsum_scalar_static_key(B, H, BT, REVERSE, cu_seqlens, **kwargs):
+    IS_VARLEN = cu_seqlens is not None
+    return {"B": B, "H": H, "BT": BT, "IS_VARLEN": IS_VARLEN, "REVERSE": REVERSE}
+
+
+def _get_cumsum_scalar_run_key(B, H, BT, REVERSE, cu_seqlens, **kwargs):
+    IS_VARLEN = cu_seqlens is not None
+    return f"{B}_{H}_{BT}_{IS_VARLEN}_{REVERSE}"
+
+
+@autotune(
+    kernel_name="chunk_local_cumsum_scalar",
+    configs_gen_func=_get_cumsum_scalar_configs,
+    static_key_func=_get_cumsum_scalar_static_key,
+    run_key_func=_get_cumsum_scalar_run_key,
+)
 def chunk_local_cumsum_scalar(
     g: torch.Tensor,
     chunk_size: int,
@@ -158,6 +171,7 @@ def chunk_local_cumsum_scalar(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    run_config=None,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = g.shape
@@ -168,6 +182,13 @@ def chunk_local_cumsum_scalar(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+
+    # Extract config parameters
+    if run_config is None:
+        run_config = {"num_warps": 2}
+
+    num_warps = run_config.get("num_warps", 2)
+
     grid = (NT, B * H)
     chunk_local_cumsum_scalar_kernel[grid](
         g_org,
@@ -180,10 +201,31 @@ def chunk_local_cumsum_scalar(
         BT=BT,
         HEAD_FIRST=head_first,
         REVERSE=reverse,
+        num_warps=num_warps,
     )
     return g
 
 
+def _get_cumsum_vector_configs():
+    return [{"BS": BS, "num_warps": num_warps} for BS in BS_LIST for num_warps in [2, 4, 8]]
+
+
+def _get_cumsum_vector_static_key(B, H, S, BT, REVERSE, cu_seqlens, **kwargs):
+    IS_VARLEN = cu_seqlens is not None
+    return {"B": B, "H": H, "S": S, "BT": BT, "IS_VARLEN": IS_VARLEN, "REVERSE": REVERSE}
+
+
+def _get_cumsum_vector_run_key(B, H, S, BT, REVERSE, cu_seqlens, **kwargs):
+    IS_VARLEN = cu_seqlens is not None
+    return f"{B}_{H}_{S}_{BT}_{IS_VARLEN}_{REVERSE}"
+
+
+@autotune(
+    kernel_name="chunk_local_cumsum_vector",
+    configs_gen_func=_get_cumsum_vector_configs,
+    static_key_func=_get_cumsum_vector_static_key,
+    run_key_func=_get_cumsum_vector_run_key,
+)
 def chunk_local_cumsum_vector(
     g: torch.Tensor,
     chunk_size: int,
@@ -191,6 +233,7 @@ def chunk_local_cumsum_vector(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    run_config=None,
 ) -> torch.Tensor:
     if head_first:
         B, H, T, S = g.shape
@@ -203,8 +246,14 @@ def chunk_local_cumsum_vector(
 
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
 
-    def grid(meta):
-        return (triton.cdiv(meta["S"], meta["BS"]), NT, B * H)
+    # Extract config parameters
+    if run_config is None:
+        run_config = {"BS": 32, "num_warps": 2}
+
+    BS = run_config.get("BS", 32)
+    num_warps = run_config.get("num_warps", 2)
+
+    grid = (triton.cdiv(S, BS), NT, B * H)
 
     # keep cumulative normalizer in fp32
     # this kernel is equivalent to
@@ -219,8 +268,10 @@ def chunk_local_cumsum_vector(
         H=H,
         S=S,
         BT=BT,
+        BS=BS,
         HEAD_FIRST=head_first,
         REVERSE=reverse,
+        num_warps=num_warps,
     )
     return g
 
