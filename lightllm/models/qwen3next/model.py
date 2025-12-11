@@ -89,14 +89,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         )
 
     @override
-    def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
-        infer_state = super()._create_inferstate(model_input, microbatch_index)
-
-        buffer_indexes = self.req_manager.req_to_buffer_indexes[model_input.b_req_idx]
-        infer_state.buffer_indexes = buffer_indexes
-        return infer_state
-
-    @override
     def _init_req_manager(self):
         create_max_seq_len = 0
 

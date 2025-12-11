@@ -82,14 +82,12 @@ class HybridRadixCache(RadixCache):
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = g_infer_context.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-            buffer_idx = req.buffer_idx
 
             # 分配新的 buffer 并复制当前 buffer 的内容
-            self.mem_manager.copy_buffer(buffer_idx, new_buffer_indexes[i])
-            req.buffer_idx = new_buffer_indexes[i]
+            self.mem_manager.copy_buffer(req.buffer_idx, new_buffer_indexes[i])
 
             _, new_shared_kv_node = self.insert(key, value)
-            new_shared_kv_node.buffer_idx = buffer_idx
+            new_shared_kv_node.buffer_idx = new_buffer_indexes[i]
             self.dec_node_ref_counter(req.shared_kv_node)
             self.add_node_ref_counter(new_shared_kv_node)
             req.shared_kv_node = new_shared_kv_node

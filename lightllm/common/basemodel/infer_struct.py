@@ -88,9 +88,6 @@ class InferStateInfo:
         self.dp_output_split_sizes: List[List[int]] = None
         self.dp_input_split_sizes: List[List[int]] = None
 
-        # 专门用于管理混合注意力模型的buffer
-        self.buffer_indexes: torch.Tensor = None
-
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         if self.is_prefill:
             (

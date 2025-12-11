@@ -121,8 +121,7 @@ class Qwen3NextMemoryManager(HybridMemManager):
     @override
     def alloc_buffer(self, need_size):
         # conv_state 和 ssm_state 共享buffer_idx
-        buffer_indexes = self.conv_state_mem_manager.alloc(need_size)
-        return buffer_indexes
+        return self.conv_state_mem_manager.alloc(need_size)
 
     @override
     def get_buffer_can_use_size(self):
