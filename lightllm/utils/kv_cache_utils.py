@@ -189,6 +189,16 @@ def create_shm_kv_cache_ptr() -> int:
         raise Exception("Error attaching shared memory")
     logger.info(f"Shared cpu kv cache tensor memory at address: {shm_addr}")
 
+    # Best-effort memory prefaulting in background to speed up subsequent cudaHostRegister
+    def _pre_warm_memory():
+        page_size = _get_default_hugepage_size() if use_hugetlb else 4096
+        arr = np.ctypeslib.as_array(ctypes.cast(shm_addr, ctypes.POINTER(ctypes.c_uint8)), shape=(size_to_alloc,))
+        volatile_sum = int(arr[::page_size].sum())
+        logger.info(f"pre warmed shared memory pages successfully, checksum={volatile_sum})")
+
+    th = threading.Thread(target=_pre_warm_memory, name="cpu_cache_pre_warm", daemon=True)
+    th.start()
+
     return shm_addr
 
 
