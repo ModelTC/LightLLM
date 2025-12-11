@@ -103,22 +103,23 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
 
     @override
     def _get_o(
-        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+        self, input, gate_value, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ) -> torch.Tensor:
-        input = input * layer_weight._gate
-        layer_weight._gate = None
-        o_tensor = layer_weight.o_proj.mm(input)
+        # Handle different input shapes from different attention kernels
+        input = input.view(-1, gate_value.shape[-1])
+        gated_input = input * gate_value
+        o_tensor = layer_weight.o_proj.mm(gated_input)
         return o_tensor
 
     def _context_full_attn(
-        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+        self, input, gate_value, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
         q, cache_kv = self._get_qkv(input, infer_state, layer_weight)
         input = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
-        o = self._get_o(o, infer_state, layer_weight)
+        o = self._get_o(o, gate_value, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o
@@ -130,8 +131,8 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         if self.is_linear:
             o = self.linear_attn_infer._linear_attn(input1, infer_state, layer_weight, is_prefill=True, infer_cls=self)
         else:
-            layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
-            o = self._context_full_attn(input1, infer_state, layer_weight)
+            gate_value = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
+            o = self._context_full_attn(input1, gate_value, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
@@ -143,13 +144,15 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
-    def _token_full_attn(self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight):
+    def _token_full_attn(
+        self, input, gate_value, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+    ):
         q, cache_kv = self._get_qkv(input, infer_state, layer_weight)
         input = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
-        o = self._get_o(o, infer_state, layer_weight)
+        o = self._get_o(o, gate_value, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return o
@@ -161,8 +164,8 @@ class Qwen3NextTransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         if self.is_linear:
             o = self.linear_attn_infer._linear_attn(input1, infer_state, layer_weight, is_prefill=False, infer_cls=self)
         else:
-            layer_weight._gate = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
-            o = self._token_full_attn(input1, infer_state, layer_weight)
+            gate_value = torch.sigmoid(layer_weight.o_gate_proj.mm(input1))
+            o = self._token_full_attn(input1, gate_value, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
@@ -284,10 +287,7 @@ class Qwen3NextGatedDeltaNetInfer:
         # Rearrange mixed_qkv to query, key, value
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv)
 
-        # Compute beta and g
-        beta = b.sigmoid()
-        g = fused_gdn_gating(layer_weight.linear_A_log.weight, a, layer_weight.linear_dt_bias.weight)
-        g, beta = map(lambda x: rearrange(x, "l d -> 1 l d"), (g, beta))
+        g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
 
         if is_prefill:
             initial_state = ssm_states[buffer_idx].contiguous()
@@ -304,7 +304,7 @@ class Qwen3NextGatedDeltaNetInfer:
                 use_qk_l2norm_in_kernel=True,
             )
             # Update SSM state with final state
-            ssm_states[buffer_idx, ...] = last_recurrent_state.to(ssm_states.dtype)
+            ssm_states[buffer_idx, ...] = last_recurrent_state.to(ssm_states.dtype, copy=False)
         else:
             batch_size = input.shape[0]
             cu_seqlens = torch.arange(0, batch_size + 1, dtype=torch.int32, device=input.device)

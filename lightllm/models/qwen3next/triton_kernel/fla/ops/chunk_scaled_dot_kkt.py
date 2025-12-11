@@ -17,6 +17,8 @@ from .index import prepare_chunk_indices
 from .op import exp
 from lightllm.common.triton_utils.autotuner import autotune
 
+triton.set_allocator
+
 
 @triton.heuristics(
     {
@@ -96,14 +98,14 @@ def _get_chunk_scaled_dot_kkt_configs():
     ]
 
 
-def _get_chunk_scaled_dot_kkt_static_key(k, beta, chunk_size, cu_seqlens, **kwargs):
+def _get_chunk_scaled_dot_kkt_static_key(k, beta, chunk_size=64, cu_seqlens=None):
     B, T, Hg, K = k.shape
     H = beta.shape[-1]
     IS_VARLEN = cu_seqlens is not None
     return {"H": H, "K": K, "BT": chunk_size, "IS_VARLEN": IS_VARLEN}
 
 
-def _get_chunk_scaled_dot_kkt_run_key(k, beta, **kwargs):
+def _get_chunk_scaled_dot_kkt_run_key(k, beta):
     # Return batch * heads as run key
     return k.shape[0] * k.shape[2]
 

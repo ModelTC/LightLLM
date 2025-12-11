@@ -80,12 +80,12 @@ def _get_l2norm_kernel1_configs():
     return [{"num_warps": num_warps} for num_warps in [1, 2, 4, 8, 16, 32]]
 
 
-def _get_l2norm_kernel1_static_key(x, **kwargs):
+def _get_l2norm_kernel1_static_key(x):
     D = x.shape[-1]
     return {"D": D}
 
 
-def _get_l2norm_kernel1_run_key(x, **kwargs):
+def _get_l2norm_kernel1_run_key(x):
     return x.shape[0]  # T
 
 
@@ -109,12 +109,12 @@ def _get_l2norm_kernel_configs():
     return [{"BT": BT, "num_warps": num_warps} for num_warps in [1, 2, 4, 8, 16] for BT in BT_LIST]
 
 
-def _get_l2norm_kernel_static_key(x, **kwargs):
+def _get_l2norm_kernel_static_key(x):
     D = x.shape[-1]
     return {"D": D}
 
 
-def _get_l2norm_kernel_run_key(x, **kwargs):
+def _get_l2norm_kernel_run_key(x):
     return x.shape[0]  # T
 
 
