@@ -14,8 +14,9 @@ from einops import rearrange
 from lightllm.models.qwen3next.triton_kernel.gated_rmsnorm import gated_rmsnorm_forward
 from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
-from lightllm.models.qwen3next.triton_kernel.fla.ops.chunk import chunk_gated_delta_rule
-from lightllm.models.qwen3next.triton_kernel.fla.ops.fused_recurrent import fused_recurrent_gated_delta_rule
+from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
+from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
+
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.qwen3next.triton_kernel.gemma_rmsnorm import gemma_rmsnorm_forward
@@ -260,15 +261,13 @@ class Qwen3NextGatedDeltaNetInfer:
 
         if is_prefill:
             mixed_qkv = mixed_qkv.transpose(0, 1)
-            out_tensor = infer_cls.alloc_tensor(mixed_qkv.shape, mixed_qkv.dtype, device=mixed_qkv.device)
-            causal_conv1d_fn(
+            out_tensor = causal_conv1d_fn(
                 mixed_qkv,
                 layer_weight.linear_conv1d.mm_param.weight.transpose(0, 1),
-                layer_weight.linear_conv1d.mm_param.bias,
-                conv_states.transpose(1, 2),
-                infer_state.b1_cu_q_seq_len,
-                out=out_tensor,
+                bias=layer_weight.linear_conv1d.mm_param.bias,
+                query_start_loc=infer_state.b1_cu_q_seq_len,
                 cache_indices=buffer_idx,
+                conv_states=conv_states.transpose(1, 2),
                 activation=self.activation,
             )
             mixed_qkv = out_tensor.transpose(0, 1)
@@ -277,10 +276,9 @@ class Qwen3NextGatedDeltaNetInfer:
                 mixed_qkv,
                 conv_states.transpose(1, 2),
                 layer_weight.linear_conv1d.mm_param.weight.transpose(0, 1),
-                layer_weight.linear_conv1d.mm_param.bias,
-                self.activation,
+                bias=layer_weight.linear_conv1d.mm_param.bias,
+                activation=self.activation,
                 conv_state_indices=buffer_idx,
-                validate_data=True,
             )
 
         # Rearrange mixed_qkv to query, key, value

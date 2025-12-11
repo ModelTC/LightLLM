@@ -6,3 +6,10 @@
 # The original source code was licensed under the MIT license and included
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+from .chunk import chunk_gated_delta_rule
+from .fused_recurrent import fused_recurrent_gated_delta_rule
+
+__all__ = [
+    "chunk_gated_delta_rule",
+    "fused_recurrent_gated_delta_rule",
+]

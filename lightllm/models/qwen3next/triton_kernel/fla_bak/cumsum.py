@@ -8,6 +8,7 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 import warnings
+from typing import Optional
 
 import torch
 
@@ -42,14 +43,8 @@ def chunk_local_cumsum_scalar_kernel(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = (
-            tl.load(chunk_indices + i_t * 2).to(tl.int32),
-            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
-        )
-        bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
-        )
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -93,14 +88,8 @@ def chunk_local_cumsum_vector_kernel(
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = (
-            tl.load(chunk_indices + i_t * 2).to(tl.int32),
-            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
-        )
-        bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
-        )
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -112,39 +101,11 @@ def chunk_local_cumsum_vector_kernel(
         m_s = tl.where(o_i[:, None] >= o_i[None, :], 1.0, 0.0)
 
     if HEAD_FIRST:
-        p_s = tl.make_block_ptr(
-            s + (bos * H + i_h * T) * S,
-            (T, S),
-            (S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
-        p_o = tl.make_block_ptr(
-            o + (bos * H + i_h * T) * S,
-            (T, S),
-            (S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
+        p_s = tl.make_block_ptr(s + (bos * H + i_h * T) * S, (T, S), (S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
+        p_o = tl.make_block_ptr(o + (bos * H + i_h * T) * S, (T, S), (S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
     else:
-        p_s = tl.make_block_ptr(
-            s + (bos * H + i_h) * S,
-            (T, S),
-            (H * S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
-        p_o = tl.make_block_ptr(
-            o + (bos * H + i_h) * S,
-            (T, S),
-            (H * S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
-        )
+        p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
+        p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
     # [BT, BS]
     b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
     b_o = tl.dot(m_s, b_s, allow_tf32=False)
@@ -155,9 +116,9 @@ def chunk_local_cumsum_scalar(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False,
-    output_dtype: torch.dtype | None = torch.float,
+    output_dtype: Optional[torch.dtype] = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = g.shape
@@ -170,16 +131,7 @@ def chunk_local_cumsum_scalar(
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (NT, B * H)
     chunk_local_cumsum_scalar_kernel[grid](
-        g_org,
-        g,
-        cu_seqlens,
-        chunk_indices,
-        T=T,
-        B=B,
-        H=H,
-        BT=BT,
-        HEAD_FIRST=head_first,
-        REVERSE=reverse,
+        g_org, g, cu_seqlens, chunk_indices, T=T, B=B, H=H, BT=BT, HEAD_FIRST=head_first, REVERSE=reverse
     )
     return g
 
@@ -188,9 +140,9 @@ def chunk_local_cumsum_vector(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False,
-    output_dtype: torch.dtype | None = torch.float,
+    output_dtype: Optional[torch.dtype] = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T, S = g.shape
@@ -210,17 +162,7 @@ def chunk_local_cumsum_vector(
     # this kernel is equivalent to
     # g = g.view(B, H, NT, BT, -1).cumsum(-2).view(B, H, T, -1)
     chunk_local_cumsum_vector_kernel[grid](
-        g_org,
-        g,
-        cu_seqlens,
-        chunk_indices,
-        T=T,
-        B=B,
-        H=H,
-        S=S,
-        BT=BT,
-        HEAD_FIRST=head_first,
-        REVERSE=reverse,
+        g_org, g, cu_seqlens, chunk_indices, T=T, B=B, H=H, S=S, BT=BT, HEAD_FIRST=head_first, REVERSE=reverse
     )
     return g
 
@@ -230,15 +172,15 @@ def chunk_local_cumsum(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False,
-    output_dtype: torch.dtype | None = torch.float,
+    output_dtype: Optional[torch.dtype] = torch.float,
     **kwargs,
 ) -> torch.Tensor:
     if not head_first and g.shape[1] < g.shape[2]:
         warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: "
-            f"seq_len ({g.shape[1]}) < num_heads ({g.shape[2]}). "
+            f"Input tensor shape suggests potential format mismatch"
+            f" seq_len ({g.shape[1]}) < num_heads ({g.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
