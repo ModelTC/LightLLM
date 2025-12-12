@@ -72,7 +72,7 @@ class CompletionRequest(BaseModel):
     # prompt: string or tokens
     prompt: Union[str, List[str], List[int], List[List[int]]]
     suffix: Optional[str] = None
-    max_tokens: Optional[int] = 16
+    max_tokens: Optional[int] = 16000
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -112,7 +112,7 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     stop: Optional[Union[str, List[str]]] = None
-    max_tokens: Optional[int] = 16
+    max_tokens: Optional[int] = 16000
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None

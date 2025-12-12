@@ -31,6 +31,12 @@ class TreeNode:
         self.node_value_len = 0
         self.node_prefix_total_len = 0
 
+        # 专门用于管理混合注意力模型（例如 Qwen3Next），
+        # 该类模型每个请求需要管理一个唯一的buffer_idx，
+        # 放在这里让该类模型能够复用当前的radix_cache代码。
+        # 纯注意力模型该 buffer_idx 始终保持为 None
+        self.buffer_idx = None
+
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 

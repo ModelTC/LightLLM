@@ -10,6 +10,7 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
@@ -39,6 +40,8 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+
+logger = init_logger(__name__)
 
 
 class ModeBackend:
@@ -138,6 +141,7 @@ class ModeBackend:
             wait_events.append(self.multi_level_cache_module)
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
+        self.is_hybrid_model = model_cfg.get("model_type", "") in ["qwen3_next"]
 
         model_kvargs = {
             "weight_dir": self.weight_dir,
@@ -163,8 +167,9 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
+        radix_cache_class = HybridRadixCache if self.is_hybrid_model else RadixCache
         self.radix_cache = (
-            RadixCache(
+            radix_cache_class(
                 get_unique_server_name(),
                 self.model.mem_manager.size,
                 self.rank_in_node,
@@ -186,7 +191,6 @@ class ModeBackend:
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
         )
-
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
             self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
