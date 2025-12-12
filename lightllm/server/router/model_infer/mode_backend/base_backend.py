@@ -100,7 +100,6 @@ class ModeBackend:
         self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
         self.is_nixl_pd_mode = self.run_mode in ["nixl_prefill", "nixl_decode"]
         self.is_nixl_decode_mode = self.run_mode == "nixl_decode"
-        self.is_hybrid_model = kvargs.get("is_hybrid_model", False)
 
         self.logger = init_logger(__name__)
 
