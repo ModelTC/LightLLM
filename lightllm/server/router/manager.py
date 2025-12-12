@@ -250,14 +250,13 @@ class RouterManager:
                         frozen_token_num = self.shared_token_load.get_frozened_token_count(d_i)
                         estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(d_i)
                         paused_req_num = self._get_paused_req_num_in_dp_index(dp_index=d_i)
-
                         logger.debug(
                             f"dp_i {d_i} current batch size: {len(self.running_batch.reqs)} \n"
                             f"dp_i {d_i} paused req num: {paused_req_num} \n"
                             f"dp_i {d_i} frozen token num: {frozen_token_num} \n"
                             f"dp_i {d_i} estimated_peak_token_count: {estimated_peak_token_count} \n"
                             f"dp_i {d_i} token used ratio: {token_ratio1} not contain prompt cache tree unrefed token\n"
-                            f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token\n"
+                            f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token"
                         )
                         self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
                 # pd decode mode need to update token_load more frequently

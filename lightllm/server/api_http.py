@@ -130,22 +130,6 @@ def get_model_name():
     return {"model_name": g_objs.args.model_name}
 
 
-@app.get("/get_server_info")
-@app.post("/get_server_info")
-def get_server_info():
-    # 将 StartArgs 转换为字典格式
-    from dataclasses import asdict
-
-    server_info: dict[str, Any] = asdict(g_objs.args)
-    return {**server_info}
-
-
-@app.get("/get_weight_version")
-@app.post("/get_weight_version")
-def get_weight_version():
-    return {"weight_version": g_objs.args.weight_version}
-
-
 @app.get("/healthz", summary="Check server health")
 @app.get("/health", summary="Check server health")
 @app.head("/health", summary="Check server health")
@@ -267,7 +251,7 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
-    logger.info(f"completions request: {request}")
+
     resp = await completions_impl(request, raw_request)
     return resp
 

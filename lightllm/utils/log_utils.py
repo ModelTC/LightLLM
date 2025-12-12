@@ -29,17 +29,6 @@ class NewLineFormatter(logging.Formatter):
         return msg
 
 
-class RankFilter(logging.Filter):
-    def filter(self, record):
-        from lightllm.utils.dist_utils import get_current_rank_in_dp
-
-        try:
-            rank = get_current_rank_in_dp()
-            return rank == 0
-        except:
-            return False
-
-
 _root_logger = logging.getLogger("lightllm")
 _default_handler = None
 _default_file_handler = None
@@ -56,7 +45,6 @@ def _setup_logger():
         _default_handler = logging.StreamHandler(sys.stdout)
         _default_handler.flush = sys.stdout.flush  # type: ignore
         _default_handler.setLevel(_LOG_LEVEL)
-        # _default_handler.addFilter(RankFilter())
         _root_logger.addHandler(_default_handler)
 
     if _default_file_handler is None and _LOG_DIR is not None:
@@ -68,7 +56,6 @@ def _setup_logger():
         _default_file_handler = logging.FileHandler(_LOG_DIR + "/default.log")
         _default_file_handler.setLevel(_LOG_LEVEL)
         _default_file_handler.setFormatter(fmt)
-        # _default_file_handler.addFilter(RankFilter())
         _root_logger.addHandler(_default_file_handler)
 
     _default_handler.setFormatter(fmt)

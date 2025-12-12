@@ -7,6 +7,10 @@
     "BLOCK_N": 256,
     "num_warps": 1
   },
+  "1312768": {
+    "BLOCK_N": 64,
+    "num_warps": 2
+  },
   "16384": {
     "BLOCK_N": 128,
     "num_warps": 1

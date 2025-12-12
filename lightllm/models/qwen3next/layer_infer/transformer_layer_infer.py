@@ -271,14 +271,14 @@ class Qwen3NextGatedDeltaNetInfer:
                 query_start_loc=infer_state.b1_cu_q_seq_len,
                 cache_indices=buffer_idx,
                 has_initial_state=infer_state.b_ready_cache_len > 0,
-                conv_states=conv_states.transpose(1, 2),
+                conv_states=conv_states,
                 activation=self.activation,
             )
             mixed_qkv = out_tensor.transpose(0, 1)
         else:
             mixed_qkv = causal_conv1d_update(
                 mixed_qkv,
-                conv_states.transpose(1, 2),
+                conv_states,
                 layer_weight.linear_conv1d.mm_param.weight.transpose(0, 1),
                 bias=layer_weight.linear_conv1d.mm_param.bias,
                 activation=self.activation,
