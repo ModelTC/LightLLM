@@ -6,3 +6,6 @@
 # The original source code was licensed under the MIT license and included
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
+# Adapted from
+# https://github.com/vllm-project/vllm

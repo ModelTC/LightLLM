@@ -270,6 +270,7 @@ class Qwen3NextGatedDeltaNetInfer:
                 bias=layer_weight.linear_conv1d.mm_param.bias,
                 query_start_loc=infer_state.b1_cu_q_seq_len,
                 cache_indices=buffer_idx,
+                has_initial_state=infer_state.b_ready_cache_len > 0,
                 conv_states=conv_states.transpose(1, 2),
                 activation=self.activation,
             )
