@@ -14,7 +14,7 @@ import triton
 import triton.language as tl
 
 from .index import prepare_chunk_indices
-from .op import exp
+from .op import exp, safe_exp
 from lightllm.common.triton_utils.autotuner import autotune
 
 triton.set_allocator
@@ -80,7 +80,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_diff = b_g[:, None] - b_g[None, :]
-        b_A = b_A * exp(b_g_diff)
+        b_A = b_A * safe_exp(b_g_diff)
 
     b_A *= b_beta[:, None]
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)

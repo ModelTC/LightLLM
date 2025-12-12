@@ -19,6 +19,16 @@ log = tl.log
 log2 = tl.log2
 
 
+@triton.jit
+def safe_exp(x):
+    """
+    Numerically stable exponential function.
+    Only applies exp to non-positive values, returns 0 for positive values.
+    This prevents numerical overflow and improves stability.
+    """
+    return exp(tl.where(x <= 0, x, float("-inf")))
+
+
 if not is_gather_supported:
 
     @triton.jit
