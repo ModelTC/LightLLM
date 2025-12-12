@@ -1,4 +1,4 @@
-from typing import Set, Protocol, List
+from typing import Set, Protocol, List, Optional, Tuple
 
 import torch
 from sortedcontainers import SortedSet
@@ -29,7 +29,6 @@ class HybridRadixCache(RadixCache):
         self.mem_manager: HybridMemManager = mem_manager
         super().__init__(unique_name, total_token_num, rank_in_node, mem_manager)
         self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: x.time_id)
-        self.evict_buffer_set.add(self.root_node)
 
     def free_radix_cache_to_get_enough_buffer(self, need_buffer_num):
         if need_buffer_num > self.mem_manager.get_buffer_can_use_size():
@@ -56,16 +55,12 @@ class HybridRadixCache(RadixCache):
 
     def evict_buffer(self, need_evict_buffer_num, evict_buffer_callback, evict_token_callback):
         while need_evict_buffer_num > 0:
-            node = self.evict_buffer_set.pop()
-            if node.buffer_idx is not None:
-                evict_buffer_callback(node.buffer_idx)
-                need_evict_buffer_num -= 1
-            else:
-                # 在混合注意力模型的情景里，只能匹配 buffer_idx 不为 None的节点
-                # 假如 buffer_idx 为 None，则当做匹配失败。
-                # 所以可以直接把这个节点给释放掉
-                if node.is_leaf() and node.ref_counter == 0:
-                    self._remove_leaf_node(node)
+            node = self.evict_buffer_set.pop(0)
+            assert node.buffer_idx is not None
+            evict_buffer_callback(node.buffer_idx)
+            evict_token_callback(node.token_mem_index_value)
+            need_evict_buffer_num -= 1
+            self._remove_leaf_node(node)
         return
 
     def insert_for_hybrid_radix_cache(self, reqs):
@@ -90,6 +85,7 @@ class HybridRadixCache(RadixCache):
             new_shared_kv_node.buffer_idx = new_buffer_indexes[i]
             self.dec_node_ref_counter(req.shared_kv_node)
             self.add_node_ref_counter(new_shared_kv_node)
+            self.evict_buffer_set.add(req.shared_kv_node)
             req.shared_kv_node = new_shared_kv_node
 
     def match_prefix(self, key, update_refs=False):
@@ -113,9 +109,17 @@ class HybridRadixCache(RadixCache):
 
     def _remove_leaf_node(self, node: TreeNode):
         self.evict_tree_set.discard(node)
+        self.evict_buffer_set.discard(node)
         self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
         parent_node: TreeNode = node.parent
         parent_node.remove_child(node)
         if parent_node.is_leaf():
             self.evict_tree_set.add(parent_node)
+            if parent_node.buffer_idx is not None:
+                self.evict_buffer_set.add(parent_node)
         return parent_node
+
+    def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
+        prefix_len, node = super().insert(key, value)
+        self.evict_buffer_set.add(node)
+        return prefix_len, node
