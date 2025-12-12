@@ -16,7 +16,7 @@ import triton
 import triton.language as tl
 
 from .index import prepare_chunk_indices
-from .op import exp
+from .op import exp, safe_exp
 from .utils import FLA_GDN_FIX_BT, check_shared_mem, is_nvidia_hopper
 from lightllm.common.triton_utils.autotuner import autotune
 
@@ -103,7 +103,7 @@ def chunk_fwd_kernel_o(
         p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         b_o = b_o * exp(b_g)[:, None]
-        b_A = b_A * exp(b_g[:, None] - b_g[None, :])
+        b_A = b_A * safe_exp(b_g[:, None] - b_g[None, :])
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T

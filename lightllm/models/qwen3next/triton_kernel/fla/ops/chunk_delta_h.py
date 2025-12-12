@@ -14,7 +14,7 @@ import triton
 import triton.language as tl
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
-from .op import exp
+from .op import exp, safe_exp
 from .utils import use_cuda_graph
 from lightllm.common.triton_utils.autotuner import autotune
 
@@ -150,19 +150,18 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
         last_idx = min((i_t + 1) * BT, T) - 1
         if USE_G:
-            m_t = (i_t * BT + tl.arange(0, BT)) < T
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
+            b_v = b_v * safe_exp(b_g_last - b_g)[:, None]
             b_g_last = exp(b_g_last)
-            b_h1 *= b_g_last
+            b_h1 = b_h1 * b_g_last
             if K > 64:
-                b_h2 *= b_g_last
+                b_h2 = b_h2 * b_g_last
             if K > 128:
-                b_h3 *= b_g_last
+                b_h3 = b_h3 * b_g_last
             if K > 192:
-                b_h4 *= b_g_last
+                b_h4 = b_h4 * b_g_last
 
         if USE_GK:
             o_k1 = tl.arange(0, 64)
