@@ -151,6 +151,5 @@ class StartArgs:
     disable_custom_allreduce: bool = field(default=False)
 
     # hybrid attention model
-    linear_attn_cache_size: int = field(default=2000)
-
-    weight_version: str = "default"
+    mamba_cache_size: int = field(default=2000)
+    mamba_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})

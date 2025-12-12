@@ -1,5 +1,5 @@
 # Adapted from https://github.com/sgl-project/sglang/python/sglang/srt/layers/attention/fla/fused_gdn_gating.py
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import triton
@@ -61,15 +61,15 @@ def fused_gdn_gating(
     dt_bias: torch.Tensor,
     beta: float = 1.0,
     threshold: float = 20.0,
-    run_config: dict = None,
+    run_config: Optional[dict] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-    if not run_config:
+    if run_config is None:
         run_config = {"BLK_HEADS": 8, "num_warps": 1}
 
     batch, num_heads = a.shape
     seq_len = 1
-    grid = (batch, seq_len, triton.cdiv(num_heads, 8))
+    grid = (batch, seq_len, triton.cdiv(num_heads, run_config["BLK_HEADS"]))
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
     beta_output = torch.empty(1, batch, num_heads, dtype=torch.float32, device=b.device)
     fused_gdn_gating_kernel[grid](

@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import Optional
 from typing_extensions import override
@@ -62,11 +63,11 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         start_args: StartArgs = get_env_start_args()
 
         mtp_step = start_args.mtp_step
-        linear_attn_cache_size = start_args.linear_attn_cache_size
-        if linear_attn_cache_size is not None:
+        mamba_cache_size = start_args.mamba_cache_size
+        if mamba_cache_size is not None:
             assert (
-                linear_attn_cache_size >= start_args.running_max_req_size
-            ), "linear_attn_cache_size must be greater than running_max_req_size"
+                mamba_cache_size >= start_args.running_max_req_size
+            ), "mamba_cache_size must be greater than running_max_req_size"
 
         self.num_linear_k_heads = self.config["linear_num_key_heads"]
         self.num_linear_v_heads = self.config["linear_num_value_heads"]
@@ -78,9 +79,12 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
         )
 
+        ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
+        assert start_args.mamba_ssm_data_type in ssm_dtype_dict
+
         self.mem_manager = Qwen3NextMemoryManager(
             full_attn_cache_size=self.max_total_token_num,
-            linear_attn_cache_size=linear_attn_cache_size,
+            linear_attn_cache_size=mamba_cache_size,
             dtype=self.data_type,
             num_kv_heads=self.num_kv_heads,
             head_dim=self.config["head_dim"],
@@ -89,7 +93,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             full_attention_interval=self.config["full_attention_interval"],
             conv_state_dtype=self.data_type,
             conv_state_shape=(conv_kernel_size - 1 + mtp_step, conv_dim // self.tp_world_size_),
-            ssm_state_dtype=self.data_type,
+            ssm_state_dtype=ssm_dtype_dict[start_args.mamba_ssm_data_type],
             ssm_state_shape=(
                 # mtp_step + 1,
                 self.num_linear_v_heads // self.tp_world_size_,

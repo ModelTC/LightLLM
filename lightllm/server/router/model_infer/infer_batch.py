@@ -114,7 +114,8 @@ class InferenceContext:
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
 
             prefix_len, node = self.radix_cache.insert(key, value)
-            node.buffer_idx = req.buffer_idx
+            if hasattr(self.req_manager, "req_to_buffer_indexes"):
+                node.buffer_idx = self.req_manager.req_to_buffer_indexes[req.req_idx]
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
@@ -347,10 +348,6 @@ class InferReq:
         self.nixl_pd_task_sunccess_num: int = 0
         self.nixl_pd_task_failed_num: int = 0
         self.nixl_trans_device_id: int = -1
-
-        # 可以用于请求在整个生命周期维护单一大小的buffer的场景
-        # 例如混合注意力模型 Qwen3Next
-        self.buffer_idx = -1
 
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
