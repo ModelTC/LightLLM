@@ -28,7 +28,7 @@ class HybridRadixCache(RadixCache):
     def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
         self.mem_manager: HybridMemManager = mem_manager
         super().__init__(unique_name, total_token_num, rank_in_node, mem_manager)
-        self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: x.time_id)
+        self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: (x.time_id,))
 
     def free_radix_cache_to_get_enough_buffer(self, need_buffer_num):
         if need_buffer_num > self.mem_manager.get_buffer_can_use_size():
@@ -85,7 +85,8 @@ class HybridRadixCache(RadixCache):
             new_shared_kv_node.buffer_idx = new_buffer_indexes[i]
             self.dec_node_ref_counter(req.shared_kv_node)
             self.add_node_ref_counter(new_shared_kv_node)
-            self.evict_buffer_set.add(req.shared_kv_node)
+            if req.shared_kv_node is not None and req.shared_kv_node.buffer_idx is not None:
+                self.update_buffer_evict_set(req.shared_kv_node)
             req.shared_kv_node = new_shared_kv_node
 
     def match_prefix(self, key, update_refs=False):
@@ -105,6 +106,7 @@ class HybridRadixCache(RadixCache):
             return None, 0, None
 
         value = torch.concat(ans_value_list)
+        self.update_buffer_evict_set(tree_node)
         return tree_node, len(value), value
 
     def _remove_leaf_node(self, node: TreeNode):
@@ -116,10 +118,26 @@ class HybridRadixCache(RadixCache):
         if parent_node.is_leaf():
             self.evict_tree_set.add(parent_node)
             if parent_node.buffer_idx is not None:
-                self.evict_buffer_set.add(parent_node)
+                self.update_buffer_evict_set(parent_node)
         return parent_node
 
     def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
         prefix_len, node = super().insert(key, value)
+        if node is not None:
+            node.update_buffer_time()
         self.evict_buffer_set.add(node)
         return prefix_len, node
+
+    def update_buffer_evict_set(self, node: TreeNode):
+        if node is None or node.buffer_idx is None:
+            return
+
+        if node not in self.evict_buffer_set:
+            self.evict_buffer_set.add(node)
+            return
+
+        self.evict_buffer_set.discard(node)
+        node.update_buffer_time()
+        self.evict_buffer_set.add(node)
+
+        self.update_buffer_evict_set(node.parent)
