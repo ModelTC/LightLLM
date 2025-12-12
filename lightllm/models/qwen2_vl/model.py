@@ -56,6 +56,7 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
             height=height, width=width, factor=factor, min_pixels=self.min_pixel, max_pixels=self.max_pixel
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
+        img.grid_thw = (1, grid_h, grid_w)
         token_num = (grid_h * grid_w) // (self.merge_size ** 2)
         return token_num
 

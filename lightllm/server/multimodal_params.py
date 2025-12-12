@@ -75,6 +75,7 @@ class ImageItem:
         self.token_id = None
         # the image token num
         self.token_num = None
+        self.grid_thw = None
         self.image_w = 0
         self.image_h = 0
 
@@ -120,6 +121,7 @@ class ImageItem:
         ret["uuid"] = self.uuid
         ret["token_id"] = self.token_id
         ret["token_num"] = self.token_num
+        ret["grid_thw"] = self.grid_thw
         return ret
 
     def to_origin_dict(self):
