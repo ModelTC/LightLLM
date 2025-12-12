@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from io import BytesIO
+from typing import List, Optional
 import multiprocessing.shared_memory as shm
 
 

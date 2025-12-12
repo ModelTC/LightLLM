@@ -17,8 +17,13 @@ from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
+from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
-from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
+from lightllm.server.embed_cache.utils import (
+    tensor2bytes,
+    create_shm,
+    get_shm_name_embed,
+)
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.dist_utils import init_vision_distributed_env
@@ -64,6 +69,10 @@ class VisualModelRpcServer(rpyc.Service):
             elif self.model_type == "qwen2_5_vl":
                 self.model = (
                     Qwen2_5_VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
+                )
+            elif self.model_type in ["qwen3_vl", "qwen3_vl_moe"]:
+                self.model = (
+                    Qwen3VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
             elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
                 self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
