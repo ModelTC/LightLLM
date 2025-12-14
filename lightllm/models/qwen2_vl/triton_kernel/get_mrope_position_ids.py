@@ -1,3 +1,4 @@
+from tracemalloc import start
 import torch
 import triton
 import triton.language as tl
@@ -21,8 +22,6 @@ def _get_mrope_position_triton(
     BLOCK_SIZE: tl.constexpr,
 ) -> torch.Tensor:
     cur_batch = tl.program_id(0)
-    if cur_batch == 0:
-        return
     cache_len = tl.load(b_ready_cache_len + cur_batch)
     seq_len = tl.load(b_seq_len + cur_batch)
     image_num = tl.load(b_image_nums + cur_batch)
@@ -30,7 +29,7 @@ def _get_mrope_position_triton(
     start_loc = tl.load(b_start_loc + cur_batch)
     for i in range(image_num):
         local_image_start_idx = tl.load(b_image_start_idx + image_start_num + i)
-        image_start_idx = start_loc + local_image_start_idx
+        image_start_idx = start_loc + local_image_start_idx - cache_len
         image_len = tl.load(b_image_len + image_start_num + i)
         cu_image_len = tl.load(b_image_cu_len + image_start_num + i)
         for j in range(0, image_len, BLOCK_SIZE):
@@ -56,26 +55,34 @@ def _get_mrope_position_triton(
                 + local_image_start_idx
             )
             tl.store(
-                position_ids + off + image_start_idx, t_pos, mask=(off < image_len) & (local_image_start_idx + off >= 0)
+                position_ids + off + image_start_idx,
+                t_pos,
+                mask=(off < image_len)
+                & (off + local_image_start_idx - cache_len < seq_len)
+                & (local_image_start_idx - cache_len + off >= 0),
             )
             tl.store(
                 position_ids + position_ids_stride0 + off + image_start_idx,
                 h_pos,
-                mask=(off < image_len) & (local_image_start_idx + off >= 0),
+                mask=(off < image_len)
+                & (off + local_image_start_idx - cache_len < seq_len)
+                & (local_image_start_idx - cache_len + off >= 0),
             )
             tl.store(
                 position_ids + position_ids_stride0 * 2 + off + image_start_idx,
                 w_pos,
-                mask=(off < image_len) & (local_image_start_idx + off >= 0),
+                mask=(off < image_len)
+                & (off + local_image_start_idx - cache_len < seq_len)
+                & (local_image_start_idx - cache_len + off >= 0),
             )
-            t_pos = tl.load(position_ids + off + image_start_idx, mask=(off < seq_len), other=0.0)
 
     for i in range(image_num):
         local_image_start_idx = tl.load(b_image_start_idx + image_start_num + i)
         image_len = tl.load(b_image_len + image_start_num + i)
         image_delta = tl.load(b_image_pos_delta + image_start_num + i)
         image_end = local_image_start_idx + image_len - cache_len
-        for j in range(image_end, seq_len, BLOCK_SIZE):
+        text_start = tl.maximum(0, image_end)
+        for j in range(text_start, seq_len, BLOCK_SIZE):
             off = j + tl.arange(0, BLOCK_SIZE)
             t_pos = tl.load(position_ids + off + start_loc, mask=(off < seq_len), other=0.0) + image_delta
             h_pos = (
@@ -163,8 +170,8 @@ def test():
     )
     print(position_ids)
     """
-    tensor([[ 0,  1,  2,  3,  4,  0,  0,  0,  0,  0,  1,  2],
-        [ 0,  1,  2,  3,  4, 21, 21, 31, 31,  0,  1,  2],
-        [ 0,  1,  2,  3,  4, 22, 22, 32, 32,  0,  1,  2]], device='cuda:0',
+    tensor([[ 0,  0,  0,  2,  3,  0,  0,  0,  0,  0,  1,  2],
+        [11, 11, 11,  2,  3, 21, 21, 31, 31,  0,  1,  2],
+        [12, 12, 12,  2,  3, 22, 22, 32, 32,  0,  1,  2]], device='cuda:0',
        dtype=torch.int32)
     """

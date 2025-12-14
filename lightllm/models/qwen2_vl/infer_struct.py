@@ -32,8 +32,6 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
                 b_position_delta[batch_idx] = position_delta
             position_ids = self.position_ids + torch.tensor(b_position_delta, device=self.position_ids.device)
             position_ids = position_ids.unsqueeze(0).expand(3, -1)
-        torch.set_printoptions(profile="full")
-        print(f"position_ids is {position_ids}")
         self.position_cos = model._cos_cached[position_ids.unsqueeze(1)]  # (3, 1, L, D)
         self.position_sin = model._sin_cached[position_ids.unsqueeze(1)]  # (3, 1, L, D)
         if get_env_start_args().enable_fa3:
@@ -104,7 +102,6 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         b_image_len = torch.tensor(b_image_len, device=self.position_ids.device)
         b_image_position_id = torch.cat(b_image_position_id, dim=1).cuda(non_blocking=True)
         position_ids = self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
-        print(f"BFR get_mrope_position_triton {position_ids}")
         get_mrope_position_triton(
             b_image_start_idx=b_image_start_idx,
             b_image_pos_delta=b_image_pos_delta,
