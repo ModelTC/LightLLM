@@ -75,7 +75,10 @@ class ImageItem:
         self.token_id = None
         # the image token num
         self.token_num = None
-        self.grid_thw = None
+        # the start index of the image in the input_ids
+        # used for mrope position id calculation
+        self.start_idx = 0
+        self.grid_thwd = None
         self.image_w = 0
         self.image_h = 0
 
@@ -121,7 +124,8 @@ class ImageItem:
         ret["uuid"] = self.uuid
         ret["token_id"] = self.token_id
         ret["token_num"] = self.token_num
-        ret["grid_thw"] = self.grid_thw
+        ret["grid_thwd"] = self.grid_thwd
+        ret["start_idx"] = self.start_idx
         return ret
 
     def to_origin_dict(self):

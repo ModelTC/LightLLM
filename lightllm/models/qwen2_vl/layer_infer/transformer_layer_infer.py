@@ -19,8 +19,6 @@ class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
         self.axis_map = torch.tensor(axis_map, dtype=torch.int32, device="cuda")
 
     def _get_qkv(self, input, infer_state, layer_weight):
-        if infer_state.rope_type != "mrope":
-            return super()._get_qkv(input, infer_state, layer_weight)
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         seq_len, _ = q.shape

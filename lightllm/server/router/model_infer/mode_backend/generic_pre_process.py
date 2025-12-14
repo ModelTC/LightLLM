@@ -103,6 +103,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_mtp_index = []
     b_seq_len = []
     b_q_seq_len = []
+    multimodal_params = []
     for req in req_objs:
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
@@ -112,6 +113,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         total_token_num += seq_len
         max_len_in_batch = max(max_len_in_batch, seq_len)
         b_mtp_index.append(0)
+        multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
         for step in range(req.mtp_step):
             run_reqs.append(req)
@@ -121,6 +123,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
             total_token_num += seq_len
             max_len_in_batch = max(max_len_in_batch, seq_len)
             b_mtp_index.append(step + 1)
+            multimodal_params.append(req.multimodal_params)
         b_q_seq_len.append(req.mtp_step + 1)
 
     max_kv_seq_len = max(b_seq_len)
@@ -158,6 +161,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mark_shared_group=b_mark_shared_group,
         is_prefill=False,
     )
+    model_input.multimodal_params = multimodal_params
     return model_input, run_reqs
 
 
