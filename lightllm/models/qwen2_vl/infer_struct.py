@@ -21,7 +21,7 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", None))
         InferStateInfo.init_some_extra_state(self, model, input_ids)
         if self.is_prefill:
-            position_ids = self.get_mrope_position(self.multimodal_params)
+            self.position_ids = self.get_mrope_position(self.multimodal_params)
         else:
             b_position_delta = [0 for _ in range(self.b_seq_len.shape[0])]
             for batch_idx, p in enumerate(self.multimodal_params):
@@ -30,9 +30,10 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
                     position_delta += image["grid_thwd"][3]
                 b_position_delta[batch_idx] = position_delta
             position_ids = self.position_ids + torch.tensor(b_position_delta, device=self.position_ids.device)
-            position_ids = position_ids.unsqueeze(0).expand(3, -1)
-        self.position_cos = model._cos_cached[position_ids]  # (3, L, D)
-        self.position_sin = model._sin_cached[position_ids]  # (3, L, D)
+            self.position_ids = position_ids.unsqueeze(0).expand(3, -1)
+
+        self.position_cos = model._cos_cached[self.position_ids]  # (3, L, D)
+        self.position_sin = model._sin_cached[self.position_ids]  # (3, L, D)
         if get_env_start_args().enable_fa3:
             self.max_seq_len = self.max_kv_seq_len
             self.q_max_seq_len = self.max_q_seq_len
