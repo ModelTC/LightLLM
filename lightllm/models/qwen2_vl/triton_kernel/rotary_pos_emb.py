@@ -34,8 +34,9 @@ def rotary_kernel(
     partner_d = tl.where(d < HALF_D, d + HALF_D, d - HALF_D)
 
     for pid_l in tl.range(pid_l_start, total_len, step=tl.num_programs(axis=1)):
-        cos_ptr_ = cos_ptr + pid_l * stride_cos_l + d
-        sin_ptr_ = sin_ptr + pid_l * stride_sin_l + d
+        idx_d = tl.where(d < HALF_D, d, d - HALF_D)
+        cos_ptr_ = cos_ptr + pid_l * stride_cos_l + idx_d * stride_cos_d
+        sin_ptr_ = sin_ptr + pid_l * stride_sin_l + idx_d * stride_sin_d
         cos = tl.load(cos_ptr_, mask=mask)
         sin = tl.load(sin_ptr_, mask=mask)
 
@@ -52,7 +53,7 @@ def rotary_kernel(
 
             y = x * cos + rotated * sin
 
-            out_ptr_ = out_ptr + base + d
+            out_ptr_ = out_ptr + base + d * stride_d
             tl.store(out_ptr_, y, mask=mask)
 
 
@@ -66,8 +67,8 @@ def apply_rotary_pos_emb_triton(
     orig_dtype = tensor.dtype
     x = tensor.float()
 
-    cos = cos.repeat(1, 2).view(cos.size(0), -1).contiguous().float()
-    sin = sin.repeat(1, 2).view(sin.size(0), -1).contiguous().float()
+    cos = cos.contiguous().float()
+    sin = sin.contiguous().float()
 
     L, H, D = x.shape
     HALF_D = D // 2

@@ -31,8 +31,8 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
                 b_position_delta[batch_idx] = position_delta
             position_ids = self.position_ids + torch.tensor(b_position_delta, device=self.position_ids.device)
             position_ids = position_ids.unsqueeze(0).expand(3, -1)
-        self.position_cos = model._cos_cached[position_ids.unsqueeze(1)]  # (3, 1, L, D)
-        self.position_sin = model._sin_cached[position_ids.unsqueeze(1)]  # (3, 1, L, D)
+        self.position_cos = model._cos_cached[position_ids]  # (3, L, D)
+        self.position_sin = model._sin_cached[position_ids]  # (3, L, D)
         if get_env_start_args().enable_fa3:
             self.max_seq_len = self.max_kv_seq_len
             self.q_max_seq_len = self.max_q_seq_len
