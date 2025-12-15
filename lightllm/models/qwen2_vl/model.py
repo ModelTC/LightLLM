@@ -62,28 +62,25 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         # <img></img> --> <img>id,id+1...id+num</img>
         input_ids = []
         image_id = 0
-        start_idx = 0
-        cu_image_token_num = 0
         while True:
             try:
-                start_idx = origin_ids.index(self.image_start_id, start_idx)
+                start_idx = origin_ids.index(self.image_start_id)
                 if start_idx + 1 >= len(origin_ids):
                     break
                 if origin_ids[start_idx + 1] == self.image_end_id:
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.images[image_id].token_id
                     token_num = multimodal_params.images[image_id].token_num
-                    multimodal_params.images[image_id].start_idx = start_idx + 1 + cu_image_token_num
+                    multimodal_params.images[image_id].start_idx = len(input_ids)
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.image_end_id)
-                    start_idx += 1
+                    origin_ids = origin_ids[start_idx + 2 :]
                     image_id += 1
-                    cu_image_token_num += token_num
                 else:
                     raise ValueError("image token error")
             except ValueError:
                 break
-        input_ids.extend(origin_ids[start_idx + 1 :])
+        input_ids.extend(origin_ids)
         return input_ids
 
 
