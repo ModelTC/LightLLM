@@ -340,9 +340,6 @@ class InferReq:
         self.nixl_pd_task_failed_num: int = 0
         self.nixl_trans_device_id: int = -1
 
-        # # mrope模式下，decode的position_ids
-        # self.mrope_position_start_ids: torch.Tensor = None
-
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
@@ -484,10 +481,6 @@ class InferReq:
         elif output_len >= self.sampling_param.shm_param.max_new_tokens:
             self.finish_status.set_status(FinishStatus.FINISHED_LENGTH)
         return
-
-    # def update_mrope_decode_position_ids(self):
-    #     self.mrope_position_start_ids += 1
-    #     return
 
     def _stop_sequences_matched(self, output_len: int):
         for stop_token_ids in self.stop_sequences:
