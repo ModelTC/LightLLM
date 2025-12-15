@@ -129,7 +129,7 @@ class ChunkedPrefillBackend(ModeBackend):
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
         # 针对 HybridRadixCache 进行特殊处理
-        if isinstance(g_infer_context.radix_cache, HybridRadixCache):
+        if g_infer_context.use_buffer_manager and g_infer_context.radix_cache is not None:
             g_infer_state_lock.acquire()
             g_infer_context.radix_cache.insert_for_hybrid_radix_cache(run_reqs)
             g_infer_state_lock.release()
