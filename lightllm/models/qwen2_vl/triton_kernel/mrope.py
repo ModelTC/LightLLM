@@ -79,7 +79,7 @@ def mrope_kernel(
 
     axis_id = tl.load(AXIS_ptr + offs, mask=mask, other=0)  # 0,1,2
     idx_d = tl.where(offs < HALF, offs, offs - HALF)
-    cos_idx = pid_l * s_tok + axis_id * s_ax + idx_d * s_d
+    cos_idx = pid_l * s_tok + axis_id * s_ax + idx_d
     c = tl.load(COS_ptr + cos_idx, mask=mask, other=0.0)
     s = tl.load(SIN_ptr + cos_idx, mask=mask, other=0.0)
 
