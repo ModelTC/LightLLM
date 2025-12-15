@@ -112,10 +112,10 @@ class Qwen3NextMemoryManager(HybridMemManager):
         return self.conv_state_mem_manager.buffer[real_layer_index], self.ssm_state_mem_manager.buffer[real_layer_index]
 
     @override
-    def free_buffer(self, free_buffer_indexes: List[int], reset=True):
+    def free_buffer(self, free_buffer_indexes: List[int], reset_to_zero=True):
         # conv_state 和 ssm_state 共享buffer_idx
         self.conv_state_mem_manager.free(free_buffer_indexes)
-        if reset:
+        if reset_to_zero:
             self.conv_state_mem_manager.buffer[:, free_buffer_indexes] = 0
             self.ssm_state_mem_manager.buffer[:, free_buffer_indexes] = 0
 
@@ -130,8 +130,6 @@ class Qwen3NextMemoryManager(HybridMemManager):
 
     @override
     def copy_buffer(self, src_idx, tgt_idx):
-        assert src_idx is not None and tgt_idx is not None
-        assert src_idx != tgt_idx
         # Use slice operation and in-place copy for better performance
         self.conv_state_mem_manager.buffer[:, tgt_idx].copy_(self.conv_state_mem_manager.buffer[:, src_idx])
         self.ssm_state_mem_manager.buffer[:, tgt_idx].copy_(self.ssm_state_mem_manager.buffer[:, src_idx])
