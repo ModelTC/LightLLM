@@ -14,13 +14,9 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.models.qwen3next.req_manager import Qwen3NextReqManager
+from lightllm.common.req_manager import ReqManagerWithBuffer
 
 logger = init_logger(__name__)
-
-
-def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
-    return torch.empty(size, device="cuda", dtype=torch.int8)
 
 
 @ModelRegistry("qwen3_next")
@@ -34,6 +30,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def __init__(self, kvargs) -> None:
         self.mem_manager: Qwen3NextMemoryManager = None
+
+        def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
+            return torch.empty(size, device="cuda", dtype=torch.int8)
 
         # Set Triton allocator for TMA descriptors
         # This is required for kernels in qwen3next/triton_kernel/fla/ops/solve_tril.py
@@ -113,5 +112,5 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self.req_manager = Qwen3NextReqManager(self.max_req_num, create_max_seq_len, self.mem_manager)
+        self.req_manager = ReqManagerWithBuffer(self.max_req_num, create_max_seq_len, self.mem_manager)
         return

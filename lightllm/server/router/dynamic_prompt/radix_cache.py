@@ -36,6 +36,7 @@ class TreeNode:
         # 放在这里让该类模型能够复用当前的radix_cache代码。
         # 纯注意力模型该 buffer_idx 始终保持为 None
         self.buffer_idx = None
+        self.buffer_time = time_gen.generate_time_id()
 
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
@@ -83,6 +84,9 @@ class TreeNode:
 
     def update_time(self):
         self.time_id = time_gen.generate_time_id()
+
+    def update_buffer_time(self):
+        self.buffer_time = time_gen.generate_time_id()
 
     def is_leaf(self):
         return len(self.children) == 0
@@ -135,9 +139,8 @@ class RadixCache:
         if value is None:
             value = key
 
-        assert len(key) == len(value)  # and len(key) >= 1
-        if len(key) == 0:
-            return 0, None
+        assert len(key) == len(value) and len(key) >= 1
+
         return self._insert_helper(self.root_node, key, value)
 
     def _insert_helper(self, node: TreeNode, key, value) -> Tuple[int, Optional[TreeNode]]:
