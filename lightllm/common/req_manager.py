@@ -3,6 +3,8 @@ import collections
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional
+from typing_extensions import override
+
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
@@ -236,3 +238,32 @@ class ReqSamplingParamsManager:
             p_token_counts_tensor.cuda(non_blocking=True),
             p_cumsum_seq_len_tensor.cuda(non_blocking=True),
         )
+
+
+class ReqManagerWithBuffer(ReqManager):
+    def __init__(self, max_request_num, max_sequence_length, mem_manager):
+        super().__init__(max_request_num, max_sequence_length, mem_manager)
+        self.req_has_buffer = torch.zeros((self.max_request_num + 1), dtype=torch.bool, device="cuda")
+        self.req_to_buffer_index = torch.zeros((self.max_request_num + 1), dtype=torch.int32, device="cuda")
+        self.req_to_buffer_index[self.HOLD_REQUEST_ID] = self.mem_manager.HOLD_BUFFER_INDEX
+
+    @override
+    def free(self, free_req_indexes: List[int], free_token_index):
+        super().free(free_req_indexes, free_token_index)
+        self.req_has_buffer[free_req_indexes] = False
+        self.free_buffer(self.req_to_buffer_index[free_req_indexes])
+
+    @override
+    def free_all(self):
+        self.req_has_buffer.zero_()
+        super().free_all()
+        return
+
+    def free_buffer(self, free_buffer_indexes: List[int]):
+        self.mem_manager.free_buffer(free_buffer_indexes)
+        return
+
+    def alloc_buffer_for_req(self, req_index: int):
+        self.req_has_buffer[req_index] = True
+        buffer_indexes = self.mem_manager.alloc_buffer(len(req_index))
+        self.req_to_buffer_index[req_index] = buffer_indexes
