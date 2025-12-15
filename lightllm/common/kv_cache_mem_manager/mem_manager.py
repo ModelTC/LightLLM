@@ -80,7 +80,8 @@ class BaseAllocator:
         assert start >= 0, f"error free state start: {self.mark_start} free len {len(free_index)}"
 
         if isinstance(free_index, list):
-            self.mem_state.numpy()[start:end] = free_index
+            free_index_tensor = torch.tensor(free_index, dtype=self.mem_state.dtype, device=self.mem_state.device)
+            self.mem_state[start:end] = free_index_tensor
         else:
             # 从 gpu 到 cpu 的拷贝操作是流内阻塞操作
             self.mem_state[start:end] = free_index
@@ -422,12 +423,6 @@ class MemoryManager(BaseAllocator):
         self._free_buffers()
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
         return
-
-    def get_index_kv_buffer(self, index):
-        return {"kv_buffer": self.kv_buffer[:, index]}
-
-    def load_index_kv_buffer(self, index, load_tensor_dict):
-        self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
 
     def copy_kv_from_other_dp_ranks(
         self,
