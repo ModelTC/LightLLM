@@ -401,7 +401,7 @@ class LlamaTpPartModel(TpPartBaseModel):
         except:
             pass
 
-        inv_freq = 1.0 / (
+        self.inv_freq = 1.0 / (
             base ** (torch.arange(0, partial_head_dim, 2, device="cpu", dtype=torch.float32) / partial_head_dim)
         )
 
@@ -409,8 +409,8 @@ class LlamaTpPartModel(TpPartBaseModel):
             torch.arange(max(max_seq_len + 1024 * 128, self.max_seq_length), device="cpu", dtype=torch.float32)
             / rope_scaling_factor
         )
-        freqs = torch.outer(t, inv_freq).unsqueeze(0).expand(3, -1, -1)
-        freqs = torch.cat((freqs, freqs), dim=-1)
+        freqs = torch.outer(t, self.inv_freq)  # (T, D/2)
+        freqs = torch.cat((freqs, freqs), dim=-1)  # (T, D)
 
         self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
         self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()

@@ -270,7 +270,6 @@ class HttpServerManager:
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)
-
         try:
             original_multimodal_params = None
             if self.is_multinode_tp_master:
