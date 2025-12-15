@@ -68,6 +68,7 @@ def padded_prepare_prefill_inputs(
         b_ready_cache_len.append(0)
         total_token_num += 1
         prefix_total_token_num += 0
+        batch_multimodal_params.append({"images": [], "audios": []})
 
     max_kv_seq_len = max(b_seq_len)
     max_cache_len = max(b_ready_cache_len)
@@ -143,6 +144,7 @@ def padded_prepare_decode_inputs(
     b_seq_len = []
     b_q_seq_len = []
     args_mtp_step = get_env_start_args().mtp_step
+    batch_multimodal_params = []
     for req in req_objs:
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
@@ -151,6 +153,7 @@ def padded_prepare_decode_inputs(
         b_seq_len.append(seq_len)
         total_token_num += seq_len
         b_mtp_index.append(0)
+        batch_multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
         for step in range(req.mtp_step):
             run_reqs.append(req)
@@ -159,6 +162,7 @@ def padded_prepare_decode_inputs(
             b_req_idx.append(req.req_idx)
             b_seq_len.append(seq_len)
             b_mtp_index.append(step + 1)
+            batch_multimodal_params.append(req.multimodal_params)
 
         b_q_seq_len.append(req.mtp_step + 1)
 
@@ -169,12 +173,14 @@ def padded_prepare_decode_inputs(
         b_req_idx.append(g_infer_context.req_manager.HOLD_REQUEST_ID)
         b_seq_len.append(seq_len)
         b_mtp_index.append(0)
+        batch_multimodal_params.append({"images": [], "audios": []})
         for step in range(args_mtp_step):
             seq_len += 1
             total_token_num += seq_len
             b_seq_len.append(seq_len)
             b_req_idx.append(g_infer_context.req_manager.HOLD_REQUEST_ID)
             b_mtp_index.append(step + 1)
+            batch_multimodal_params.append({"images": [], "audios": []})
 
         b_q_seq_len.append(1 + args_mtp_step)
 
@@ -215,6 +221,7 @@ def padded_prepare_decode_inputs(
         b_seq_len=b_seq_len,
         is_prefill=False,
     )
+    model_input.multimodal_params = batch_multimodal_params
     return model_input, run_reqs, padded_req_num
 
 

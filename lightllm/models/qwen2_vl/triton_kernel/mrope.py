@@ -21,6 +21,7 @@ def mrope_kernel(
     HALF: tl.constexpr,
     s_tok: tl.int32,
     s_ax: tl.int32,
+    s_d: tl.int32,
     q_sb: tl.int32,
     q_sh: tl.int32,
     q_sl: tl.int32,
@@ -77,9 +78,10 @@ def mrope_kernel(
     rot_vals = tl.where(offs < HALF, -rot_vals, rot_vals)
 
     axis_id = tl.load(AXIS_ptr + offs, mask=mask, other=0)  # 0,1,2
-    cos_idx = pid_l * s_tok + axis_id * s_ax + offs
-    c = tl.load(COS_ptr + cos_idx, mask=mask, other=0.0)
-    s = tl.load(SIN_ptr + cos_idx, mask=mask, other=0.0)
+    idx_d = tl.where(offs < HALF, offs, offs - HALF)
+    cos_idx = pid_l * s_tok + axis_id * s_ax + idx_d
+    c = tl.load(COS_ptr + cos_idx, mask=idx_d < HALF, other=0.0)
+    s = tl.load(SIN_ptr + cos_idx, mask=idx_d < HALF, other=0.0)
 
     out = vals * c + rot_vals * s
 
@@ -101,12 +103,11 @@ def mrope_triton(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch
     qo_sb, qo_sh, qo_sl, qo_sd = map(int, q_out.stride())
     ko_sb, ko_sh, ko_sl, ko_sd = map(int, k_out.stride())
 
-    assert len(cos.shape) == 4
-    token_dim = 2
-    axis_dim = 0
+    assert len(cos.shape) == 3
 
-    s_token = int(cos.stride(token_dim))
-    s_axis = int(cos.stride(axis_dim))
+    s_axis = int(cos.stride(0))
+    s_token = int(cos.stride(1))
+    s_d = int(cos.stride(2))
 
     grid = (B * (H_q + H_k), L)
 
@@ -126,6 +127,7 @@ def mrope_triton(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch
         HALF,
         s_token,
         s_axis,
+        s_d,
         q_sb,
         q_sh,
         q_sl,
@@ -142,7 +144,7 @@ def mrope_triton(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch
         ko_sh,
         ko_sl,
         ko_sd,
-        BLOCK_D=128,
+        BLOCK_D=triton.next_power_of_2(D),
         num_warps=4,
         num_stages=3,
     )

@@ -1,28 +1,15 @@
 import json
 import numpy as np
-import unicodedata
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.models.qwen.model import QWenTpPartModel
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
-from transformers.feature_extraction_utils import BatchFeature
-from transformers.image_utils import ImageInput
-from transformers.processing_utils import ProcessorMixin
 from lightllm.server.core.objs import SamplingParams
-from transformers.tokenization_utils_base import PaddingStrategy, PreTokenizedInput, TextInput, TruncationStrategy
-from typing import List, Optional, Union
-from transformers.utils import TensorType, logging
-from lightllm.models.qwen2_vl.flashattention_infer_struct import Qwen2VLFlashAttentionStateInfo
 from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
-import torch
-from PIL import Image
 from .vision_process import smart_resize
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
-from lightllm.models.qwen2.layer_weights import transformer_layer_weight, pre_and_post_layer_weight
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 import os
 
@@ -57,6 +44,9 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
         token_num = (grid_h * grid_w) // (self.merge_size ** 2)
+        position_delta = max(grid_h // self.merge_size, grid_w // self.merge_size) - token_num
+        # delta 是为了mrope准备的，记录由于图片引入，position_id 产生的偏移量
+        img.grid_thwd = (1, grid_h // self.merge_size, grid_w // self.merge_size, position_delta)
         return token_num
 
     def get_audio_token_length(self, audio: AudioItem):
@@ -71,26 +61,25 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         # <img></img> --> <img>id,id+1...id+num</img>
         input_ids = []
         image_id = 0
-        start_idx = 0
         while True:
             try:
-                start_idx = origin_ids.index(self.image_start_id, start_idx)
+                start_idx = origin_ids.index(self.image_start_id)
                 if start_idx + 1 >= len(origin_ids):
                     break
                 if origin_ids[start_idx + 1] == self.image_end_id:
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.images[image_id].token_id
                     token_num = multimodal_params.images[image_id].token_num
+                    multimodal_params.images[image_id].start_idx = len(input_ids)
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.image_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]
-                    start_idx = 0
                     image_id += 1
                 else:
                     raise ValueError("image token error")
             except ValueError:
                 break
-        input_ids.extend(origin_ids[start_idx:])
+        input_ids.extend(origin_ids)
         return input_ids
 
 
@@ -107,8 +96,7 @@ class Qwen2VLTpPartModel(Qwen2TpPartModel):
         return
 
     def _init_inferstate_cls(self):
-        if get_env_start_args().enable_fa3:
-            self.infer_state_class = Qwen2VLFlashAttentionStateInfo
+        pass
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
