@@ -19,7 +19,6 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
     def init_some_extra_state(self, model, input_ids: torch.Tensor):
         rope_scaling = model.config.get("rope_scaling", {})
         self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", None))
-        self.vision_config = model.config.get("vision_config", {})
         InferStateInfo.init_some_extra_state(self, model, input_ids)
         if self.is_prefill:
             position_ids = self.get_mrope_position(self.multimodal_params)
@@ -50,17 +49,17 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         image_start_num = 0
         b_image_thwd = []
         for _, p in enumerate(multimodal_params):
-            for img in p["images"]:
+            images = p.get("images", [])
+            for img in images:
                 b_image_start_idx.append(img["start_idx"])
                 b_image_len.append(img["token_num"])
                 b_image_thwd.append(img["grid_thwd"])
-            b_image_nums.append(len(p["images"]))
+            b_image_nums.append(len(images))
             b_image_start_num.append(image_start_num)
-            image_start_num += len(p["images"])
+            image_start_num += len(images)
         # 没有任何图片
         if image_start_num == 0:
             return self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
-
         b_image_start_idx = torch.tensor(b_image_start_idx, device="cpu").cuda(non_blocking=True)
         b_image_thwd = torch.tensor(b_image_thwd, device="cpu").cuda(non_blocking=True)  # image_num x 4
         b_image_nums = torch.tensor(b_image_nums, device="cpu").cuda(non_blocking=True)
@@ -75,7 +74,7 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
             b_image_len=b_image_len,
             position_ids=position_ids,
             b_ready_cache_len=self.b_ready_cache_len,
-            b_seq_len=self.b_q_seq_len,
+            b_q_seq_len=self.b_q_seq_len,
             b_start_loc=self.b_start_loc,
         )
         return position_ids
