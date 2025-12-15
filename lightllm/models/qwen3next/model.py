@@ -15,6 +15,7 @@ from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.req_manager import ReqManagerWithBuffer
+from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
 logger = init_logger(__name__)
 
@@ -38,7 +39,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         # This is required for kernels in qwen3next/triton_kernel/fla/ops/solve_tril.py
         triton.set_allocator(_triton_allocator)
         logger.info("Triton allocator set for Qwen3Next model")
-
+        g_infer_context.use_buffer_manager = True
         super().__init__(kvargs)
 
     @override

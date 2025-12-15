@@ -59,6 +59,7 @@ class HybridRadixCache(RadixCache):
             node = self.evict_buffer_set.pop(0)
             assert node.buffer_idx is not None
             evict_buffer_callback(node.buffer_idx)
+            node.buffer_idx = None
             need_evict_buffer_num -= 1
             # 当一个节点的buffer_idx变为None时，事实上无法在后续进行match，
             # 但当该节点子节点或者引用数不为0时，仍然需要保留， 否则则应该被删除
@@ -73,38 +74,25 @@ class HybridRadixCache(RadixCache):
         return
 
     def insert_for_hybrid_radix_cache(self, reqs):
-        # 在请求运行途中对prefix cache进行保留，而不是请求被释放时
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
-        from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 
-        # 过滤掉 cur_kv_len 为 0 的请求（新请求还没有生成任何 KV）
-        valid_reqs = [req for req in reqs if req.cur_kv_len > 0]
+        self.free_radix_cache_to_get_enough_buffer(len(reqs))
+        new_buffer_indexes = self.mem_manager.alloc_buffer(len(reqs))
 
-        if len(valid_reqs) == 0:
-            return
+        for i, req in enumerate(reqs):
+            input_token_ids = req.get_input_token_ids()
+            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+            value = g_infer_context.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+            cur_buffer_idx = g_infer_context.req_manager.req_to_buffer_index[req.req_idx]
 
-        # 确保有足够的空间用于新的 buffer，并在锁保护下完成所有 radix cache 操作
-        g_infer_state_lock.acquire()
-        try:
-            self.free_radix_cache_to_get_enough_buffer(len(valid_reqs))
-            new_buffer_indexes = self.mem_manager.alloc_buffer(len(valid_reqs))
+            # 分配新的 buffer 并复制当前 buffer 的内容
+            self.mem_manager.copy_buffer(cur_buffer_idx, new_buffer_indexes[i])
 
-            for i, req in enumerate(valid_reqs):
-                input_token_ids = req.get_input_token_ids()
-                key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-                value = g_infer_context.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-                cur_buffer_idx = g_infer_context.req_manager.req_to_buffer_indexes[req.req_idx]
-
-                # 分配新的 buffer 并复制当前 buffer 的内容
-                self.mem_manager.copy_buffer(cur_buffer_idx, new_buffer_indexes[i])
-
-                _, new_shared_kv_node = super().insert(key, value)
-                self.dec_node_ref_counter(req.shared_kv_node)
-                self.add_node_ref_counter(new_shared_kv_node)
-                new_shared_kv_node.buffer_idx = new_buffer_indexes[i]
-                req.shared_kv_node = new_shared_kv_node
-        finally:
-            g_infer_state_lock.release()
+            _, new_shared_kv_node = super().insert(key, value)
+            self.dec_node_ref_counter(req.shared_kv_node)
+            self.add_node_ref_counter(new_shared_kv_node)
+            new_shared_kv_node.buffer_idx = new_buffer_indexes[i]
+            req.shared_kv_node = new_shared_kv_node
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
@@ -184,12 +172,13 @@ class HybridRadixCache(RadixCache):
             node: TreeNode = self.evict_tree_set.pop(0)
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
-            ), "error evict tree node state"
+            ), f"error evict tree node state: {node.ref_counter}, {len(node.children)}"
             num_evicted += len(node.token_mem_index_value)
             evict_callback(node.token_mem_index_value)
             if node.buffer_idx is not None:
                 self.evict_buffer_set.discard(node)
                 evict_buffer_callback(node.buffer_idx)
+                node.buffer_idx = None
             # update total token num
             self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
             parent_node: TreeNode = node.parent
