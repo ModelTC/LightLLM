@@ -279,7 +279,6 @@ class TpPartBaseModel:
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
 
         infer_state.multimodal_params = model_input.multimodal_params
-        print(f"infer_state.multimodal_params is {infer_state.multimodal_params}", flush=True)
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager

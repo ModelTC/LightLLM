@@ -7,13 +7,11 @@ import triton.language as tl
 @triton.jit
 def _get_mrope_position_triton(
     b_image_start_idx: torch.Tensor,
-    b_image_pos_delta: torch.Tensor,
+    b_image_thwd: torch.Tensor,
+    b_image_thwd_stride0: torch.Tensor,
     b_image_nums: torch.Tensor,
     b_image_start_num: torch.Tensor,
     b_image_len: torch.Tensor,
-    b_image_cu_len: torch.Tensor,
-    b_image_position_id: torch.Tensor,
-    b_image_position_id_stride0: torch.Tensor,
     position_ids: torch.Tensor,
     position_ids_stride0: torch.Tensor,
     b_ready_cache_len: torch.Tensor,
@@ -31,29 +29,14 @@ def _get_mrope_position_triton(
         local_image_start_idx = tl.load(b_image_start_idx + image_start_num + i)
         image_start_idx = start_loc + local_image_start_idx - cache_len
         image_len = tl.load(b_image_len + image_start_num + i)
-        cu_image_len = tl.load(b_image_cu_len + image_start_num + i)
+        image_h = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 1)
+        image_w = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 2)
         for j in range(0, image_len, BLOCK_SIZE):
             off = j + tl.arange(0, BLOCK_SIZE)
-            t_pos = (
-                tl.load(b_image_position_id + off + cu_image_len, mask=off < image_len, other=0.0)
-                + local_image_start_idx
-            )
-            h_pos = (
-                tl.load(
-                    b_image_position_id + b_image_position_id_stride0 + off + cu_image_len,
-                    mask=off < image_len,
-                    other=0.0,
-                )
-                + local_image_start_idx
-            )
-            w_pos = (
-                tl.load(
-                    b_image_position_id + b_image_position_id_stride0 * 2 + off + cu_image_len,
-                    mask=off < image_len,
-                    other=0.0,
-                )
-                + local_image_start_idx
-            )
+            # 目前没考虑视频，所以t 恒为 0
+            t_pos = local_image_start_idx + off * 0
+            h_pos = local_image_start_idx + off // image_h
+            w_pos = local_image_start_idx + off % image_w
             tl.store(
                 position_ids + off + image_start_idx,
                 t_pos,
@@ -79,7 +62,7 @@ def _get_mrope_position_triton(
     for i in range(image_num):
         local_image_start_idx = tl.load(b_image_start_idx + image_start_num + i)
         image_len = tl.load(b_image_len + image_start_num + i)
-        image_delta = tl.load(b_image_pos_delta + image_start_num + i)
+        image_delta = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 3)
         image_end = local_image_start_idx + image_len - cache_len
         text_start = tl.maximum(0, image_end)
         for j in range(text_start, seq_len, BLOCK_SIZE):
@@ -101,12 +84,10 @@ def _get_mrope_position_triton(
 
 def get_mrope_position_triton(
     b_image_start_idx: torch.Tensor,
-    b_image_pos_delta: torch.Tensor,
+    b_image_thwd: torch.Tensor,
     b_image_nums: torch.Tensor,
     b_image_start_num: torch.Tensor,
     b_image_len: torch.Tensor,
-    b_image_cu_len: torch.Tensor,
-    b_image_position_id: torch.Tensor,
     position_ids: torch.Tensor,
     b_ready_cache_len: torch.Tensor,
     b_seq_len: torch.Tensor,
@@ -118,13 +99,11 @@ def get_mrope_position_triton(
     BLOCK_SIZE = 64
     _get_mrope_position_triton[grid](
         b_image_start_idx=b_image_start_idx,
-        b_image_pos_delta=b_image_pos_delta,
+        b_image_thwd=b_image_thwd,
+        b_image_thwd_stride0=b_image_thwd.stride(0),
         b_image_nums=b_image_nums,
         b_image_start_num=b_image_start_num,
         b_image_len=b_image_len,
-        b_image_cu_len=b_image_cu_len,
-        b_image_position_id=b_image_position_id,
-        b_image_position_id_stride0=b_image_position_id.stride(0),
         position_ids=position_ids,
         position_ids_stride0=position_ids.stride(0),
         b_ready_cache_len=b_ready_cache_len,
@@ -135,34 +114,26 @@ def get_mrope_position_triton(
 
 
 def test():
-    b_image_start_idx = torch.tensor([0, 0, 2], dtype=torch.int32, device="cuda")
-    b_image_pos_delta = torch.tensor([-1, -2, -2], dtype=torch.int32, device="cuda")
+    b_image_start_idx = torch.tensor([0, 0, 4], dtype=torch.int32, device="cuda")
+    b_image_thwd = torch.tensor([[1, 2, 2, -2], [1, 2, 2, -2], [1, 2, 2, -2]], dtype=torch.int32, device="cuda")
     b_image_nums = torch.tensor([1, 2], dtype=torch.int32, device="cuda")
     b_image_start_num = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
-    b_image_len = torch.tensor([3, 2, 2], dtype=torch.int32, device="cuda")
-    b_image_cu_len = torch.tensor([0, 3, 5], dtype=torch.int32, device="cuda")
-    b_image_position_id = torch.tensor(
-        [[0, 0, 0, 0, 0, 0, 0], [11, 11, 11, 21, 21, 31, 31], [12, 12, 12, 22, 22, 32, 32]],
-        dtype=torch.int32,
-        device="cuda",
-    )
+    b_image_len = torch.tensor([4, 4, 4], dtype=torch.int32, device="cuda")
     position_ids = (
-        torch.tensor([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6], dtype=torch.int32, device="cuda")
+        torch.tensor([0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], dtype=torch.int32, device="cuda")
         .unsqueeze(0)
         .expand(3, -1)
         .contiguous()
     )
     b_ready_cache_len = torch.tensor([0, 0], dtype=torch.int32, device="cuda")
-    b_seq_len = torch.tensor([5, 7], dtype=torch.int32, device="cuda")
-    b_start_loc = torch.tensor([0, 5], dtype=torch.int32, device="cuda")
+    b_seq_len = torch.tensor([7, 13], dtype=torch.int32, device="cuda")
+    b_start_loc = torch.tensor([0, 7], dtype=torch.int32, device="cuda")
     get_mrope_position_triton(
         b_image_start_idx,
-        b_image_pos_delta,
+        b_image_thwd,
         b_image_nums,
         b_image_start_num,
         b_image_len,
-        b_image_cu_len,
-        b_image_position_id,
         position_ids,
         b_ready_cache_len,
         b_seq_len,
@@ -170,8 +141,8 @@ def test():
     )
     print(position_ids)
     """
-    tensor([[ 0,  0,  0,  2,  3,  0,  0,  0,  0,  0,  1,  2],
-        [11, 11, 11,  2,  3, 21, 21, 31, 31,  0,  1,  2],
-        [12, 12, 12,  2,  3, 22, 22, 32, 32,  0,  1,  2]], device='cuda:0',
-       dtype=torch.int32)
+    tensor([[0, 0, 0, 0, 2, 3, 4, 0, 0, 0, 0, 2, 2, 2, 2, 4, 5, 6, 7, 8],
+        [0, 0, 1, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 4, 5, 6, 7, 8],
+        [0, 1, 0, 1, 2, 3, 4, 0, 1, 0, 1, 2, 3, 2, 3, 4, 5, 6, 7, 8]],
+       device='cuda:0', dtype=torch.int32)
     """

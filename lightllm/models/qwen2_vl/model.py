@@ -47,7 +47,7 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         token_num = (grid_h * grid_w) // (self.merge_size ** 2)
         position_delta = max(grid_h // self.merge_size, grid_w // self.merge_size) - token_num
         # delta 是为了mrope准备的，记录由于图片引入，position_id 产生的偏移量
-        img.grid_thwd = (1, grid_h, grid_w, position_delta)
+        img.grid_thwd = (1, grid_h // self.merge_size, grid_w // self.merge_size, position_delta)
         return token_num
 
     def get_audio_token_length(self, audio: AudioItem):

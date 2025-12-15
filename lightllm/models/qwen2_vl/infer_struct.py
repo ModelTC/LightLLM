@@ -40,53 +40,20 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
             self.init_flash_attention_state_func(model, input_ids)
         return
 
-    def get_image_position_ids(self, image_grid_thw: List[int]) -> torch.Tensor:
-        # TODO: 跟 img embed 一样，缓存在shm里。
-
-        spatial_merge_size = self.vision_config.get("spatial_merge_size", 2)
-        tokens_per_second = self.vision_config.get("tokens_per_second", 1.0)
-        t, h, w = image_grid_thw
-        video_second_per_grid_t = 0.0
-
-        llm_grid_t, llm_grid_h, llm_grid_w = (
-            t,
-            h // spatial_merge_size,
-            w // spatial_merge_size,
-        )
-        t_index = (
-            (
-                torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w)
-                * video_second_per_grid_t
-                * tokens_per_second
-            )
-            .long()
-            .flatten()
-        )
-
-        h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-        w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
-        return torch.stack([t_index, h_index, w_index]).reshape(3, -1)
-
     def get_mrope_position(self, multimodal_params: List[dict]) -> torch.Tensor:
         if len(multimodal_params) == 0:
             return self.position_ids.unsqueeze(0).expand(3, -1)
         b_image_start_idx = []
-        b_image_pos_delta = []
         b_image_nums = []
-        b_image_position_id = []
         b_image_start_num = []
-        b_image_cu_len = []
         b_image_len = []
         image_start_num = 0
-        image_cu_len = 0
+        b_image_thwd = []
         for _, p in enumerate(multimodal_params):
             for img in p["images"]:
                 b_image_start_idx.append(img["start_idx"])
                 b_image_len.append(img["token_num"])
-                b_image_pos_delta.append(img["grid_thwd"][3])
-                b_image_position_id.append(self.get_image_position_ids(img["grid_thwd"][:3]))
-                b_image_cu_len.append(image_cu_len)
-                image_cu_len += img["token_num"]
+                b_image_thwd.append(img["grid_thwd"])
             b_image_nums.append(len(p["images"]))
             b_image_start_num.append(image_start_num)
             image_start_num += len(p["images"])
@@ -95,21 +62,17 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
             return self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
 
         b_image_start_idx = torch.tensor(b_image_start_idx, device=self.position_ids.device)
-        b_image_pos_delta = torch.tensor(b_image_pos_delta, device=self.position_ids.device)
+        b_image_thwd = torch.tensor(b_image_thwd, device=self.position_ids.device)  # image_num x 4
         b_image_nums = torch.tensor(b_image_nums, device=self.position_ids.device)
         b_image_start_num = torch.tensor(b_image_start_num, device=self.position_ids.device)
-        b_image_cu_len = torch.tensor(b_image_cu_len, device=self.position_ids.device)
         b_image_len = torch.tensor(b_image_len, device=self.position_ids.device)
-        b_image_position_id = torch.cat(b_image_position_id, dim=1).cuda(non_blocking=True)
         position_ids = self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
         get_mrope_position_triton(
             b_image_start_idx=b_image_start_idx,
-            b_image_pos_delta=b_image_pos_delta,
+            b_image_thwd=b_image_thwd,
             b_image_nums=b_image_nums,
             b_image_start_num=b_image_start_num,
             b_image_len=b_image_len,
-            b_image_cu_len=b_image_cu_len,
-            b_image_position_id=b_image_position_id,
             position_ids=position_ids,
             b_ready_cache_len=self.b_ready_cache_len,
             b_seq_len=self.b_q_seq_len,
