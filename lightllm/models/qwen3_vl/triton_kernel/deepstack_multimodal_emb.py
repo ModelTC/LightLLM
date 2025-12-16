@@ -120,25 +120,17 @@ def apply_deepstack_features(
     if not infer_state.deepstack_features:
         return
 
-    deepstack_layers_num = len(infer_state.deepstack_features[0])
-
-    if layer_num < 0 or layer_num >= deepstack_layers_num:
-        return
-
-    input_ids = infer_state.input_ids
-    device = input_embeddings.device
-
-    if infer_state.img_token_lens.shape[0] == 0:
+    if layer_num >= len(infer_state.deepstack_features[0]):
         return
 
     per_img_deepstack_features = [
-        infer_state.deepstack_features[i][layer_num].to(device=device, non_blocking=True)
-        for i in range(infer_state.img_token_lens.shape[0])
+        infer_state.deepstack_features[i][layer_num] for i in range(infer_state.img_token_lens.shape[0])
     ]
     all_deepstack_features = torch.cat(per_img_deepstack_features, dim=0)
+
     add_deepstack_embs(
         out=input_embeddings,
-        input_ids=input_ids,
+        input_ids=infer_state.input_ids,
         deepstack_embs=all_deepstack_features,
         img_token_lens=infer_state.img_token_lens,
         img_start_token_ids=infer_state.img_start_token_ids,

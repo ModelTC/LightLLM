@@ -54,7 +54,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
                 for layer in range(deepstack_layer_num):
                     start = img["token_num"] * (layer + 1)
                     end = img["token_num"] * (layer + 2)
-                    per_image_deepstack.append(all_img_embed_df[start:end])
+                    per_image_deepstack.append(all_img_embed_df[start:end].cuda())
 
                 infer_state.deepstack_features.append(per_image_deepstack)
                 infer_state.img_start_token_ids.append(img["token_id"])
