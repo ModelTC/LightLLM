@@ -1,5 +1,4 @@
 import json
-from operator import mul
 import numpy as np
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer

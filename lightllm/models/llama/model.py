@@ -206,6 +206,7 @@ class LlamaTpPartModel(TpPartBaseModel):
             / rope_scaling_factor
         )
         freqs = torch.outer(t, inv_freq)
+
         self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
         self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
         return
