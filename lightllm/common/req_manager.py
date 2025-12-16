@@ -250,7 +250,6 @@ class ReqManagerWithBuffer(ReqManager):
     @override
     def free(self, free_req_indexes: List[int], free_token_index):
         super().free(free_req_indexes, free_token_index)
-        self.free_buffer(self.req_to_buffer_index[free_req_indexes])
 
     @override
     def free_all(self):
