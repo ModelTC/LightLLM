@@ -91,7 +91,7 @@ class HybridRadixCache(RadixCache):
             _, new_shared_kv_node = super().insert(key, value)
             self.dec_node_ref_counter(req.shared_kv_node)
             self.add_node_ref_counter(new_shared_kv_node)
-            new_shared_kv_node.buffer_idx = new_buffer_indexes[i]
+            self.set_node_buffer_idx(new_shared_kv_node, new_buffer_indexes[i].item())
             req.shared_kv_node = new_shared_kv_node
 
     def match_prefix(self, key, update_refs=False):
@@ -100,9 +100,14 @@ class HybridRadixCache(RadixCache):
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
         evict_token_list = []
         while tree_node != self.root_node and tree_node.buffer_idx is None:
-            self.dec_node_ref_counter(tree_node)
-            if tree_node.is_leaf() and tree_node.ref_counter == 0:
+            if tree_node.is_leaf():
                 self.evict_tree_set.discard(tree_node)
+
+            if tree_node.ref_counter == 1:
+                self.refed_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
+            tree_node.ref_counter -= 1  # 只减少当前节点，不递归
+
+            if tree_node.is_leaf() and tree_node.ref_counter == 0:
                 evict_token_list.append(tree_node.token_mem_index_value)
                 self.tree_total_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
                 parent_node: TreeNode = tree_node.parent
@@ -111,6 +116,8 @@ class HybridRadixCache(RadixCache):
                     self.evict_tree_set.add(parent_node)
                 tree_node = parent_node
             else:
+                if tree_node.is_leaf():
+                    self.evict_tree_set.add(tree_node)
                 tree_node = tree_node.parent
             ans_value_list.pop()
 
@@ -132,12 +139,12 @@ class HybridRadixCache(RadixCache):
         value = torch.concat(ans_value_list)
         return tree_node, len(value), value
 
-    def insert(self, key, value) -> Tuple[int, Optional[TreeNode]]:
-        prefix_len, node = super().insert(key, value)
+    def set_node_buffer_idx(self, node: TreeNode, buffer_idx: int):
+        """Set buffer_idx for a node and add it to evict_buffer_set."""
+        node.buffer_idx = buffer_idx
         self.evict_buffer_set.discard(node)
         node.update_buffer_time()
         self.evict_buffer_set.add(node)
-        return prefix_len, node
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
         assert self.mem_manager is not None
