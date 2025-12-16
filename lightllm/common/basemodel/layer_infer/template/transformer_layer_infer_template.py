@@ -7,6 +7,7 @@ from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.distributed import all_reduce
 from typing import Tuple
+from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
@@ -68,7 +69,32 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+
+        # prefill 的 cuda graph 过程， 排除掉attention部分
+        if torch.cuda.is_current_stream_capturing():
+            infer_state.cpu_prefill_atomic_event += 1
+            infer_state.prefill_atomic_event_incr()
+            wait_event = infer_state.cpu_prefill_atomic_event
+            o = torch.empty_like(q)
+            _q, _cache_kv, _o = (
+                tensor_to_no_ref_tensor(q.contiguous()),
+                tensor_to_no_ref_tensor(cache_kv.contiguous()),
+                tensor_to_no_ref_tensor(o),
+            )
+
+            def att_func(new_infer_state: InferStateInfo):
+                infer_state.prefill_atomic_event_wait(wait_event=wait_event)
+                _o.copy_(self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight))
+                infer_state.prefill_atomic_event_incr()
+                return
+
+            infer_state.cpu_prefill_atomic_event += 1
+            infer_state.prefill_atomic_event_wait(wait_event=infer_state.cpu_prefill_atomic_event)
+
+            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func)
+        else:
+            o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+
         q = None
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
@@ -110,7 +136,32 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         q, cache_kv = self._tpsp_get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+
+        # prefill 的 cuda graph 过程， 排除掉attention部分
+        if torch.cuda.is_current_stream_capturing():
+            infer_state.cpu_prefill_atomic_event += 1
+            infer_state.prefill_atomic_event_incr()
+            wait_event = infer_state.cpu_prefill_atomic_event
+            o = torch.empty_like(q)
+            _q, _cache_kv, _o = (
+                tensor_to_no_ref_tensor(q.contiguous()),
+                tensor_to_no_ref_tensor(cache_kv.contiguous()),
+                tensor_to_no_ref_tensor(o),
+            )
+
+            def att_func(new_infer_state: InferStateInfo):
+                infer_state.prefill_atomic_event_wait(wait_event=wait_event)
+                _o.copy_(self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight))
+                infer_state.prefill_atomic_event_incr()
+                return
+
+            infer_state.cpu_prefill_atomic_event += 1
+            infer_state.prefill_atomic_event_wait(wait_event=infer_state.cpu_prefill_atomic_event)
+
+            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func)
+        else:
+            o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+
         q = None
         o = self._tpsp_get_o(o, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))

@@ -11,6 +11,7 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank
+from lightllm.common.basemodel.triton_kernel.atomic_event import add_value, wait_value
 
 
 class InferStateInfo:
@@ -292,3 +293,39 @@ class InferStateInfo:
             async_op=False,
         )
         return origin_data.view(-1, *old_shape[1:])
+
+    # 用于 prefll cuda graph 的专用功能接口
+    def prefill_atomic_event_init(self):
+        self.prefill_atomic_event: torch.Tensor = torch.zeros(
+            size=(1,), dtype=torch.int32, device="cuda"
+        )  # 用于 prefill 阶段的 atomic event 标记变量
+        self.cpu_prefill_atomic_event: int = 0
+        return
+
+    def prefill_atomic_event_clear(self):
+        self.prefill_atomic_event.fill_(0)
+        self.cpu_prefill_atomic_event = 0
+        return
+
+    def prefill_atomic_event_incr(self):
+        add_value(self.prefill_atomic_event)
+        return
+
+    def prefill_atomic_event_wait(self, wait_event: int):
+        wait_value(self.prefill_atomic_event, wait_event)
+        return
+
+    def prefill_cuda_graph_add_cpu_runnning_func(self, func):
+        if not hasattr(self, "prefill_cuda_graph_func_list"):
+            self.prefill_cuda_graph_func_list = []
+        self.prefill_cuda_graph_func_list.append(func)
+        assert len(self.prefill_cuda_graph_func_list) == self.cpu_prefill_atomic_event // 2
+        return
+
+    def prefill_replay(self, new_infer_state: "InferStateInfo"):
+        if not hasattr(self, "prefill_cuda_graph_stream"):
+            self.prefill_cuda_graph_stream = torch.cuda.Stream()
+        with torch.cuda.stream(self.prefill_cuda_graph_stream):
+            for func in self.prefill_cuda_graph_func_list:
+                func(new_infer_state)
+        return
