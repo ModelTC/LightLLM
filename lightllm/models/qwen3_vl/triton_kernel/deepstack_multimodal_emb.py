@@ -77,6 +77,8 @@ def add_deepstack_embs(
     img_start_token_ids: torch.Tensor,
     img_start_locs: torch.Tensor,
 ):
+    print(f"deepstack_embs is {deepstack_embs}")
+
     assert input_ids.dim() == 1
     assert out.dim() == 2
     assert deepstack_embs.dim() == 2

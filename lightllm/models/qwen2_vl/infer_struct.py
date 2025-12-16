@@ -65,7 +65,7 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         b_image_thwd = torch.tensor(b_image_thwd, device="cpu").cuda(non_blocking=True)  # image_num x 4
         b_image_nums = torch.tensor(b_image_nums, device="cpu").cuda(non_blocking=True)
         b_image_start_num = torch.tensor(b_image_start_num, device="cpu").cuda(non_blocking=True)
-        b_image_len = torch.tensor(b_image_len, device=self.position_ids.device)
+        b_image_len = torch.tensor(b_image_len, device="cpu").cuda(non_blocking=True)
         position_ids = self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
         get_mrope_position_triton(
             b_image_start_idx=b_image_start_idx,

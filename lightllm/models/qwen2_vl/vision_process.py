@@ -275,5 +275,4 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
 
         pixel_values = torch.cat(processed_images, dim=0)
         image_grid_thw = torch.as_tensor(processed_grids)
-
         return pixel_values, image_grid_thw
