@@ -26,9 +26,9 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         img_start_loc = 0
 
         infer_state.input_ids = input_ids
-        infer_state.img_start_token_ids = []
-        infer_state.img_token_lens = []
-        infer_state.img_start_locs = []
+        img_start_token_ids = []
+        img_token_lens = []
+        img_start_locs = []
 
         device = layer_weight.wte_weight_.device
         dtype = layer_weight.wte_weight_.dtype
@@ -39,8 +39,9 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
                 # skip the same image
-                if img["token_id"] in infer_state.img_start_token_ids or img["_prefill_"] is False:
+                if img["token_id"] in img_start_token_ids or img["_prefill_"] is False:
                     continue
+                infer_state.image_num_need_deepstack += 1
 
                 # all_img_embed_df的shape是
                 # image_embed(token_num, hidden_dim) + deepstack(token_num*layer_num, hidden_dim)
@@ -57,9 +58,9 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
                     per_image_deepstack.append(all_img_embed_df[start:end])
 
                 infer_state.deepstack_features.append(per_image_deepstack)
-                infer_state.img_start_token_ids.append(img["token_id"])
-                infer_state.img_token_lens.append(img["token_num"])
-                infer_state.img_start_locs.append(img_start_loc)
+                img_start_token_ids.append(img["token_id"])
+                img_token_lens.append(img["token_num"])
+                img_start_locs.append(img_start_loc)
                 img_start_loc += img["token_num"]
         out = torch.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
 
@@ -73,18 +74,18 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         )
         # each tp will fill the img embeds, should divide by world_size
         img_weight = img_weight / self.tp_world_size_
-        img_start_token_ids = torch.Tensor(infer_state.img_start_token_ids).to(device=device, dtype=torch.long)
-        img_token_lens = torch.Tensor(infer_state.img_token_lens).to(device=device, dtype=torch.long)
-        img_start_locs = torch.Tensor(infer_state.img_start_locs).to(device=device, dtype=torch.long)
+        infer_state.img_start_token_ids = torch.Tensor(img_start_token_ids).to(device=device, dtype=torch.long)
+        infer_state.img_token_lens = torch.Tensor(img_token_lens).to(device=device, dtype=torch.long)
+        infer_state.img_start_locs = torch.Tensor(img_start_locs).to(device=device, dtype=torch.long)
 
         multimodal_emb(
             out,
             input_ids,
             layer_weight.wte_weight_,
             img_weight,
-            img_token_lens,
-            img_start_token_ids,
-            img_start_locs,
+            infer_state.img_token_lens,
+            infer_state.img_start_token_ids,
+            infer_state.img_start_locs,
             self.vob_start_id_,
             self.vob_end_id_,
         )

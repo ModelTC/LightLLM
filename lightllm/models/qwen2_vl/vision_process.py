@@ -80,6 +80,7 @@ def resize_image(
 class Qwen2VLImageProcessor(BaseImageProcessorFast):
     def __init__(
         self,
+        size: dict = None,
         do_resize: bool = True,
         resample: PILImageResampling = PILImageResampling.BICUBIC,
         do_rescale: bool = True,
@@ -98,6 +99,7 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        self.size = size
         self.do_resize = do_resize
         self.resample = resample
         self.do_rescale = do_rescale
