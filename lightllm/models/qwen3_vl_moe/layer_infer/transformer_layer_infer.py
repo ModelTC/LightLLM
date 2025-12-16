@@ -11,7 +11,7 @@ from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwe
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
-from lightllm.models.qwen3_vl.triton_kernel.qk_norm import qk_rmsnorm_forward
+from lightllm.models.qwen3.triton_kernel.qk_norm import qk_rmsnorm_forward
 from lightllm.distributed import all_reduce
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.models.qwen3_vl.triton_kernel.deepstack_multimodal_emb import apply_deepstack_features
