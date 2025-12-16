@@ -33,8 +33,8 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
             self.position_ids = position_ids.unsqueeze(0).expand(3, -1)
 
         self.position_ids = self.position_ids.contiguous()
-        self.position_cos = model._cos_cached[self.position_ids]  # (3, L, D)
-        self.position_sin = model._sin_cached[self.position_ids]  # (3, L, D)
+        self._cos_cached = model._cos_cached
+        self._sin_cached = model._sin_cached
         if get_env_start_args().enable_fa3:
             self.max_seq_len = self.max_kv_seq_len
             self.q_max_seq_len = self.max_q_seq_len
