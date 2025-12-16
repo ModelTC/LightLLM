@@ -402,7 +402,6 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                     max_pixels=self.processor.max_pixels,
                 )
                 pixel_values, image_grid_thw = self.processor.preprocess(image_data)
-                print(f"pixel_values is {pixel_values}")
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:

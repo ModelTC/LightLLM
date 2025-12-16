@@ -77,8 +77,6 @@ def add_deepstack_embs(
     img_start_token_ids: torch.Tensor,
     img_start_locs: torch.Tensor,
 ):
-    print(f"deepstack_embs is {deepstack_embs}")
-
     assert input_ids.dim() == 1
     assert out.dim() == 2
     assert deepstack_embs.dim() == 2
@@ -117,8 +115,9 @@ def clear_deepstack_state(
         total_layers = len(infer_state.deepstack_features[0])
         if layer_num == total_layers:
             infer_state.img_start_token_ids = []
-            infer_state.img_token_lens = []
-            infer_state.img_start_locs = []
+            infer_state.img_token_lens = None
+            infer_state.img_start_locs = None
+            infer_state.image_num_need_deepstack = 0
             infer_state.deepstack_features = []
     return
 
@@ -146,27 +145,25 @@ def apply_deepstack_features(
     device = input_embeddings.device
     dtype = input_embeddings.dtype
 
-    if len(infer_state.img_start_token_ids) == 0:
+    if infer_state.image_num_need_deepstack == 0:
         clear_deepstack_state(layer_num, infer_state)
         return
 
     per_img_deepstack_features = [
         infer_state.deepstack_features[i][layer_num].to(device=device, dtype=dtype, non_blocking=True)
-        for i in range(len(infer_state.img_start_token_ids))
+        for i in range(infer_state.image_num_need_deepstack)
     ]
     all_deepstack_features = torch.cat(per_img_deepstack_features, dim=0)
 
-    img_start_token_ids_t = torch.as_tensor(infer_state.img_start_token_ids, device=device, dtype=input_ids.dtype)
-    img_token_lens_t = torch.as_tensor(infer_state.img_token_lens, device=device, dtype=input_ids.dtype)
-    img_start_locs_t = torch.as_tensor(infer_state.img_start_locs, device=device, dtype=input_ids.dtype)
+    img_start_token_ids_t = torch.as_tensor(infer_state.img_start_token_ids, device=device, dtype=torch.long)
 
     add_deepstack_embs(
         out=input_embeddings,
         input_ids=input_ids,
         deepstack_embs=all_deepstack_features,
-        img_token_lens=img_token_lens_t,
+        img_token_lens=infer_state.img_token_lens,
         img_start_token_ids=img_start_token_ids_t,
-        img_start_locs=img_start_locs_t,
+        img_start_locs=infer_state.img_start_locs,
     )
 
     clear_deepstack_state(layer_num, infer_state)

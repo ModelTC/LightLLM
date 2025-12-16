@@ -21,7 +21,7 @@ MODELS = [
     ),
 ]
 os.environ["OPENAI_API_KEY"] = "lightllm123"
-os.environ["OPENAI_API_BASE"] = "http://localhost:8000/v1"
+os.environ["OPENAI_API_BASE"] = "http://localhost:18009/v1"
 
 
 def run_mmmu_eval(
@@ -72,4 +72,4 @@ def run_mmmu_eval(
     )
 
 
-run_mmmu_eval("Qwen/Qwen2.5-VL-7B-Instruct", "./logs")
+run_mmmu_eval("/mtc/sangchengmeng/models/Qwen3-VL-8B-Instruct/", "./logs")
