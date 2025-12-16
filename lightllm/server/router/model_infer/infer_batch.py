@@ -71,39 +71,31 @@ class InferenceContext:
             self.cpu_kv_cache_stream = torch.cuda.Stream()
         return self.cpu_kv_cache_stream
 
-    def _maybe_alloc_and_copy_req_buffers(self, req_objs: List["InferReq"]) -> None:
-        """
-        For hybrid/linear-attention models (e.g. Qwen3-Next) we allocate a fixed-size buffer per request.
-        If radix cache hits and the matched node has a buffer, copy that buffer content to the newly
-        allocated buffer for this request.
-        """
-        if not self.use_buffer_manager or not req_objs:
-            return
-
+    def _alloc_and_copy_req_buffers(self, req_objs: List["InferReq"]) -> None:
+        # 为请求分配 buffer， 如果 shared_kv_node 不为 None，则从 radix cache 复制 buffer。
         if self.radix_cache is not None:
-            # Ensure enough buffer capacity by evicting radix cache buffers if needed.
             self.radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs))
 
-        req_idxs = np.array([r.req_idx for r in req_objs], dtype=np.int64)
-        request_indices_gpu = torch.from_numpy(req_idxs).to(device="cuda", dtype=torch.int64)
+        req_idxs = []
+        copy_indices = []
+        copy_buffers = []
+
+        for r in req_objs:
+            req_idxs.append(r.req_idx)
+            if r.shared_kv_node is not None:
+                copy_indices.append(r.req_idx)
+                copy_buffers.append(r.shared_kv_node.buffer_idx)
+
+        request_indices_gpu = torch.tensor(req_idxs, device="cuda", dtype=torch.int64)
         self.req_manager.alloc_buffer_for_req(request_indices_gpu)
 
         if self.radix_cache is None:
             return
 
-        # `shared_kv_node` may be None on cache miss; treat it as "no buffer to copy".
-        buffer_idxs = np.array(
-            [None if r.shared_kv_node is None else r.shared_kv_node.buffer_idx for r in req_objs], dtype=object
-        )
-        mask = buffer_idxs == None  # noqa: E711 (intentional elementwise comparison against None)
-        copy_indices = req_idxs[~mask].tolist()
-        if not copy_indices:
-            return
-
-        copy_buffers = buffer_idxs[~mask].tolist()
-        copy_indices_tensor = torch.tensor(copy_indices, device="cuda", dtype=torch.int64)
-        copy_buffers_tensor = torch.tensor(copy_buffers, device="cuda", dtype=torch.int64)
-        self.req_manager.copy_buffer_from_another_buffer(copy_buffers_tensor, copy_indices_tensor)
+        if copy_indices:
+            copy_indices_tensor = torch.tensor(copy_indices, device="cuda", dtype=torch.int64)
+            copy_buffers_tensor = torch.tensor(copy_buffers, device="cuda", dtype=torch.int64)
+            self.req_manager.copy_buffer_from_another_buffer(copy_buffers_tensor, copy_indices_tensor)
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
@@ -143,8 +135,8 @@ class InferenceContext:
                     slave_req: InferReq = slave_req
                     slave_req.related_master_req = master_req
 
-        # Hybrid/linear-attention models
-        self._maybe_alloc_and_copy_req_buffers(req_objs)
+        if self.use_buffer_manager and len(req_objs) > 0:
+            self._alloc_and_copy_req_buffers(req_objs)
 
         return req_objs
 
@@ -169,11 +161,11 @@ class InferenceContext:
             if self.use_buffer_manager:
                 buffer_idx = self.req_manager.req_to_buffer_index[req.req_idx].item()
                 if node.buffer_idx is None:
-                    self.radix_cache.set_node_buffer_idx(node, buffer_idx)
+                    self.radix_cache.add_buffer_idx_to_node(node, buffer_idx)
                 else:
                     free_buffer_index.append(buffer_idx)
 
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+            old_prefix_len = req.shm_req.prompt_cache_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
                 assert req.shared_kv_node.node_prefix_total_len <= prefix_len
@@ -218,7 +210,6 @@ class InferenceContext:
             self.req_manager.free(free_req_index, free_token_index)
 
         if self.use_buffer_manager and len(free_buffer_index) != 0:
-            free_buffer_index = torch.tensor(free_buffer_index, dtype=torch.int64, device="cpu")
             self.req_manager.free_buffer(free_buffer_index)
 
         finished_req_ids_set = set(finished_request_ids)
@@ -278,6 +269,7 @@ class InferenceContext:
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
             g_infer_state_lock.acquire()
+            revovered_reqs = []
             for req in paused_reqs:
                 prefill_need_token_num = req.get_cur_total_len()
                 if prefill_need_token_num > can_alloc_token_num:
@@ -288,8 +280,10 @@ class InferenceContext:
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
                 can_alloc_token_num -= prefill_need_token_num
+                revovered_reqs.append(req)
 
-            self._maybe_alloc_and_copy_req_buffers(paused_reqs)
+            self._alloc_and_copy_req_buffers(revovered_reqs)
+            g_infer_state_lock.release()
         return
 
     def get_can_alloc_token_num(self):
@@ -413,13 +407,12 @@ class InferReq:
         self.nixl_pd_task_failed_num: int = 0
         self.nixl_trans_device_id: int = -1
 
+        # 在开启radix cache的情况下，用于标记命中情况，用于插入算法
+        self.mamba_model_match_len = 0
+
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
-
-        # 用于管理该请求整个生命周期固定大小的 buffer 索引，None 表示未分配
-        # 用于线性注意力模型，比如 Qwen3-Next
-        self.buffer_idx: int = None
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
@@ -469,6 +462,7 @@ class InferReq:
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+            self.mamba_model_match_len = kv_len
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
