@@ -49,7 +49,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
 
                 # 计算deepstack的层数
                 deepstack_layer_num = all_img_embed_df.shape[0] // img["token_num"] - 1
-                img_weight.append(all_img_embed_df[: img["token_num"]].cuda())
+                img_weight.append(all_img_embed_df[: img["token_num"]].cuda(non_blocking=True))
 
                 for layer in range(deepstack_layer_num):
                     start = img["token_num"] * (layer + 1)
@@ -64,7 +64,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         out = torch.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
 
         if len(img_weight) > 0:
-            img_weight = torch.cat(img_weight, dim=0).to(device=device, dtype=dtype)
+            img_weight = torch.cat(img_weight, dim=0).to(dtype=dtype)
         else:
             img_weight = torch.empty((0, hidden_size), device=device, dtype=dtype)
         assert img_weight.shape[1] == hidden_size, (
@@ -73,9 +73,15 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         )
         # each tp will fill the img embeds, should divide by world_size
         img_weight = img_weight / self.tp_world_size_
-        img_start_token_ids = torch.Tensor(infer_state.img_start_token_ids).to(device=device, dtype=torch.long)
-        infer_state.img_token_lens = torch.Tensor(img_token_lens).to(device=device, dtype=torch.long)
-        infer_state.img_start_locs = torch.Tensor(img_start_locs).to(device=device, dtype=torch.long)
+        infer_state.img_start_token_ids = torch.tensor(
+            infer_state.img_start_token_ids, dtype=torch.long, device="cpu"
+        ).cuda(non_blocking=True)
+        infer_state.img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu").cuda(
+            non_blocking=True
+        )
+        infer_state.img_start_locs = torch.tensor(img_start_locs, dtype=torch.long, device="cpu").cuda(
+            non_blocking=True
+        )
 
         multimodal_emb(
             out,
@@ -83,7 +89,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
             layer_weight.wte_weight_,
             img_weight,
             infer_state.img_token_lens,
-            img_start_token_ids,
+            infer_state.img_start_token_ids,
             infer_state.img_start_locs,
             self.vob_start_id_,
             self.vob_end_id_,

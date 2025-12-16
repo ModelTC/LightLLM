@@ -107,20 +107,6 @@ def add_deepstack_embs(
     return
 
 
-def clear_deepstack_state(
-    layer_num: int,
-    infer_state: Qwen3VLInferStateInfo,
-):
-    if infer_state.deepstack_features:
-        total_layers = len(infer_state.deepstack_features[0])
-        if layer_num == total_layers:
-            infer_state.img_start_token_ids = []
-            infer_state.img_token_lens = None
-            infer_state.img_start_locs = None
-            infer_state.deepstack_features = []
-    return
-
-
 @torch.no_grad()
 def apply_deepstack_features(
     input_embeddings: torch.Tensor,
@@ -137,14 +123,12 @@ def apply_deepstack_features(
     deepstack_layers_num = len(infer_state.deepstack_features[0])
 
     if layer_num < 0 or layer_num >= deepstack_layers_num:
-        clear_deepstack_state(layer_num, infer_state)
         return
 
     input_ids = infer_state.input_ids
     device = input_embeddings.device
 
     if infer_state.img_token_lens.shape[0] == 0:
-        clear_deepstack_state(layer_num, infer_state)
         return
 
     per_img_deepstack_features = [
@@ -152,17 +136,12 @@ def apply_deepstack_features(
         for i in range(infer_state.img_token_lens.shape[0])
     ]
     all_deepstack_features = torch.cat(per_img_deepstack_features, dim=0)
-
-    img_start_token_ids_t = torch.as_tensor(infer_state.img_start_token_ids, device=device, dtype=torch.long)
-
     add_deepstack_embs(
         out=input_embeddings,
         input_ids=input_ids,
         deepstack_embs=all_deepstack_features,
         img_token_lens=infer_state.img_token_lens,
-        img_start_token_ids=img_start_token_ids_t,
+        img_start_token_ids=infer_state.img_start_token_ids,
         img_start_locs=infer_state.img_start_locs,
     )
-
-    clear_deepstack_state(layer_num, infer_state)
     return
