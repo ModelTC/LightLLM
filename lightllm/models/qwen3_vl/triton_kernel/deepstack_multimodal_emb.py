@@ -17,32 +17,32 @@ def _deepstack_add_kernel(
     stride_out_s,
     stride_out_d,
     hidden_size,
-    BLOCK_HIDDEN_DIM: tl.constexpr,
+    BLOCK_DIM: tl.constexpr,
 ):
     seq_index = tl.program_id(0).to(tl.int64)
     img_handle_id = tl.program_id(1)
 
     token_id = tl.load(input_ids + seq_index)
-    off_d = tl.arange(0, BLOCK_HIDDEN_DIM)
+    off_d = tl.arange(0, BLOCK_DIM)
 
     img_start_token_id = tl.load(
-        Img_start_token_ids + img_handle_id - 1,
-        mask=img_handle_id >= 1,
+        Img_start_token_ids + img_handle_id,
+        mask=img_handle_id >= 0,
         other=0,
     )
     img_start_loc = tl.load(
-        Img_start_locs + img_handle_id - 1,
-        mask=img_handle_id >= 1,
+        Img_start_locs + img_handle_id,
+        mask=img_handle_id >= 0,
         other=0,
     )
     img_token_len = tl.load(
-        Img_token_lens + img_handle_id - 1,
-        mask=img_handle_id >= 1,
+        Img_token_lens + img_handle_id,
+        mask=img_handle_id >= 0,
         other=0,
     )
 
     # 判断当前 token 是否属于这个 image
-    cond = (img_handle_id != 0) & (token_id >= img_start_token_id) & (token_id < img_start_token_id + img_token_len)
+    cond = (token_id >= img_start_token_id) & (token_id < img_start_token_id + img_token_len)
 
     for _ in range(0, tl.where(cond, 1, 0), 1):
         token_offset = token_id - img_start_token_id
@@ -85,8 +85,8 @@ def add_deepstack_embs(
     hidden = out.shape[1]
     BLOCK = triton.next_power_of_2(hidden)
 
-    grid = (total_len, img_token_lens.shape[0] + 1)
-    num_warps = 1
+    grid = (total_len, img_token_lens.shape[0])
+    num_warps = 4
 
     _deepstack_add_kernel[grid](
         input_ids,
@@ -100,7 +100,7 @@ def add_deepstack_embs(
         out.stride(0),
         out.stride(1),
         hidden_size=hidden,
-        BLOCK_HIDDEN_DIM=BLOCK,
+        BLOCK_DIM=BLOCK,
         num_warps=num_warps,
         num_stages=1,
     )
@@ -117,7 +117,6 @@ def clear_deepstack_state(
             infer_state.img_start_token_ids = []
             infer_state.img_token_lens = None
             infer_state.img_start_locs = None
-            infer_state.image_num_need_deepstack = 0
             infer_state.deepstack_features = []
     return
 
@@ -143,15 +142,14 @@ def apply_deepstack_features(
 
     input_ids = infer_state.input_ids
     device = input_embeddings.device
-    dtype = input_embeddings.dtype
 
-    if infer_state.image_num_need_deepstack == 0:
+    if infer_state.img_token_lens.shape[0] == 0:
         clear_deepstack_state(layer_num, infer_state)
         return
 
     per_img_deepstack_features = [
-        infer_state.deepstack_features[i][layer_num].to(device=device, dtype=dtype, non_blocking=True)
-        for i in range(infer_state.image_num_need_deepstack)
+        infer_state.deepstack_features[i][layer_num].to(device=device, non_blocking=True)
+        for i in range(infer_state.img_token_lens.shape[0])
     ]
     all_deepstack_features = torch.cat(per_img_deepstack_features, dim=0)
 

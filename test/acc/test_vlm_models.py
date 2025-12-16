@@ -21,7 +21,7 @@ MODELS = [
     ),
 ]
 os.environ["OPENAI_API_KEY"] = "lightllm123"
-os.environ["OPENAI_API_BASE"] = "http://localhost:18009/v1"
+os.environ["OPENAI_API_BASE"] = "http://localhost:8000/v1"
 
 
 def run_mmmu_eval(
