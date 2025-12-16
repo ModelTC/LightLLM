@@ -17,12 +17,17 @@ logger = init_logger(__name__)
 class PrefillCudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, max_token_num: int, decode_cuda_graph: CudaGraph):
+    def __init__(self, decode_cuda_graph: CudaGraph):
         self.graph = {}
-        self.mempool = decode_cuda_graph.mempool  # prefill 和 decode 共享一个 mempool
+
+        if decode_cuda_graph is not None:
+            self.mempool = decode_cuda_graph.mempool  # prefill 和 decode 共享一个 mempool
+        else:
+            self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
+
         self.args = get_env_start_args()
         self.enable_prefill_microbatch_overlap = self.args.enable_prefill_microbatch_overlap
-        self.max_handle_token_num = max_token_num
+        self.max_handle_token_num = self.args.prefll_cudagraph_max_handle_token
 
         graph_handle_token_nums = []
         for i in range(2048):
@@ -103,7 +108,7 @@ class PrefillCudaGraph:
                 prefill_func=prefill_func, input_tensors=input_tensors, infer_state=infer_state
             )
 
-    def _replay(self, input_tensors: List[torch.Tensor], infer_state: InferStateInfo):
+    def _replay(self, input_tensors: List[torch.Tensor], infer_state: InferStateInfo) -> List[torch.Tensor]:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
         graph_obj, graph_infer_state, graph_input_tensors, graph_output_tensors = self.graph[handle_token_num]
         # 拷贝
@@ -122,7 +127,7 @@ class PrefillCudaGraph:
         infer_state: InferStateInfo,
         input_tensors1: List[torch.Tensor],
         infer_state1: InferStateInfo,
-    ):
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
         (
             graph_obj,
