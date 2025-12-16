@@ -21,7 +21,7 @@ def test_get_mrope_position_triton():
         .contiguous()
     )
     b_ready_cache_len = torch.tensor([0, 0], dtype=torch.int32, device="cuda")
-    b_seq_len = torch.tensor([7, 13], dtype=torch.int32, device="cuda")
+    b_q_seq_len = torch.tensor([7, 13], dtype=torch.int32, device="cuda")
     b_start_loc = torch.tensor([0, 7], dtype=torch.int32, device="cuda")
     get_mrope_position_triton(
         b_image_start_idx,
@@ -31,7 +31,7 @@ def test_get_mrope_position_triton():
         b_image_len,
         position_ids,
         b_ready_cache_len,
-        b_seq_len,
+        b_q_seq_len,
         b_start_loc,
     )
     # 预期的输出结果

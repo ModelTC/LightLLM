@@ -77,7 +77,7 @@ class ImageItem:
         self.token_num = None
         # the start index of the image in the input_ids
         # used for mrope position id calculation
-        self.start_idx = 0
+        self.start_idx = None
         self.grid_thwd = None
         self.image_w = 0
         self.image_h = 0

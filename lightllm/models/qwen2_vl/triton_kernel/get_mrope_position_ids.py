@@ -1,4 +1,3 @@
-from tracemalloc import start
 import torch
 import triton
 import triton.language as tl
@@ -15,13 +14,13 @@ def _get_mrope_position_triton(
     position_ids: torch.Tensor,
     position_ids_stride0: torch.Tensor,
     b_ready_cache_len: torch.Tensor,
-    b_seq_len: torch.Tensor,
+    b_q_seq_len: torch.Tensor,
     b_start_loc: torch.Tensor,
     BLOCK_SIZE: tl.constexpr,
 ) -> torch.Tensor:
     cur_batch = tl.program_id(0)
     cache_len = tl.load(b_ready_cache_len + cur_batch)
-    seq_len = tl.load(b_seq_len + cur_batch)
+    q_seq_len = tl.load(b_q_seq_len + cur_batch)
     image_num = tl.load(b_image_nums + cur_batch)
     image_start_num = tl.load(b_image_start_num + cur_batch)
     start_loc = tl.load(b_start_loc + cur_batch)
@@ -41,21 +40,21 @@ def _get_mrope_position_triton(
                 position_ids + off + image_start_idx,
                 t_pos,
                 mask=(off < image_len)
-                & (off + local_image_start_idx - cache_len < seq_len)
+                & (off + local_image_start_idx - cache_len < q_seq_len)
                 & (local_image_start_idx - cache_len + off >= 0),
             )
             tl.store(
                 position_ids + position_ids_stride0 + off + image_start_idx,
                 h_pos,
                 mask=(off < image_len)
-                & (off + local_image_start_idx - cache_len < seq_len)
+                & (off + local_image_start_idx - cache_len < q_seq_len)
                 & (local_image_start_idx - cache_len + off >= 0),
             )
             tl.store(
                 position_ids + position_ids_stride0 * 2 + off + image_start_idx,
                 w_pos,
                 mask=(off < image_len)
-                & (off + local_image_start_idx - cache_len < seq_len)
+                & (off + local_image_start_idx - cache_len < q_seq_len)
                 & (local_image_start_idx - cache_len + off >= 0),
             )
 
@@ -65,20 +64,20 @@ def _get_mrope_position_triton(
         image_delta = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 3)
         image_end = local_image_start_idx + image_len - cache_len
         text_start = tl.maximum(0, image_end)
-        for j in range(text_start, seq_len, BLOCK_SIZE):
+        for j in range(text_start, q_seq_len, BLOCK_SIZE):
             off = j + tl.arange(0, BLOCK_SIZE)
-            t_pos = tl.load(position_ids + off + start_loc, mask=(off < seq_len), other=0.0) + image_delta
+            t_pos = tl.load(position_ids + off + start_loc, mask=(off < q_seq_len), other=0.0) + image_delta
             h_pos = (
-                tl.load(position_ids + position_ids_stride0 + off + start_loc, mask=(off < seq_len), other=0.0)
+                tl.load(position_ids + position_ids_stride0 + off + start_loc, mask=(off < q_seq_len), other=0.0)
                 + image_delta
             )
             w_pos = (
-                tl.load(position_ids + position_ids_stride0 * 2 + off + start_loc, mask=(off < seq_len), other=0.0)
+                tl.load(position_ids + position_ids_stride0 * 2 + off + start_loc, mask=(off < q_seq_len), other=0.0)
                 + image_delta
             )
-            tl.store(position_ids + off + start_loc, t_pos, mask=(off < seq_len))
-            tl.store(position_ids + position_ids_stride0 + off + start_loc, h_pos, mask=(off < seq_len))
-            tl.store(position_ids + position_ids_stride0 * 2 + off + start_loc, w_pos, mask=(off < seq_len))
+            tl.store(position_ids + off + start_loc, t_pos, mask=(off < q_seq_len))
+            tl.store(position_ids + position_ids_stride0 + off + start_loc, h_pos, mask=(off < q_seq_len))
+            tl.store(position_ids + position_ids_stride0 * 2 + off + start_loc, w_pos, mask=(off < q_seq_len))
     return
 
 
@@ -90,11 +89,11 @@ def get_mrope_position_triton(
     b_image_len: torch.Tensor,
     position_ids: torch.Tensor,
     b_ready_cache_len: torch.Tensor,
-    b_seq_len: torch.Tensor,
+    b_q_seq_len: torch.Tensor,
     b_start_loc: torch.Tensor,
 ) -> torch.Tensor:
 
-    batch_size = b_seq_len.shape[0]
+    batch_size = b_q_seq_len.shape[0]
     grid = (batch_size,)
     BLOCK_SIZE = 64
     _get_mrope_position_triton[grid](
@@ -107,7 +106,7 @@ def get_mrope_position_triton(
         position_ids=position_ids,
         position_ids_stride0=position_ids.stride(0),
         b_ready_cache_len=b_ready_cache_len,
-        b_seq_len=b_seq_len,
+        b_q_seq_len=b_q_seq_len,
         b_start_loc=b_start_loc,
         BLOCK_SIZE=BLOCK_SIZE,
     )
@@ -126,7 +125,7 @@ def test():
         .contiguous()
     )
     b_ready_cache_len = torch.tensor([0, 0], dtype=torch.int32, device="cuda")
-    b_seq_len = torch.tensor([7, 13], dtype=torch.int32, device="cuda")
+    b_q_seq_len = torch.tensor([7, 13], dtype=torch.int32, device="cuda")
     b_start_loc = torch.tensor([0, 7], dtype=torch.int32, device="cuda")
     get_mrope_position_triton(
         b_image_start_idx,
@@ -136,7 +135,7 @@ def test():
         b_image_len,
         position_ids,
         b_ready_cache_len,
-        b_seq_len,
+        b_q_seq_len,
         b_start_loc,
     )
     """

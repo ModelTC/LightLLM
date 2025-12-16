@@ -72,4 +72,4 @@ def run_mmmu_eval(
     )
 
 
-run_mmmu_eval("Qwen/Qwen3-VL-8B-Instruct", "./logs")
+run_mmmu_eval("Qwen/Qwen2.5-VL-7B-Instruct", "./logs")
