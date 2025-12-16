@@ -114,6 +114,9 @@ def clear_deepstack_state(
     if infer_state.deepstack_features:
         total_layers = len(infer_state.deepstack_features[0])
         if layer_num == total_layers:
+            infer_state.img_start_token_ids = []
+            infer_state.img_token_lens = None
+            infer_state.img_start_locs = None
             infer_state.image_num_need_deepstack = 0
             infer_state.deepstack_features = []
     return
@@ -152,12 +155,14 @@ def apply_deepstack_features(
     ]
     all_deepstack_features = torch.cat(per_img_deepstack_features, dim=0)
 
+    img_start_token_ids_t = torch.as_tensor(infer_state.img_start_token_ids, device=device, dtype=torch.long)
+
     add_deepstack_embs(
         out=input_embeddings,
         input_ids=input_ids,
         deepstack_embs=all_deepstack_features,
         img_token_lens=infer_state.img_token_lens,
-        img_start_token_ids=infer_state.img_start_token_ids,
+        img_start_token_ids=img_start_token_ids_t,
         img_start_locs=infer_state.img_start_locs,
     )
 

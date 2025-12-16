@@ -7,6 +7,6 @@ class Qwen3VLInferStateInfo(Qwen2VLInferStateInfo):
         self.input_ids = None
         self.image_num_need_deepstack = 0
         self.deepstack_features = []
-        self.img_start_token_ids = None
+        self.img_start_token_ids = []
         self.img_token_lens = None
         self.img_start_locs = None
