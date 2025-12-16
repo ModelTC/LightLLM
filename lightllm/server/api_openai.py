@@ -161,7 +161,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     prompt = await build_prompt(request, tools)
     sampling_params_dict = {
-        "do_sample": True,
+        "do_sample": request.do_sample,
         "presence_penalty": request.presence_penalty,
         "frequency_penalty": request.frequency_penalty,
         "repetition_penalty": request.repetition_penalty,

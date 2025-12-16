@@ -1,8 +1,9 @@
 import time
 import uuid
 
-from pydantic import BaseModel, Field, field_validator
-from typing import Any, Dict, List, Optional, Union, Literal
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
+from transformers import GenerationConfig
 
 
 class ImageURL(BaseModel):
@@ -96,10 +97,42 @@ class CompletionRequest(BaseModel):
     )
 
     # Additional parameters supported by LightLLM
-    do_sample: Optional[bool] = False
+    do_sample: Optional[bool] = True
     top_k: Optional[int] = -1
     repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
+
+    # Class variables to store loaded default values
+    _loaded_defaults: ClassVar[Dict[str, Any]] = {}
+
+    @classmethod
+    def load_generation_cfg(cls, weight_dir: str):
+        """Load default values from model generation config."""
+        try:
+            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            cls._loaded_defaults = {
+                "do_sample": generation_cfg.get("do_sample", True),
+                "presence_penalty": generation_cfg.get("presence_penalty", 0.0),
+                "frequency_penalty": generation_cfg.get("frequency_penalty", 0.0),
+                "repetition_penalty": generation_cfg.get("repetition_penalty", 1.0),
+                "temperature": generation_cfg.get("temperature", 1.0),
+                "top_p": generation_cfg.get("top_p", 1.0),
+                "top_k": generation_cfg.get("top_k", -1),
+            }
+            # Remove None values
+            cls._loaded_defaults = {k: v for k, v in cls._loaded_defaults.items() if v is not None}
+        except Exception:
+            pass
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_loaded_defaults(cls, data: Any):
+        """Apply loaded default values if field is not provided."""
+        if isinstance(data, dict) and cls._loaded_defaults:
+            for key, value in cls._loaded_defaults.items():
+                if key not in data:
+                    data[key] = value
+        return data
 
 
 class ChatCompletionRequest(BaseModel):
@@ -134,13 +167,45 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = True
 
     # Additional parameters supported by LightLLM
-    do_sample: Optional[bool] = False
+    do_sample: Optional[bool] = True
     top_k: Optional[int] = -1
     repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
     role_settings: Optional[Dict[str, str]] = None
     character_settings: Optional[List[Dict[str, str]]] = None
     chat_template_kwargs: Optional[Dict[str, bool]] = None
+
+    # Class variables to store loaded default values
+    _loaded_defaults: ClassVar[Dict[str, Any]] = {}
+
+    @classmethod
+    def load_generation_cfg(cls, weight_dir: str):
+        """Load default values from model generation config."""
+        try:
+            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            cls._loaded_defaults = {
+                "do_sample": generation_cfg.get("do_sample", True),
+                "presence_penalty": generation_cfg.get("presence_penalty", 0.0),
+                "frequency_penalty": generation_cfg.get("frequency_penalty", 0.0),
+                "repetition_penalty": generation_cfg.get("repetition_penalty", 1.0),
+                "temperature": generation_cfg.get("temperature", 1.0),
+                "top_p": generation_cfg.get("top_p", 1.0),
+                "top_k": generation_cfg.get("top_k", -1),
+            }
+            # Remove None values
+            cls._loaded_defaults = {k: v for k, v in cls._loaded_defaults.items() if v is not None}
+        except Exception:
+            pass
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_loaded_defaults(cls, data: Any):
+        """Apply loaded default values if field is not provided."""
+        if isinstance(data, dict) and cls._loaded_defaults:
+            for key, value in cls._loaded_defaults.items():
+                if key not in data:
+                    data[key] = value
+        return data
 
 
 class FunctionResponse(BaseModel):
