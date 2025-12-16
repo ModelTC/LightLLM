@@ -527,6 +527,7 @@ class TpPartBaseModel:
                 output_tensors: List[torch.Tensor] = self.prefill_graph.capture_prefill(
                     prefill_func=prefill_func,
                     input_tensors=input_tensors,
+                    infer_state=infer_state,
                 )
             else:
                 output_tensors: List[torch.Tensor] = self.prefill_graph.replay(

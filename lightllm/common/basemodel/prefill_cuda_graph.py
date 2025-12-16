@@ -60,8 +60,9 @@ class PrefillCudaGraph:
             return None
 
     def _capture_prefill(
-        self, prefill_func, handle_token_num: int, input_tensors: List[torch.Tensor], infer_state: InferStateInfo
+        self, prefill_func, input_tensors: List[torch.Tensor], infer_state: InferStateInfo
     ) -> List[torch.Tensor]:
+        handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
         infer_state.prefill_atomic_event_init()
         infer_state.prefill_atomic_event_clear()
         dist_group: CustomProcessGroup = infer_state.dist_group
@@ -70,7 +71,7 @@ class PrefillCudaGraph:
             with torch.cuda.graph(graph_obj, pool=self.mempool):
                 out_tensors = prefill_func(input_tensors, infer_state)
         self.graph[handle_token_num] = (graph_obj, infer_state, input_tensors, out_tensors)
-        graph_obj.replay()
+        self.replay(input_tensors, infer_state)
         return out_tensors
 
     def _capture_prefill_overlap(
@@ -114,9 +115,10 @@ class PrefillCudaGraph:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
         graph_obj, graph_infer_state, graph_input_tensors, graph_output_tensors = self.graph[handle_token_num]
         graph_infer_state: InferStateInfo = graph_infer_state
-        # 拷贝
-        for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
-            graph_in_tensor.copy_(in_tensor)
+        # 拷贝输入， 但是自己和自己不能拷贝
+        if graph_infer_state is not infer_state:
+            for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
+                graph_in_tensor.copy_(in_tensor)
 
         graph_infer_state.prefill_atomic_event_clear()
         graph_obj.replay()
@@ -178,6 +180,8 @@ class PrefillCudaGraph:
             b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
             b_seq_len.fill_(total_token_num)
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
 
             model_input = ModelInput(
                 batch_size=1,
@@ -185,12 +189,17 @@ class PrefillCudaGraph:
                 max_len_in_batch=total_token_num,
                 max_q_seq_len=total_token_num,
                 max_kv_seq_len=total_token_num,
+                max_cache_len=0,
                 input_ids=input_ids,
                 mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
-                b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
+                b_seq_len=b_seq_len,
+                b_ready_cache_len=b_ready_cache_len,
+                b_prefill_start_loc=b_prefill_start_loc,
                 is_prefill=True,
+                b_prefill_has_output_cpu=[False],
+                prefix_total_token_num=0,
                 **model._gen_special_model_input(token_num=total_token_num),
             )
             model_output: ModelOutput = model.forward(model_input)
@@ -231,21 +240,29 @@ class PrefillCudaGraph:
                 b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
                 b_seq_len.fill_(total_token_num)
                 b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
 
                 micro_batch = ModelInput(
-                    is_prefill=True,
                     batch_size=1,
                     total_token_num=total_token_num,
                     max_len_in_batch=total_token_num,
                     max_q_seq_len=total_token_num,
                     max_kv_seq_len=total_token_num,
+                    max_cache_len=0,
                     input_ids=input_ids,
-                    b_mtp_index=b_mtp_index,
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
+                    b_mtp_index=b_mtp_index,
                     b_seq_len=b_seq_len,
+                    b_ready_cache_len=b_ready_cache_len,
+                    b_prefill_start_loc=b_prefill_start_loc,
+                    is_prefill=True,
+                    b_prefill_has_output_cpu=[False],
+                    prefix_total_token_num=0,
                     **model._gen_special_model_input(token_num=total_token_num),
                 )
+
                 prefill_batches.append(micro_batch)
                 del micro_batch
 
