@@ -149,10 +149,16 @@ class InferenceContext:
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq", free_buffer_index: List = None):
+        # If no KV cache has been allocated yet, there's nothing to free
+        if req.cur_kv_len == 0:
+            if self.use_buffer_manager:
+                free_buffer_index.append(self.req_manager.req_to_buffer_index[req.req_idx].item())
+            return
+
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
             if self.use_buffer_manager:
-                free_buffer_index.append(self.req_manager.req_to_buffer_index[req.req_idx])
+                free_buffer_index.append(self.req_manager.req_to_buffer_index[req.req_idx].item())
         else:
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
@@ -161,10 +167,11 @@ class InferenceContext:
 
             prefix_len, node = self.radix_cache.insert(key, value)
             if self.use_buffer_manager:
+                buffer_idx = self.req_manager.req_to_buffer_index[req.req_idx].item()
                 if node.buffer_idx is None:
-                    node.buffer_idx = self.req_manager.req_to_buffer_index[req.req_idx]
+                    self.radix_cache.set_node_buffer_idx(node, buffer_idx)
                 else:
-                    free_buffer_index.append(self.req_manager.req_to_buffer_index[req.req_idx])
+                    free_buffer_index.append(buffer_idx)
 
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
@@ -209,6 +216,10 @@ class InferenceContext:
         if len(free_token_index) != 0:
             free_token_index = custom_cat(free_token_index)
             self.req_manager.free(free_req_index, free_token_index)
+
+        if self.use_buffer_manager and len(free_buffer_index) != 0:
+            free_buffer_index = torch.tensor(free_buffer_index, dtype=torch.int64, device="cpu")
+            self.req_manager.free_buffer(free_buffer_index)
 
         finished_req_ids_set = set(finished_request_ids)
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
@@ -258,7 +269,7 @@ class InferenceContext:
                 self.req_manager.free_token(free_token_index)
 
             if self.use_buffer_manager and len(free_buffer_index) != 0:
-                pause_req_indices = torch.tensor(pause_req_indices, dtype=torch.int64, device="cpu")
+                free_buffer_index = torch.tensor(free_buffer_index, dtype=torch.int64, device="cpu")
                 self.req_manager.free_buffer(free_buffer_index)
 
             g_infer_state_lock.release()
