@@ -62,6 +62,8 @@ class PrefillCudaGraph:
     def _capture_prefill(
         self, prefill_func, handle_token_num: int, input_tensors: List[torch.Tensor], infer_state: InferStateInfo
     ) -> List[torch.Tensor]:
+        infer_state.prefill_atomic_event_init()
+        infer_state.prefill_atomic_event_clear()
         dist_group: CustomProcessGroup = infer_state.dist_group
         graph_obj = torch.cuda.CUDAGraph()
         with lightllm_capture_graph(dist_group):
@@ -111,11 +113,12 @@ class PrefillCudaGraph:
     def _replay(self, input_tensors: List[torch.Tensor], infer_state: InferStateInfo) -> List[torch.Tensor]:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
         graph_obj, graph_infer_state, graph_input_tensors, graph_output_tensors = self.graph[handle_token_num]
+        graph_infer_state: InferStateInfo = graph_infer_state
         # 拷贝
         for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
             graph_in_tensor.copy_(in_tensor)
 
-        graph_infer_state.copy_for_cuda_graph(infer_state)
+        graph_infer_state.prefill_atomic_event_clear()
         graph_obj.replay()
         graph_infer_state.prefill_replay(infer_state)
 
