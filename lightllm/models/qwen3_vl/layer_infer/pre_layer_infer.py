@@ -42,7 +42,6 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
                 if img["token_id"] in infer_state.img_start_token_ids or img["_prefill_"] is False:
                     continue
 
-                infer_state.image_num_need_deepstack += 1
                 # all_img_embed_df的shape是
                 # image_embed(token_num, hidden_dim) + deepstack(token_num*layer_num, hidden_dim)
                 all_img_embed_df = bytes2tensor(read_shm(get_shm_name_embed(img["uuid"])))
