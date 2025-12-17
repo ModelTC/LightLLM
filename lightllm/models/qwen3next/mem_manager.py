@@ -105,6 +105,12 @@ class Qwen3NextMemoryManager(HybridMemManager):
         return
 
     @override
+    def get_cell_size(self):
+        # Only full attention layers and MTP layers have KV cache
+        kv_cache_layer_num = self.full_attn_layer_num + self.mtp_layer_num
+        return 2 * self.head_num * self.head_dim * kv_cache_layer_num * torch._utils._element_size(self.dtype)
+
+    @override
     def get_buffer(self, layer_index) -> Tuple[torch.Tensor, torch.Tensor]:
         assert layer_index < self.layer_num, "layer_index is out of range"
         assert (layer_index + 1) % self.full_attention_interval != 0, "layer_index is not linear attention layer"
