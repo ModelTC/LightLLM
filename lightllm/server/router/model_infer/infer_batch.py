@@ -409,6 +409,10 @@ class InferReq:
 
         # 在开启radix cache的情况下，用于标记命中情况，用于插入算法
         self.mamba_model_match_len = 0
+        # 是否使用基于 mamba_model_match_len 的优化策略
+        self.use_mamba_match_len_strategy = False
+        # 是否已在 mamba_model_match_len 位置插入 buffer
+        self.mamba_buffer_inserted = False
 
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
@@ -471,6 +475,12 @@ class InferReq:
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
+                # 判断是否使用基于 mamba_model_match_len 的优化策略
+                # 当需要重新计算的增量足够大时，值得单独在分支点保存 buffer
+                increment = self.mamba_model_match_len - ready_cache_len
+                threshold = self.shm_req.chunked_prefill_size // 2
+                self.use_mamba_match_len_strategy = increment >= threshold
+
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
 
@@ -518,13 +528,24 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
     def get_chuncked_input_token_ids(self):
-        chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+        # 复用 get_chuncked_input_token_len 的逻辑，保持一致性
+        chunked_end = self.get_chuncked_input_token_len()
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+
+        # 优化策略：第一个 chunk 直接到 mamba_model_match_len（分支点）
+        # 这样可以在分支点位置保存 buffer，提升后续请求的缓存命中率
+        if (
+            self.use_mamba_match_len_strategy
+            and not self.mamba_buffer_inserted
+            and self.mamba_model_match_len > chunked_start
+            and self.mamba_model_match_len <= self.get_cur_total_len()
+        ):
+            chunked_end = self.mamba_model_match_len
+
         return chunked_end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
