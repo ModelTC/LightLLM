@@ -326,3 +326,11 @@ class InferStateInfo:
             else:
                 func(new_infer_state)
         return
+
+    def copy_for_prefill_cuda_graph(self, new_infer_state: "InferStateInfo"):
+        for attr_name, attr_value in vars(new_infer_state).items():
+            if isinstance(attr_value, torch.Tensor):
+                attr_ = getattr(self, attr_name, None)
+                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr() and attr_.shape == attr_value.shape:
+                    attr_.copy_(attr_value, non_blocking=True)
+        return

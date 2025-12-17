@@ -6,6 +6,7 @@ from typing import List, Tuple
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .infer_struct import InferStateInfo
@@ -68,12 +69,18 @@ class PrefillCudaGraph:
             infer_state.mem_pool = self.mempool
             infer_state.prefill_cuda_graph_create_graph_obj()
             infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            out_tensors = prefill_func(input_tensors, infer_state)
+            graph_input_tensors: List[torch.Tensor] = [torch.empty_like(e) for e in input_tensors]
+            graph_out_tensors: List[torch.Tensor] = prefill_func(graph_input_tensors, infer_state)
+            graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
             infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
 
-        self.graph[handle_token_num] = (infer_state, input_tensors, out_tensors)
+        graph_input_tensors = [tensor_to_no_ref_tensor(e) for e in graph_input_tensors]
+        graph_out_tensors = [tensor_to_no_ref_tensor(e) for e in graph_out_tensors]
+
+        self.graph[handle_token_num] = (infer_state, graph_input_tensors, graph_out_tensors)
         self.replay(input_tensors, infer_state)
-        return out_tensors
+
+        return graph_out_tensors
 
     def _capture_prefill_overlap(
         self,
@@ -116,11 +123,10 @@ class PrefillCudaGraph:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
         graph_infer_state, graph_input_tensors, graph_output_tensors = self.graph[handle_token_num]
         graph_infer_state: InferStateInfo = graph_infer_state
-        # 拷贝输入， 但是自己和自己不能拷贝
-        if graph_infer_state is not infer_state:
-            for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
-                graph_in_tensor.copy_(in_tensor)
+        for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
+            graph_in_tensor.copy_(in_tensor)
 
+        graph_infer_state.copy_for_prefill_cuda_graph(new_infer_state=infer_state)
         graph_infer_state.prefill_replay(infer_state)
 
         return graph_output_tensors
