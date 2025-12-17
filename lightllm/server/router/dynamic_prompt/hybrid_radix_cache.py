@@ -80,14 +80,38 @@ class HybridRadixCache(RadixCache):
                     self.evict_tree_set.add(parent_node)
         return
 
+    def _should_insert_buffer(self, req) -> bool:
+        """决定是否需要在当前位置插入 buffer"""
+        # 情况1：prefill 完成（即将进入 decode），必须插入
+        if req.cur_kv_len >= req.get_cur_total_len():
+            return True
+
+        # 情况2：使用优化策略时
+        if req.use_mamba_match_len_strategy:
+            # 只在 mamba_model_match_len 位置插入
+            if req.cur_kv_len == req.mamba_model_match_len and not req.mamba_buffer_inserted:
+                return True
+            return False
+
+        # 情况3：原策略（每个 chunk 后都插入）
+        return True
+
     def insert_for_hybrid_radix_cache(self, reqs):
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        self.free_radix_cache_to_get_enough_buffer(len(reqs))
-        new_buffer_indexes = self.mem_manager.alloc_buffer(len(reqs))
-        # req_ids_gpu = req_ids.cuda()
+        # 过滤需要插入的请求
+        reqs_to_insert = []
+        for req in reqs:
+            if self._should_insert_buffer(req):
+                reqs_to_insert.append(req)
 
-        for i, req in enumerate(reqs):
+        if len(reqs_to_insert) == 0:
+            return
+
+        self.free_radix_cache_to_get_enough_buffer(len(reqs_to_insert))
+        new_buffer_indexes = self.mem_manager.alloc_buffer(len(reqs_to_insert))
+
+        for i, req in enumerate(reqs_to_insert):
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = g_infer_context.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
@@ -104,6 +128,10 @@ class HybridRadixCache(RadixCache):
             # 更新 prompt_cache_len，这样 free_a_req_mem 不会释放已属于树的 token
             # free_a_req_mem 中会释放 [prompt_cache_len:prefix_len]，更新后这个范围为空
             req.shm_req.prompt_cache_len = req.cur_kv_len
+
+            # 标记已在 mamba_model_match_len 位置插入
+            if req.cur_kv_len == req.mamba_model_match_len:
+                req.mamba_buffer_inserted = True
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
