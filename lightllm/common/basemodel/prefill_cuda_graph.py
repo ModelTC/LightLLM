@@ -31,7 +31,7 @@ class PrefillCudaGraph:
 
         graph_handle_token_nums = []
         for i in range(2048):
-            token_num = int(2 ** i)
+            token_num = int(2 ** (2 * i))
             if token_num < self.max_handle_token_num:
                 graph_handle_token_nums.append(token_num)
             else:
