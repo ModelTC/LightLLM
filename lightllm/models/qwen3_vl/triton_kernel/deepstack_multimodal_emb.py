@@ -25,21 +25,9 @@ def _deepstack_add_kernel(
     token_id = tl.load(input_ids + seq_index)
     off_d = tl.arange(0, BLOCK_DIM)
 
-    img_start_token_id = tl.load(
-        Img_start_token_ids + img_handle_id,
-        mask=img_handle_id >= 0,
-        other=0,
-    )
-    img_start_loc = tl.load(
-        Img_start_locs + img_handle_id,
-        mask=img_handle_id >= 0,
-        other=0,
-    )
-    img_token_len = tl.load(
-        Img_token_lens + img_handle_id,
-        mask=img_handle_id >= 0,
-        other=0,
-    )
+    img_start_token_id = tl.load(Img_start_token_ids + img_handle_id)
+    img_start_loc = tl.load(Img_start_locs + img_handle_id)
+    img_token_len = tl.load(Img_token_lens + img_handle_id)
 
     # 判断当前 token 是否属于这个 image
     cond = (token_id >= img_start_token_id) & (token_id < img_start_token_id + img_token_len)
@@ -47,21 +35,18 @@ def _deepstack_add_kernel(
     for _ in range(0, tl.where(cond, 1, 0), 1):
         token_offset = token_id - img_start_token_id
 
-        # 从 Deepstack_embs 里取对应行
         deep_row = tl.load(
-            Deepstack_embs + stride_deep_s * (img_start_loc + token_offset) + off_d * stride_deep_d,
+            Deepstack_embs + stride_deep_s * (img_start_loc + token_offset) + off_d,
             mask=off_d < hidden_size,
             other=0,
         )
-
-        # 把 deepstack 加到 Out[seq_index] 上
         old = tl.load(
-            Out + stride_out_s * seq_index + stride_out_d * off_d,
+            Out + stride_out_s * seq_index + off_d,
             mask=off_d < hidden_size,
             other=0,
         )
         tl.store(
-            Out + stride_out_s * seq_index + stride_out_d * off_d,
+            Out + stride_out_s * seq_index + off_d,
             old + deep_row,
             mask=off_d < hidden_size,
         )
