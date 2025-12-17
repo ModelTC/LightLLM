@@ -6,6 +6,6 @@ class Qwen3VLInferStateInfo(Qwen2VLInferStateInfo):
         super().__init__()
         self.input_ids = None
         self.deepstack_features = []
-        self.img_start_token_ids = []
+        self.img_start_token_ids = None
         self.img_token_lens = None
         self.img_start_locs = None

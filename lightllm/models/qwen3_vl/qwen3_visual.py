@@ -223,7 +223,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
 
             all_chunks.append(combined_i)
 
-            row_offset += new_end
+            row_offset = new_end
 
         all_img_embeds_ds = torch.cat(all_chunks, dim=0)
         return all_img_embeds_ds, new_valid_ids
@@ -395,12 +395,6 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
-                image_data = resize_image(
-                    image_file=image_data,
-                    factor=self.processor.patch_size * self.processor.merge_size,
-                    min_pixels=self.processor.min_pixels,
-                    max_pixels=self.processor.max_pixels,
-                )
                 pixel_values, image_grid_thw = self.processor.preprocess(image_data)
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
