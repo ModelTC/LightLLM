@@ -46,8 +46,9 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
                 # image_embed(token_num, hidden_dim) + deepstack(token_num*layer_num, hidden_dim)
                 all_img_embed_df = (
                     bytes2tensor(read_shm(get_shm_name_embed(img["uuid"])))
-                    .cuda(non_blocking=True)
+                    .view(dtype)
                     .view(-1, hidden_size)
+                    .cuda(non_blocking=True)
                 )
                 per_image_deepstack = []
 

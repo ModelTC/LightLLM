@@ -121,8 +121,6 @@ class VisualModelRpcServer(rpyc.Service):
                     continue
                 uid = uuids[i]
                 start, end = valid_ids[i]
-                # cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                # create_shm(get_shm_name_embed(uid), cur_embed_bytes)
                 create_shm_and_dump(get_shm_name_embed(uid), all_img_embeds[start:end])
                 ids_to_set.append(uid)
             if ids_to_set:
