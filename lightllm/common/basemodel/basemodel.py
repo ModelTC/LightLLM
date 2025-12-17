@@ -410,8 +410,13 @@ class TpPartBaseModel:
         if handle_token_num == origin_handle_token_num:
             return model_output
 
-        new_model_output = copy.copy(model_output)
-        new_model_output.logits = new_model_output.logits[0:origin_handle_token_num]
+        if self.return_all_prompt_logics:
+            new_model_output = copy.copy(model_output)
+            new_model_output.logits = new_model_output.logits[0:origin_handle_token_num]
+        else:
+            new_model_output = copy.copy(model_output)
+            # 移除多余的pad 的那个 req 对应的 logics
+            new_model_output.logits = new_model_output.logits[0:-1]
 
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
         if new_model_output.deepseekv3_mtp_main_output_hiddens is not None:
