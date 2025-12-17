@@ -11,7 +11,6 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank
-from lightllm.common.basemodel.triton_kernel.atomic_event import add_value, wait_value
 
 
 class InferStateInfo:
