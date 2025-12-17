@@ -182,7 +182,6 @@ class PrefillCudaGraph:
                 **model._gen_special_model_input(token_num=total_token_num),
             )
             model_output: ModelOutput = model.forward(model_input)
-            logger.info(f"Capture prefill cudagraph, handle_token_num: {handle_token_num} 1111")
             del model_output
             del input_ids
             del mem_indexes
