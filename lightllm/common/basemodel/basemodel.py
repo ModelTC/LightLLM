@@ -348,12 +348,10 @@ class TpPartBaseModel:
         return new_model_input
 
     def _create_padded_prefill_model_input(self, model_input: ModelInput, new_handle_token_num: int):
-        if model_input.total_token_num - model_input.prefix_total_token_num == new_handle_token_num:
-            return model_input
-
         assert model_input.total_token_num - model_input.prefix_total_token_num < new_handle_token_num
 
         padded_token_num = new_handle_token_num - (model_input.total_token_num - model_input.prefix_total_token_num)
+        assert padded_token_num > 0
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = model_input.batch_size + 1
         new_model_input.total_token_num += padded_token_num
@@ -405,16 +403,12 @@ class TpPartBaseModel:
 
         return new_model_output
 
-    def _create_unpad_prefill_model_output(self, model_output: ModelOutput, origin_handle_token_num: int):
-        handle_token_num = model_output.logits.shape[0]
-        if handle_token_num == origin_handle_token_num:
-            return model_output
-
+    def _create_unpad_prefill_model_output(self, padded_model_output: ModelOutput, origin_handle_token_num: int):
         if self.return_all_prompt_logics:
-            new_model_output = copy.copy(model_output)
+            new_model_output = copy.copy(padded_model_output)
             new_model_output.logits = new_model_output.logits[0:origin_handle_token_num]
         else:
-            new_model_output = copy.copy(model_output)
+            new_model_output = copy.copy(padded_model_output)
             # 移除多余的pad 的那个 req 对应的 logics
             new_model_output.logits = new_model_output.logits[0:-1]
 
@@ -429,14 +423,18 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ):
-        handle_token_num = model_input.total_token_num - model_input.prefix_total_token_num
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
+        origin_handle_token_num = model_input.total_token_num - model_input.prefix_total_token_num
+
+        is_padded_model_input = False
+        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=origin_handle_token_num):
             finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
-                handle_token_num=handle_token_num
+                handle_token_num=origin_handle_token_num
             )
-            model_input = self._create_padded_prefill_model_input(
-                model_input=model_input, new_handle_token_num=finded_handle_token_num
-            )
+            if finded_handle_token_num != origin_handle_token_num:
+                is_padded_model_input = True
+                model_input = self._create_padded_prefill_model_input(
+                    model_input=model_input, new_handle_token_num=finded_handle_token_num
+                )
 
         infer_state = self._create_inferstate(model_input)
         init_req_to_token_indexes(
@@ -453,7 +451,10 @@ class TpPartBaseModel:
 
         infer_state.init_some_extra_state(self, model_input.input_ids)
         model_output = self._context_forward(model_input.input_ids, infer_state)
-        model_output = self._create_unpad_prefill_model_output(model_output, origin_handle_token_num=handle_token_num)
+        if is_padded_model_input:
+            model_output = self._create_unpad_prefill_model_output(
+                model_output, origin_handle_token_num=origin_handle_token_num
+            )
         model_output.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         return model_output
 
