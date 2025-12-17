@@ -82,7 +82,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
             def get_o_shape_dtype_device():
                 # 在一个新的 graph 中尝试运行，并不是为了捕获图，是为了尝试得到 o 的形状等信息
                 with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
-                    __o = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
+                    __o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
                     o_shape = __o.shape
                     o_dtype = __o.dtype
                     o_device = __o.device
@@ -94,9 +94,10 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
                     torch.cuda.empty_cache()
                 return o_shape, o_dtype, o_device
 
+            o_shape, o_dtype, o_device = get_o_shape_dtype_device()
+
             infer_state.prefill_cuda_graph_create_graph_obj()
             infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            o_shape, o_dtype, o_device = get_o_shape_dtype_device()
             o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
             _o = tensor_to_no_ref_tensor(o)
 
@@ -176,9 +177,9 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
                     torch.cuda.empty_cache()
                 return o_shape, o_dtype, o_device
 
+            o_shape, o_dtype, o_device = get_o_shape_dtype_device()
             infer_state.prefill_cuda_graph_create_graph_obj()
             infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            o_shape, o_dtype, o_device = get_o_shape_dtype_device()
             o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
             _o = tensor_to_no_ref_tensor(o)
 
