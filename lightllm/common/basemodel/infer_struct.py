@@ -252,8 +252,6 @@ class InferStateInfo:
             shape=(handle_len * scale_size,),
             data_type=data.dtype,
             device="cuda",
-            is_graph_out=False,
-            microbatch_index=self.microbatch_index,
         )
         dist.all_to_all_single(
             output=dest_data.view(-1),
@@ -281,8 +279,6 @@ class InferStateInfo:
             shape=(origin_len * scale_size,),
             data_type=data.dtype,
             device="cuda",
-            is_graph_out=False,
-            microbatch_index=self.microbatch_index,
         )
         dist.all_to_all_single(
             output=origin_data.view(-1),

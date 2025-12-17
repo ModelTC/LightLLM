@@ -556,39 +556,29 @@ class TpPartBaseModel:
     @final
     def _token_forward(self, input_ids, infer_state: InferStateInfo):
         run_mode_index = 1 if self.enable_tpsp_mix_mode else 0
-        g_cache_manager.cache_env_in(
-            is_cuda_graph=infer_state.is_cuda_graph,
-            cur_batch_size=infer_state.batch_size,
-            cuda_graph_max_batch_size=self.graph_max_batch_size,
-        )
         cuda_input_ids = input_ids
         pre_method = (self.pre_infer.token_forward, self.pre_infer.tpsp_token_forward)[run_mode_index]
         input_embs = pre_method(cuda_input_ids, infer_state, self.pre_post_weight)
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             layer_method = (layer.token_forward, layer.tpsp_token_forward)[run_mode_index]
-            input_embs = layer_method(input_embs, infer_state, self.trans_layers_weight[i])
+            input_embs: torch.Tensor = layer_method(input_embs, infer_state, self.trans_layers_weight[i])
 
         post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
-        predict_logits = post_method(input_embs, infer_state, self.pre_post_weight)
+        predict_logits: torch.Tensor = post_method(input_embs, infer_state, self.pre_post_weight)
 
         if self.is_deepseekv3_mtp_mode:
-            graph_out_hiddens = g_cache_manager.alloc_tensor(
-                input_embs.shape,
-                data_type=input_embs.dtype,
-                is_graph_out=True,
-                microbatch_index=infer_state.microbatch_index,
-                graph_out_key=520,
-            )
-            graph_out_hiddens.copy_(input_embs)
+            graph_out_hiddens = input_embs.contiguous()
 
-        g_cache_manager.cache_env_out()
-
-        model_output = ModelOutput(logits=predict_logits)
+        model_output = ModelOutput(logits=predict_logits.contiguous())
 
         # 特殊模型特殊模式的额外输出
         if self.is_deepseekv3_mtp_mode:
             model_output.deepseekv3_mtp_main_output_hiddens = graph_out_hiddens
+
+        # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
+        if infer_state.is_cuda_graph:
+            model_output.to_no_ref_tensor()
 
         return model_output
 
@@ -749,12 +739,12 @@ class TpPartBaseModel:
         )
         g_cache_manager.cache_env_out()
 
-        model_output = ModelOutput(logits=predict_logits)
-        model_output1 = ModelOutput(logits=predict_logits1)
+        model_output = ModelOutput(logits=predict_logits.contiguous())
+        model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
         if self.is_deepseekv3_mtp_mode:
-            model_output.deepseekv3_mtp_main_output_hiddens = input_embs
-            model_output1.deepseekv3_mtp_main_output_hiddens = input_embs1
+            model_output.deepseekv3_mtp_main_output_hiddens = input_embs.contiguous()
+            model_output1.deepseekv3_mtp_main_output_hiddens = input_embs1.contiguous()
 
         return model_output, model_output1
 
@@ -762,11 +752,6 @@ class TpPartBaseModel:
     def _overlap_tpsp_token_forward(
         self, input_ids, infer_state: InferStateInfo, input_ids1, infer_state1: InferStateInfo
     ):
-        g_cache_manager.cache_env_in(
-            is_cuda_graph=infer_state.is_cuda_graph,
-            cur_batch_size=infer_state.batch_size,
-            cuda_graph_max_batch_size=self.graph_max_batch_size,
-        )
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(
             input_ids, input_ids1, infer_state, infer_state1, self.pre_post_weight
         )
@@ -781,31 +766,19 @@ class TpPartBaseModel:
         )
 
         if self.is_deepseekv3_mtp_mode:
-            graph_out_hiddens = g_cache_manager.alloc_tensor(
-                input_embs.shape,
-                data_type=input_embs.dtype,
-                is_graph_out=True,
-                microbatch_index=0,
-                graph_out_key=520,
-            )
-            graph_out_hiddens.copy_(input_embs)
-            graph_out_hiddens1 = g_cache_manager.alloc_tensor(
-                input_embs1.shape,
-                data_type=input_embs1.dtype,
-                is_graph_out=True,
-                microbatch_index=1,
-                graph_out_key=520,
-            )
-            graph_out_hiddens1.copy_(input_embs1)
+            graph_out_hiddens = input_embs.contiguous()
+            graph_out_hiddens1 = input_embs1.contiguous()
 
-        g_cache_manager.cache_env_out()
-
-        model_output = ModelOutput(logits=predict_logits)
-        model_output1 = ModelOutput(logits=predict_logits1)
+        model_output = ModelOutput(logits=predict_logits.contiguous())
+        model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
         if self.is_deepseekv3_mtp_mode:
             model_output.deepseekv3_mtp_main_output_hiddens = graph_out_hiddens
             model_output1.deepseekv3_mtp_main_output_hiddens = graph_out_hiddens1
+
+        if infer_state.is_cuda_graph:
+            model_output.to_no_ref_tensor()
+            model_output1.to_no_ref_tensor()
 
         return model_output, model_output1
 

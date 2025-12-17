@@ -130,7 +130,7 @@ class MMWeightTpl(BaseWeightTpl):
             dtype = input_tensor.dtype
             device = input_tensor.device
             if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
+                out = g_cache_manager.alloc_tensor(shape, dtype, device=device)
             else:
                 out = torch.empty(shape, dtype=dtype, device=device)
         if self.mm_param.bias is None:
@@ -373,7 +373,7 @@ class BMMWeightTpl(MMWeightTpl):
             dtype = input_tensor.dtype
             device = input_tensor.device
             if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
+                out = g_cache_manager.alloc_tensor(shape, dtype, device=device)
             else:
                 out = torch.empty(shape, dtype=dtype, device=device)
         if self.mm_param.bias is None:
