@@ -17,8 +17,6 @@ from .index import prepare_chunk_indices
 from .op import exp, safe_exp
 from lightllm.common.triton_utils.autotuner import autotune
 
-triton.set_allocator
-
 
 @triton.heuristics(
     {
