@@ -9,16 +9,16 @@ def _wait_value(
     input_ptr,
     expected_value,
 ):
-    value = tl.atomic_add(input_ptr, 0)
+    value = tl.atomic_add(input_ptr, 0, scope="gpu", sem="acq_rel")
     while value != expected_value:
-        value = tl.atomic_add(input_ptr, 0)
+        value = tl.atomic_add(input_ptr, 0, scope="gpu", sem="acq_rel")
 
 
 @triton.jit
 def _add_value(
     input_ptr,
 ):
-    tl.atomic_add(input_ptr, 1)
+    tl.atomic_add(input_ptr, 1, scope="gpu", sem="acq_rel")
 
 
 @torch.inference_mode()

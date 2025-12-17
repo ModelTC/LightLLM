@@ -72,9 +72,6 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
         # prefill 的 cuda graph 过程， 排除掉attention部分
         if torch.cuda.is_current_stream_capturing():
-            infer_state.cpu_prefill_atomic_event += 1
-            infer_state.prefill_atomic_event_incr()
-            wait_event = infer_state.cpu_prefill_atomic_event
             o = torch.empty_like(q)
             _q, _cache_kv, _o = (
                 tensor_to_no_ref_tensor(q.contiguous()),
@@ -82,16 +79,15 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
                 tensor_to_no_ref_tensor(o),
             )
 
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__()
+
             def att_func(new_infer_state: InferStateInfo):
-                infer_state.prefill_atomic_event_wait(wait_event=wait_event)
                 _o.copy_(self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight))
-                infer_state.prefill_atomic_event_incr()
                 return
 
-            infer_state.cpu_prefill_atomic_event += 1
-            infer_state.prefill_atomic_event_wait(wait_event=infer_state.cpu_prefill_atomic_event)
-
             infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func)
+            infer_state.prefill_cuda_graph_create_graph_obj()
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
         else:
             o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
 
@@ -139,9 +135,6 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
         # prefill 的 cuda graph 过程， 排除掉attention部分
         if torch.cuda.is_current_stream_capturing():
-            infer_state.cpu_prefill_atomic_event += 1
-            infer_state.prefill_atomic_event_incr()
-            wait_event = infer_state.cpu_prefill_atomic_event
             o = torch.empty_like(q)
             _q, _cache_kv, _o = (
                 tensor_to_no_ref_tensor(q.contiguous()),
@@ -149,16 +142,15 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
                 tensor_to_no_ref_tensor(o),
             )
 
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__()
+
             def att_func(new_infer_state: InferStateInfo):
-                infer_state.prefill_atomic_event_wait(wait_event=wait_event)
                 _o.copy_(self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight))
-                infer_state.prefill_atomic_event_incr()
                 return
 
-            infer_state.cpu_prefill_atomic_event += 1
-            infer_state.prefill_atomic_event_wait(wait_event=infer_state.cpu_prefill_atomic_event)
-
             infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func)
+            infer_state.prefill_cuda_graph_create_graph_obj()
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
         else:
             o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
 

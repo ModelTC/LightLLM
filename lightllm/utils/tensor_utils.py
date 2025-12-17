@@ -18,6 +18,7 @@ def tensor_to_no_ref_tensor(origin_tensor: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: 无引用计数的tensor
     """
+    assert origin_tensor.is_contiguous(), "Only support contiguous tensor"
     device_ptr = origin_tensor.data_ptr()
     nbytes = origin_tensor.numel() * origin_tensor.element_size()
     no_ref_tensor = ptr_to_tensor(device_ptr, nbytes).view(dtype=origin_tensor.dtype).view(size=origin_tensor.shape)

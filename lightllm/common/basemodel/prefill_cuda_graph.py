@@ -63,14 +63,15 @@ class PrefillCudaGraph:
         self, prefill_func, input_tensors: List[torch.Tensor], infer_state: InferStateInfo
     ) -> List[torch.Tensor]:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
-        infer_state.prefill_atomic_event_init()
-        infer_state.prefill_atomic_event_clear()
         dist_group: CustomProcessGroup = infer_state.dist_group
-        graph_obj = torch.cuda.CUDAGraph()
         with lightllm_capture_graph(dist_group):
-            with torch.cuda.graph(graph_obj, pool=self.mempool):
-                out_tensors = prefill_func(input_tensors, infer_state)
-        self.graph[handle_token_num] = (graph_obj, infer_state, input_tensors, out_tensors)
+            infer_state.mem_pool = self.mempool
+            infer_state.prefill_cuda_graph_create_graph_obj()
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+            out_tensors = prefill_func(input_tensors, infer_state)
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__()
+
+        self.graph[handle_token_num] = (infer_state, input_tensors, out_tensors)
         self.replay(input_tensors, infer_state)
         return out_tensors
 
@@ -113,15 +114,13 @@ class PrefillCudaGraph:
 
     def _replay(self, input_tensors: List[torch.Tensor], infer_state: InferStateInfo) -> List[torch.Tensor]:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
-        graph_obj, graph_infer_state, graph_input_tensors, graph_output_tensors = self.graph[handle_token_num]
+        graph_infer_state, graph_input_tensors, graph_output_tensors = self.graph[handle_token_num]
         graph_infer_state: InferStateInfo = graph_infer_state
         # 拷贝输入， 但是自己和自己不能拷贝
         if graph_infer_state is not infer_state:
             for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
                 graph_in_tensor.copy_(in_tensor)
 
-        graph_infer_state.prefill_atomic_event_clear()
-        graph_obj.replay()
         graph_infer_state.prefill_replay(infer_state)
 
         return graph_output_tensors
@@ -133,28 +132,7 @@ class PrefillCudaGraph:
         input_tensors1: List[torch.Tensor],
         infer_state1: InferStateInfo,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
-        (
-            graph_obj,
-            graph_input_tensors,
-            graph_infer_state,
-            graph_input_tensors1,
-            graph_infer_state1,
-            graph_output_tensors,
-            graph_output_tensors1,
-        ) = self.graph[handle_token_num]
-        # 拷贝
-        for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
-            graph_in_tensor.copy_(in_tensor)
-
-        for graph_in_tensor1, in_tensor1 in zip(graph_input_tensors1, input_tensors1):
-            graph_in_tensor1.copy_(in_tensor1)
-
-        graph_obj.replay()
-        graph_infer_state.prefill_replay(infer_state)
-        graph_infer_state1.prefill_replay(infer_state1)
-
-        return graph_output_tensors, graph_output_tensors1
+        raise NotImplementedError("not impl")
 
     def replay(self, input_tensors, infer_state, input_tensor1=None, infer_state1=None):
         if self.enable_prefill_microbatch_overlap:
@@ -173,6 +151,7 @@ class PrefillCudaGraph:
 
         # prefill cuda graph init
         for handle_token_num in self.graph_handle_token_nums[::-1]:
+            logger.info(f"Capture prefill cudagraph, handle_token_num: {handle_token_num}")
             total_token_num = handle_token_num
             input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int32, device="cuda")
             mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
@@ -203,6 +182,7 @@ class PrefillCudaGraph:
                 **model._gen_special_model_input(token_num=total_token_num),
             )
             model_output: ModelOutput = model.forward(model_input)
+            logger.info(f"Capture prefill cudagraph, handle_token_num: {handle_token_num} 1111")
             del model_output
             del input_ids
             del mem_indexes
