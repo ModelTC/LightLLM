@@ -2,27 +2,35 @@ import torch
 import numpy as np
 from io import BytesIO
 import multiprocessing.shared_memory as shm
+import time
 
 
 def tensor2bytes(t: torch.Tensor):
-    # t = t.cpu().numpy().tobytes()
-    # return t
-    buf = BytesIO()
-    t = t.detach().cpu()
-    # 这个地方进行新的empty并复制是因为，torch的tensor save的机制存在问题
-    # 如果 t 是从一个大 tensor 上切片复制下来的的tensor， 在save的时候，其
-    # 会保存大tensor的所有数据，所以会导致存储开销较大，需要申请一个新的tensor
-    # 并进行复制，来打断这种联系。
-    dest = torch.empty_like(t)
-    dest.copy_(t)
-    torch.save(dest, buf, _use_new_zipfile_serialization=False, pickle_protocol=4)
-    buf.seek(0)
-    return buf.read()
+    # 转换为 numpy array，使用 contiguous 确保内存连续
+    print(f"tensor2bytes shape: {t.shape} {t.is_contiguous()}")
+    memory_size = t.numel() * t.element_size()
+    out = torch.empty(memory_size, dtype=torch.uint8, device="cpu", pin_memory=True).copy_(t.view(torch.uint8).view(-1))
+    return out.numpy().tobytes()
 
 
 def bytes2tensor(b):
-    # return torch.from_numpy(np.frombuffer(b, dtype=np.float16)).cuda()
-    return torch.load(BytesIO(b), weights_only=False)
+    # 直接返回二进制数据的 uint8 tensor，外部自己转 dtype 和 view
+    # 避免 numpy 不支持 bfloat16 等问题
+    return torch.frombuffer(b, dtype=torch.uint8)
+
+
+def create_shm_and_dump(name, data: torch.Tensor):
+    try:
+        data_size = data.numel() * data.element_size()
+        shared_memory = shm.SharedMemory(name=name, create=True, size=data_size)
+        tensor = torch.frombuffer(shared_memory.buf, dtype=torch.uint8)
+        out = torch.empty(data_size, dtype=torch.uint8, device="cpu", pin_memory=True).copy_(
+            data.view(torch.uint8).view(-1)
+        )
+        tensor.copy_(out)
+        return tensor
+    except FileExistsError:
+        print("Warning create shm {} failed because of FileExistsError!".format(name))
 
 
 def create_shm(name, data):

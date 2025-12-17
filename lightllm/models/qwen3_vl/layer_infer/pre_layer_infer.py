@@ -44,17 +44,22 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
 
                 # all_img_embed_df的shape是
                 # image_embed(token_num, hidden_dim) + deepstack(token_num*layer_num, hidden_dim)
-                all_img_embed_df = bytes2tensor(read_shm(get_shm_name_embed(img["uuid"])))
+                all_img_embed_df = (
+                    bytes2tensor(read_shm(get_shm_name_embed(img["uuid"])))
+                    .view(dtype)
+                    .view(-1, hidden_size)
+                    .cuda(non_blocking=True)
+                )
                 per_image_deepstack = []
 
                 # 计算deepstack的层数
                 deepstack_layer_num = all_img_embed_df.shape[0] // img["token_num"] - 1
-                img_weight.append(all_img_embed_df[: img["token_num"]].cuda(non_blocking=True))
+                img_weight.append(all_img_embed_df[: img["token_num"]])
 
                 for layer in range(deepstack_layer_num):
                     start = img["token_num"] * (layer + 1)
                     end = img["token_num"] * (layer + 2)
-                    per_image_deepstack.append(all_img_embed_df[start:end].cuda())
+                    per_image_deepstack.append(all_img_embed_df[start:end])
 
                 infer_state.deepstack_features.append(per_image_deepstack)
                 infer_state.img_start_token_ids.append(img["token_id"])
