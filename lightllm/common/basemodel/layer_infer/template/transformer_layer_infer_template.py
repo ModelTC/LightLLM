@@ -72,22 +72,41 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
         # prefill 的 cuda graph 过程， 排除掉attention部分
         if torch.cuda.is_current_stream_capturing():
-            o = torch.empty_like(q)
-            _q, _cache_kv, _o = (
+            _q, _cache_kv = (
                 tensor_to_no_ref_tensor(q.contiguous()),
                 tensor_to_no_ref_tensor(cache_kv.contiguous()),
-                tensor_to_no_ref_tensor(o),
             )
+            pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
+            pre_capture_graph.__exit__(None, None, None)
 
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__()
+            def get_o_shape_dtype_device():
+                # 在一个新的 graph 中尝试运行，并不是为了捕获图，是为了尝试得到 o 的形状等信息
+                with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
+                    __o = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
+                    o_shape = __o.shape
+                    o_dtype = __o.dtype
+                    o_device = __o.device
+                    del __o
 
-            def att_func(new_infer_state: InferStateInfo):
-                _o.copy_(self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight))
-                return
+                    import gc
 
-            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                return o_shape, o_dtype, o_device
+
             infer_state.prefill_cuda_graph_create_graph_obj()
             infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+            o_shape, o_dtype, o_device = get_o_shape_dtype_device()
+            o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
+            _o = tensor_to_no_ref_tensor(o)
+
+            def att_func(new_infer_state: InferStateInfo):
+                tmp_o = self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight)
+                assert tmp_o.shape == _o.shape
+                _o.copy_(tmp_o)
+                return
+
+            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func, after_graph=pre_capture_graph)
         else:
             o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
 
@@ -135,22 +154,41 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
         # prefill 的 cuda graph 过程， 排除掉attention部分
         if torch.cuda.is_current_stream_capturing():
-            o = torch.empty_like(q)
-            _q, _cache_kv, _o = (
+            _q, _cache_kv = (
                 tensor_to_no_ref_tensor(q.contiguous()),
                 tensor_to_no_ref_tensor(cache_kv.contiguous()),
-                tensor_to_no_ref_tensor(o),
             )
+            pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
+            pre_capture_graph.__exit__(None, None, None)
 
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__()
+            def get_o_shape_dtype_device():
+                # 在一个新的 graph 中尝试运行，并不是为了捕获图，是为了尝试得到 o 的形状等信息
+                with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
+                    __o = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
+                    o_shape = __o.shape
+                    o_dtype = __o.dtype
+                    o_device = __o.device
+                    del __o
 
-            def att_func(new_infer_state: InferStateInfo):
-                _o.copy_(self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight))
-                return
+                    import gc
 
-            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                return o_shape, o_dtype, o_device
+
             infer_state.prefill_cuda_graph_create_graph_obj()
             infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+            o_shape, o_dtype, o_device = get_o_shape_dtype_device()
+            o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
+            _o = tensor_to_no_ref_tensor(o)
+
+            def att_func(new_infer_state: InferStateInfo):
+                tmp_o = self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight)
+                assert tmp_o.shape == _o.shape
+                _o.copy_(tmp_o)
+                return
+
+            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func, after_graph=pre_capture_graph)
         else:
             o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
 

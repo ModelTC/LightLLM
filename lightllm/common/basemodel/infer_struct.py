@@ -310,11 +310,18 @@ class InferStateInfo:
         else:
             return self.prefill_cuda_graph_exe_list[-2][1]
 
-    def prefill_cuda_graph_add_cpu_runnning_func(self, func):
+    def prefill_cuda_graph_add_cpu_runnning_func(self, func, after_graph: torch.cuda.graph):
         if not hasattr(self, "prefill_cuda_graph_exe_list"):
             self.prefill_cuda_graph_exe_list = []
-        self.prefill_cuda_graph_exe_list.append(func)
-        return
+        if after_graph is None:
+            self.prefill_cuda_graph_exe_list.append(func)
+            return
+
+        for i, e in enumerate(self.prefill_cuda_graph_exe_list):
+            if isinstance(e, tuple) and e[1] == after_graph:
+                self.prefill_cuda_graph_exe_list.insert(i + 1, func)
+                return
+        assert False, "after_graph not found in prefill_cuda_graph_exe_list"
 
     def prefill_replay(self, new_infer_state: "InferStateInfo"):
         for func in self.prefill_cuda_graph_exe_list:

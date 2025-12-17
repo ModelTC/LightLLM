@@ -69,7 +69,7 @@ class PrefillCudaGraph:
             infer_state.prefill_cuda_graph_create_graph_obj()
             infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
             out_tensors = prefill_func(input_tensors, infer_state)
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__()
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
 
         self.graph[handle_token_num] = (infer_state, input_tensors, out_tensors)
         self.replay(input_tensors, infer_state)
