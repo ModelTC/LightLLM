@@ -336,6 +336,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )
     parser.add_argument(
+        "--embed_cache_storage_size",
+        type=float,
+        default=4,
+        help="embed cache for swap multimodal data in llm and vit, whisper. 4G is default",
+    )
+    parser.add_argument(
         "--data_type",
         type=str,
         choices=["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"],

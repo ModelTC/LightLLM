@@ -82,6 +82,9 @@ def normal_or_p_d_start(args):
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
 
+    if args.enable_multimodal:
+        args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
+
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
     # 确保单机上多实列不冲突
     if args.zmq_mode == "ipc:///tmp/":
