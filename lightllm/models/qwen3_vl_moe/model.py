@@ -2,34 +2,22 @@ import os
 import json
 from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
-from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
+from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
-from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
+from lightllm.models.qwen3_vl_moe.layer_infer.transformer_layer_infer import Qwen3VLMOETransformerLayerInfer
 from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
-from lightllm.models.qwen2_vl.model import QWen2VLTokenizer
-from lightllm.models.qwen3.model import Qwen3TpPartModel
+from lightllm.models.qwen3_vl_moe.layer_weights.transformers_layer_weight import Qwen3VLMOETransformerLayerWeight
+from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 
 
-class QWen3VLTokenizer(QWen2VLTokenizer):
-    def __init__(self, tokenizer=None, image_processor=None, **kwargs):
-        self.tokenizer = tokenizer
-        self.image_processor = image_processor
-        self.min_pixel = self.image_processor.size["shortest_edge"]
-        self.max_pixel = self.image_processor.size["longest_edge"]
-        self.patch_size = self.image_processor.patch_size
-        self.merge_size = self.image_processor.merge_size
-        self.image_start_id = kwargs["model_cfg"]["vision_start_token_id"]
-        self.image_end_id = kwargs["model_cfg"]["vision_end_token_id"]
-        self.image_token_id = kwargs["model_cfg"]["image_token_id"]
-
-
-@ModelRegistry(["qwen3_vl"], is_multimodal=True)
-class Qwen3VLTpPartModel(Qwen3TpPartModel):
+@ModelRegistry(["qwen3_vl_moe"], is_multimodal=True)
+class Qwen3VLMOETpPartModel(Qwen3MOEModel):
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
-    transformer_layer_infer_class = Qwen3VLTransformerLayerInfer
+    transformer_layer_infer_class = Qwen3VLMOETransformerLayerInfer
 
     pre_and_post_weight_class = Qwen3VLPreAndPostLayerWeight
+    transformer_weight_class = Qwen3VLMOETransformerLayerWeight
 
     infer_state_class = Qwen3VLInferStateInfo
 
