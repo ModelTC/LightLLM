@@ -20,12 +20,9 @@ from lightllm.models.qwen3_vl.triton_kernel.deepstack_multimodal_emb import appl
 class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     def __init__(self, layer_num, network_config, mode=[]):
         super().__init__(layer_num, network_config, mode)
-        self.mrope_section = network_config["rope_scaling"]["mrope_section"]
-        mrope_length = sum(self.mrope_section)
-        self.axis_map = torch.zeros((1, mrope_length), dtype=torch.int32, device="cuda")
-        for dim in (1, 2):
-            length = self.mrope_section[dim] * 3
-            self.axis_map[..., dim:length:3] = dim
+        self.mrope_section = torch.tensor(
+            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"
+        )
 
     def _get_qkv(
         self,
@@ -35,7 +32,7 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
-        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        cache_kv = layer_weight.kv_proj.mm(input)
         qk_rmsnorm_forward(
             q,
             weight=layer_weight.q_norm_weight_.weight,
@@ -50,9 +47,8 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         mrope_triton_fused(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
-            infer_state._cos_cached,
-            infer_state._sin_cached,
-            infer_state.position_ids,
+            infer_state.position_cos,
+            infer_state.position_sin,
             self.mrope_section,
             is_interleaved=True,
         )
