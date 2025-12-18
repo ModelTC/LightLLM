@@ -109,9 +109,6 @@ class HybridRadixCache(RadixCache):
             self.add_node_ref_counter(new_shared_kv_node)
             self.add_buffer_idx_to_node(new_shared_kv_node, new_buffer_indexes[i].item())
             req.shared_kv_node = new_shared_kv_node
-            # 更新 prompt_cache_len，这样 free_a_req_mem 不会释放已属于树的 token
-            # free_a_req_mem 中会释放 [prompt_cache_len:prefix_len]，更新后这个范围为空
-            req.shm_req.prompt_cache_len = req.cur_kv_len
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0

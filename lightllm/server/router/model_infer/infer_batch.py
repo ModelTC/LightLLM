@@ -165,12 +165,16 @@ class InferenceContext:
                 else:
                     free_buffer_index.append(buffer_idx)
 
-            old_prefix_len = req.shm_req.prompt_cache_len
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
                 assert req.shared_kv_node.node_prefix_total_len <= prefix_len
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                 req.shared_kv_node = None
+
+            if len(req.extra_need_to_free_token_index) > 0:
+                free_token_index.extend(req.extra_need_to_free_token_index)
+                req.extra_need_to_free_token_index = []
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -411,6 +415,7 @@ class InferReq:
         self.mamba_model_match_len = 0
         self.use_mamba_buffer_inserted = False
         self.mamba_buffer_insert_len = 0
+        self.extra_need_to_free_token_index = []
 
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
