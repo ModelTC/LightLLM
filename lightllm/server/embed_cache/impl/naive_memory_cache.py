@@ -134,9 +134,18 @@ class InMemoryCache:
         self._sorted_records.add(rec)
         return
 
+    def _judge_enough_token_cache(self, md5sum_list: list[str], token_num_list: list[int]) -> bool:
+        tmp_dict = {}
+        for md5, token_num in zip(md5sum_list, token_num_list):
+            tmp_dict[md5] = token_num
+        return sum(tmp_dict.values()) < self.cpu_embed_cache_client.token_num / 3
+
     def alloc(self, md5sum_list: list[str], token_num_list: list[int]) -> Optional[list[dict]]:
         now = time.time()
         with self.lock:
+            if not self._judge_enough_token_cache(md5sum_list=md5sum_list, token_num_list=token_num_list):
+                return "error not enough cache"
+
             add_ref_m_list = []
             new_md5_dict = {}
             for m, token_need in zip(md5sum_list, token_num_list):
