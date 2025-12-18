@@ -8,24 +8,6 @@ from lightllm.common.basemodel import TpPartBaseModel
 
 
 class Qwen3NextMTPModel(Qwen3NextTpPartModel):
-    """
-    Qwen3Next Multi-Token Prediction (MTP) Model.
-
-    MTP is used for speculative decoding where draft tokens are predicted
-    by this lightweight model and verified by the main model.
-
-    Structure:
-    - Pre-layer: Combines embedding and hidden state through normalization and projection
-    - Transformer layers: Full attention + MoE FFN (same structure as main model's full attention layers)
-    - Post-layer: Final normalization before lm_head
-
-    Weight structure (from model.safetensors.index.json):
-    - mtp.fc.weight: Projection from (embedding + hidden) to hidden_size
-    - mtp.pre_fc_norm_embedding.weight: Embedding normalization
-    - mtp.pre_fc_norm_hidden.weight: Hidden state normalization
-    - mtp.layers.{i}.* : Transformer layer weights (attention + MoE)
-    - mtp.norm.weight: Final normalization
-    """
 
     # weight classes
     pre_and_post_weight_class = Qwen3NextMTPPreAndPostLayerWeight

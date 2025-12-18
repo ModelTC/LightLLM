@@ -67,7 +67,7 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             if linear_conv1d_weight_name in weights:
                 weights[linear_conv1d_weight_name] = self._parse_linear_conv1d(
                     weights[linear_conv1d_weight_name].squeeze(1)
-                )
+                ).transpose(0, 1)
             if linear_conv1d_bias_name in weights:
                 weights[linear_conv1d_bias_name] = self._parse_linear_conv1d(weights[linear_conv1d_bias_name])
         else:
@@ -134,7 +134,7 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     def _init_linear_weight(self):
         prefix = f"model.layers.{self.layer_num_}.linear_attn"
-        self.linear_conv1d = ROWMMWeight(
+        self.linear_conv1d = COLMMWeight(
             weight_names=f"{prefix}.conv1d.weight",
             data_type=self.data_type_,
             quant_cfg=self.quant_cfg,
