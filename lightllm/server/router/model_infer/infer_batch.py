@@ -409,10 +409,8 @@ class InferReq:
 
         # 在开启radix cache的情况下，用于标记命中情况，用于插入算法
         self.mamba_model_match_len = 0
-        # 是否使用基于 mamba_model_match_len 的优化策略
-        self.use_mamba_match_len_strategy = False
-        # 是否已在 mamba_model_match_len 位置插入 buffer
-        self.mamba_buffer_inserted = False
+        self.use_mamba_buffer_inserted = False
+        self.mamba_buffer_insert_len = 0
 
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
@@ -466,7 +464,6 @@ class InferReq:
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
-            self.mamba_model_match_len = kv_len
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
@@ -475,11 +472,10 @@ class InferReq:
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
-                # 判断是否使用基于 mamba_model_match_len 的优化策略
-                # 当需要重新计算的增量足够大时，值得单独在分支点保存 buffer
-                increment = self.mamba_model_match_len - ready_cache_len
-                threshold = self.shm_req.chunked_prefill_size // 2
-                self.use_mamba_match_len_strategy = increment >= threshold
+                if g_infer_context.use_buffer_manager:
+                    if kv_len - ready_cache_len >= self.shm_req.chunked_prefill_size // 2:
+                        self.use_mamba_buffer_inserted = True
+                        self.mamba_buffer_insert_len = kv_len - ready_cache_len
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
@@ -536,15 +532,8 @@ class InferReq:
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
 
-        # 优化策略：第一个 chunk 直接到 mamba_model_match_len（分支点）
-        # 这样可以在分支点位置保存 buffer，提升后续请求的缓存命中率
-        if (
-            self.use_mamba_match_len_strategy
-            and not self.mamba_buffer_inserted
-            and self.mamba_model_match_len > chunked_start
-            and self.mamba_model_match_len <= self.get_cur_total_len()
-        ):
-            chunked_end = self.mamba_model_match_len
+        if self.use_mamba_buffer_inserted:
+            chunked_end = min(self.get_cur_total_len(), chunked_start + self.mamba_buffer_insert_len)
 
         return chunked_end
 
