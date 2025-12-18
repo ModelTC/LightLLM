@@ -32,7 +32,7 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
-        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        cache_kv = layer_weight.kv_proj.mm(input)
         qk_rmsnorm_forward(
             q,
             weight=layer_weight.q_norm_weight_.weight,
