@@ -61,7 +61,9 @@ def scatter_token(
         b_req_idx: (batch_size,)
         b_mtp_index: (batch_size,)
     """
-    assert next_token_ids.shape[0] == b_req_idx.shape[0]
+    assert (
+        next_token_ids.shape[0] == b_req_idx.shape[0]
+    ), f"batch size not match, {next_token_ids.shape[0]} != {b_req_idx.shape[0]}"
     batch_size = b_req_idx.shape[0]
     BLOCK = 256
 

@@ -251,8 +251,6 @@ class InferStateInfo:
             shape=(handle_len * scale_size,),
             data_type=data.dtype,
             device="cuda",
-            is_graph_out=False,
-            microbatch_index=self.microbatch_index,
         )
         dist.all_to_all_single(
             output=dest_data.view(-1),
@@ -280,8 +278,6 @@ class InferStateInfo:
             shape=(origin_len * scale_size,),
             data_type=data.dtype,
             device="cuda",
-            is_graph_out=False,
-            microbatch_index=self.microbatch_index,
         )
         dist.all_to_all_single(
             output=origin_data.view(-1),
@@ -292,3 +288,49 @@ class InferStateInfo:
             async_op=False,
         )
         return origin_data.view(-1, *old_shape[1:])
+
+    # 用于 prefll cuda graph 的专用功能接口
+    def prefill_cuda_graph_create_graph_obj(self):
+        if not hasattr(self, "prefill_cuda_graph_exe_list"):
+            self.prefill_cuda_graph_exe_list = []
+        graph_obj = torch.cuda.CUDAGraph()
+        capture_graph = torch.cuda.graph(graph_obj, pool=self.mem_pool)
+        self.prefill_cuda_graph_exe_list.append((graph_obj, capture_graph))
+        return
+
+    def prefill_cuda_graph_get_current_capture_graph(self) -> torch.cuda.graph:
+        assert len(self.prefill_cuda_graph_exe_list) > 0, "no cuda graph exe obj found"
+        if isinstance(self.prefill_cuda_graph_exe_list[-1], tuple):
+            return self.prefill_cuda_graph_exe_list[-1][1]
+        else:
+            return self.prefill_cuda_graph_exe_list[-2][1]
+
+    def prefill_cuda_graph_add_cpu_runnning_func(self, func, after_graph: torch.cuda.graph):
+        if not hasattr(self, "prefill_cuda_graph_exe_list"):
+            self.prefill_cuda_graph_exe_list = []
+        if after_graph is None:
+            self.prefill_cuda_graph_exe_list.append(func)
+            return
+
+        for i, e in enumerate(self.prefill_cuda_graph_exe_list):
+            if isinstance(e, tuple) and e[1] == after_graph:
+                self.prefill_cuda_graph_exe_list.insert(i + 1, func)
+                return
+        assert False, "after_graph not found in prefill_cuda_graph_exe_list"
+
+    def prefill_replay(self, new_infer_state: "InferStateInfo"):
+        for func in self.prefill_cuda_graph_exe_list:
+            if isinstance(func, tuple):
+                graph_obj, _ = func
+                graph_obj.replay()
+            else:
+                func(new_infer_state)
+        return
+
+    def copy_for_prefill_cuda_graph(self, new_infer_state: "InferStateInfo"):
+        for attr_name, attr_value in vars(new_infer_state).items():
+            if isinstance(attr_value, torch.Tensor):
+                attr_ = getattr(self, attr_name, None)
+                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr() and attr_.shape == attr_value.shape:
+                    attr_.copy_(attr_value, non_blocking=True)
+        return

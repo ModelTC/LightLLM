@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from typing import List
 from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
+from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
 @dataclass
@@ -88,3 +89,8 @@ class ModelOutput:
     # 输出最后一层的hidden state 状态用于 draft 模型的 deepseekv3_mtp_draft_input_hiddens
     # 输入
     deepseekv3_mtp_main_output_hiddens: Optional[torch.Tensor] = None
+
+    def to_no_ref_tensor(self):
+        self.logits = tensor_to_no_ref_tensor(self.logits)
+        if self.deepseekv3_mtp_main_output_hiddens is not None:
+            self.deepseekv3_mtp_main_output_hiddens = tensor_to_no_ref_tensor(self.deepseekv3_mtp_main_output_hiddens)
