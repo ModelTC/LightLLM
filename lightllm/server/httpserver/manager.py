@@ -13,7 +13,7 @@ import pickle
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Union, List, Tuple, Dict, Optional, AsyncGenerator
+from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
@@ -799,6 +799,23 @@ class HttpServerManager:
             req.is_aborted = True
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
+
+    def _get_router_profiler_client(self):
+        router_profiler_client = getattr(self, "router_profiler_client", None)
+        if router_profiler_client is None or getattr(router_profiler_client, "closed", False):
+            from lightllm.utils.retry_utils import retry
+
+            self.router_profiler_client = retry(max_attempts=20, wait_time=0.5)(rpyc.connect)(
+                "localhost",
+                self.args.router_profiler_port,
+                config={"allow_pickle": True},
+            )
+            self.router_profiler_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return self.router_profiler_client
+
+    async def profiler_cmd(self, cmd: Literal["start", "stop"]):
+        client = self._get_router_profiler_client()
+        client.root.profiler_cmd(cmd)
 
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()

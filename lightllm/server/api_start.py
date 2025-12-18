@@ -350,13 +350,14 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=9 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
+        num=10 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
         used_ports=already_uesd_ports,
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
         nccl_port,
         router_port,
+        router_profiler_port,
         detokenization_port,
         http_server_port,
         visual_port,
@@ -364,8 +365,8 @@ def normal_or_p_d_start(args):
         cache_port,
         metric_port,
         multi_level_kv_cache_port,
-    ) = can_use_ports[0:9]
-    can_use_ports = can_use_ports[9:]
+    ) = can_use_ports[0:10]
+    can_use_ports = can_use_ports[10:]
 
     if args.visual_nccl_ports is None:
         args.visual_nccl_ports = can_use_ports[: args.visual_dp]
@@ -383,6 +384,7 @@ def normal_or_p_d_start(args):
     if args.nccl_port is None:
         args.nccl_port = nccl_port
     args.router_port = router_port
+    args.router_profiler_port = router_profiler_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
     args.visual_port = visual_port

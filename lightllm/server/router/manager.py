@@ -12,7 +12,7 @@ import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import multiprocessing
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
@@ -26,6 +26,7 @@ from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
+from lightllm.utils.profiler import ProfilerCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
@@ -34,6 +35,7 @@ from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
+from .profiler_service import RouterProfilerCmdQueue, start_router_profiler_server
 
 logger = init_logger(__name__)
 
@@ -102,6 +104,8 @@ class RouterManager:
             else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
         )
         self.router_statics = RouterStatics(self.args)
+        self.profiler_cmd_queue = RouterProfilerCmdQueue()
+
         return
 
     async def wait_to_model_ready(self):
@@ -275,6 +279,7 @@ class RouterManager:
         """
         # 接受新请求，并尝试调度
         await self._recv_new_reqs_and_schedule()
+        await self._write_profiler_cmds()
         # 判断是否有新请求加入推理
         # 激进调度满足，有新的推理batch就需要进行加入。
         # 或者延迟step的步数满足了当前条件，也需要进行新的推理batch的加入。
@@ -301,6 +306,17 @@ class RouterManager:
         self.shm_reqs_io_buffer.write_obj(reqs)
         self.shm_reqs_io_buffer.set_ready()
         logger.debug(f"Prefill Batch: {batch.simple_log()} \n")
+        return
+
+    async def _write_profiler_cmds(self):
+        cmd = self.profiler_cmd_queue.pop()
+        if cmd is None:
+            return
+
+        while not self.shm_reqs_io_buffer.is_empty():
+            await asyncio.sleep(0.001)
+        self.shm_reqs_io_buffer.write_obj([ProfilerCmd(cmd)])
+        self.shm_reqs_io_buffer.set_ready()
         return
 
     async def _aborted_reqs(self, aborted_reqs: List[Req]):
@@ -537,6 +553,10 @@ def start_router_process(args, pipe_writer):
         )
 
         loop.run_until_complete(router.wait_to_model_ready())
+        router.profiler_rpyc_server, router.profiler_rpyc_thread = start_router_profiler_server(
+            args,
+            router.profiler_cmd_queue,
+        )
     except:
         import traceback
         import sys

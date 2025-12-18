@@ -103,6 +103,10 @@ class StartArgs:
     use_reward_model: bool = field(default=False)
     use_tgi_api: bool = field(default=False)
     health_monitor: bool = field(default=False)
+    enable_profiling: Optional[str] = field(
+        default=None,
+        metadata={"choices": ["torch_profiler", "nvtx"]},
+    )
     metric_gateway: Optional[str] = field(default=None)
     job_name: str = field(default="lightllm")
     grouping_key: List[str] = field(default_factory=list)
@@ -182,6 +186,7 @@ class StartArgs:
     enable_dp_prompt_cache_fetch: bool = field(default=False)
     # zmp ports
     router_port: int = field(default=None)
+    router_profiler_port: int = field(default=None)
     detokenization_port: int = field(default=None)
     http_server_port: int = field(default=None)
     visual_port: int = field(default=None)
