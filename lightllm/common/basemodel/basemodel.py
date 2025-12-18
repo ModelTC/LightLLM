@@ -384,7 +384,7 @@ class TpPartBaseModel:
         if new_model_input.deepseekv3_mtp_draft_input_hiddens is not None:
             new_model_input.deepseekv3_mtp_draft_input_hiddens = pad2dim_tensor_to_new_batch(
                 input=new_model_input.deepseekv3_mtp_draft_input_hiddens,
-                new_batch_size=padded_token_num,
+                new_batch_size=new_handle_token_num,
             )
 
         return new_model_input

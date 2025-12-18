@@ -33,11 +33,8 @@ class PrefillCudaGraph:
         graph_handle_token_nums = []
         for i in range(2048):
             token_num = int(2 ** (2 * i))
-            if token_num < self.max_handle_token_num:
+            if 1 < token_num < self.max_handle_token_num:
                 graph_handle_token_nums.append(token_num)
-            else:
-                break
-
         graph_handle_token_nums.append(self.max_handle_token_num)
         self.graph_handle_token_nums = graph_handle_token_nums
         logger.info(f"prefill cuda graph graph_handle_token_nums: {self.graph_handle_token_nums}")
