@@ -20,19 +20,19 @@ class CpuEmbedCacheClient(object):
     This class is responsible for handling cpu kv cache meta data.
     """
 
-    def __init__(self, only_create_meta_data: bool, init_shm_data: bool):
+    def __init__(self, create_meta_data: bool, init_shm_data: bool):
         self.args = get_env_start_args()
         # to do here need calcu from from settings.
         self.embed_cache_tensor_meta = calcu_embed_cache_meta()
         self.token_num: int = self.embed_cache_tensor_meta.token_num
 
-        if not only_create_meta_data:
+        if create_meta_data:
             self.token_index_manager = MemoryManager(total_size=self.token_num)
         else:
             if init_shm_data:
                 self._create_shm_embed_kv_cache()
             else:
-                self._create_shm_embed_kv_cache()
+                self._attach_shm_cpu_embed_cache()
         return
 
     def alloc_indexes(self, token_num: int) -> Optional["MemoryBlock"]:
@@ -41,6 +41,15 @@ class CpuEmbedCacheClient(object):
     def release_indexes(self, block: "MemoryBlock"):
         self.token_index_manager.release(block)
         return
+
+    def copy_to_cache(self, embed_tensor: torch.Tensor, start_index_in_cache: int):
+        from .copy_to_cache import offload_embed_tensor_to_cache
+
+        offload_embed_tensor_to_cache(
+            embed_tensor=embed_tensor,
+            cache_tensor=self.cpu_embed_cache_tensor,
+            start_index_in_cache=start_index_in_cache,
+        )
 
     def _create_shm_embed_kv_cache(self):
         shm_ptr = create_shm_embed_cache_ptr()

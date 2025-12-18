@@ -42,7 +42,7 @@ class InMemoryCache:
         self.token_id_range_start = 0
         self.token_id_range_end = 0
         self.use_config_server = self.args.config_server_host and self.args.config_server_port
-        self.cpu_embed_cache_client = CpuEmbedCacheClient(only_create_meta_data=True, init_shm_data=False)
+        self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=True, init_shm_data=False)
 
     def _check_and_set_new_id_range(self, alloced_token_num):
         need_update_range = self.token_id_range_start + alloced_token_num >= self.token_id_range_end
