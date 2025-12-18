@@ -402,6 +402,7 @@ class RadixCache:
             or parent_node.ref_counter != 0
             or len(parent_node.children) != 1
             or child_node.ref_counter != 0
+            or parent_node.buffer_idx is not None
         ):
             return None
 
