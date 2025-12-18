@@ -5,6 +5,9 @@ import collections
 from typing import Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
+from lightllm.utils.log_utils import init_logger, log_time_ready
+
+logger = init_logger(__name__)
 
 
 class UniqueTimeIdGenerator:
@@ -135,6 +138,34 @@ class RadixCache:
         )
         self.tree_total_tokens_num.arr[0] = 0
 
+        self.total_query_tokens = SharedArray(f"{unique_name}_total_query_tokens_{rank_in_node}", (1,), dtype=np.int64)
+        self.total_query_tokens.arr[0] = 0
+        self.total_hit_tokens = SharedArray(f"{unique_name}_total_hit_tokens_{rank_in_node}", (1,), dtype=np.int64)
+        self.total_hit_tokens.arr[0] = 0
+        self.last_log_query_tokens = 0
+        self.last_log_hit_tokens = 0
+
+    def _inc_hit_rate(self, query_len, hit_len):
+        self.total_query_tokens.arr[0] += query_len
+        self.total_hit_tokens.arr[0] += hit_len
+        if log_time_ready("radix_cache_hit_rate", time_count=30):
+            current_total_query = self.total_query_tokens.arr[0]
+            current_total_hit = self.total_hit_tokens.arr[0]
+            window_query = current_total_query - self.last_log_query_tokens
+            window_hit = current_total_hit - self.last_log_hit_tokens
+            window_hit_rate = window_hit / window_query if window_query > 0 else 0.0
+            cumulative_hit_rate = current_total_hit / current_total_query if current_total_query > 0 else 0.0
+
+            label = self.__class__.__name__
+            logger.info(
+                f"{label} Hit Rate: "
+                f"Window {window_hit_rate:.2%} ({window_hit}/{window_query}), "
+                f"Cumulative {cumulative_hit_rate:.2%} ({current_total_hit}/{current_total_query})"
+            )
+
+            self.last_log_query_tokens = current_total_query
+            self.last_log_hit_tokens = current_total_hit
+
     def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
         if value is None:
             value = key
@@ -248,9 +279,13 @@ class RadixCache:
                 value = torch.concat(ans_value_list)
             else:
                 value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
-            return tree_node, len(value), value
+
+            matched_len = len(value)
+            self._inc_hit_rate(len(key), matched_len)
+            return tree_node, matched_len, value
         else:
             self.dec_node_ref_counter(self.root_node)
+            self._inc_hit_rate(len(key), 0)
             return None, 0, None
 
     def _match_prefix_helper(
