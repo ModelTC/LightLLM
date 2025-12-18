@@ -85,6 +85,8 @@ class StartArgs:
     visual_nccl_ports: List[int] = field(default_factory=lambda: [29500])
     enable_monitor_auth: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
+    enable_prefill_cudagraph: bool = field(default=False)
+    prefll_cudagraph_max_handle_token: int = field(default=512)
     graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)

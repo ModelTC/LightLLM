@@ -19,7 +19,9 @@ class Deepseek3MTPPreLayerInfer(LlamaPreLayerInfer):
         self, input_embdings, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek3MTPPreAndPostLayerWeight
     ):
         tgt_embdings = infer_state.deepseekv3_mtp_draft_input_hiddens
-        assert input_embdings.shape[0] == tgt_embdings.shape[0]
+        assert (
+            input_embdings.shape[0] == tgt_embdings.shape[0]
+        ), f"shape {input_embdings.shape} != shape {tgt_embdings.shape}"
         rmsnorm_forward(input_embdings, weight=layer_weight.enorm_weight_, eps=self.eps_, out=input_embdings)
         rmsnorm_forward(tgt_embdings, weight=layer_weight.hnorm_weight_, eps=self.eps_, out=tgt_embdings)
 

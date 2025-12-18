@@ -7,6 +7,7 @@ from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.distributed import all_reduce
 from typing import Tuple
+from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
@@ -68,7 +69,11 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+
+        o = self.__context_attention_wrapper_run(
+            q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
+        )
+
         q = None
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
@@ -110,7 +115,11 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         q, cache_kv = self._tpsp_get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+
+        o = self.__context_attention_wrapper_run(
+            q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
+        )
+
         q = None
         o = self._tpsp_get_o(o, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
@@ -138,3 +147,49 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input1 = None
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
+
+    def __context_attention_wrapper_run(
+        self, q: torch.Tensor, cache_kv: torch.Tensor, infer_state: InferStateInfo, layer_weight
+    ) -> torch.Tensor:
+        if torch.cuda.is_current_stream_capturing():
+            q = q.contiguous()
+            cache_kv = cache_kv.contiguous()
+            _q, _cache_kv = (
+                tensor_to_no_ref_tensor(q),
+                tensor_to_no_ref_tensor(cache_kv),
+            )
+            pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
+            pre_capture_graph.__exit__(None, None, None)
+
+            def get_o_shape_dtype_device():
+                # 在一个新的 graph 中尝试运行，并不是为了捕获图，是为了尝试得到 o 的形状等信息
+                with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
+                    __o = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
+                    o_shape = __o.shape
+                    o_dtype = __o.dtype
+                    o_device = __o.device
+                    del __o
+
+                    import gc
+
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                return o_shape, o_dtype, o_device
+
+            o_shape, o_dtype, o_device = get_o_shape_dtype_device()
+            infer_state.prefill_cuda_graph_create_graph_obj()
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+            o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
+            _o = tensor_to_no_ref_tensor(o)
+
+            def att_func(new_infer_state: InferStateInfo):
+                tmp_o = self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight)
+                assert tmp_o.shape == _o.shape
+                _o.copy_(tmp_o)
+                return
+
+            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func, after_graph=pre_capture_graph)
+        else:
+            o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+
+        return o

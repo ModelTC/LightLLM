@@ -90,9 +90,7 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         n = qweight.shape[1]
         if out is None:
             if use_custom_tensor_mananger:
-                out = self.cache_manager.alloc_tensor(
-                    (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
-                )
+                out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
@@ -149,9 +147,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         n = qweight.shape[1]
         if out is None:
             if use_custom_tensor_mananger:
-                out = self.cache_manager.alloc_tensor(
-                    (m, n), input_tensor.dtype, device=input_tensor.device, is_graph_out=False
-                )
+                out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         if LIGHTLLM_USE_TRITON_FP8_SCALED_MM:

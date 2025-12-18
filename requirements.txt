@@ -92,3 +92,4 @@ torchvision==0.23.0
 interegular==0.3.3
 partial_json_parser==0.2.1.1.post6
 websockets==15.0.1
+cupy-cuda12x==13.6.0
