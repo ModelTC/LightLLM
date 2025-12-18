@@ -144,7 +144,7 @@ class InMemoryCache:
         now = time.time()
         with self.lock:
             if not self._judge_enough_token_cache(md5sum_list=md5sum_list, token_num_list=token_num_list):
-                return "error not enough cache"
+                return "error not enough embed cache"
 
             add_ref_m_list = []
             new_md5_dict = {}
@@ -197,7 +197,7 @@ class InMemoryCache:
                         {
                             "id": rec.id,
                             "token_id": rec.token_id,
-                            "embed_cache_start_index": rec.mem_block.start,
+                            "start_index_in_embed_cache": rec.mem_block.start,
                             "token_num": rec.token_num,
                         }
                     )
