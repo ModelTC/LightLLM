@@ -39,6 +39,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
 
 class ModeBackend:
@@ -231,6 +232,10 @@ class ModeBackend:
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
 
+        prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
+        prof_mode = self.args.enable_profiling
+        self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
+
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
         self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True)
@@ -343,6 +348,10 @@ class ModeBackend:
             self._try_read_new_reqs_multinode_tp()
         else:
             self._try_read_new_reqs_normal()
+
+        # on each loop thread
+        if self.profiler is not None:
+            self.profiler.multi_thread_helper()
         return
 
     def _try_read_new_reqs_normal(self):
@@ -408,6 +417,8 @@ class ModeBackend:
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
+                elif isinstance(obj, ProfilerCmd):
+                    self.profiler.cmd(obj)
                 else:
                     assert False, f"error type {type(obj)}"
             if init_reqs:

@@ -572,4 +572,19 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
+    parser.add_argument(
+        "--enable_profiling",
+        type=str,
+        choices=["torch_profiler", "nvtx"],
+        default=None,
+        help="""Enable profiler support.
+                This will expose '/profiler_start' and '/profiler_stop' API,
+                below profiling features will only be enabled in this range.
+                Options:
+                'torch_profiler': will setup torch.profiler.profile(), trace files will be saved to './trace',
+                or set by 'LIGHTLLM_TRACE_DIR' env;
+                'nvtx': will add NVTX marks for external profiler like NVIDIA Nsight System
+                (you should set it up by yourself).
+                A NVTX range named 'LIGHTLLM_PROFILE' will be added within the profiling range.""",
+    )
     return parser
