@@ -18,6 +18,7 @@ from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
+from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 logger = init_logger(__name__)
 
@@ -30,12 +31,19 @@ class InferenceContext:
     requests_mapping: Dict[int, "InferReq"] = None
     infer_req_ids = None
     vocab_size = None
+    cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
 
     def register(
-        self, backend, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int
+        self,
+        backend,
+        req_manager: ReqManager,
+        radix_cache: RadixCache,
+        shm_req_manager: ShmReqManager,
+        vocab_size: int,
+        cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None,
     ):
         self.args = get_env_start_args()
         from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -50,6 +58,7 @@ class InferenceContext:
         self.infer_req_ids = []
 
         self.vocab_size = vocab_size
+        self.cpu_embed_cache_client = cpu_embed_cache_client
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:

@@ -39,6 +39,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 
 class ModeBackend:
@@ -179,12 +180,16 @@ class ModeBackend:
             self.preload_prompt_cache_kv_buffer(model_cfg)
 
         self.logger.info(f"loaded model class {self.model.__class__}")
+
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
+            cpu_embed_cache_client=CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
+            if self.args.enable_multimodal
+            else None,
         )
 
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
