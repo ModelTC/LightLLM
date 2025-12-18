@@ -335,6 +335,24 @@ async def kv_move_status(websocket: WebSocket):
     return
 
 
+@app.get("/profiler_start")
+async def profiler_start() -> Response:
+    if g_objs.args.enable_profiling:
+        await g_objs.httpserver_manager.profiler_cmd("start")
+        return JSONResponse({"status": "ok"})
+    else:
+        return JSONResponse({"message": "Profiling support not enabled"}, status_code=400)
+
+
+@app.get("/profiler_stop")
+async def profiler_stop() -> Response:
+    if g_objs.args.enable_profiling:
+        await g_objs.httpserver_manager.profiler_cmd("stop")
+        return JSONResponse({"status": "ok"})
+    else:
+        return JSONResponse({"message": "Profiling support not enabled"}, status_code=400)
+
+
 @app.on_event("shutdown")
 async def shutdown():
     logger.info("Received signal to shutdown. Performing graceful shutdown...")

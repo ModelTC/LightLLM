@@ -26,6 +26,7 @@ from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
+from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.basemodel.infer_lock import g_router_lock
@@ -106,6 +107,9 @@ class RouterManager:
             if not self.args.enable_cpu_cache
             else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
         )
+
+        profiler_mode = args.enable_profiling
+        self.profiler = ProcessProfiler(mode=profiler_mode, name="lightllm-router") if profiler_mode else None
         return
 
     async def wait_to_model_ready(self):
@@ -504,6 +508,16 @@ class RouterManager:
             raise e
         return
 
+    async def _profiler_cmd(self, cmd_obj: ProfilerCmd):
+        self.profiler.cmd(cmd_obj)
+
+        cmd = ProfilerCmd(cmd=cmd_obj.cmd)
+        while not self.shm_reqs_io_buffer.is_empty():
+            await asyncio.sleep(0.02)
+
+        self.shm_reqs_io_buffer.write_obj([cmd])
+        self.shm_reqs_io_buffer.set_ready()
+
     async def _recv_new_reqs_and_schedule(self):
         if not hasattr(self, "recv_max_count"):
             self.recv_max_count = 64
@@ -511,9 +525,11 @@ class RouterManager:
         try:
             # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
             for _ in range(self.recv_max_count):
-                recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                recv_req: Union[GroupReqIndexes, ProfilerCmd] = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                 if isinstance(recv_req, GroupReqIndexes):
                     self._add_req(recv_req)
+                elif isinstance(recv_req, ProfilerCmd):
+                    await self._profiler_cmd(recv_req)
                 else:
                     assert False, f"Error Req Inf {recv_req}"
 
