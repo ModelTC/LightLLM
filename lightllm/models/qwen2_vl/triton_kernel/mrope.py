@@ -74,23 +74,20 @@ def _mrope_triton_fused_kernel(
     Cos,
     Sin,
     mrope_section,
-    position_ids,
-    stride_positions,
+    stride_cosld,
+    stride_cosd,
+    stride_sinld,
+    stride_sind,
     stride_qbs,
     stride_qh,
     stride_qd,
     stride_kbs,
     stride_kh,
     stride_kd,
-    stride_cosbs,
-    stride_cosd,
-    stride_sinbs,
-    stride_sind,
     is_interleaved: tl.constexpr,
     HEAD_Q: tl.constexpr,
     HEAD_K: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
-    NUM_STAGE: tl.constexpr,
 ):
     head_index = tl.program_id(0)
     seq_index = tl.program_id(1)
@@ -98,16 +95,12 @@ def _mrope_triton_fused_kernel(
     dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)
     dim_range1 = dim_range0 + BLOCK_DMODEL // 2
 
-    t = tl.load(position_ids + 0 * stride_positions + seq_index)
-    h = tl.load(position_ids + 1 * stride_positions + seq_index)
-    w = tl.load(position_ids + 2 * stride_positions + seq_index)
-
-    t_cos = Cos + t * stride_cosbs
-    h_cos = Cos + h * stride_cosbs
-    w_cos = Cos + w * stride_cosbs
-    t_sin = Sin + t * stride_sinbs
-    h_sin = Sin + h * stride_sinbs
-    w_sin = Sin + w * stride_sinbs
+    t_cos = Cos + seq_index * stride_cosd
+    h_cos = Cos + stride_cosld + seq_index * stride_cosd
+    w_cos = Cos + 2 * stride_cosld + seq_index * stride_cosd
+    t_sin = Sin + seq_index * stride_sind
+    h_sin = Sin + stride_sinld + seq_index * stride_sind
+    w_sin = Sin + 2 * stride_sinld + seq_index * stride_sind
 
     mrope_section_t = tl.load(mrope_section + 0)
     mrope_section_h = tl.load(mrope_section + 1)
@@ -198,7 +191,6 @@ def mrope_triton_fused(
     k: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
-    position_ids: torch.Tensor,
     mrope_section: torch.Tensor,
     is_interleaved: bool,
     run_config: Optional[dict] = None,
@@ -224,24 +216,21 @@ def mrope_triton_fused(
         k=k,
         Cos=cos,
         Sin=sin,
-        position_ids=position_ids,
         mrope_section=mrope_section,
-        stride_positions=position_ids.stride(0),
+        stride_cosld=cos.stride(0),
+        stride_cosd=cos.stride(1),
+        stride_sinld=sin.stride(0),
+        stride_sind=sin.stride(1),
         stride_qbs=q.stride(0),
         stride_qh=q.stride(1),
         stride_qd=q.stride(2),
         stride_kbs=k.stride(0),
         stride_kh=k.stride(1),
         stride_kd=k.stride(2),
-        stride_cosbs=cos.stride(0),
-        stride_cosd=cos.stride(1),
-        stride_sinbs=sin.stride(0),
-        stride_sind=sin.stride(1),
         is_interleaved=is_interleaved,
         HEAD_Q=head_num_q,
         HEAD_K=head_num_k,
         BLOCK_DMODEL=head_dim,
-        NUM_STAGE=num_stages,
         num_warps=num_warps,
         num_stages=num_stages,
     )

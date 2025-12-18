@@ -54,9 +54,8 @@ def test_mrope_triton_correctness(B, H_q, H_k, L, D, mrope_section):
 
     q = q.transpose(1, 2).contiguous().view(L, H_q, D)
     k = k.transpose(1, 2).contiguous().view(L, H_k, D)
-    position_ids = torch.arange(L, dtype=torch.int32, device="cuda").unsqueeze(0).expand(3, L).contiguous()
     mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")
-    mrope_triton_fused(q, k, cos_half[0], sin_half[0], position_ids, mrope_section, is_interleaved=False)
+    mrope_triton_fused(q, k, cos_half, sin_half, mrope_section, is_interleaved=False)
     q = q.transpose(0, 1).contiguous().view(B, H_q, L, D)
     k = k.transpose(0, 1).contiguous().view(B, H_k, L, D)
     assert torch.allclose(q, ref_q, rtol=1e-3, atol=1e-3)

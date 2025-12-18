@@ -51,9 +51,8 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
         mrope_triton_fused(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
-            infer_state._cos_cached,
-            infer_state._sin_cached,
-            infer_state.position_ids,
+            infer_state.position_cos,
+            infer_state.position_sin,
             self.mrope_section,
             is_interleaved=True,
         )
