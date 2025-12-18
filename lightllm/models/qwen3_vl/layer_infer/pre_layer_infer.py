@@ -34,8 +34,6 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         dtype = layer_weight.wte_weight_.dtype
         hidden_size = layer_weight.wte_weight_.shape[1]
 
-        infer_state.mark_multimodal_objs_for_prefill(input_ids=input_ids)
-
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
                 # skip the same image
