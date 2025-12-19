@@ -27,9 +27,9 @@ def _rms_norm_fwd_fused(
     var = tl.sum(x * x, axis=0) / head_dim
     rstd = 1 / tl.sqrt(var + eps)
     # Normalize and apply linear transformation
-    w = tl.load(W + tl.arange(0, BLOCK_SIZE))
+    w = tl.load(W + tl.arange(0, BLOCK_SIZE)).to(tl.float32)
     x_hat = x * rstd
-    y = x_hat.to(W.dtype.element_ty) * w
+    y = x_hat * w
     # Write output
     tl.store(X + cols, y.to(X.dtype.element_ty))
 
@@ -61,6 +61,6 @@ def qk_rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps):
         eps,
         head_dim=head_dim,
         BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=1,
+        num_warps=4,
     )
     return x
