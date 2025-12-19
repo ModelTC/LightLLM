@@ -31,6 +31,12 @@ class AudioModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir, model_cfg)
             self.model = self.model.cuda()
+
+            # CpuEmbedCacheClient 的初始化需要依赖这个设置的环境信息。
+            from lightllm.utils.dist_utils import set_current_device_id
+
+            set_current_device_id(torch.cuda.current_device())
+
             self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
         except Exception as e:
             print("#" * 16)
