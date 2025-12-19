@@ -34,7 +34,7 @@ def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
 
 
 def get_hidden_size(model_path: str) -> Optional[int]:
-    hidden_size = _get_config_llm_keyvalue(model_path=model_path, key_name=["hidden_size"])
+    hidden_size = _get_config_llm_keyvalue(model_path=model_path, key_name=["hidden_size", "n_embd", "n_embed"])
     if isinstance(hidden_size, int):
         return hidden_size
     return None

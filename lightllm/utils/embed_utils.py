@@ -19,7 +19,7 @@ class EmbedCacheMeta:
         return self.token_num * self.calcu_one_token_size()
 
     def calcu_one_token_size(self):
-        return self.token_num * self.layer_num * self.hidden_size * self.data_type.itemsize
+        return self.layer_num * self.hidden_size * self.data_type.itemsize
 
 
 @lru_cache(maxsize=None)
@@ -30,19 +30,20 @@ def calcu_embed_cache_meta() -> "EmbedCacheMeta":
     from lightllm.models import Qwen3VLTpPartModel, Qwen3VLMOETpPartModel
 
     model_class = get_llm_model_class()
+    model_dir = args.model_dir
 
     if model_class in [Qwen3VLTpPartModel, Qwen3VLMOETpPartModel]:
         embed_cache_meta_data = EmbedCacheMeta(
             token_num=None,
             layer_num=4,
-            hidden_size=get_hidden_size(),
+            hidden_size=get_hidden_size(model_dir),
             data_type=get_llm_data_type(),
         )
     else:
         embed_cache_meta_data = EmbedCacheMeta(
             token_num=None,
             layer_num=1,
-            hidden_size=get_hidden_size(),
+            hidden_size=get_hidden_size(model_dir),
             data_type=get_llm_data_type(),
         )
 
