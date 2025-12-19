@@ -123,17 +123,49 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     return cpu_cache_meta
 
 
+@dataclasses.dataclass
+class CpuKVCacheMeta:
+    page_num: int
+    token_page_size: int
+    layer_num: int
+    num_heads: int
+    head_dim: int
+    data_type: torch.dtype
+    scale_head_dim: int
+    scale_data_type: torch.dtype
+
+    def calcu_size(self):
+        return self.page_num * self.calcu_one_page_size()
+
+    def calcu_one_page_size(self):
+        return (
+            self.token_page_size
+            * self.layer_num
+            * self.num_heads
+            * (self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize)
+        )
+
+    def get_merged_head_dim(self):
+        """
+        返回将head_dim 和 scale_head_dim 看成融合成一个head_dim时候, head_dim的长度。
+        """
+        assert (
+            self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize
+        ) % self.data_type.itemsize == 0
+        return (
+            self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize
+        ) // self.data_type.itemsize
+
+
 @lru_cache(maxsize=None)
-def create_shm_kv_cache_ptr() -> int:
+def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
     libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
     libc.shmget.restype = ctypes.c_int
     libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
     libc.shmat.restype = ctypes.c_void_p
 
-    args = get_env_start_args()
-    key = args.cpu_kv_cache_shm_id
-    requested_size = calcu_cpu_cache_meta().calcu_size()
+    requested_size = size
     use_hugetlb = enable_huge_page()
 
     # 计算大页大小（默认从 /proc/meminfo 读取 Hugepagesize）
@@ -196,44 +228,10 @@ def create_shm_kv_cache_ptr() -> int:
         volatile_sum = int(arr[::page_size].sum())
         logger.info(f"pre warmed shared memory pages successfully, checksum={volatile_sum})")
 
-    th = threading.Thread(target=_pre_warm_memory, name="cpu_cache_pre_warm", daemon=True)
+    th = threading.Thread(target=_pre_warm_memory, name=f"cpu_cache_pre_warm_{key}", daemon=True)
     th.start()
 
     return shm_addr
-
-
-@dataclasses.dataclass
-class CpuKVCacheMeta:
-    page_num: int
-    token_page_size: int
-    layer_num: int
-    num_heads: int
-    head_dim: int
-    data_type: torch.dtype
-    scale_head_dim: int
-    scale_data_type: torch.dtype
-
-    def calcu_size(self):
-        return self.page_num * self.calcu_one_page_size()
-
-    def calcu_one_page_size(self):
-        return (
-            self.token_page_size
-            * self.layer_num
-            * self.num_heads
-            * (self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize)
-        )
-
-    def get_merged_head_dim(self):
-        """
-        返回将head_dim 和 scale_head_dim 看成融合成一个head_dim时候, head_dim的长度。
-        """
-        assert (
-            self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize
-        ) % self.data_type.itemsize == 0
-        return (
-            self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize
-        ) // self.data_type.itemsize
 
 
 @lru_cache(maxsize=None)
@@ -275,7 +273,7 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
         assert host_ptr.value == device_ptr.value
         handle.tasks_finished.set()
 
-    th = threading.Thread(target=_worker, name="cpu_cache_register", daemon=True)
+    th = threading.Thread(target=_worker, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
     handle.thread = th
     th.start()
     return handle
@@ -317,7 +315,7 @@ class AsyncRegistrationHandle:
 
 
 @lru_cache(maxsize=None)
-def attach_shm_kv_cache_ptr() -> int:
+def attach_shm_kv_cache_ptr(key: int, size: int) -> int:
     libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
     libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
     libc.shmget.restype = ctypes.c_int
@@ -325,11 +323,8 @@ def attach_shm_kv_cache_ptr() -> int:
     libc.shmat.restype = ctypes.c_void_p
 
     # Try to locate an existing SHM without creating a new one
-    args = get_env_start_args()
-    key = args.cpu_kv_cache_shm_id
     shmid = libc.shmget(key, 0, 0)
     if shmid < 0:
-        size = calcu_cpu_cache_meta().calcu_size()
         shmid = libc.shmget(key, size, 0)
     if shmid < 0:
         err = ctypes.get_errno()

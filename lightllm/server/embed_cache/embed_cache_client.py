@@ -5,12 +5,8 @@ from sortedcontainers import SortedSet
 from typing import Optional, List
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.embed_utils import (
-    calcu_embed_cache_meta,
-    create_shm_embed_cache_ptr,
-    attach_shm_kv_cache_ptr,
-    register_shm_ptr_to_pin,
-)
+from lightllm.utils.embed_utils import calcu_embed_cache_meta
+from lightllm.utils.kv_cache_utils import create_shm_kv_cache_ptr, attach_shm_kv_cache_ptr, register_shm_ptr_to_pin
 
 logger = init_logger(__name__)
 
@@ -52,7 +48,11 @@ class CpuEmbedCacheClient(object):
         )
 
     def _create_shm_embed_kv_cache(self):
-        shm_ptr = create_shm_embed_cache_ptr()
+        shm_ptr = create_shm_kv_cache_ptr(
+            key=self.args.multi_modal_cache_shm_id, size=self.embed_cache_tensor_meta.calcu_size()
+        )
+        handle = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.embed_cache_tensor_meta.calcu_size())
+        handle.wait()
         numpy_array = np.frombuffer(
             memoryview((ctypes.c_uint8 * self.embed_cache_tensor_meta.calcu_size()).from_address(shm_ptr)),
             dtype=np.uint8,
@@ -69,7 +69,9 @@ class CpuEmbedCacheClient(object):
         return
 
     def _attach_shm_cpu_embed_cache(self):
-        shm_ptr = attach_shm_kv_cache_ptr()
+        shm_ptr = attach_shm_kv_cache_ptr(
+            key=self.args.multi_modal_cache_shm_id, size=self.embed_cache_tensor_meta.calcu_size()
+        )
         handle = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.embed_cache_tensor_meta.calcu_size())
         handle.wait()
         numpy_array = np.frombuffer(
