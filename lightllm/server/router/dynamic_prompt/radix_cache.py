@@ -148,18 +148,14 @@ class RadixCache:
     def _inc_hit_rate(self, query_len, hit_len):
         self.total_query_tokens.arr[0] += query_len
         self.total_hit_tokens.arr[0] += hit_len
-        if log_time_ready("radix_cache_hit_rate", time_count=30):
+        if log_time_ready("radix_cache_hit_rate", time_count=10):
             current_total_query = self.total_query_tokens.arr[0]
             current_total_hit = self.total_hit_tokens.arr[0]
-            window_query = current_total_query - self.last_log_query_tokens
-            window_hit = current_total_hit - self.last_log_hit_tokens
-            window_hit_rate = window_hit / window_query if window_query > 0 else 0.0
             cumulative_hit_rate = current_total_hit / current_total_query if current_total_query > 0 else 0.0
 
             label = self.__class__.__name__
-            logger.info(
+            logger.warning(
                 f"{label} Hit Rate: "
-                f"Window {window_hit_rate:.2%} ({window_hit}/{window_query}), "
                 f"Cumulative {cumulative_hit_rate:.2%} ({current_total_hit}/{current_total_query})"
             )
 
