@@ -6,6 +6,7 @@ from transformers.configuration_utils import PretrainedConfig
 from lightllm.models.whisper.whisper_audio import WhisperAudioModel
 from lightllm.server.multimodal_params import AudioItem
 from lightllm.utils.infer_utils import set_random_seed
+from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 
 class AudioModelRpcServer(rpyc.Service):
@@ -30,6 +31,13 @@ class AudioModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir, model_cfg)
             self.model = self.model.cuda()
+
+            # CpuEmbedCacheClient 的初始化需要依赖这个设置的环境信息。
+            from lightllm.utils.dist_utils import set_current_device_id
+
+            set_current_device_id(torch.cuda.current_device())
+
+            self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -44,7 +52,7 @@ class AudioModelRpcServer(rpyc.Service):
     # @calculate_time(show=True, min_cost_ms=150)
     @torch.no_grad()
     def forward(self, audios):
-        return self.model.encode(audios)
+        return self.model.encode(audios, cpu_embed_cache_client=self.cpu_embed_cache_client)
 
     # @calculate_time(show=False, min_cost_ms=300)
     def exposed_encode(self, audios):

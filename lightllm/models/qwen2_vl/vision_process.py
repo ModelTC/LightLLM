@@ -80,6 +80,7 @@ def resize_image(
 class Qwen2VLImageProcessor(BaseImageProcessorFast):
     def __init__(
         self,
+        size: dict = None,
         do_resize: bool = True,
         resample: PILImageResampling = PILImageResampling.BICUBIC,
         do_rescale: bool = True,
@@ -98,6 +99,7 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        self.size = size
         self.do_resize = do_resize
         self.resample = resample
         self.do_rescale = do_rescale
@@ -114,6 +116,13 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
         self.disable_grouping = disable_grouping
         self.interpolation = interpolation
         self.data_format = ChannelDimension.FIRST
+        if isinstance(self.size, dict):
+            shortest = self.size.get("shortest_edge", None)
+            longest = self.size.get("longest_edge", None)
+            if shortest is not None:
+                self.min_pixels = shortest
+            if longest is not None:
+                self.max_pixels = longest
         self._fused_cache = {}  # key: (do_norm, do_rescale, rescale_factor, device)
 
     def _get_fused_mean_std(

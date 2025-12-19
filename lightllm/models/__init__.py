@@ -29,6 +29,8 @@ from lightllm.models.internvl.model import (
 from lightllm.models.internvl.model import InternVLInternlm2TpPartModel
 from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel
 from lightllm.models.qwen2_reward.model import Qwen2RewardTpPartModel
+from lightllm.models.qwen3_vl.model import Qwen3VLTpPartModel
+from lightllm.models.qwen3_vl_moe.model import Qwen3VLMOETpPartModel
 from lightllm.models.gemma3.model import Gemma3TpPartModel
 from lightllm.models.tarsier2.model import (
     Tarsier2Qwen2TpPartModel,

@@ -14,25 +14,27 @@ def get_config_json(model_path: str):
     return json_obj
 
 
-def _get_config_llm_keyvalue(model_path: str, key_name: str):
+def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
     config_json = get_config_json(model_path)
-    try:
-        value = config_json[key_name]
-    except:
-        # for some multimodal model
+    for key in key_name:
         try:
-            value = config_json["llm_config"][key_name]
+            value = config_json[key]
         except:
-            value = config_json.get("text_config", {}).get(key_name)
+            # for some multimodal model
+            try:
+                value = config_json["llm_config"][key]
+            except:
+                value = config_json.get("text_config", {}).get(key)
+        if value is not None:
+            return value
 
-    if value is None:
-        logger.error(f"cannot get {key_name} from config.json, return None")
+    logger.error(f"cannot get {key_name} from config.json, return None")
 
-    return value
+    return None
 
 
 def get_hidden_size(model_path: str) -> Optional[int]:
-    hidden_size = _get_config_llm_keyvalue(model_path=model_path, key_name="hidden_size")
+    hidden_size = _get_config_llm_keyvalue(model_path=model_path, key_name=["hidden_size", "n_embd", "n_embed"])
     if isinstance(hidden_size, int):
         return hidden_size
     return None
@@ -40,7 +42,7 @@ def get_hidden_size(model_path: str) -> Optional[int]:
 
 @lru_cache(maxsize=None)
 def get_num_key_value_heads(model_path: str) -> int:
-    num_key_value_heads = _get_config_llm_keyvalue(model_path=model_path, key_name="num_key_value_heads")
+    num_key_value_heads = _get_config_llm_keyvalue(model_path=model_path, key_name=["num_key_value_heads"])
     if isinstance(num_key_value_heads, int):
         return num_key_value_heads
     return None
@@ -48,7 +50,7 @@ def get_num_key_value_heads(model_path: str) -> int:
 
 @lru_cache(maxsize=None)
 def get_num_attention_heads(model_path: str) -> int:
-    num_attention_heads = _get_config_llm_keyvalue(model_path=model_path, key_name="num_attention_heads")
+    num_attention_heads = _get_config_llm_keyvalue(model_path=model_path, key_name=["num_attention_heads"])
     if isinstance(num_attention_heads, int):
         return num_attention_heads
     return None
@@ -56,7 +58,7 @@ def get_num_attention_heads(model_path: str) -> int:
 
 @lru_cache(maxsize=None)
 def get_head_dim(model_path: str) -> int:
-    head_dim = _get_config_llm_keyvalue(model_path=model_path, key_name="head_dim")
+    head_dim = _get_config_llm_keyvalue(model_path=model_path, key_name=["head_dim"])
     if isinstance(head_dim, int):
         return head_dim
 
@@ -68,22 +70,14 @@ def get_head_dim(model_path: str) -> int:
 
 @lru_cache(maxsize=None)
 def get_layer_num(model_path: str) -> int:
-    num_hidden_layers = _get_config_llm_keyvalue(model_path=model_path, key_name="num_hidden_layers")
+    num_hidden_layers = _get_config_llm_keyvalue(model_path=model_path, key_name=["num_hidden_layers"])
     if isinstance(num_hidden_layers, int):
         return num_hidden_layers
     return None
 
 
-@lru_cache(maxsize=None)
-def get_model_type(model_path: str) -> str:
-    model_type = _get_config_llm_keyvalue(model_path=model_path, key_name="model_type")
-    if isinstance(model_type, str):
-        return model_type
-    return None
-
-
 def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
-    eos_token_id = _get_config_llm_keyvalue(model_path=model_path, key_name="eos_token_id")
+    eos_token_id = _get_config_llm_keyvalue(model_path=model_path, key_name=["eos_token_id"])
     if isinstance(eos_token_id, int):
         return [eos_token_id]
     if isinstance(eos_token_id, list):
@@ -109,6 +103,9 @@ def get_vocab_size(model_path: str):
         if "llm_config" in config_json:
             vocab_size = int(config_json["llm_config"]["vocab_size"])
             return vocab_size
+        elif "text_config" in config_json:
+            vocab_size = int(config_json["text_config"]["vocab_size"])
+            return vocab_size
         vocab_size = config_json["vocab_size"]
         if not isinstance(vocab_size, int):
             vocab_size = int(vocab_size)
@@ -119,7 +116,7 @@ def get_vocab_size(model_path: str):
 
 
 def get_dtype(model_path: str):
-    torch_dtype = _get_config_llm_keyvalue(model_path=model_path, key_name="torch_dtype")
+    torch_dtype = _get_config_llm_keyvalue(model_path=model_path, key_name=["torch_dtype", "dtype", "model_dtype"])
     if torch_dtype is None:
         logger.warning("torch_dtype not in config.json, use float16 as default")
         return "float16"

@@ -17,13 +17,13 @@ from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
+from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
-from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
 from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -65,6 +65,10 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = (
                     Qwen2_5_VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
+            elif self.model_type in ["qwen3_vl", "qwen3_vl_moe"]:
+                self.model = (
+                    Qwen3VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
+                )
             elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
                 self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
             elif self.model_type == "llava":
@@ -79,6 +83,7 @@ class VisualModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
+            self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=True)
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -99,7 +104,7 @@ class VisualModelRpcServer(rpyc.Service):
     def exposed_encode(self, images: List[ImageItem]):
         images = obtain(images)
         all_img_embeds, uuids, valid_ids = self.forward(images)
-        all_img_embeds = all_img_embeds.to(torch.device("cpu"))
+        all_img_embeds = all_img_embeds.to(torch.device("cuda"))
 
         if self.tp_rank_id == 0:
             ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
@@ -109,10 +114,13 @@ class VisualModelRpcServer(rpyc.Service):
                     continue
                 uid = uuids[i]
                 start, end = valid_ids[i]
-                cur_embed_bytes = tensor2bytes(all_img_embeds[start:end])
-                create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+                image = images[i]
+                self.cpu_embed_cache_client.copy_to_cache(
+                    embed_tensor=all_img_embeds[start:end], start_index_in_cache=image.start_index_in_embed_cache
+                )
                 ids_to_set.append(uid)
             if ids_to_set:
+                torch.cuda.current_stream().synchronize()
                 self.cache_client.root.set_items_embed(ids_to_set)
         return
 

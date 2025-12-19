@@ -11,7 +11,7 @@ from functools import partial
 from PIL import Image
 from typing import Callable, Optional, Sequence, Tuple, List, Union
 import numpy as np
-from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
+from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 import torch
 from torch import nn
 from torch.nn import functional as F

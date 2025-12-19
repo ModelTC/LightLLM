@@ -125,11 +125,18 @@ class HttpServerManager:
                 await asyncio.sleep(0.1)
                 continue
 
+            if isinstance(records, str) and "error" in records:
+                logger.error(str(records) + "and try to set --embed_cache_storage_size bigger")
+                raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
+
             uid_list = []
             for item, rec in zip(items, records):
+                item: Union[ImageItem, AudioItem] = item
                 item.uuid = rec["id"]
                 item.token_id = rec["token_id"]
                 item.token_num = rec["token_num"]
+                item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
+
                 uid_list.append(rec["id"])
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
@@ -187,6 +194,7 @@ class HttpServerManager:
                         img.uuid = None
                         img.token_id = None
                         img.token_num = None
+                        img.start_index_in_embed_cache = None
                 for audio in multimodal_params.audios:
                     if audio.uuid is not None:
                         ids_to_release.append(audio.uuid)
@@ -194,6 +202,7 @@ class HttpServerManager:
                         audio.uuid = None
                         audio.token_id = None
                         audio.token_num = None
+                        audio.start_index_in_embed_cache = None
                 if ids_to_release:
                     self.cache_client.root.release(ids_to_release)
         return

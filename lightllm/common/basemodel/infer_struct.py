@@ -122,27 +122,6 @@ class InferStateInfo:
                     attr_.copy_(attr_value, non_blocking=True)
         return
 
-    def mark_multimodal_objs_for_prefill(self, input_ids: torch.Tensor):
-        """
-        功能函数，用于标记在chuncked prefill的过程中，到底哪些多模态对象对应的token是需要参与计算的。
-        因为分chunck的原因，并不是所有的多模态对象对应的token都需要参与计算。
-        """
-        multi_objs = []
-        for _, p in enumerate(self.multimodal_params):
-            for obj in p["images"] + p["audios"]:
-                multi_objs.append(obj)
-
-        if multi_objs:
-            obj_start_ids = torch.tensor([e["token_id"] for e in multi_objs], dtype=torch.int64, device="cuda")
-            obj_token_lens = torch.tensor([e["token_num"] for e in multi_objs], dtype=torch.int64, device="cuda")
-            marks = mark_multimodal_obj(
-                obj_start_token_ids=obj_start_ids, obj_token_lens=obj_token_lens, input_ids=input_ids
-            )
-            marks_array = marks.detach().cpu().numpy()
-            for mark, obj in zip(marks_array, multi_objs):
-                obj["_prefill_"] = mark > 0
-        return
-
     def prefill_dp_balance(self, input_ids: torch.Tensor):
         """
         在prefill的时候, 对于处于 dp 模式下的时候，对输入的数据进行重新的调整和分配，降低各个dp处理数据量过于不一致的时候,导致

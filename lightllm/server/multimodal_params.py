@@ -20,6 +20,8 @@ class AudioItem:
         self.uuid = None
         # the start audio token id
         self.token_id = None
+        # the start index in embed cache
+        self.start_index_in_embed_cache = None
         # the audio token num
         self.token_num = None
         # the audio length
@@ -62,6 +64,7 @@ class AudioItem:
         ret["uuid"] = self.uuid
         ret["token_id"] = self.token_id
         ret["token_num"] = self.token_num
+        ret["start_index_in_embed_cache"] = self.start_index_in_embed_cache
         return ret
 
 
@@ -73,6 +76,8 @@ class ImageItem:
         self.uuid = None
         # the start image token id
         self.token_id = None
+        # the start index in embed cache
+        self.start_index_in_embed_cache = None
         # the image token num
         self.token_num = None
         # the start index of the image in the input_ids
@@ -123,6 +128,7 @@ class ImageItem:
         ret = {}
         ret["uuid"] = self.uuid
         ret["token_id"] = self.token_id
+        ret["start_index_in_embed_cache"] = self.start_index_in_embed_cache
         ret["token_num"] = self.token_num
         ret["grid_thwd"] = self.grid_thwd
         ret["start_idx"] = self.start_idx

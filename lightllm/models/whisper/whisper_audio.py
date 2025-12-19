@@ -9,9 +9,10 @@ from io import BytesIO
 from typing import List, Union
 from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
-from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
+from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.multimodal_params import AudioItem
 from rpyc.utils.classic import obtain
+from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
@@ -161,16 +162,18 @@ class WhisperAudioModel:
         x = F.linear(x, weight=self.projector_weights["mlp2.3.weight"], bias=self.projector_weights["mlp2.3.bias"])
         return x
 
-    def encode(self, audio_items: List[AudioItem]):
+    def encode(self, audio_items: List[AudioItem], cpu_embed_cache_client: CpuEmbedCacheClient):
         # 每个元素是一个chunk
         batch_audios = []
         batch_audio_lens = []
         uuids = []
+        items: List[AudioItem] = []
         # 记录每个chunk属于哪个audio_items下标
         chunk_owner_index = []
         for i, item in enumerate(audio_items):
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
+                items.append(item)
                 audio_data = read_shm(get_shm_name_data(item.uuid))
                 audio = BytesIO(audio_data)
                 audio, _ = librosa.load(audio, sr=16000)
@@ -226,12 +229,15 @@ class WhisperAudioModel:
                 continue
 
             uid = uuids[i]
+            item = items[i]
 
             # 拼接该 audio 的所有 chunk embedding
             cur_embed = torch.cat(per_audio_embeds[i], dim=0)
-            cur_embed_bytes = tensor2bytes(cur_embed)
-            create_shm(get_shm_name_embed(uid), cur_embed_bytes)
+            cpu_embed_cache_client.copy_to_cache(
+                embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
+            )
             ids_to_set.append(uid)
 
         if ids_to_set:
+            torch.cuda.current_stream().synchronize()
             self.cache_client.root.set_items_embed(ids=ids_to_set)

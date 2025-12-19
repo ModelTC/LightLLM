@@ -1,225 +1,237 @@
 import time
 import torch
+import itertools
 import triton
 import triton.language as tl
+from typing import Optional
+from frozendict import frozendict
+from functools import lru_cache
+from lightllm.common.kernel_config import KernelConfigs
+from lightllm.utils.log_utils import init_logger
+from lightllm.common.triton_utils.autotuner import autotune
+
+logger = init_logger(__name__)
+
+
+class MropeTritonFusedKernelConfig(KernelConfigs):
+    kernel_name: str = "mrope_triton_fused_kernel"
+
+    @classmethod
+    @lru_cache(maxsize=200)
+    def try_to_get_best_config(
+        cls,
+        M: int,
+        Q_HEAD_NUM: int,
+        K_HEAD_NUM: int,
+        HEAD_DIM: int,
+        dtype: str,
+    ) -> dict:
+        key_params = {
+            "Q_HEAD_NUM": Q_HEAD_NUM,
+            "K_HEAD_NUM": K_HEAD_NUM,
+            "HEAD_DIM": HEAD_DIM,
+            "dtype": str(dtype),
+        }
+        key_params = frozendict(key_params)
+
+        finded_config = cls.get_the_config(key_params)
+
+        if finded_config:
+            config = finded_config[min(finded_config.keys(), key=lambda x: abs(int(x) - M))]
+            return config
+        else:
+            if M <= 256:
+                config = {"num_warps": 1, "num_stages": 1}
+            else:
+                config = {"num_warps": 1, "num_stages": 1}
+
+        return config
+
+    @classmethod
+    def save_config(
+        cls,
+        Q_HEAD_NUM: int,
+        K_HEAD_NUM: int,
+        HEAD_DIM: int,
+        dtype: str,
+        config_json: dict,
+    ):
+        key_params = {
+            "Q_HEAD_NUM": Q_HEAD_NUM,
+            "K_HEAD_NUM": K_HEAD_NUM,
+            "HEAD_DIM": HEAD_DIM,
+            "dtype": str(dtype),
+        }
+        key_params = frozendict(key_params)
+
+        return cls.store_config(key_params, config_json)
 
 
 @triton.jit
-def mrope_kernel(
-    Q_ptr,
-    K_ptr,
-    COS_ptr,
-    SIN_ptr,
-    AXIS_ptr,
-    QO_ptr,
-    KO_ptr,
-    B: tl.int32,
-    H_q: tl.int32,
-    H_k: tl.int32,
-    L: tl.int32,
-    D: tl.int32,
-    HALF: tl.constexpr,
-    s_tok: tl.int32,
-    s_ax: tl.int32,
-    s_d: tl.int32,
-    q_sb: tl.int32,
-    q_sh: tl.int32,
-    q_sl: tl.int32,
-    q_sd: tl.int32,
-    k_sb: tl.int32,
-    k_sh: tl.int32,
-    k_sl: tl.int32,
-    k_sd: tl.int32,
-    qo_sb: tl.int32,
-    qo_sh: tl.int32,
-    qo_sl: tl.int32,
-    qo_sd: tl.int32,
-    ko_sb: tl.int32,
-    ko_sh: tl.int32,
-    ko_sl: tl.int32,
-    ko_sd: tl.int32,
-    BLOCK_D: tl.constexpr,
+def _mrope_triton_fused_kernel(
+    q,
+    k,
+    Cos,
+    Sin,
+    mrope_section,
+    stride_cosld,
+    stride_cosd,
+    stride_sinld,
+    stride_sind,
+    stride_qbs,
+    stride_qh,
+    stride_qd,
+    stride_kbs,
+    stride_kh,
+    stride_kd,
+    is_interleaved: tl.constexpr,
+    HEAD_Q: tl.constexpr,
+    HEAD_K: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
 ):
+    head_index = tl.program_id(0)
+    seq_index = tl.program_id(1)
 
-    total_h = H_q + H_k
-    pid_bh = tl.program_id(0)
-    pid_l = tl.program_id(1)
+    dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)
+    dim_range1 = dim_range0 + BLOCK_DMODEL // 2
 
-    b = pid_bh // total_h
-    h_local = pid_bh - b * total_h
+    t_cos = Cos + seq_index * stride_cosd
+    h_cos = Cos + stride_cosld + seq_index * stride_cosd
+    w_cos = Cos + 2 * stride_cosld + seq_index * stride_cosd
+    t_sin = Sin + seq_index * stride_sind
+    h_sin = Sin + stride_sinld + seq_index * stride_sind
+    w_sin = Sin + 2 * stride_sinld + seq_index * stride_sind
 
-    is_q = h_local < H_q
-    h_q = h_local
-    h_k = h_local - H_q
+    mrope_section_t = tl.load(mrope_section + 0)
+    mrope_section_h = tl.load(mrope_section + 1)
+    mrope_section_w = tl.load(mrope_section + 2)
 
-    sb = tl.where(is_q, q_sb, k_sb)
-    sh = tl.where(is_q, q_sh, k_sh)
-    sl = tl.where(is_q, q_sl, k_sl)
-    sd = tl.where(is_q, q_sd, k_sd)
+    # Updated offsets for half head_dim
+    offsets = tl.arange(0, BLOCK_DMODEL // 2)
+    if is_interleaved:
+        h_mask = ((offsets % 3) == 1) & (offsets <= 3 * mrope_section_h)
+        w_mask = ((offsets % 3) == 2) & (offsets <= 3 * mrope_section_w)
+        t_mask = ~(h_mask | w_mask)
+    else:
+        t_end = mrope_section_t
+        h_end = t_end + mrope_section_h
+        t_mask = offsets < mrope_section_t
+        h_mask = (t_end <= offsets) & (offsets < h_end)
+        w_mask = (h_end <= offsets) & (offsets < BLOCK_DMODEL // 2)
 
-    osb = tl.where(is_q, qo_sb, ko_sb)
-    osh = tl.where(is_q, qo_sh, ko_sh)
-    osl = tl.where(is_q, qo_sl, ko_sl)
-    osd = tl.where(is_q, qo_sd, ko_sd)
+    t_cos = tl.load(t_cos + offsets, mask=t_mask, other=0)
+    t_sin = tl.load(t_sin + offsets, mask=t_mask, other=0)
+    h_cos = tl.load(h_cos + offsets, mask=h_mask, other=0)
+    h_sin = tl.load(h_sin + offsets, mask=h_mask, other=0)
+    w_cos = tl.load(w_cos + offsets, mask=w_mask, other=0)
+    w_sin = tl.load(w_sin + offsets, mask=w_mask, other=0)
 
-    base_ptr = tl.where(is_q, Q_ptr, K_ptr)
-    out_ptr = tl.where(is_q, QO_ptr, KO_ptr)
-    h_index = tl.where(is_q, h_q, h_k)
+    cos = t_cos + h_cos + w_cos
+    sin = t_sin + h_sin + w_sin
 
-    base = b * sb + h_index * sh + pid_l * sl
-    offs = tl.arange(0, BLOCK_D)
-    mask = offs < D
+    if head_index < HEAD_Q:
+        q_head_index = head_index
+        off_q0 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range0 * stride_qd
+        off_q1 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range1 * stride_qd
+        q0 = tl.load(q + off_q0)
+        q1 = tl.load(q + off_q1)
+        out_q0 = q0 * cos - q1 * sin
+        out_q1 = q0 * sin + q1 * cos
+        tl.store(q + off_q0, out_q0)
+        tl.store(q + off_q1, out_q1)
+    else:
+        k_head_index = head_index - HEAD_Q
+        off_k0 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd
+        off_k1 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd
 
-    idx = base + offs * sd
-    vals = tl.load(base_ptr + idx, mask=mask, other=0.0)
+        k0 = tl.load(k + off_k0)
+        k1 = tl.load(k + off_k1)
 
-    rot_offs = tl.where(offs < HALF, (offs + HALF) * sd, (offs - HALF) * sd)
-    rot_vals = tl.load(base_ptr + base + rot_offs, mask=mask, other=0.0)
-    rot_vals = tl.where(offs < HALF, -rot_vals, rot_vals)
+        out_k0 = k0 * cos - k1 * sin
+        out_k1 = k0 * sin + k1 * cos
 
-    axis_id = tl.load(AXIS_ptr + offs, mask=mask, other=0)  # 0,1,2
-    idx_d = tl.where(offs < HALF, offs, offs - HALF)
-    cos_idx = pid_l * s_tok + axis_id * s_ax + idx_d
-    c = tl.load(COS_ptr + cos_idx, mask=idx_d < HALF, other=0.0)
-    s = tl.load(SIN_ptr + cos_idx, mask=idx_d < HALF, other=0.0)
+        tl.store(k + off_k0, out_k0)
+        tl.store(k + off_k1, out_k1)
 
-    out = vals * c + rot_vals * s
-
-    out_idx = b * osb + h_index * osh + pid_l * osl + offs * osd
-    tl.store(out_ptr + out_idx, out, mask=mask)
+    return
 
 
-def mrope_triton(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, axis_map: torch.Tensor):
+def get_test_configs():
+    configs = []
+    result = itertools.product([1, 2, 4, 8], [1, 2, 3, 4, 5])
+    for num_warps, num_stages in result:
+        t_config = {
+            "num_warps": num_warps,
+            "num_stages": num_stages,
+        }
+        configs.append(t_config)
+    return configs
 
-    B, H_q, L, D = q.shape
-    H_k = k.shape[1]
-    HALF = D // 2
 
-    q_sb, q_sh, q_sl, q_sd = map(int, q.stride())
-    k_sb, k_sh, k_sl, k_sd = map(int, k.stride())
+def get_static_key(q, k):
+    head_num_q, head_num_k, head_dim = q.shape[1], k.shape[1], q.shape[2]
+    return {
+        "Q_HEAD_NUM": head_num_q,
+        "K_HEAD_NUM": head_num_k,
+        "HEAD_DIM": head_dim,
+        "dtype": str(q.dtype),
+    }
 
-    q_out = torch.empty_like(q)
-    k_out = torch.empty_like(k)
-    qo_sb, qo_sh, qo_sl, qo_sd = map(int, q_out.stride())
-    ko_sb, ko_sh, ko_sl, ko_sd = map(int, k_out.stride())
 
-    assert len(cos.shape) == 3
+@autotune(
+    kernel_name="mrope_triton_fused:v1",
+    configs_gen_func=get_test_configs,
+    static_key_func=get_static_key,
+    run_key_func=lambda q: q.shape[0],
+    mutates_args=["q", "k"],
+)
+@torch.no_grad()
+def mrope_triton_fused(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    mrope_section: torch.Tensor,
+    is_interleaved: bool,
+    run_config: Optional[dict] = None,
+):
+    head_num_q, head_num_k = q.shape[1], k.shape[1]
+    head_dim = int(q.shape[2])
+    num_tokens = q.shape[0]
 
-    s_axis = int(cos.stride(0))
-    s_token = int(cos.stride(1))
-    s_d = int(cos.stride(2))
+    if not run_config:
+        run_config = MropeTritonFusedKernelConfig.try_to_get_best_config(
+            M=num_tokens,
+            Q_HEAD_NUM=head_num_q,
+            K_HEAD_NUM=head_num_k,
+            HEAD_DIM=head_dim,
+            dtype=str(q.dtype),
+        )
+    num_stages = run_config["num_stages"]
+    num_warps = run_config["num_warps"]
 
-    grid = (B * (H_q + H_k), L)
-
-    mrope_kernel[grid](
-        q,
-        k,
-        cos,
-        sin,
-        axis_map,
-        q_out,
-        k_out,
-        B,
-        H_q,
-        H_k,
-        L,
-        D,
-        HALF,
-        s_token,
-        s_axis,
-        s_d,
-        q_sb,
-        q_sh,
-        q_sl,
-        q_sd,
-        k_sb,
-        k_sh,
-        k_sl,
-        k_sd,
-        qo_sb,
-        qo_sh,
-        qo_sl,
-        qo_sd,
-        ko_sb,
-        ko_sh,
-        ko_sl,
-        ko_sd,
-        BLOCK_D=triton.next_power_of_2(D),
-        num_warps=4,
-        num_stages=3,
+    grid = (head_num_q + head_num_k, num_tokens)
+    _mrope_triton_fused_kernel[grid](
+        q=q,
+        k=k,
+        Cos=cos,
+        Sin=sin,
+        mrope_section=mrope_section,
+        stride_cosld=cos.stride(0),
+        stride_cosd=cos.stride(1),
+        stride_sinld=sin.stride(0),
+        stride_sind=sin.stride(1),
+        stride_qbs=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_qd=q.stride(2),
+        stride_kbs=k.stride(0),
+        stride_kh=k.stride(1),
+        stride_kd=k.stride(2),
+        is_interleaved=is_interleaved,
+        HEAD_Q=head_num_q,
+        HEAD_K=head_num_k,
+        BLOCK_DMODEL=head_dim,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
-    return q_out, k_out
-
-
-# ----------------  test ---------------- #
-def test():
-
-    # torch实现
-    def rotate_half(x: torch.Tensor):
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
-
-    def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1):
-        chunks = mrope_section * 2
-        cos_embed = torch.cat(
-            [m[i % 3] for i, m in enumerate(cos.split(chunks, dim=-1))],
-            dim=-1,
-        ).unsqueeze(unsqueeze_dim)
-        sin_embed = torch.cat(
-            [m[i % 3] for i, m in enumerate(sin.split(chunks, dim=-1))],
-            dim=-1,
-        ).unsqueeze(unsqueeze_dim)
-
-        q_out = q * cos_embed + rotate_half(q) * sin_embed
-        k_out = k * cos_embed + rotate_half(k) * sin_embed
-        return q_out, k_out
-
-    B, H_q, H_k, L, D = 3, 28, 4, 16384, 128
-    mrope_section = [16, 24, 24]
-    torch.manual_seed(0)
-    device = "cuda"
-
-    q = torch.rand(B, H_q, L, D, dtype=torch.float32, device=device).transpose(1, 2).contiguous().transpose(1, 2)
-    k = torch.rand(B, H_k, L, D, dtype=torch.float32, device=device).transpose(1, 2).contiguous().transpose(1, 2)
-    cos = torch.rand(3, 1, L, D, dtype=torch.float32, device=device)
-    sin = torch.rand(3, 1, L, D, dtype=torch.float32, device=device)
-
-    # 精度对比
-    axis_map = []
-    for i, n in enumerate(mrope_section * 2):
-        axis_map += [i % 3] * n
-    axis_map = torch.tensor(axis_map, dtype=torch.int32, device="cuda")
-    ref_q, ref_k = apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1)
-
-    torch.cuda.synchronize()
-    out_q, out_k = mrope_triton(q, k, cos, sin, axis_map)
-    torch.cuda.synchronize()
-
-    err_q = (out_q - ref_q).abs().max().item()
-    err_k = (out_k - ref_k).abs().max().item()
-    print(f"abs‑max error   q:{err_q:.6f}, k:{err_k:.6f}")
-
-    assert err_q < 1e-2 and err_k < 1e-2
-
-    # 速度对比
-    n_iter = 100
-    e0 = torch.cuda.Event(enable_timing=True)
-    e1 = torch.cuda.Event(enable_timing=True)
-
-    e0.record()
-    for _ in range(n_iter):
-        _ = apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1)
-    e1.record()
-    torch.cuda.synchronize()
-    t_ref = e0.elapsed_time(e1) / n_iter
-
-    e0.record()
-    for _ in range(n_iter):
-        _ = mrope_triton(q, k, cos, sin, axis_map)
-    e1.record()
-    torch.cuda.synchronize()
-    t_tri = e0.elapsed_time(e1) / n_iter
-
-    print(f"torch {t_ref:.2f} ms/iter")
-    print(f"triton {t_tri:.2f} ms/iter")
+    return

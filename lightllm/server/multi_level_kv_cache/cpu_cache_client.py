@@ -275,7 +275,9 @@ class CpuKvCacheClient(object):
         return
 
     def _create_shm_cpu_kv_cache(self):
-        shm_ptr = create_shm_kv_cache_ptr()
+        shm_ptr = create_shm_kv_cache_ptr(
+            key=self.args.cpu_kv_cache_shm_id, size=self.kv_cache_tensor_meta.calcu_size()
+        )
         numpy_array = np.frombuffer(
             memoryview((ctypes.c_uint8 * self.kv_cache_tensor_meta.calcu_size()).from_address(shm_ptr)), dtype=np.uint8
         )
@@ -293,7 +295,9 @@ class CpuKvCacheClient(object):
         return
 
     def _attach_shm_cpu_kv_cache(self):
-        shm_ptr = attach_shm_kv_cache_ptr()
+        shm_ptr = attach_shm_kv_cache_ptr(
+            key=self.args.cpu_kv_cache_shm_id, size=self.kv_cache_tensor_meta.calcu_size()
+        )
         handle = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.kv_cache_tensor_meta.calcu_size())
         numpy_array = np.frombuffer(
             memoryview((ctypes.c_uint8 * self.kv_cache_tensor_meta.calcu_size()).from_address(shm_ptr)), dtype=np.uint8

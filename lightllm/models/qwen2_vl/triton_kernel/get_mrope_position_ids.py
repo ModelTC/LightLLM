@@ -138,7 +138,34 @@ def test():
         b_q_seq_len,
         b_start_loc,
     )
-    print(position_ids)
+
+    # print(position_ids)
+    old_value = torch.cat([position_ids[:, 2:7], position_ids[:, 7 + 2 :]], dim=1)
+
+    position_ids = (
+        torch.tensor([2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], dtype=torch.int32, device="cuda")
+        .unsqueeze(0)
+        .expand(3, -1)
+        .contiguous()
+    )
+    b_ready_cache_len = torch.tensor([2, 2], dtype=torch.int32, device="cuda")
+    b_q_seq_len = torch.tensor([5, 11], dtype=torch.int32, device="cuda")
+    b_start_loc = torch.tensor([0, 5], dtype=torch.int32, device="cuda")
+
+    get_mrope_position_triton(
+        b_image_start_idx,
+        b_image_thwd,
+        b_image_nums,
+        b_image_start_num,
+        b_image_len,
+        position_ids,
+        b_ready_cache_len,
+        b_q_seq_len,
+        b_start_loc,
+    )
+
+    assert torch.equal(old_value, position_ids)
+
     """
     tensor([[0, 0, 0, 0, 2, 3, 4, 0, 0, 0, 0, 2, 2, 2, 2, 4, 5, 6, 7, 8],
         [0, 0, 1, 1, 2, 3, 4, 0, 0, 1, 1, 2, 2, 3, 3, 4, 5, 6, 7, 8],

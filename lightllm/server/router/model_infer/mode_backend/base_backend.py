@@ -39,6 +39,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 
 class ModeBackend:
@@ -137,6 +138,9 @@ class ModeBackend:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
             wait_events.append(self.multi_level_cache_module)
 
+        if self.args.enable_multimodal:
+            g_infer_context.init_cpu_embed_cache_client()
+
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
         model_kvargs = {
@@ -179,6 +183,7 @@ class ModeBackend:
             self.preload_prompt_cache_kv_buffer(model_cfg)
 
         self.logger.info(f"loaded model class {self.model.__class__}")
+
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,

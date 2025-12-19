@@ -19,13 +19,13 @@ def test_mark_multimodal_obj():
 
 
 def test_multimodal_emb():
-    S, D = 1024 * 1000, 128 * 64
-    vob_size = 320000
+    S, D = 1024 * 10, 128 * 64
+    vob_size = 3200
     image_size = 10
     image_token_size = 512
 
     text_weight = torch.randn((vob_size, D), device="cuda", dtype=torch.float16)
-    img_weight = torch.randn((image_size * image_token_size, D), device="cuda", dtype=torch.float16)
+    img_weight = torch.randn((image_size * image_token_size, 1, D), device="cuda", dtype=torch.float16)
     img_token_lens = torch.full((image_size,), image_token_size, device="cuda", dtype=torch.long)
     img_start_token_ids = (
         (torch.arange(0, image_size * image_token_size, image_token_size) + vob_size * 10).cuda().long()
@@ -39,8 +39,9 @@ def test_multimodal_emb():
 
     out = torch.zeros((S, D), dtype=torch.float16, device="cuda")
     multimodal_emb(
-        out, prompt_ids, text_weight, img_weight, img_token_lens, img_start_token_ids, img_start_locs, 0, vob_size
+        out, prompt_ids, text_weight, img_weight, img_token_lens, img_start_token_ids, img_start_locs, 0, vob_size, 1
     )
+    assert torch.allclose(out[0 : image_size * image_token_size, :].view(-1), img_weight.view(-1), atol=0.0001)
     return
 
 

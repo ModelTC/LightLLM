@@ -95,6 +95,8 @@ class G_Objs:
         else:
             init_tokenizer(args)  # for openai api
             SamplingParams.load_generation_cfg(args.model_dir)
+            CompletionRequest.load_generation_cfg(args.model_dir)
+            ChatCompletionRequest.load_generation_cfg(args.model_dir)
             self.metric_client = MetricClient(args.metric_port)
             self.httpserver_manager = HttpServerManager(args=args)
             dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
