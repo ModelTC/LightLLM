@@ -43,7 +43,6 @@ class InferenceContext:
         radix_cache: RadixCache,
         shm_req_manager: ShmReqManager,
         vocab_size: int,
-        cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None,
     ):
         self.args = get_env_start_args()
         from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -58,7 +57,10 @@ class InferenceContext:
         self.infer_req_ids = []
 
         self.vocab_size = vocab_size
-        self.cpu_embed_cache_client = cpu_embed_cache_client
+        return
+
+    def init_cpu_embed_cache_client(self):
+        self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:

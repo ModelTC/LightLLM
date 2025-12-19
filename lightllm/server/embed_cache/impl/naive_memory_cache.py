@@ -28,6 +28,9 @@ class Record(object):
     token_num: int
     mem_block: MemoryBlock
 
+    def __hash__(self) -> int:
+        return self.id
+
 
 class InMemoryCache:
     def __init__(self, args) -> None:
@@ -162,7 +165,7 @@ class InMemoryCache:
                 free_min_count=new_needed - (self.capacity - self.occupied), new_md5_dict=new_md5_dict
             )
             if len(alloc_md5_dict) == len(new_md5_dict):
-                for md5sum, mem_block in alloc_md5_dict:
+                for md5sum, mem_block in alloc_md5_dict.items():
                     token_num = new_md5_dict[md5sum]
                     uid_int = uuid.uuid1().int
                     self._check_and_set_new_id_range(token_num)

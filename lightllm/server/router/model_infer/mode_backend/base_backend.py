@@ -138,6 +138,9 @@ class ModeBackend:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
             wait_events.append(self.multi_level_cache_module)
 
+        if self.args.enable_multimodal:
+            g_infer_context.init_cpu_embed_cache_client()
+
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
         model_kvargs = {
@@ -187,9 +190,6 @@ class ModeBackend:
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
-            cpu_embed_cache_client=CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
-            if self.args.enable_multimodal
-            else None,
         )
 
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到

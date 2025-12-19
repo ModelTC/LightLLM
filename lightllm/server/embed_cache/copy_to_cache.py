@@ -24,7 +24,6 @@ def _offload_embed_tensor_to_cache(
     dest_index = (start_index_in_cache + token_index).to(tl.int64)
 
     for layer_index in range(layer_num):
-        layer_index = layer_index.to(tl.int64)
         for block_index in range(tl.cdiv(hidden_size, BLOCK)):
             off = block_index * BLOCK + tl.arange(0, BLOCK)
             mask = off < hidden_size
