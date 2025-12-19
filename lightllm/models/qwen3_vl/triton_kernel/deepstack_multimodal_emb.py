@@ -11,7 +11,7 @@ def _deepstack_add_kernel(
     Out,
     Img_token_lens,
     Img_start_token_ids,
-    Img_start_locs,
+    Img_start_locs_in_cache,
     stride_deep_s,
     stride_deep_d,
     stride_out_s,
@@ -26,8 +26,8 @@ def _deepstack_add_kernel(
     off_d = tl.arange(0, BLOCK_DIM)
 
     img_start_token_id = tl.load(Img_start_token_ids + img_handle_id)
-    img_start_loc = tl.load(Img_start_locs + img_handle_id)
     img_token_len = tl.load(Img_token_lens + img_handle_id)
+    img_start_loc_in_cache = tl.load(Img_start_locs_in_cache + img_handle_id)
 
     # 判断当前 token 是否属于这个 image
     cond = (token_id >= img_start_token_id) & (token_id < img_start_token_id + img_token_len)
@@ -36,7 +36,7 @@ def _deepstack_add_kernel(
         token_offset = token_id - img_start_token_id
 
         deep_row = tl.load(
-            Deepstack_embs + stride_deep_s * (img_start_loc + token_offset) + off_d,
+            Deepstack_embs + stride_deep_s * (img_start_loc_in_cache + token_offset) + off_d,
             mask=off_d < hidden_size,
             other=0,
         )
@@ -60,7 +60,7 @@ def add_deepstack_embs(
     deepstack_embs: torch.Tensor,
     img_token_lens: torch.Tensor,
     img_start_token_ids: torch.Tensor,
-    img_start_locs: torch.Tensor,
+    img_start_locs_in_cache: torch.Tensor,
 ):
     assert input_ids.dim() == 1
     assert out.dim() == 2
@@ -79,7 +79,7 @@ def add_deepstack_embs(
         out,
         img_token_lens,
         img_start_token_ids,
-        img_start_locs,
+        img_start_locs_in_cache,
         deepstack_embs.stride(0),
         deepstack_embs.stride(1),
         out.stride(0),
@@ -105,20 +105,17 @@ def apply_deepstack_features(
     if not infer_state.deepstack_features:
         return
 
-    if layer_num >= len(infer_state.deepstack_features[0]):
-        return
+    deepstack_num_layers = infer_state.cpu_embed_cache_tensor.shape[1] - 1
 
-    per_img_deepstack_features = [
-        infer_state.deepstack_features[i][layer_num] for i in range(infer_state.img_token_lens.shape[0])
-    ]
-    all_deepstack_features = torch.cat(per_img_deepstack_features, dim=0)
+    if layer_num >= deepstack_num_layers:
+        return
 
     add_deepstack_embs(
         out=input_embeddings,
         input_ids=infer_state.input_ids,
-        deepstack_embs=all_deepstack_features,
+        deepstack_embs=infer_state.cpu_embed_cache_tensor[:, layer_num + 1, :],
         img_token_lens=infer_state.img_token_lens,
         img_start_token_ids=infer_state.img_start_token_ids,
-        img_start_locs=infer_state.img_start_locs,
+        img_start_locs_in_cache=infer_state.img_start_locs_in_cache,
     )
     return

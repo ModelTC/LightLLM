@@ -34,19 +34,20 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
         cpu_embed_cache_tensor = g_infer_context.cpu_embed_cache_client.cpu_embed_cache_tensor
+        infer_state.cpu_embed_cache_tensor = cpu_embed_cache_tensor
 
         assert cpu_embed_cache_tensor.shape[2] == hidden_size, (
             f"Dimension mismatch: text weight dimension is {hidden_size}, "
             f"but image embed dimension is {cpu_embed_cache_tensor.shape[2]}"
         )
         # each tp will fill the img embeds, should divide by world_size
-        img_start_token_ids = torch.tensor(img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True).cuda(
+        infer_state.img_start_token_ids = torch.tensor(
+            img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True
+        ).cuda(non_blocking=True)
+        infer_state.img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).cuda(
             non_blocking=True
         )
-        img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
-        )
-        img_start_locs_in_cache = torch.tensor(
+        infer_state.img_start_locs_in_cache = torch.tensor(
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
         ).cuda(non_blocking=True)
 
@@ -55,9 +56,9 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
             prompt_ids=input_ids,
             text_weight_embs=layer_weight.wte_weight_,
             embed_cache=cpu_embed_cache_tensor,
-            img_token_lens=img_token_lens,
-            img_start_token_ids=img_start_token_ids,
-            img_start_locs_in_cache=img_start_locs_in_cache,
+            img_token_lens=infer_state.img_token_lens,
+            img_start_token_ids=infer_state.img_start_token_ids,
+            img_start_locs_in_cache=infer_state.img_start_locs_in_cache,
             tp_text_start_token_id=self.vob_start_id_,
             tp_text_end_token_id=self.vob_end_id_,
             tp_world_size=self.tp_world_size_,
