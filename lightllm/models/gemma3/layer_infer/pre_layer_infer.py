@@ -53,9 +53,15 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
             f"but image embed dimension is {cpu_embed_cache_tensor.shape[2]}"
         )
         # each tp will fill the img embeds, should divide by world_size
-        img_start_token_ids = torch.Tensor(img_start_token_ids).to(device=device, dtype=torch.long)
-        img_token_lens = torch.Tensor(img_token_lens).to(device=device, dtype=torch.long)
-        img_start_locs_in_cache = torch.Tensor(img_start_locs_in_cache).to(device=device, dtype=torch.long)
+        img_start_token_ids = torch.tensor(img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True).cuda(
+            non_blocking=True
+        )
+        img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).cuda(
+            non_blocking=True
+        )
+        img_start_locs_in_cache = torch.tensor(
+            img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
+        ).cuda(non_blocking=True)
 
         multimodal_emb(
             out=out,
