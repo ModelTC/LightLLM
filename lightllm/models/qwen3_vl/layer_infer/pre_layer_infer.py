@@ -2,17 +2,9 @@ import torch
 import torch.distributed as dist
 
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
-from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
-
-from lightllm.server.embed_cache.utils import (
-    bytes2tensor,
-    read_shm,
-    get_shm_name_embed,
-)
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
-
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 
 

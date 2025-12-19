@@ -2,7 +2,6 @@ import torch
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
-from lightllm.server.embed_cache.utils import bytes2tensor, get_shm_name_embed, read_shm
 
 
 class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
