@@ -239,5 +239,5 @@ class WhisperAudioModel:
             ids_to_set.append(uid)
 
         if ids_to_set:
-            torch.cuda.current_stream().synchronize()
             self.cache_client.root.set_items_embed(ids=ids_to_set)
+            torch.cuda.current_stream().synchronize()

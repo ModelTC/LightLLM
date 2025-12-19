@@ -50,6 +50,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         infer_state.img_start_locs_in_cache = torch.tensor(
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
         ).cuda(non_blocking=True)
+        infer_state.input_ids = input_ids
 
         multimodal_emb(
             out=out,

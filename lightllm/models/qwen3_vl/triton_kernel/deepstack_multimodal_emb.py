@@ -102,9 +102,6 @@ def apply_deepstack_features(
     apply deepstack features for all images in qwen3-vl/qwen3-vl-moe
     """
 
-    if not infer_state.deepstack_features:
-        return
-
     deepstack_num_layers = infer_state.cpu_embed_cache_tensor.shape[1] - 1
 
     if layer_num >= deepstack_num_layers:
