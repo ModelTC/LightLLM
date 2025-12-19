@@ -5,7 +5,7 @@ import math
 import time
 import torch.nn.functional as F
 from typing import Optional, Tuple
-from lightllm.utils.device_utils import is_hopper
+from lightllm.utils.device_utils import is_hopper, is_4090
 
 if triton.__version__ >= "2.1.0":
 
@@ -217,7 +217,7 @@ def flash_attention_fwd(q, k, v, o, cu_seqlens, max_seqlen):
     则使用 sgl_kernel里的接口，否则使用 Triton 版本。
     """
     global _flash_attn_v3_available
-    if _flash_attn_v3_available and is_hopper():
+    if _flash_attn_v3_available and (is_hopper() or is_4090()):
         try:
             flash_attention_v3_fwd(q, k, v, o, cu_seqlens, max_seqlen)
         except Exception as e:

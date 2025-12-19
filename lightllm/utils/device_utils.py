@@ -25,6 +25,11 @@ def is_hopper():
 
 
 @lru_cache(maxsize=None)
+def is_4090():
+    return "4090" in torch.cuda.get_device_name(0) or "RTX 4090" in torch.cuda.get_device_name(0)
+
+
+@lru_cache(maxsize=None)
 def get_device_sm_count():
     import triton
     from triton.runtime import driver
