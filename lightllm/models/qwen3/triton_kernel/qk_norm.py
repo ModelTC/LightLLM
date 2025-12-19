@@ -4,8 +4,6 @@ import triton
 import triton.language as tl
 import os
 
-rmsnorm_num_warps = int(os.getenv("RMSNORM_WARPS", "8"))
-
 
 @triton.jit
 def _rms_norm_fwd_fused(
@@ -22,24 +20,21 @@ def _rms_norm_fwd_fused(
     row = tl.program_id(0)
     head_idx = tl.program_id(1)
 
-    X += row * x_stride0 + head_idx * head_dim
+    X += row * x_stride0
     # Compute variance
-    _var = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-    cols = tl.arange(0, BLOCK_SIZE)
+    cols = (head_idx * head_dim + tl.arange(0, BLOCK_SIZE)) * x_stride1
     x = tl.load(X + cols).to(tl.float32)
-    _var += x * x
-    var = tl.sum(_var, axis=0) / head_dim
+    var = tl.sum(x * x, axis=0) / head_dim
     rstd = 1 / tl.sqrt(var + eps)
     # Normalize and apply linear transformation
-    w = tl.load(W + cols).to(tl.float32)
-    x = tl.load(X + cols).to(tl.float32)
+    w = tl.load(W + tl.arange(0, BLOCK_SIZE))
     x_hat = x * rstd
-    y = x_hat * w
+    y = x_hat.to(W.dtype.element_ty) * w
     # Write output
     tl.store(X + cols, y.to(X.dtype.element_ty))
 
 
-def qk_rmsnorm_forward(x: torch.Tensor, weight, eps):
+def qk_rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps):
     """
     This function is used to perform in-place RMSNorm on the input tensor,
     and to adapt the head_dim norm for Qwen3 MoE and the splited qk tensor layout.
@@ -48,6 +43,7 @@ def qk_rmsnorm_forward(x: torch.Tensor, weight, eps):
     eps: float
     return: x
     """
+    assert weight.is_contiguous()
     # reshape input data into 2D tensor
     x_arg = x.view(-1, x.shape[-1])
     M, N = x_arg.shape
@@ -65,6 +61,6 @@ def qk_rmsnorm_forward(x: torch.Tensor, weight, eps):
         eps,
         head_dim=head_dim,
         BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=rmsnorm_num_warps,
+        num_warps=1,
     )
     return x
