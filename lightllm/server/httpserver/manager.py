@@ -125,8 +125,9 @@ class HttpServerManager:
                 await asyncio.sleep(0.1)
                 continue
 
-            if "error" in records:
-                raise Exception(records)
+            if isinstance(records, str) and "error" in records:
+                logger.error(str(records) + "and try to set --embed_cache_storage_size bigger")
+                raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
 
             uid_list = []
             for item, rec in zip(items, records):
