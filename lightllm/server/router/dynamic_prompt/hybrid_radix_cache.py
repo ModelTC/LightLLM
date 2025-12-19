@@ -33,10 +33,6 @@ class HybridRadixCache(RadixCache):
         super().__init__(unique_name, total_token_num, rank_in_node, mem_manager)
         # 用于缓存需要被驱逐的buffer节点， 应该包含所有有buffer的节点
         self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: (x.buffer_time,))
-        self.match_count = 0
-        self.log_interval = 1000
-        self.match_len = 0
-        self.hit_len = 0
 
     def free_radix_cache_to_get_enough_buffer(self, need_buffer_num):
         if need_buffer_num > self.mem_manager.get_buffer_can_use_size():
@@ -83,11 +79,15 @@ class HybridRadixCache(RadixCache):
     def insert_for_hybrid_radix_cache(self, reqs):
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        self.free_radix_cache_to_get_enough_buffer(len(reqs))
-        new_buffer_indexes = self.mem_manager.alloc_buffer(len(reqs))
-        # req_ids_gpu = req_ids.cuda()
+        reqs_to_insert = [req for req in reqs if req.cur_kv_len < req.get_cur_total_len()]
 
-        for i, req in enumerate(reqs):
+        if len(reqs_to_insert) == 0:
+            return
+
+        self.free_radix_cache_to_get_enough_buffer(len(reqs_to_insert))
+        new_buffer_indexes = self.mem_manager.alloc_buffer(len(reqs_to_insert))
+
+        for i, req in enumerate(reqs_to_insert):
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = g_infer_context.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
@@ -97,21 +97,18 @@ class HybridRadixCache(RadixCache):
             self.mem_manager.copy_buffer(cur_buffer_idx, new_buffer_indexes[i])
 
             prefix_len, new_shared_kv_node = super().insert(key, value)
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             self.dec_node_ref_counter(req.shared_kv_node)
             self.add_node_ref_counter(new_shared_kv_node)
             self.add_buffer_idx_to_node(new_shared_kv_node, new_buffer_indexes[i].item())
+            req.extra_need_to_free_token_index.append(g_infer_context.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             req.shared_kv_node = new_shared_kv_node
-            # 更新 prompt_cache_len，这样 free_a_req_mem 不会释放已属于树的 token
-            # free_a_req_mem 中会释放 [prompt_cache_len:prefix_len]，更新后这个范围为空
-            req.shm_req.prompt_cache_len = req.cur_kv_len
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
-        self.match_count = (self.match_count + 1) % self.log_interval
-        self.match_len += len(key)
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
-        origin_ans_len = sum(len(v) for v in ans_value_list)
+        miss_ans_len = 0
         evict_token_list = []
         while tree_node != self.root_node and tree_node.buffer_idx is None:
             if tree_node.is_leaf():
@@ -133,14 +130,15 @@ class HybridRadixCache(RadixCache):
                 if tree_node.is_leaf():
                     self.evict_tree_set.add(tree_node)
                 tree_node = tree_node.parent
-            ans_value_list.pop()
+            miss_ans_len += len(ans_value_list.pop())
 
         if len(evict_token_list) > 0:
             evict_token_value = torch.concat(evict_token_list)
             self.mem_manager.free(evict_token_value)
 
         if tree_node == self.root_node:
-            return None, origin_ans_len, None
+            self._inc_hit_rate(len(key), 0)
+            return None, miss_ans_len, None
 
         update_node = tree_node
         while update_node != self.root_node:
@@ -151,17 +149,8 @@ class HybridRadixCache(RadixCache):
             update_node = update_node.parent
 
         value = torch.concat(ans_value_list)
-        # logger.info("HybridRadixCache match_prefix hit tokens: {}".format(len(value)))
-        self.hit_len += len(value)
-        if self.match_count == 0:
-            logger.info(
-                f"HybridRadixCache match_prefix avg hit rate: {self.hit_len / self.match_len:.4f} "
-                f"({self.hit_len}/{self.match_len}) over last {self.log_interval} matches"
-            )
-            self.match_len = 0
-            self.hit_len = 0
-
-        return tree_node, origin_ans_len, value
+        self._inc_hit_rate(len(key), len(value))
+        return tree_node, miss_ans_len, value
 
     def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int):
         """Set buffer_idx for a node and add it to evict_buffer_set."""

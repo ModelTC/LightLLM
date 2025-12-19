@@ -165,12 +165,16 @@ class InferenceContext:
                 else:
                     free_buffer_index.append(buffer_idx)
 
-            old_prefix_len = req.shm_req.prompt_cache_len
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
                 assert req.shared_kv_node.node_prefix_total_len <= prefix_len
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                 req.shared_kv_node = None
+
+            if len(req.extra_need_to_free_token_index) > 0:
+                free_token_index.extend(req.extra_need_to_free_token_index)
+                req.extra_need_to_free_token_index = []
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -409,6 +413,8 @@ class InferReq:
 
         # 在开启radix cache的情况下，用于标记命中情况，用于插入算法
         self.mamba_model_match_len = 0
+        self.mamba_buffer_insert_len = 0
+        self.extra_need_to_free_token_index = []
 
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
@@ -461,8 +467,7 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
-            self.mamba_model_match_len = kv_len
+            share_node, miss_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
@@ -470,6 +475,10 @@ class InferReq:
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+
+                if g_infer_context.use_buffer_manager:
+                    if miss_len > 1024:
+                        self.mamba_buffer_insert_len = miss_len
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
@@ -518,13 +527,18 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
     def get_chuncked_input_token_ids(self):
-        chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+        # 复用 get_chuncked_input_token_len 的逻辑，保持一致性
+        chunked_end = self.get_chuncked_input_token_len()
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+
+        if self.mamba_buffer_insert_len > 0:
+            chunked_end = min(self.get_cur_total_len(), chunked_start + self.mamba_buffer_insert_len)
+            self.mamba_buffer_insert_len = 0
+            
         return chunked_end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):

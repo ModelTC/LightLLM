@@ -9,6 +9,7 @@
 # ruff: noqa: E501
 
 import os
+from typing import Optional
 
 import torch
 
@@ -19,6 +20,16 @@ from .index import prepare_chunk_indices
 from .op import make_tensor_descriptor
 from .utils import input_guard, is_amd, is_tma_supported
 from lightllm.common.triton_utils.autotuner import autotune
+
+
+def _ensure_triton_allocator():
+    """Ensure Triton has an allocator set for kernels requiring scratch memory."""
+
+    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+        return torch.empty(size, device="cuda", dtype=torch.int8)
+
+    triton.set_allocator(alloc_fn)
+
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32"] if is_amd else ["ieee", "tf32", "tf32x3"]
@@ -433,6 +444,10 @@ def solve_tril(
         merge_fn = merge_16x16_to_32x32_inverse_kernel
     elif BT == 64:
         merge_fn = merge_16x16_to_64x64_inverse_kernel
+
+    # Ensure Triton allocator is set for TMA kernels that require scratch memory
+    if is_tma_supported:
+        _ensure_triton_allocator()
 
     merge_fn[NT, B * H](
         A=A,
