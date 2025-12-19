@@ -22,14 +22,9 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         return
 
     def context_forward(self, input_ids, infer_state: Qwen3VLInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
-        img_weight = []
-        img_start_loc = 0
-
-        infer_state.input_ids = input_ids
         img_start_token_ids = []
         img_token_lens = []
-        img_start_locs = []
-
+        img_start_locs_in_cache = []
         device = layer_weight.wte_weight_.device
         dtype = layer_weight.wte_weight_.dtype
         hidden_size = layer_weight.wte_weight_.shape[1]
@@ -37,65 +32,43 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
                 # skip the same image
-                if img["token_id"] in img_start_token_ids or img["_prefill_"] is False:
+                if img["token_id"] in img_start_token_ids:
                     continue
-
-                # all_img_embed_df的shape是
-                # image_embed(token_num, hidden_dim) + deepstack(token_num*layer_num, hidden_dim)
-                all_img_embed_df = (
-                    bytes2tensor(read_shm(get_shm_name_embed(img["uuid"])))
-                    .view(dtype)
-                    .view(-1, hidden_size)
-                    .cuda(non_blocking=True)
-                )
-                per_image_deepstack = []
-
-                # 计算deepstack的层数
-                deepstack_layer_num = all_img_embed_df.shape[0] // img["token_num"] - 1
-                img_weight.append(all_img_embed_df[: img["token_num"]])
-
-                for layer in range(deepstack_layer_num):
-                    start = img["token_num"] * (layer + 1)
-                    end = img["token_num"] * (layer + 2)
-                    per_image_deepstack.append(all_img_embed_df[start:end])
-
-                infer_state.deepstack_features.append(per_image_deepstack)
                 img_start_token_ids.append(img["token_id"])
                 img_token_lens.append(img["token_num"])
-                img_start_locs.append(img_start_loc)
-                img_start_loc += img["token_num"]
+                img_start_locs_in_cache.append(img["start_index_in_embed_cache"])
         out = torch.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
 
-        if len(img_weight) > 0:
-            img_weight = torch.cat(img_weight, dim=0).to(dtype=dtype)
-        else:
-            img_weight = torch.empty((0, hidden_size), device=device, dtype=dtype)
-        assert img_weight.shape[1] == hidden_size, (
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        cpu_embed_cache_tensor = g_infer_context.cpu_embed_cache_client.cpu_embed_cache_tensor
+
+        assert cpu_embed_cache_tensor.shape[2] == hidden_size, (
             f"Dimension mismatch: text weight dimension is {hidden_size}, "
-            f"but image weight dimension is {img_weight.shape[1]}"
+            f"but image embed dimension is {cpu_embed_cache_tensor.shape[2]}"
         )
         # each tp will fill the img embeds, should divide by world_size
-        img_weight = img_weight / self.tp_world_size_
-        infer_state.img_start_token_ids = torch.tensor(img_start_token_ids, dtype=torch.long, device="cpu").cuda(
+        img_start_token_ids = torch.tensor(img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True).cuda(
             non_blocking=True
         )
-        infer_state.img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu").cuda(
+        img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).cuda(
             non_blocking=True
         )
-        infer_state.img_start_locs = torch.tensor(img_start_locs, dtype=torch.long, device="cpu").cuda(
-            non_blocking=True
-        )
+        img_start_locs_in_cache = torch.tensor(
+            img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
+        ).cuda(non_blocking=True)
 
         multimodal_emb(
-            out,
-            input_ids,
-            layer_weight.wte_weight_,
-            img_weight,
-            infer_state.img_token_lens,
-            infer_state.img_start_token_ids,
-            infer_state.img_start_locs,
-            self.vob_start_id_,
-            self.vob_end_id_,
+            out=out,
+            prompt_ids=input_ids,
+            text_weight_embs=layer_weight.wte_weight_,
+            embed_cache=cpu_embed_cache_tensor,
+            img_token_lens=img_token_lens,
+            img_start_token_ids=img_start_token_ids,
+            img_start_locs_in_cache=img_start_locs_in_cache,
+            tp_text_start_token_id=self.vob_start_id_,
+            tp_text_end_token_id=self.vob_end_id_,
+            tp_world_size=self.tp_world_size_,
         )
         if self.tp_world_size_ > 1:
             all_reduce(out, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
