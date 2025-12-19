@@ -291,7 +291,7 @@ class Qwen3NextGatedDeltaNetInfer:
         g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
 
         if is_prefill:
-            initial_state = ssm_states[buffer_idx].contiguous()
+            initial_state = ssm_states[buffer_idx]
             (core_attn_out, last_recurrent_state,) = chunk_gated_delta_rule(
                 q=query,
                 k=key,
@@ -304,11 +304,8 @@ class Qwen3NextGatedDeltaNetInfer:
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
-            # Update SSM state with final state
-            ssm_states[buffer_idx, ...] = last_recurrent_state.to(ssm_states.dtype, copy=False)
+            ssm_states[buffer_idx] = last_recurrent_state.to(ssm_states.dtype, copy=False)
         else:
-            batch_size = input.shape[0]
-            cu_seqlens = torch.arange(0, batch_size + 1, dtype=torch.int32, device=input.device)
             (core_attn_out, last_recurrent_state,) = fused_recurrent_gated_delta_rule(
                 q=query,
                 k=key,
@@ -317,7 +314,7 @@ class Qwen3NextGatedDeltaNetInfer:
                 beta=beta,
                 initial_state=ssm_states,
                 inplace_final_state=True,
-                cu_seqlens=cu_seqlens,
+                cu_seqlens=infer_state.b1_cu_q_seq_len,
                 ssm_state_indices=buffer_idx,
                 use_qk_l2norm_in_kernel=True,
             )

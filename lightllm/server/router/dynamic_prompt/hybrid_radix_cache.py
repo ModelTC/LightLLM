@@ -79,11 +79,7 @@ class HybridRadixCache(RadixCache):
     def insert_for_hybrid_radix_cache(self, reqs):
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        reqs_to_insert = []
-        for req in reqs:
-            if req.use_mamba_buffer_inserted:
-                reqs_to_insert.append(req)
-                req.use_mamba_buffer_inserted = False
+        reqs_to_insert = [req for req in reqs if req.cur_kv_len < req.get_cur_total_len()]
 
         if len(reqs_to_insert) == 0:
             return
@@ -101,16 +97,18 @@ class HybridRadixCache(RadixCache):
             self.mem_manager.copy_buffer(cur_buffer_idx, new_buffer_indexes[i])
 
             prefix_len, new_shared_kv_node = super().insert(key, value)
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             self.dec_node_ref_counter(req.shared_kv_node)
             self.add_node_ref_counter(new_shared_kv_node)
             self.add_buffer_idx_to_node(new_shared_kv_node, new_buffer_indexes[i].item())
+            req.extra_need_to_free_token_index.append(g_infer_context.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             req.shared_kv_node = new_shared_kv_node
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
-        origin_ans_len = sum(len(v) for v in ans_value_list)
+        miss_ans_len = 0
         evict_token_list = []
         while tree_node != self.root_node and tree_node.buffer_idx is None:
             if tree_node.is_leaf():
@@ -132,7 +130,7 @@ class HybridRadixCache(RadixCache):
                 if tree_node.is_leaf():
                     self.evict_tree_set.add(tree_node)
                 tree_node = tree_node.parent
-            ans_value_list.pop()
+            miss_ans_len += len(ans_value_list.pop())
 
         if len(evict_token_list) > 0:
             evict_token_value = torch.concat(evict_token_list)
@@ -140,7 +138,7 @@ class HybridRadixCache(RadixCache):
 
         if tree_node == self.root_node:
             self._inc_hit_rate(len(key), 0)
-            return None, origin_ans_len, None
+            return None, miss_ans_len, None
 
         update_node = tree_node
         while update_node != self.root_node:
@@ -152,7 +150,7 @@ class HybridRadixCache(RadixCache):
 
         value = torch.concat(ans_value_list)
         self._inc_hit_rate(len(key), len(value))
-        return tree_node, origin_ans_len, value
+        return tree_node, miss_ans_len, value
 
     def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int):
         """Set buffer_idx for a node and add it to evict_buffer_set."""

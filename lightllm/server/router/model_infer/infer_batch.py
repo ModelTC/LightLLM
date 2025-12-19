@@ -424,7 +424,6 @@ class InferReq:
 
         # 在开启radix cache的情况下，用于标记命中情况，用于插入算法
         self.mamba_model_match_len = 0
-        self.use_mamba_buffer_inserted = False
         self.mamba_buffer_insert_len = 0
         self.extra_need_to_free_token_index = []
 
@@ -479,7 +478,7 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+            share_node, miss_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
@@ -489,9 +488,8 @@ class InferReq:
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
                 if g_infer_context.use_buffer_manager:
-                    if kv_len - ready_cache_len >= self.shm_req.chunked_prefill_size // 2:
-                        self.use_mamba_buffer_inserted = True
-                        self.mamba_buffer_insert_len = kv_len - ready_cache_len
+                    if miss_len > 1024:
+                        self.mamba_buffer_insert_len = miss_len
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
@@ -548,9 +546,10 @@ class InferReq:
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
 
-        if self.use_mamba_buffer_inserted:
+        if self.mamba_buffer_insert_len > 0:
             chunked_end = min(self.get_cur_total_len(), chunked_start + self.mamba_buffer_insert_len)
-
+            self.mamba_buffer_insert_len = 0
+            
         return chunked_end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
