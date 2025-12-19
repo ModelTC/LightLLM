@@ -196,37 +196,16 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
         return
 
     def concat_img_embed_and_deepstack_features(self, image_embed, deepstack_feature_lists, valid_ids):
-        # input: image_embed: [img_embed1, img_embed2, img_embed3]
-        #        deepstack_feature_lists:[df1-1, df1-2, df1-3,
-        #                                 df2-1, df2-2, df2-3,
-        #                                 df3-1, df3-2, df3-3]
-        #        valid_ids:[[start_1, end_1], [start_2, end_2], [start_3, end_3]]
-        #
-        # return: all_img_embeds_ds: [img_embed1, df1-1, df1-2, df1-3,
-        #                             img_embed2, df2-1, df2-2, df2-3,
-        #                             img_embed3, df3-1, df3-2, df3-3]
-        #         valid_ids:[[start_1, end_1], [start_2, end_2], [start_3, end_3]] # image_embed的start和end
         all_chunks = []
-        new_valid_ids = []
-
-        row_offset = 0
 
         for start, end in valid_ids:
             hs_i = image_embed[start:end]
             ds_i_list = [feat[start:end] for feat in deepstack_feature_lists]
-
-            combined_i = torch.cat([hs_i, *ds_i_list], dim=0)
-
-            new_start = row_offset
-            new_end = row_offset + combined_i.size(0)
-            new_valid_ids.append([new_start, new_end])
-
+            combined_i = torch.cat([hs_i, *ds_i_list], dim=1).view((end - start), len(ds_i_list) + 1, hs_i.shape[-1])
             all_chunks.append(combined_i)
 
-            row_offset = new_end
-
         all_img_embeds_ds = torch.cat(all_chunks, dim=0)
-        return all_img_embeds_ds, new_valid_ids
+        return all_img_embeds_ds, valid_ids
 
     def load_model(self, weight_dir):
 

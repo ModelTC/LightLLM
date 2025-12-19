@@ -34,7 +34,7 @@ def calcu_embed_cache_meta() -> "EmbedCacheMeta":
     if model_class in [Qwen3VLTpPartModel, Qwen3VLMOETpPartModel]:
         embed_cache_meta_data = EmbedCacheMeta(
             token_num=None,
-            layer_num=3,
+            layer_num=4,
             hidden_size=get_hidden_size(),
             data_type=get_llm_data_type(),
         )
