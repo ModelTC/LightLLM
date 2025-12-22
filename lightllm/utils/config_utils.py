@@ -132,3 +132,16 @@ def get_fixed_kv_len():
         return len(model_cfg["prompt_cache_token_ids"])
     else:
         return 0
+
+
+@lru_cache(maxsize=None)
+def is_qwen3_vl():
+    from lightllm.utils.llm_utils import get_llm_model_class
+    from lightllm.models import Qwen3VLTpPartModel, Qwen3VLMOETpPartModel
+
+    model_class = get_llm_model_class()
+
+    if model_class in [Qwen3VLTpPartModel, Qwen3VLMOETpPartModel]:
+        return True
+    else:
+        return False

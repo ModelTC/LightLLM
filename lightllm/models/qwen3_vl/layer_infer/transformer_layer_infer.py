@@ -63,7 +63,7 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
         q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+        o = self._context_attention_wrapper_run(q, cache_kv, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
