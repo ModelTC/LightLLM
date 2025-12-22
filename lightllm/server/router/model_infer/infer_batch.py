@@ -172,7 +172,7 @@ class InferenceContext:
             if self.use_buffer_manager:
                 buffer_idx = self.req_manager.req_to_buffer_index[req.req_idx].item()
                 if node.buffer_idx is None:
-                    self.radix_cache.add_buffer_idx_to_node(node, buffer_idx)
+                    self.radix_cache.set_buffer_idx_to_node(node, buffer_idx)
                 else:
                     free_buffer_index.append(buffer_idx)
 
@@ -423,7 +423,6 @@ class InferReq:
         self.nixl_trans_device_id: int = -1
 
         # 在开启radix cache的情况下，用于标记命中情况，用于插入算法
-        self.mamba_model_match_len = 0
         self.mamba_buffer_insert_len = 0
         self.extra_need_to_free_token_index = []
 
@@ -549,7 +548,7 @@ class InferReq:
         if self.mamba_buffer_insert_len > 0:
             chunked_end = min(self.get_cur_total_len(), chunked_start + self.mamba_buffer_insert_len)
             self.mamba_buffer_insert_len = 0
-            
+
         return chunked_end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):

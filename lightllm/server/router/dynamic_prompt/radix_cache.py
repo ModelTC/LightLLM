@@ -39,7 +39,7 @@ class TreeNode:
         # 放在这里让该类模型能够复用当前的radix_cache代码。
         # 纯注意力模型该 buffer_idx 始终保持为 None
         self.buffer_idx = None
-        self.buffer_time = time_gen.generate_time_id()
+        self.hit_count = 0  # 用于记录该节点被命中次数
 
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
@@ -87,9 +87,6 @@ class TreeNode:
 
     def update_time(self):
         self.time_id = time_gen.generate_time_id()
-
-    def update_buffer_time(self):
-        self.buffer_time = time_gen.generate_time_id()
 
     def is_leaf(self):
         return len(self.children) == 0
