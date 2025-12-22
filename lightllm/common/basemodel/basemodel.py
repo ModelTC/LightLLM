@@ -515,27 +515,9 @@ class TpPartBaseModel:
         input_embs = pre_method(cuda_input_ids, infer_state, self.pre_post_weight)
         input_tensors = [input_embs]
 
-        # prefill cuda graph 在 qwen3 vl 上的前几层由于特殊的处理，导致目前无法支持cuda graph
-        from lightllm.utils.config_utils import is_qwen3_vl
-
-        if is_qwen3_vl():
-            no_graph_layer_num = 3
-        else:
-            no_graph_layer_num = 0
-
-        def no_graph_prefill_func(input_tensors, infer_state):
+        def prefill_func(input_tensors, infer_state):
             _input_embs = input_tensors[0]
-            for i in range(no_graph_layer_num):
-                layer = self.layers_infer[i]
-                layer_method = (layer.context_forward, layer.tpsp_context_forward)[run_mode_index]
-                _input_embs = layer_method(_input_embs, infer_state, self.trans_layers_weight[i])
-            return [_input_embs]
-
-        input_tensors = no_graph_prefill_func(input_tensors=input_tensors, infer_state=infer_state)
-
-        def graph_prefill_func(input_tensors, infer_state):
-            _input_embs = input_tensors[0]
-            for i in range(no_graph_layer_num, self.layers_num):
+            for i in range(self.layers_num):
                 layer = self.layers_infer[i]
                 layer_method = (layer.context_forward, layer.tpsp_context_forward)[run_mode_index]
                 _input_embs = layer_method(_input_embs, infer_state, self.trans_layers_weight[i])
@@ -549,7 +531,7 @@ class TpPartBaseModel:
             )
             if self.prefill_graph.need_capture(handle_token_num=finded_handle_token_num):
                 output_tensors: List[torch.Tensor] = self.prefill_graph.capture_prefill(
-                    prefill_func=graph_prefill_func,
+                    prefill_func=prefill_func,
                     input_tensors=input_tensors,
                     infer_state=infer_state,
                 )
@@ -560,7 +542,7 @@ class TpPartBaseModel:
 
         else:
             g_cache_manager.cache_env_in()
-            output_tensors: List[torch.Tensor] = graph_prefill_func(input_tensors, infer_state)
+            output_tensors: List[torch.Tensor] = prefill_func(input_tensors, infer_state)
             g_cache_manager.cache_env_out()
 
         input_embs = output_tensors[0]
