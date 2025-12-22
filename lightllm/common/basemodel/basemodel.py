@@ -560,7 +560,6 @@ class TpPartBaseModel:
 
         else:
             g_cache_manager.cache_env_in()
-            input_tensors = no_graph_prefill_func(input_tensors=input_tensors, infer_state=infer_state)
             output_tensors: List[torch.Tensor] = graph_prefill_func(input_tensors, infer_state)
             g_cache_manager.cache_env_out()
 
