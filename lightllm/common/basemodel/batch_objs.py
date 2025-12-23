@@ -73,6 +73,9 @@ class ModelInput:
             else:
                 self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
 
+    def __post_init__(self):
+        assert len(self.multimodal_params) == self.batch_size
+
 
 @dataclass
 class ModelOutput:

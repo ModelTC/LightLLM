@@ -829,6 +829,7 @@ class TpPartBaseModel:
                 is_prefill=True,
                 b_ready_cache_len=b_ready_cache_len,
                 b_prefill_start_loc=b_prefill_start_loc,
+                multimodal_params=[{"images": [], "audios": []}],
             )
             model_output = self.forward(
                 model_input,
@@ -905,7 +906,7 @@ class TpPartBaseModel:
                     is_prefill=True,
                     b_ready_cache_len=b_ready_cache_len,
                     b_prefill_start_loc=b_prefill_start_loc,
-                    multimodal_params=[],
+                    multimodal_params=[{"images": [], "audios": []}],
                     **self._gen_special_model_input(total_token_num),
                 )
                 model_output = self.forward(
@@ -968,7 +969,7 @@ class TpPartBaseModel:
             b_ready_cache_len=b_ready_cache_len,
             b_prefill_start_loc=b_prefill_start_loc,
             is_prefill=True,
-            multimodal_params=[],
+            multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
             **self._gen_special_model_input(total_token_num),
         )
 

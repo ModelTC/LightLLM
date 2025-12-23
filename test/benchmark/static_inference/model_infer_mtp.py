@@ -136,6 +136,7 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
         b_seq_len=b_seq_len,
         is_prefill=True,
         b_ready_cache_len=b_ready_cache_len,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
     )
 
     model_output: ModelOutput = main_model.forward(model_input)
@@ -202,6 +203,7 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
         b_req_idx=nopad_b_seq_idx,
         b_seq_len=nopad_b_seq_len,
         is_prefill=False,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size * (len(draft_models) + 1))],
     )
 
     # Main decode
