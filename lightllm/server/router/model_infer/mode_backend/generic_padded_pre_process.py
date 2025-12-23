@@ -241,7 +241,7 @@ def padded_overlap_prepare_decode_inputs(
     return micro_input, run_reqs, padded_req_num, micro_input1, run_reqs1, padded_req_num1
 
 
-def padded_overlap_prepare_prefill_inputs(req_objs: List[InferReq], is_multimodal=False):
+def padded_overlap_prepare_prefill_inputs(req_objs: List[InferReq]):
     micro_batch1_req_num = triton.cdiv(len(req_objs), 2)
 
     micro_input, run_reqs, padded_req_num = padded_prepare_prefill_inputs(req_objs[0:micro_batch1_req_num])

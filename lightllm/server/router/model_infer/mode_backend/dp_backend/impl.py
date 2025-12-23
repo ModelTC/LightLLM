@@ -232,7 +232,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_input1,
             run_reqs1,
             _,
-        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
+        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
@@ -626,7 +626,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_input1,
             run_reqs1,
             _,
-        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
+        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             logits0 = model_output0.logits
