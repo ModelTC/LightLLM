@@ -328,6 +328,10 @@ class TpPartBaseModel:
             mode="constant",
             value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
         )
+        new_model_input.multimodal_params = new_model_input.multimodal_params + [
+            {"images": [], "audios": []} for _ in range(padded_batch_size)
+        ]
+
         if enable_diverse_mode_gqa_decode_fast_kernel():
             if new_model_input.b_shared_seq_len is not None:
                 new_model_input.b_shared_seq_len = F.pad(
@@ -345,6 +349,7 @@ class TpPartBaseModel:
                 new_batch_size=new_batch_size,
             )
 
+        new_model_input.check_input()
         return new_model_input
 
     def _create_padded_prefill_model_input(self, model_input: ModelInput, new_handle_token_num: int):
@@ -389,6 +394,7 @@ class TpPartBaseModel:
                 new_batch_size=new_handle_token_num,
             )
 
+        new_model_input.check_input()
         return new_model_input
 
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
