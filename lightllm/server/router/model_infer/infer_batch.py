@@ -320,7 +320,7 @@ class InferReq:
         req_id: int,
         req_idx: int,
         shm_index: int,
-        multimodal_params=None,
+        multimodal_params: MultimodalParams,
         vocab_size: int = -1,
         init_prefix_cache: bool = True,
     ):
