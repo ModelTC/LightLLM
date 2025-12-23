@@ -50,6 +50,13 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         b_image_len = []
         image_start_num = 0
         b_image_thwd = []
+
+        # pad multimodal_params to batch size.
+        batch_size = self.b_q_seq_len.shape[0]
+        multimodal_params = multimodal_params + [
+            {"images": [], "audios": []} for _ in range(batch_size - len(multimodal_params))
+        ]
+
         for _, p in enumerate(multimodal_params):
             images = p.get("images", [])
             for img in images:
@@ -59,6 +66,7 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
             b_image_nums.append(len(images))
             b_image_start_num.append(image_start_num)
             image_start_num += len(images)
+
         # 没有任何图片
         if image_start_num == 0:
             return self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
