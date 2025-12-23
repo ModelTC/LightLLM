@@ -12,7 +12,7 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 
 
 def padded_prepare_prefill_inputs(
-    req_objs: List[InferReq], dest_batch_size: Optional[int] = None, is_multimodal=False
+    req_objs: List[InferReq], dest_batch_size: Optional[int] = None
 ) -> Tuple[ModelInput, List[InferReq], int]:
 
     if dest_batch_size is None:
@@ -116,9 +116,8 @@ def padded_prepare_prefill_inputs(
         b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
+        multimodal_params=batch_multimodal_params,
     )
-    if is_multimodal:
-        model_input.multimodal_params = batch_multimodal_params
 
     return model_input, run_reqs, padded_req_num
 
@@ -220,8 +219,8 @@ def padded_prepare_decode_inputs(
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
         is_prefill=False,
+        multimodal_params=batch_multimodal_params,
     )
-    model_input.multimodal_params = batch_multimodal_params
     return model_input, run_reqs, padded_req_num
 
 
@@ -242,15 +241,11 @@ def padded_overlap_prepare_decode_inputs(
     return micro_input, run_reqs, padded_req_num, micro_input1, run_reqs1, padded_req_num1
 
 
-def padded_overlap_prepare_prefill_inputs(req_objs: List[InferReq], is_multimodal=False):
+def padded_overlap_prepare_prefill_inputs(req_objs: List[InferReq]):
     micro_batch1_req_num = triton.cdiv(len(req_objs), 2)
 
-    micro_input, run_reqs, padded_req_num = padded_prepare_prefill_inputs(
-        req_objs[0:micro_batch1_req_num], is_multimodal=is_multimodal
-    )
+    micro_input, run_reqs, padded_req_num = padded_prepare_prefill_inputs(req_objs[0:micro_batch1_req_num])
 
-    micro_input1, run_reqs1, padded_req_num1 = padded_prepare_prefill_inputs(
-        req_objs[micro_batch1_req_num:], is_multimodal=is_multimodal
-    )
+    micro_input1, run_reqs1, padded_req_num1 = padded_prepare_prefill_inputs(req_objs[micro_batch1_req_num:])
 
     return micro_input, run_reqs, padded_req_num, micro_input1, run_reqs1, padded_req_num1

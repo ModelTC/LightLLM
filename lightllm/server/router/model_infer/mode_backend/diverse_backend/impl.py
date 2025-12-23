@@ -28,7 +28,7 @@ class DiversehBackend(ChunkedPrefillBackend):
         group_reqs = [g_infer_context.requests_mapping[req.req_id] for req in prefill_reqs if req.is_master_req()]
 
         model_input, group_run_reqs = prepare_prefill_inputs(
-            group_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
+            group_reqs, is_chuncked_mode=not self.disable_chunked_prefill
         )
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):

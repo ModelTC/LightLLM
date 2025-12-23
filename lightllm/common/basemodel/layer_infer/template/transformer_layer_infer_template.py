@@ -70,7 +70,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
 
-        o = self.__context_attention_wrapper_run(
+        o = self._context_attention_wrapper_run(
             q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
         )
 
@@ -116,7 +116,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
 
-        o = self.__context_attention_wrapper_run(
+        o = self._context_attention_wrapper_run(
             q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
         )
 
@@ -148,7 +148,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
-    def __context_attention_wrapper_run(
+    def _context_attention_wrapper_run(
         self, q: torch.Tensor, cache_kv: torch.Tensor, infer_state: InferStateInfo, layer_weight
     ) -> torch.Tensor:
         if torch.cuda.is_current_stream_capturing():

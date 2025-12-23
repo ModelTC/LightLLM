@@ -328,6 +328,10 @@ class TpPartBaseModel:
             mode="constant",
             value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
         )
+        new_model_input.multimodal_params = new_model_input.multimodal_params + [
+            {"images": [], "audios": []} for _ in range(padded_batch_size)
+        ]
+
         if enable_diverse_mode_gqa_decode_fast_kernel():
             if new_model_input.b_shared_seq_len is not None:
                 new_model_input.b_shared_seq_len = F.pad(
@@ -345,6 +349,7 @@ class TpPartBaseModel:
                 new_batch_size=new_batch_size,
             )
 
+        new_model_input.check_input()
         return new_model_input
 
     def _create_padded_prefill_model_input(self, model_input: ModelInput, new_handle_token_num: int):
@@ -378,7 +383,9 @@ class TpPartBaseModel:
         new_model_input.b_prefill_has_output_cpu = [e for e in new_model_input.b_prefill_has_output_cpu] + [False]
         new_model_input.prefix_total_token_num = model_input.prefix_total_token_num
 
-        # TODO 多模态的参数需要 pad 吗，需要check
+        new_model_input.multimodal_params = [e for e in new_model_input.multimodal_params] + [
+            {"images": [], "audios": []}
+        ]
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.deepseekv3_mtp_draft_input_hiddens is not None:
@@ -387,6 +394,7 @@ class TpPartBaseModel:
                 new_batch_size=new_handle_token_num,
             )
 
+        new_model_input.check_input()
         return new_model_input
 
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
@@ -827,6 +835,7 @@ class TpPartBaseModel:
                 is_prefill=True,
                 b_ready_cache_len=b_ready_cache_len,
                 b_prefill_start_loc=b_prefill_start_loc,
+                multimodal_params=[{"images": [], "audios": []}],
             )
             model_output = self.forward(
                 model_input,
@@ -903,7 +912,7 @@ class TpPartBaseModel:
                     is_prefill=True,
                     b_ready_cache_len=b_ready_cache_len,
                     b_prefill_start_loc=b_prefill_start_loc,
-                    multimodal_params=[],
+                    multimodal_params=[{"images": [], "audios": []}],
                     **self._gen_special_model_input(total_token_num),
                 )
                 model_output = self.forward(
@@ -966,7 +975,7 @@ class TpPartBaseModel:
             b_ready_cache_len=b_ready_cache_len,
             b_prefill_start_loc=b_prefill_start_loc,
             is_prefill=True,
-            multimodal_params=[],
+            multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
             **self._gen_special_model_input(total_token_num),
         )
 

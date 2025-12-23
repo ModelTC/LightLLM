@@ -36,8 +36,7 @@ class ModelInput:
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
     b_prefill_start_loc: torch.Tensor = None
-    multimodal_params: list = field(default_factory=list)
-
+    multimodal_params: list = None
     # cpu 变量
     mem_indexes_cpu: torch.Tensor = None
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
@@ -73,6 +72,12 @@ class ModelInput:
                 self.b_shared_seq_len = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
             else:
                 self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
+
+    def __post_init__(self):
+        self.check_input()
+
+    def check_input(self):
+        assert len(self.multimodal_params) == self.batch_size
 
 
 @dataclass

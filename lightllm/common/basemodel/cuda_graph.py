@@ -216,6 +216,7 @@ class CudaGraph:
                 b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
                 is_prefill=False,
+                multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                 **model._gen_special_model_input(batch_size),
             )
             model_output: ModelOutput = model.forward(model_input)
@@ -274,6 +275,7 @@ class CudaGraph:
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,
+                    multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                     **model._gen_special_model_input(batch_size),
                 )
                 decode_batches.append(micro_batch)
