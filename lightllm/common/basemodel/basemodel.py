@@ -378,7 +378,9 @@ class TpPartBaseModel:
         new_model_input.b_prefill_has_output_cpu = [e for e in new_model_input.b_prefill_has_output_cpu] + [False]
         new_model_input.prefix_total_token_num = model_input.prefix_total_token_num
 
-        # TODO 多模态的参数需要 pad 吗，需要check
+        new_model_input.multimodal_params = [e for e in new_model_input.multimodal_params] + [
+            {"images": [], "audios": []}
+        ]
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.deepseekv3_mtp_draft_input_hiddens is not None:

@@ -19,9 +19,7 @@ class ReturnPromptLogProbBackend(ChunkedPrefillBackend):
         assert self.radix_cache is None
         assert self.disable_chunked_prefill is True
 
-        model_input, run_reqs = prepare_prefill_inputs(
-            prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
-        )
+        model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
         model_output = self.model.forward(model_input)
         prompt_all_logits = model_output.logits

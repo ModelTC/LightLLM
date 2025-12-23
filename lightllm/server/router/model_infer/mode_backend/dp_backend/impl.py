@@ -141,7 +141,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         event_pack: OverlapEventPack,
         prefill_reqs: List[InferReq],
     ):
-        model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
+        model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs)
         run_reqs_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
@@ -355,7 +355,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
     def prefill_mtp(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         # main model prefill
-        model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
+        model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs)
         req_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output: ModelOutput = self.model.forward(model_input)
