@@ -51,6 +51,8 @@ class LightLLMClient:
         response = requests.post(f"{self.base_url}/v1/chat/completions", headers=self.headers, json=data, stream=True)
 
         if response.status_code == 200:
+            content_buffer = ""
+            reasoning_buffer = ""
             for line in response.iter_lines():
                 if line:
                     line = line.decode("utf-8")
@@ -60,8 +62,18 @@ class LightLLMClient:
                             break
                         try:
                             chunk = json.loads(data_str)
-                            if chunk["choices"][0]["delta"].get("content"):
-                                yield chunk["choices"][0]["delta"]["content"]
+                            delta = chunk["choices"][0]["delta"]
+
+                            # 处理内容
+                            if delta.get("content"):
+                                content_buffer += delta["content"]
+                                yield {"type": "content", "data": delta["content"]}
+
+                            # 处理推理思考
+                            if delta.get("reasoning_content"):
+                                reasoning_buffer += delta["reasoning_content"]
+                                yield {"type": "reasoning", "data": delta["reasoning_content"]}
+
                         except json.JSONDecodeError:
                             continue
         else:
@@ -173,6 +185,9 @@ class LightLLMClient:
                                 for tool_call in delta["tool_calls"]:
                                     tool_calls_buffer.append(tool_call)
                                     yield {"type": "tool_call", "data": tool_call}
+
+                            if delta.get("reasoning_content"):
+                                yield {"type": "reasoning", "data": delta["reasoning_content"]}
 
                         except json.JSONDecodeError:
                             continue
@@ -396,7 +411,10 @@ def test_stream_chat():
         print("助手: ", end="", flush=True)
 
         for chunk in client.stream_chat("请写一个关于人工智能的短文"):
-            print(chunk, end="", flush=True)
+            if chunk["type"] == "content":
+                print(chunk["data"], end="", flush=True)
+            elif chunk["type"] == "reasoning":
+                print(chunk["data"], end="", flush=True)
         print("\n")
     except Exception as e:
         print(f"错误: {e}")
@@ -439,29 +457,41 @@ def test_function_call():
     try:
         # 测试天气查询
         print("用户: 北京今天天气怎么样？")
-        result = client.function_call("北京今天天气怎么样？", tools)
+        result = client.function_call(
+            "北京今天天气怎么样？", tools, chat_template_kwargs={"enable_thinking": True}, separate_reasoning=True
+        )
         message = result["choices"][0]["message"]
+
+        if message.get("reasoning_content"):
+            print("助手思考:", message["reasoning_content"])
 
         if message.get("tool_calls"):
             print("助手决定调用函数:")
             for tool_call in message["tool_calls"]:
                 print(f"  函数名: {tool_call['function']['name']}")
                 print(f"  参数: {tool_call['function']['arguments']}")
-        else:
+
+        if message.get("content"):
             print("助手:", message["content"])
         print()
 
         # 测试数学计算
         print("用户: 请计算 25 * 4 + 10 的结果")
-        result = client.function_call("请计算 25 * 4 + 10 的结果", tools)
+        result = client.function_call(
+            "请计算 25 * 4 + 10 的结果", tools, chat_template_kwargs={"enable_thinking": True}, separate_reasoning=True
+        )
         message = result["choices"][0]["message"]
+
+        if message.get("reasoning_content"):
+            print("助手思考:", message["reasoning_content"])
 
         if message.get("tool_calls"):
             print("助手决定调用函数:")
             for tool_call in message["tool_calls"]:
                 print(f"  函数名: {tool_call['function']['name']}")
                 print(f"  参数: {tool_call['function']['arguments']}")
-        else:
+
+        if message.get("content"):
             print("助手:", message["content"])
         print()
 
@@ -495,13 +525,31 @@ def test_stream_function_call():
         print("用户: 上海今天天气怎么样？")
         print("助手: ", end="", flush=True)
 
-        for chunk in client.stream_function_call("上海今天天气怎么样？", tools):
+        first_tool_call = True
+        first_thinking = True
+
+        for chunk in client.stream_function_call(
+            "上海今天天气怎么样？",
+            tools,
+            chat_template_kwargs={"enable_thinking": True},
+            separate_reasoning=True,
+            stream_reasoning=True,
+        ):
             if chunk["type"] == "content":
                 print(chunk["data"], end="", flush=True)
             elif chunk["type"] == "tool_call":
-                print(f"\n[函数调用: {chunk['data']['function']['name']}]")
+                if first_tool_call:
+                    print("\n[助手决定调用函数]: ", end="", flush=True)
+                    first_tool_call = False
+                if chunk["data"]["function"].get("name"):
+                    print(f"\n{chunk['data']['function']['name']}")
                 if chunk["data"]["function"].get("arguments"):
-                    print(f"参数: {chunk['data']['function']['arguments']}")
+                    print(f"{chunk['data']['function']['arguments']}", end="", flush=True)
+            elif chunk["type"] == "reasoning":
+                if first_thinking:
+                    print("\n[思考内容]: ", end="", flush=True)
+                    first_thinking = False
+                print(chunk["data"], end="", flush=True)
         print("\n")
 
     except Exception as e:
@@ -701,6 +749,51 @@ def test_structured_generation():
         print(f"错误: {e}")
 
 
+def test_reasoning_parser():
+    """测试推理内容解析功能"""
+    client = LightLLMClient()
+
+    try:
+        print("=== 测试模型推理思考 ===")
+        prompt = "How many r's are in 'strawberry'?"
+
+        # 测试JSON生成
+        result = client.simple_chat(
+            prompt, max_tokens=1000, chat_template_kwargs={"enable_thinking": True}, separate_reasoning=True
+        )
+        print("提示:", prompt)
+        print("思考内容", result["choices"][0]["message"]["reasoning_content"])
+        print("助手:", result["choices"][0]["message"]["content"])
+    except Exception as e:
+        print(f"错误: {e}")
+
+    # Stream reasoning test
+    try:
+        print("=== 测试模型推理思考(流式输出接口) ===")
+        prompt = "How many r's are in 'strawberry'?"
+        print("提示:", prompt)
+        print("助手: ", end="", flush=True)
+
+        first_thinking = True
+        first_normal = True
+
+        for chunk in client.stream_chat(
+            prompt, chat_template_kwargs={"enable_thinking": True}, separate_reasoning=True, stream_reasoning=True
+        ):
+            if chunk["type"] == "content":
+                print("\n[回答]: ", end="", flush=True) if first_normal else None
+                first_normal = False
+                print(chunk["data"], end="", flush=True)
+            elif chunk["type"] == "reasoning":
+                print("\n[思考内容]: ", end="", flush=True) if first_thinking else None
+                first_thinking = False
+                print(chunk["data"], end="", flush=True)
+        print("\n")
+
+    except Exception as e:
+        print(f"错误: {e}")
+
+
 def main():
     # 基础功能测试
     test_completions()
@@ -709,6 +802,7 @@ def main():
     test_stream_chat()
     test_function_call()
     test_stream_function_call()
+    test_reasoning_parser()
 
     # 高级功能测试
     test_token_completions()

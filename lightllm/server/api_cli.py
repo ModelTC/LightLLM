@@ -133,6 +133,27 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="tool call parser type",
     )
     parser.add_argument(
+        "--reasoning_parser",
+        type=str,
+        choices=[
+            "deepseek-r1",
+            "deepseek-v3",
+            "glm45",
+            "gpt-oss",
+            "kimi",
+            "kimi_k2",
+            "qwen3",
+            "qwen3-thinking",
+            "minimax",
+            "minimax-append-think",
+            "step3",
+            "nano_v3",
+            "interns1",
+        ],
+        default=None,
+        help="reasoning parser type",
+    )
+    parser.add_argument(
         "--chat_template",
         type=str,
         default=None,

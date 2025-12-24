@@ -33,6 +33,26 @@ class StartArgs:
     tool_call_parser: Optional[str] = field(
         default=None, metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen"]}
     )
+    reasoning_parser: Optional[str] = field(
+        default=None,
+        metadata={
+            "choices": [
+                "deepseek-r1",
+                "deepseek-v3",
+                "glm45",
+                "gpt-oss",
+                "kimi",
+                "kimi_k2",
+                "qwen3",
+                "qwen3-thinking",
+                "minimax",
+                "minimax-append-think",
+                "step3",
+                "nano_v3",
+                "interns1",
+            ]
+        },
+    )
     chat_template: Optional[str] = field(default=None)
     running_max_req_size: int = field(default=1000)
     tp: int = field(default=1)
