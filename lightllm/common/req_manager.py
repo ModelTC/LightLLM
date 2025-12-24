@@ -1,8 +1,11 @@
 import torch
 import collections
+from lightllm.common.basemodel.triton_kernel.alloc_buffer_kernel import alloc_buffer_for_req_triton
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional
+from typing_extensions import override
+
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
@@ -236,3 +239,36 @@ class ReqSamplingParamsManager:
             p_token_counts_tensor.cuda(non_blocking=True),
             p_cumsum_seq_len_tensor.cuda(non_blocking=True),
         )
+
+
+class ReqManagerWithBuffer(ReqManager):
+    def __init__(self, max_request_num, max_sequence_length, mem_manager):
+        super().__init__(max_request_num, max_sequence_length, mem_manager)
+        self.req_to_buffer_index = torch.zeros((self.max_request_num + 1), dtype=torch.int32, device="cuda")
+        self.req_to_buffer_index[self.HOLD_REQUEST_ID] = self.mem_manager.HOLD_BUFFER_INDEX
+
+    @override
+    def free(self, free_req_indexes: List[int], free_token_index):
+        super().free(free_req_indexes, free_token_index)
+
+    @override
+    def free_all(self):
+        super().free_all()
+        return
+
+    def free_buffer(self, free_buffer_indexes: List[int]):
+        self.mem_manager.free_buffer(free_buffer_indexes)
+        return
+
+    def alloc_buffer_for_req(self, req_index: torch.Tensor):
+        buffer_indexes = self.mem_manager.alloc_buffer(req_index.shape[0])
+        alloc_buffer_for_req_triton(req_index, buffer_indexes, self.req_to_buffer_index)
+
+    def reset_buffer(self, req_index: torch.Tensor):
+        buffer_indexes = self.req_to_buffer_index[req_index]
+        self.mem_manager.reset_buffer(buffer_indexes)
+        return
+
+    def copy_buffer_from_another_buffer(self, src_buffer_index: int, tgt_req_index: int):
+        self.mem_manager.copy_buffer(src_buffer_index, self.req_to_buffer_index[tgt_req_index])
+        return
