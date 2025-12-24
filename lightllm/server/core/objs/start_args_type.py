@@ -154,3 +154,4 @@ class StartArgs:
 
     # kernel setting
     enable_fa3: bool = field(default=False)
+    enable_kernel_config_fallback: bool = field(default=False)

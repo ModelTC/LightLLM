@@ -354,6 +354,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""inference backend will use the fa3 attention kernel for prefill and decode""",
     )
     parser.add_argument(
+        "--enable_kernel_config_fallback",
+        action="store_true",
+        help="""Whether to enable kernel config fallback when triton version is not compatible.""",
+    )
+    parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )
     parser.add_argument(
