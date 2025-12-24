@@ -112,10 +112,10 @@ class TpPartBaseModel:
         self._init_some_value()
         self._init_custom()
         self._init_inferstate_cls()
-        self._autotune_warmup()
-        self._init_padded_req()
         # wait必须在init cudagraph 之前，避免错误捕获
         self._wait_other_modules_ready()
+        self._autotune_warmup()
+        self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
         self._check_max_len_infer()
