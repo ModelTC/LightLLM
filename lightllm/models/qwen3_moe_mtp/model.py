@@ -64,8 +64,8 @@ class Qwen3MOEMTPModel(Qwen3MOEModel):
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
-        self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
-        self.pre_post_weight.final_norm_weight_ = self.main_model.pre_post_weight.final_norm_weight_
+        # self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
+        # self.pre_post_weight.final_norm_weight_ = self.main_model.pre_post_weight.final_norm_weight_
         return
 
     def _init_infer_layer(self):

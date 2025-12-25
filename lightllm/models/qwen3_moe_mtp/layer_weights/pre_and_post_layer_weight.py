@@ -11,12 +11,20 @@ class Qwen3MOEMTPPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
         return
 
     def load_hf_weights(self, weights):
+        vob_size = self.network_config_["vocab_size"]
+        split_indexes = np.linspace(0, vob_size, self.tp_world_size_ + 1, dtype=np.int64)
+        split_start = split_indexes[self.tp_rank_]
+        split_end = split_indexes[self.tp_rank_ + 1]
         if "model.layers.0.proj.weight" in weights:
             self.eh_proj_weight_ = self._cuda(weights["model.layers.0.proj.weight"]).t()
         if "model.layers.0.norm_after_embedding.weight" in weights:
             self.enorm_weight_ = self._cuda(weights["model.layers.0.norm_after_embedding.weight"])
         if "model.layers.0.norm_before_output.weight" in weights:
             self.hnorm_weight_ = self._cuda(weights["model.layers.0.norm_before_output.weight"])
+        if "lm_head.weight" in weights:
+            self.lm_head_weight_ = self._cuda(weights["lm_head.weight"][split_start:split_end, :])
+        if "model.norm.weight" in weights:
+            self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
         return
 
     def verify_load(self):
