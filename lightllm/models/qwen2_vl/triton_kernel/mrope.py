@@ -85,6 +85,7 @@ def _mrope_triton_fused_kernel(
     stride_kh,
     stride_kd,
     is_interleaved: tl.constexpr,
+    is_glm4v: tl.constexpr,
     HEAD_Q: tl.constexpr,
     HEAD_K: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -94,6 +95,10 @@ def _mrope_triton_fused_kernel(
 
     dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)
     dim_range1 = dim_range0 + BLOCK_DMODEL // 2
+
+    if is_glm4v:
+        dim_range0 = dim_range0 * 2
+        dim_range1 = dim_range0 + 1
 
     t_cos = Cos + seq_index * stride_cosd
     h_cos = Cos + stride_cosld + seq_index * stride_cosd
@@ -192,11 +197,13 @@ def mrope_triton_fused(
     cos: torch.Tensor,
     sin: torch.Tensor,
     mrope_section: torch.Tensor,
-    is_interleaved: bool,
+    partial_rotary_factor: float = 1.0,
+    is_interleaved: bool = False,
+    is_glm4v: bool = False,
     run_config: Optional[dict] = None,
 ):
     head_num_q, head_num_k = q.shape[1], k.shape[1]
-    head_dim = int(q.shape[2])
+    head_dim = int(q.shape[2] * partial_rotary_factor)
     num_tokens = q.shape[0]
 
     if not run_config:
@@ -228,6 +235,7 @@ def mrope_triton_fused(
         stride_kh=k.stride(1),
         stride_kd=k.stride(2),
         is_interleaved=is_interleaved,
+        is_glm4v=is_glm4v,
         HEAD_Q=head_num_q,
         HEAD_K=head_num_k,
         BLOCK_DMODEL=head_dim,
