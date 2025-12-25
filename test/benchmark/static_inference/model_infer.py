@@ -90,7 +90,7 @@ def overlap_prefill(
         b_seq_len=_0_b_seq_len,
         is_prefill=True,
         b_ready_cache_len=_o_b_ready_cache_len,
-        multimodal_params={},
+        multimodal_params=[{"images": [], "audios": []} for _ in range(_0_batch_size)],
         mem_indexes_cpu=_0_mem_indexes,
     )
 
@@ -114,7 +114,7 @@ def overlap_prefill(
         b_seq_len=_1_b_seq_len,
         is_prefill=True,
         b_ready_cache_len=_1_b_ready_cache_len,
-        multimodal_params={},
+        multimodal_params=[{"images": [], "audios": []} for _ in range(_1_batch_size)],
         mem_indexes_cpu=_1_mem_indexes,
     )
 
@@ -144,6 +144,7 @@ def overlap_decode(
         b_mtp_index=_0_b_mtp_index,
         b_seq_len=_0_b_seq_len,
         mem_indexes_cpu=_0_mem_indexes,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(_0_batch_size)],
     )
 
     _1_batch_size = batch_size - batch_size // 2
@@ -164,6 +165,7 @@ def overlap_decode(
         b_mtp_index=_1_b_mtp_index,
         b_seq_len=_1_b_seq_len,
         mem_indexes_cpu=_1_mem_indexes,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(_1_batch_size)],
     )
 
     output, output1 = model_part.microbatch_overlap_decode(micro_batch1, micro_batch2)
@@ -202,6 +204,7 @@ def prefill(
         b_ready_cache_len=b_ready_cache_len,  # b_ready_cache_len
         b_prefill_start_loc=b_prefill_start_loc,
         prefix_total_token_num=0,  # the default kvcache len is zero.
+        multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
     )
 
     model_output = model_part.forward(model_input)
@@ -223,6 +226,7 @@ def decode(
         b_mtp_index=b_mtp_index,
         mem_indexes_cpu=mem_indexes,
         is_prefill=False,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
     )
     model_output = model_part.forward(model_input)
     return model_output.logits

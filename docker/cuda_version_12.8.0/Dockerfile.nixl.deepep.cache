@@ -110,7 +110,7 @@ RUN apt-get update && apt-get install -y cmake automake autotools-dev  libtool l
 RUN apt-get update && apt-get install -y  pkg-config tmux net-tools libaio-dev ;  \
     cd /usr/local/src; \
     pip install --upgrade meson pybind11 patchelf; \
-    git clone https://github.com/ai-dynamo/nixl.git -b main && \
+    git clone https://github.com/ai-dynamo/nixl.git -b 0.8.0 && \
     cd nixl && \
     rm -rf build && \
     mkdir build && \

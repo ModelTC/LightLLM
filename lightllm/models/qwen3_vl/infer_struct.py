@@ -7,4 +7,4 @@ class Qwen3VLInferStateInfo(Qwen2VLInferStateInfo):
         self.input_ids = None
         self.img_start_token_ids = None
         self.img_token_lens = None
-        self.img_start_locs = None
+        self.img_start_locs_in_cache = None

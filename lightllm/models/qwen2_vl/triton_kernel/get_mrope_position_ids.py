@@ -94,6 +94,7 @@ def get_mrope_position_triton(
 ) -> torch.Tensor:
 
     batch_size = b_q_seq_len.shape[0]
+    assert batch_size == b_image_nums.shape[0]
     grid = (batch_size,)
     BLOCK_SIZE = 64
     _get_mrope_position_triton[grid](

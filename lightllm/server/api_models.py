@@ -73,7 +73,7 @@ class CompletionRequest(BaseModel):
     # prompt: string or tokens
     prompt: Union[str, List[str], List[int], List[List[int]]]
     suffix: Optional[str] = None
-    max_tokens: Optional[int] = 16
+    max_tokens: Optional[int] = 8192
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -145,7 +145,7 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     stop: Optional[Union[str, List[str]]] = None
-    max_tokens: Optional[int] = 16
+    max_tokens: Optional[int] = 8192
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
@@ -166,6 +166,11 @@ class ChatCompletionRequest(BaseModel):
     )  # noqa
     parallel_tool_calls: Optional[bool] = True
 
+    # OpenAI parameters for reasoning and others
+    chat_template_kwargs: Optional[Dict] = None
+    separate_reasoning: Optional[bool] = True
+    stream_reasoning: Optional[bool] = False
+
     # Additional parameters supported by LightLLM
     do_sample: Optional[bool] = True
     top_k: Optional[int] = -1
@@ -173,7 +178,6 @@ class ChatCompletionRequest(BaseModel):
     ignore_eos: Optional[bool] = False
     role_settings: Optional[Dict[str, str]] = None
     character_settings: Optional[List[Dict[str, str]]] = None
-    chat_template_kwargs: Optional[Dict[str, bool]] = None
 
     # Class variables to store loaded default values
     _loaded_defaults: ClassVar[Dict[str, Any]] = {}
@@ -255,8 +259,9 @@ class UsageInfo(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    role: str
-    content: str
+    role: Optional[str] = None
+    content: Optional[str] = None
+    reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
 
@@ -283,6 +288,7 @@ class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+    reasoning_content: Optional[str] = None
 
 
 class ChatCompletionStreamResponseChoice(BaseModel):
