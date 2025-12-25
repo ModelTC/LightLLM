@@ -608,4 +608,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
+    parser.add_argument(
+        "--enable_return_topk_logprobs",
+        action="store_true",
+        default=False,
+        help="""Enable return topk_logprobs from server. disabled by default.""",
+    )
     return parser

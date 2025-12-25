@@ -154,3 +154,5 @@ class StartArgs:
 
     # kernel setting
     enable_fa3: bool = field(default=False)
+
+    enable_return_topk_logprobs: bool = field(default=False)
