@@ -29,6 +29,7 @@ from ..models.llava.model import LlavaTokenizer
 from ..models.qwen_vl.model import QWenVLTokenizer
 from ..models.qwen2_vl.model import QWen2VLTokenizer
 from ..models.qwen3_vl.model import QWen3VLTokenizer
+from ..models.glm4v.model import GLM4VTokenizer
 from ..models.internvl.model import InternvlTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
 
@@ -104,5 +105,10 @@ def get_tokenizer(
         tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
     elif model_type == "gemma3":
         tokenizer = Gemma3Tokenizer(tokenizer, model_cfg)
+    elif model_type == "glm4v":
+        from transformers import AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(tokenizer_name)
+        tokenizer = GLM4VTokenizer(tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg)
 
     return tokenizer
