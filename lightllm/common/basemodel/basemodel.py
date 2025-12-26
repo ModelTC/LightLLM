@@ -476,6 +476,24 @@ class TpPartBaseModel:
                 )
 
         infer_state = self._create_inferstate(model_input)
+
+        # Capture old indexer_ks positions before they are overwritten
+        # This is needed for DeepSeek v3.2 to copy cached tokens' indexer_ks
+        old_indexer_ks_positions = []
+        for i in range(infer_state.b_req_idx.shape[0]):
+            req_idx = infer_state.b_req_idx[i].item()
+            ready_cache_len = infer_state.b_ready_cache_len[i].item()
+
+            if ready_cache_len > 0:
+                # Capture old positions for cached tokens
+                old_pos = self.req_manager.req_to_token_indexs[
+                    req_idx, 0:ready_cache_len
+                ].clone()  # Clone to avoid view issues
+                old_indexer_ks_positions.append(old_pos)
+            else:
+                # No cached tokens for this request
+                old_indexer_ks_positions.append(None)
+
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
@@ -484,6 +502,8 @@ class TpPartBaseModel:
             b_start_loc=model_input.b_prefill_start_loc,
             alloc_mem_index=infer_state.mem_index,
             max_q_seq_len=infer_state.max_q_seq_len,
+            mem_manager=self.req_manager.mem_manager,
+            old_indexer_ks_positions=old_indexer_ks_positions,
         )
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
