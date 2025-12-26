@@ -38,4 +38,5 @@ from lightllm.models.tarsier2.model import (
     Tarsier2LlamaTpPartModel,
 )
 from lightllm.models.gpt_oss.model import GptOssTpPartModel
+from lightllm.models.neo_chat.model import NeoTpPartModel
 from .registry import get_model, get_model_class
