@@ -16,6 +16,7 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+
 class NSAIndexerInfer(BaseLayerInfer):
     def __init__(self, layer_idx, network_config, mode=[]):
         super().__init__()
@@ -38,13 +39,20 @@ class NSAIndexerInfer(BaseLayerInfer):
 
         return
 
-    def ref_fp8_mqa_logits(self, q: torch.Tensor, kv: torch.Tensor, weights: torch.Tensor,
-                        cu_seqlen_ks: torch.Tensor, cu_seqlen_ke: torch.Tensor, cost_only: bool = False):
+    def ref_fp8_mqa_logits(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        weights: torch.Tensor,
+        cu_seqlen_ks: torch.Tensor,
+        cu_seqlen_ke: torch.Tensor,
+        cost_only: bool = False,
+    ):
         seq_len_kv = kv.shape[0]
 
         if cost_only:
             start = cu_seqlen_ks.clamp(min=0, max=seq_len_kv)
-            end   = cu_seqlen_ke.clamp(min=0, max=seq_len_kv)
+            end = cu_seqlen_ke.clamp(min=0, max=seq_len_kv)
             count_ones_per_row = (end - start).clamp(min=0)
             return count_ones_per_row.sum()
 
@@ -52,29 +60,31 @@ class NSAIndexerInfer(BaseLayerInfer):
         q = q.float()
         k = k.float()
 
-        mask_lo = torch.arange(0, seq_len_kv, device='cuda')[None, :] >= cu_seqlen_ks[:, None]
-        mask_hi = torch.arange(0, seq_len_kv, device='cuda')[None, :] < cu_seqlen_ke[:, None]
+        mask_lo = torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+        mask_hi = torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
         mask = mask_lo & mask_hi
 
-        score = torch.einsum('mhd,nd->hmn', q, k)
+        score = torch.einsum("mhd,nd->hmn", q, k)
         logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
-        logits = logits.masked_fill(~mask, float('-inf'))
+        logits = logits.masked_fill(~mask, float("-inf"))
 
         cost = mask.sum()
         return logits, cost
 
-    def get_indices(self, hidden_states: torch.Tensor, q_lora: torch.Tensor,
-                    infer_state: Deepseek3_2FlashAttentionStateInfo, layer_weight: NSAIndexerWeight) -> torch.Tensor:
+    def get_indices(
+        self,
+        hidden_states: torch.Tensor,
+        q_lora: torch.Tensor,
+        infer_state: Deepseek3_2FlashAttentionStateInfo,
+        layer_weight: NSAIndexerWeight,
+    ) -> torch.Tensor:
 
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
         destindex_copy_indexer_ks(
-            k_fp8, 
-            k_scale, 
-            infer_state.mem_index,
-            infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_]
+            k_fp8, k_scale, infer_state.mem_index, infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_]
         )
 
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
@@ -87,20 +97,30 @@ class NSAIndexerInfer(BaseLayerInfer):
 
         # Use efficient Triton kernel to extract FP8 keys and scales from buffer
         k_fp8_, k_scale_ = extract_indexer_ks(
-            infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_],
-            infer_state.req_all_mem_index
+            infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_], infer_state.req_all_mem_index
         )
 
-        logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke) 
-        
+        # Get actual sequence length from q (which comes from q_lora)
+        # This may differ from ks.shape[0] during certain operations
+        actual_seq_len = q.shape[0]
+
+        # ks, ke, lengths, and weights should all match actual_seq_len
+        # Slice them if they don't match
+        if ks.shape[0] != actual_seq_len:
+            ks = ks[:actual_seq_len]
+            ke = ke[:actual_seq_len]
+            lengths = lengths[:actual_seq_len]
+            weights = weights[:actual_seq_len]
+
+        logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke)
+
         return fast_topk_transform_fused(
-            score=logits, 
-            lengths=lengths, 
-            page_table_size_1=page_table_1, 
-            cu_seqlens_q=infer_state.cu_seqlens_q, 
+            score=logits,
+            lengths=lengths,
+            page_table_size_1=page_table_1,
+            cu_seqlens_q=infer_state.cu_seqlens_q,
             topk=self.index_topk,
         )
-
 
     @staticmethod
     def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
@@ -108,13 +128,16 @@ class NSAIndexerInfer(BaseLayerInfer):
         from sgl_kernel import hadamard_transform
 
         hidden_size = x.size(-1)
-        assert (
-            hidden_size & (hidden_size - 1)
-        ) == 0, "Hidden size must be a power of 2 for Hadamard transform."
-        return hadamard_transform(x, scale=hidden_size**-0.5)
+        assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."
+        return hadamard_transform(x, scale=hidden_size ** -0.5)
 
-    def _get_q_k_bf16(self, hidden_states: torch.Tensor, q_lora: torch.Tensor,
-                     infer_state: Deepseek3_2FlashAttentionStateInfo, layer_weight: NSAIndexerWeight):
+    def _get_q_k_bf16(
+        self,
+        hidden_states: torch.Tensor,
+        q_lora: torch.Tensor,
+        infer_state: Deepseek3_2FlashAttentionStateInfo,
+        layer_weight: NSAIndexerWeight,
+    ):
         q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
         k = layer_weight.wk_proj_.mm(hidden_states)
 
@@ -123,11 +146,13 @@ class NSAIndexerInfer(BaseLayerInfer):
             k.float(), (self.index_head_dim,), layer_weight.k_norm_.weight, layer_weight.k_norm_.bias, self.eps
         ).type_as(k)
 
+        # Slice position_cos and position_sin to match actual token length
+        actual_seq_len = q.shape[0]
         rotary_emb_fwd(
             q[:, :, : self.qk_rope_head_dim],
             k[:, None, : self.qk_rope_head_dim],
-            infer_state.position_cos,
-            infer_state.position_sin,
+            infer_state.position_cos[:actual_seq_len],
+            infer_state.position_sin[:actual_seq_len],
         )
 
         q = self._rotate_activation(q)
