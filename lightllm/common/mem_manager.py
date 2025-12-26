@@ -19,7 +19,9 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, is_sub_mem_manager=False):
+    def __init__(
+        self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, is_sub_mem_manager=False
+    ):
         self.size = size
         self.head_num = head_num
         self.head_dim = head_dim
@@ -72,6 +74,17 @@ class MemoryManager:
         available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         self.size = int(available_memory * 1024 ** 3 / cell_size)
+
+        # Ensure size is at least a minimum positive value to avoid torch.arange errors
+        MIN_SIZE = 1024  # Minimum 1024 tokens
+        if self.size < MIN_SIZE:
+            logger.warning(
+                f"Insufficient memory for KV cache. Available: {available_memory:.2f} GB, "
+                f"but calculated size is {self.size} tokens. Using minimum size {MIN_SIZE} tokens instead. "
+                f"Consider reducing model size, using fewer GPUs, or increasing mem_fraction."
+            )
+            self.size = MIN_SIZE
+
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
             dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
@@ -94,7 +107,7 @@ class MemoryManager:
         """
         pd 分离模式使用的特殊接口
         """
-        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
         self.kv_move_buffer = torch.empty(
             (1, max_req_total_len + 8, 2 * self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
@@ -104,7 +117,7 @@ class MemoryManager:
         return
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        if isinstance(self, MemoryManager) and type(self) != MemoryManager:
+        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
             raise NotImplementedError("subclass need reimpl this method")
 
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
