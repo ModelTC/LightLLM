@@ -15,6 +15,7 @@ from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
+from lightllm.common.basemodel.cache_ops import has_prefill_hooks
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
@@ -445,6 +446,18 @@ class TpPartBaseModel:
                 )
 
         infer_state = self._create_inferstate(model_input)
+
+        # Hook: Capture state for models with custom buffers
+        # This allows models like DeepSeek V3.2 to capture positions before
+        # KV cache reorganization, enabling proper auxiliary buffer sync
+        captured_prefill_state = None
+        if has_prefill_hooks(self):
+            captured_prefill_state = self.capture_prefill_state(
+                req_to_token_indexs=self.req_manager.req_to_token_indexs,
+                b_req_idx=infer_state.b_req_idx,
+                b_ready_cache_len=infer_state.b_ready_cache_len,
+            )
+
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
@@ -453,7 +466,19 @@ class TpPartBaseModel:
             b_start_loc=model_input.b_prefill_start_loc,
             alloc_mem_index=infer_state.mem_index,
             max_q_seq_len=infer_state.max_q_seq_len,
+            mem_manager=self.req_manager.mem_manager,
         )
+
+        # Hook: Synchronize model-specific buffers after KV cache update
+        # Models with auxiliary buffers (e.g., DeepSeek V3.2's indexer_ks)
+        # can copy cached data to new positions to maintain consistency
+        if has_prefill_hooks(self) and captured_prefill_state is not None:
+            self.sync_prefill_buffers(
+                captured_state=captured_prefill_state,
+                req_to_token_indexs=self.req_manager.req_to_token_indexs,
+                b_req_idx=infer_state.b_req_idx,
+                b_ready_cache_len=infer_state.b_ready_cache_len,
+            )
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 

@@ -67,9 +67,6 @@ class FusedMoeWeightEP(BaseWeight):
         self.global_rank_ = get_global_rank()
         self.redundancy_expert_num = get_redundancy_expert_num()
         self.redundancy_expert_ids = get_redundancy_expert_ids(layer_num)
-        logger.info(
-            f"global_rank {self.global_rank_} layerindex {layer_num} redundancy_expertids: {self.redundancy_expert_ids}"
-        )
         self.redundancy_expert_ids_tensor = torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cuda")
         self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
         self.total_expert_num_contain_redundancy = (
