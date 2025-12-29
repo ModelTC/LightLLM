@@ -24,7 +24,7 @@ headers = {"Content-Type": "application/json"}
 
 for i in range(1):
     data = {
-        "inputs": "San Francisco is a",
+        "inputs": "San Francisco is a" * 20,
         # 'temperature': 0.1,
         "parameters": {
             "do_sample": False,
@@ -37,7 +37,7 @@ time.sleep(2)
 
 for i in range(20):
     data = {
-        "inputs": "San Francisco is a",
+        "inputs": "San Francisco is a" * 20,
         "parameters": {
             "do_sample": False,
             "ignore_eos": True,
