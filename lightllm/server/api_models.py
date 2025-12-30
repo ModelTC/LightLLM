@@ -68,6 +68,46 @@ class ResponseFormat(BaseModel):
     json_schema: Optional[JsonSchemaResponseFormat] = None
 
 
+class FunctionResponse(BaseModel):
+    """Function response."""
+
+    name: Optional[str] = None
+    arguments: Optional[str] = None
+
+
+class ToolCall(BaseModel):
+    """Tool call response."""
+
+    id: Optional[str] = None
+    index: Optional[int] = None
+    type: Literal["function"] = "function"
+    function: FunctionResponse
+
+
+class ChatCompletionMessageGenericParam(BaseModel):
+    role: Literal["system", "assistant", "tool", "function"]
+    content: Union[str, List[MessageContent], None] = Field(default=None)
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _normalize_role(cls, v):
+        if isinstance(v, str):
+            v_lower = v.lower()
+            if v_lower not in {"system", "assistant", "tool", "function"}:
+                raise ValueError(
+                    "'role' must be one of 'system', 'assistant', 'tool', or 'function' (case-insensitive)."
+                )
+            return v_lower
+        raise ValueError("'role' must be a string")
+
+
+ChatCompletionMessageParam = Union[ChatCompletionMessageGenericParam, Message]
+
+
 class CompletionRequest(BaseModel):
     model: str
     # prompt: string or tokens
@@ -137,7 +177,7 @@ class CompletionRequest(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: List[Message]
+    messages: List[ChatCompletionMessageParam]
     function_call: Optional[str] = "none"
     temperature: Optional[float] = 1
     top_p: Optional[float] = 1.0
@@ -210,46 +250,6 @@ class ChatCompletionRequest(BaseModel):
                 if key not in data:
                     data[key] = value
         return data
-
-
-class FunctionResponse(BaseModel):
-    """Function response."""
-
-    name: Optional[str] = None
-    arguments: Optional[str] = None
-
-
-class ToolCall(BaseModel):
-    """Tool call response."""
-
-    id: Optional[str] = None
-    index: Optional[int] = None
-    type: Literal["function"] = "function"
-    function: FunctionResponse
-
-
-class ChatCompletionMessageGenericParam(BaseModel):
-    role: Literal["system", "assistant", "tool", "function"]
-    content: Union[str, List[MessageContent], None] = Field(default=None)
-    tool_call_id: Optional[str] = None
-    name: Optional[str] = None
-    reasoning_content: Optional[str] = None
-    tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
-
-    @field_validator("role", mode="before")
-    @classmethod
-    def _normalize_role(cls, v):
-        if isinstance(v, str):
-            v_lower = v.lower()
-            if v_lower not in {"system", "assistant", "tool", "function"}:
-                raise ValueError(
-                    "'role' must be one of 'system', 'assistant', 'tool', or 'function' (case-insensitive)."
-                )
-            return v_lower
-        raise ValueError("'role' must be a string")
-
-
-ChatCompletionMessageParam = Union[ChatCompletionMessageGenericParam, Message]
 
 
 class UsageInfo(BaseModel):
