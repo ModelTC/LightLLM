@@ -1,4 +1,3 @@
-import numpy as np
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 
 
@@ -11,13 +10,12 @@ class MistralMTPPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
         return
 
     def load_hf_weights(self, weights):
-        rename_weights(weights)
-        if "model.eh_proj.weight" in weights:
-            self.eh_proj_weight_ = self._cuda(weights["model.eh_proj.weight"]).t()
-        if "model.enorm.weight" in weights:
-            self.enorm_weight_ = self._cuda(weights["model.enorm.weight"])
-        if "model.hnorm.weight" in weights:
-            self.hnorm_weight_ = self._cuda(weights["model.hnorm.weight"])
+        if "mtp.eh_proj.weight" in weights:
+            self.eh_proj_weight_ = self._cuda(weights["mtp.eh_proj.weight"]).t()
+        if "mtp.enorm.weight" in weights:
+            self.enorm_weight_ = self._cuda(weights["mtp.enorm.weight"])
+        if "mtp.hnorm.weight" in weights:
+            self.hnorm_weight_ = self._cuda(weights["mtp.hnorm.weight"])
         return
 
     def verify_load(self):
@@ -26,11 +24,3 @@ class MistralMTPPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
         for i in range(len(weights)):
             assert weights[i] is not None, "index:" + str(i) + " " + errors
         return
-
-
-def rename_weights(weights):
-    all_keys = list(weights.keys())
-    for key in all_keys:
-        if key.startswith("mtp."):
-            weights[key.replace("mtp.", "model.")] = weights.pop(key)
-    return weights
