@@ -3,6 +3,7 @@ from lightllm.models.qwen2.layer_weights.pre_and_post_layer_weight import Qwen2P
 from lightllm.models.qwen2.layer_weights.transformer_layer_weight import Qwen2TransformerLayerWeight
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 @ModelRegistry("qwen2")
@@ -41,12 +42,20 @@ class Qwen2TpPartModel(LlamaTpPartModel):
         head_dim_ = self.config["hidden_size"] // self.config["num_attention_heads"]
         head_dim_ = self.config.get("head_dim", head_dim_)
         tp_k_head_num_ = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
+
+        # mtp 模式下需要在mem manger上扩展draft model使用的layer
+        added_mtp_layer_num = 0
+        if get_env_start_args().mtp_mode == "deepseekv3_eagle":
+            added_mtp_layer_num += 1
+        elif get_env_start_args().mtp_mode == "deepseekv3_vanilla":
+            added_mtp_layer_num += get_env_start_args().mtp_step
+
         self.mem_manager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=tp_k_head_num_,
             head_dim=head_dim_,
-            layer_num=self.config["num_hidden_layers"],
+            layer_num=self.config["num_hidden_layers"] + added_mtp_layer_num,
             mem_fraction=self.mem_fraction,
         )
         return
