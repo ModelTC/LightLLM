@@ -241,34 +241,49 @@ class ReqSamplingParamsManager:
         )
 
 
-class ReqManagerWithBuffer(ReqManager):
+class ReqManagerForMamba(ReqManager):
     def __init__(self, max_request_num, max_sequence_length, mem_manager):
+        from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
+
         super().__init__(max_request_num, max_sequence_length, mem_manager)
-        self.req_to_buffer_index = torch.zeros((self.max_request_num + 1), dtype=torch.int32, device="cuda")
-        self.req_to_buffer_index[self.HOLD_REQUEST_ID] = self.mem_manager.HOLD_BUFFER_INDEX
-
-    @override
-    def free(self, free_req_indexes: List[int], free_token_index):
-        super().free(free_req_indexes, free_token_index)
-
-    @override
-    def free_all(self):
-        super().free_all()
-        return
+        self.mtp_step = get_env_start_args().mtp_step
+        self.buffer_mem_manager: MambaCacheManager = self.mem_manager.mamba_cache_mem_manager
+        self.req_to_buffer_index = torch.zeros(
+            (self.max_request_num + 1, self.mtp_step + 1), dtype=torch.int32, device="cuda"
+        )
+        self.req_to_buffer_index[self.HOLD_REQUEST_ID, :] = self.buffer_mem_manager.HOLD_BUFFER_INDEX
 
     def free_buffer(self, free_buffer_indexes: List[int]):
-        self.mem_manager.free_buffer(free_buffer_indexes)
+        self.buffer_mem_manager.free(free_buffer_indexes)
         return
 
     def alloc_buffer_for_req(self, req_index: torch.Tensor):
-        buffer_indexes = self.mem_manager.alloc_buffer(req_index.shape[0])
-        alloc_buffer_for_req_triton(req_index, buffer_indexes, self.req_to_buffer_index)
+        num_reqs = req_index.shape[0]
+        num_buffers_per_req = self.mtp_step + 1
+        buffer_indexes = self.buffer_mem_manager.alloc(num_reqs * num_buffers_per_req)
+        alloc_buffer_for_req_triton(req_index, buffer_indexes, self.req_to_buffer_index, self.mtp_step)
 
-    def reset_buffer(self, req_index: torch.Tensor):
-        buffer_indexes = self.req_to_buffer_index[req_index]
-        self.mem_manager.reset_buffer(buffer_indexes)
+    def copy_buffer_from_another_buffer(self, src_buffer_index: torch.Tensor, tgt_req_index: torch.Tensor):
+        self.buffer_mem_manager.copy_buffer_p2p(src_buffer_index, self.req_to_buffer_index[tgt_req_index, 0])
         return
 
-    def copy_buffer_from_another_buffer(self, src_buffer_index: int, tgt_req_index: int):
-        self.mem_manager.copy_buffer(src_buffer_index, self.req_to_buffer_index[tgt_req_index])
+    def broadcast_buffer_for_mtp(
+        self, b_req_idx: torch.Tensor, mtp_accept_len: torch.Tensor, b_req_mtp_start_loc: torch.Tensor
+    ):
+        num_reqs = mtp_accept_len.shape[0]
+        if num_reqs == 0:
+            return
+
+        if torch.all(mtp_accept_len == 1):
+            return
+
+        actual_req_idxes = b_req_idx[b_req_mtp_start_loc]
+        src_buffer_indexes = self.req_to_buffer_index[actual_req_idxes, mtp_accept_len - 1]
+        mtp_range = torch.arange(1, self.mtp_step + 1, dtype=torch.int32, device="cuda")
+        all_mtp_buffers = self.req_to_buffer_index[actual_req_idxes[:, None], mtp_range[None, :]]
+        mask = mtp_range[None, :] != mtp_accept_len[:, None]
+        dst_buffer_indexes = torch.where(
+            mask, all_mtp_buffers, self.buffer_mem_manager.HOLD_BUFFER_INDEX  # scalar, broadcasts automatically
+        )
+        self.buffer_mem_manager.copy_buffer_broadcast(src_buffer_indexes, dst_buffer_indexes)
         return

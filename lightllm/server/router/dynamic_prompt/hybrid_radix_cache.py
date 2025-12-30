@@ -4,39 +4,22 @@ import torch
 from sortedcontainers import SortedSet
 
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
-from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
+from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
-class HybridMemManager(MemoryManager):
-    def alloc_buffer(self, need_size):
-        ...
-
-    def free_buffer(self, free_buffer_indexes):
-        ...
-
-    def get_buffer(self, layer_index):
-        ...
-
-    def get_buffer_can_use_size(self):
-        ...
-
-    def copy_buffer(self, src_idx, tgt_idx):
-        ...
-
-
 class HybridRadixCache(RadixCache):
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
-        self.mem_manager: HybridMemManager = mem_manager
-        super().__init__(unique_name, total_token_num, rank_in_node, mem_manager)
-        # 用于缓存需要被驱逐的buffer节点， 应该包含所有有buffer的节点
+    def __init__(self, unique_name, total_token_num, rank_in_node, kv_cache_mem_manager):
+        super().__init__(unique_name, total_token_num, rank_in_node, kv_cache_mem_manager)
+        assert hasattr(kv_cache_mem_manager, "mamba_cache_mem_manager")
+        self.buffer_mem_manager: MambaCacheManager = kv_cache_mem_manager.mamba_cache_mem_manager
         self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: (x.hit_count,))
 
     def free_radix_cache_to_get_enough_buffer(self, need_buffer_num):
-        if need_buffer_num > self.mem_manager.get_buffer_can_use_size():
-            need_evict_buffer_num = need_buffer_num - self.mem_manager.get_buffer_can_use_size()
+        if need_buffer_num > self.buffer_mem_manager.can_use_mem_size:
+            need_evict_buffer_num = need_buffer_num - self.buffer_mem_manager.can_use_mem_size
 
             release_mems = []
 
@@ -51,7 +34,7 @@ class HybridRadixCache(RadixCache):
                 return
 
             self._evict_buffer(need_evict_buffer_num, release_buffer, release_mem)
-            self.mem_manager.free_buffer(release_buffers)
+            self.buffer_mem_manager.free(release_buffers)
             if len(release_mems) > 0:
                 mem_index = torch.concat(release_mems)
                 self.mem_manager.free(mem_index)
@@ -85,17 +68,16 @@ class HybridRadixCache(RadixCache):
             return
 
         self.free_radix_cache_to_get_enough_buffer(len(reqs_to_insert))
-        new_buffer_indexes = self.mem_manager.alloc_buffer(len(reqs_to_insert))
+        req_idxes = torch.tensor([req.req_idx for req in reqs_to_insert], dtype=torch.int64, device="cuda")
+        req_to_buffer_index = g_infer_context.req_manager.req_to_buffer_index
+        cur_buffer_indexes = req_to_buffer_index[req_idxes, 0]
+        new_buffer_indexes = self.buffer_mem_manager.alloc(len(reqs_to_insert))
+        self.buffer_mem_manager.copy_buffer_p2p(cur_buffer_indexes, new_buffer_indexes.cuda())
 
         for i, req in enumerate(reqs_to_insert):
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = g_infer_context.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-            cur_buffer_idx = g_infer_context.req_manager.req_to_buffer_index[req.req_idx]
-
-            # 分配新的 buffer 并复制当前 buffer 的内容
-            self.mem_manager.copy_buffer(cur_buffer_idx, new_buffer_indexes[i])
-
             prefix_len, new_shared_kv_node = super().insert(key, value)
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             self.dec_node_ref_counter(req.shared_kv_node)
@@ -105,8 +87,9 @@ class HybridRadixCache(RadixCache):
                 init_hit_count = 5
                 req.mamba_buffer_insert_len = 0
             self.set_buffer_idx_to_node(new_shared_kv_node, new_buffer_indexes[i].item(), init_hit_count)
+            # 由于在请求未结束时插入 radix cache， 所以需要额外维护需要释放的token index
             req.extra_need_to_free_token_index.append(
-                g_infer_context.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+                g_infer_context.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len].cpu()
             )
             req.shared_kv_node = new_shared_kv_node
 
@@ -114,7 +97,7 @@ class HybridRadixCache(RadixCache):
         assert len(key) != 0
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
-        miss_ans_len = 0
+        miss_prefix_len = 0
         evict_token_list = []
         while tree_node != self.root_node and tree_node.buffer_idx is None:
             if tree_node.is_leaf():
@@ -136,7 +119,7 @@ class HybridRadixCache(RadixCache):
                 if tree_node.is_leaf():
                     self.evict_tree_set.add(tree_node)
                 tree_node = tree_node.parent
-            miss_ans_len += len(ans_value_list.pop())
+            miss_prefix_len += len(ans_value_list.pop())
 
         if len(evict_token_list) > 0:
             evict_token_value = torch.concat(evict_token_list)
@@ -144,7 +127,7 @@ class HybridRadixCache(RadixCache):
 
         if tree_node == self.root_node:
             self._inc_hit_rate(len(key), 0)
-            return None, miss_ans_len, None
+            return None, miss_prefix_len, None
 
         update_node = tree_node
         while update_node != self.root_node:
@@ -156,7 +139,7 @@ class HybridRadixCache(RadixCache):
 
         value = torch.concat(ans_value_list)
         self._inc_hit_rate(len(key), len(value))
-        return tree_node, miss_ans_len, value
+        return tree_node, miss_prefix_len, value
 
     def set_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int, init_hit_count: int = 1):
         """Set buffer_idx for a node and add it to evict_buffer_set."""
@@ -164,7 +147,7 @@ class HybridRadixCache(RadixCache):
         if node.is_leaf():
             self.evict_tree_set.discard(node)
         if node.buffer_idx is not None:
-            self.mem_manager.free_buffer([node.buffer_idx])
+            self.buffer_mem_manager.free([node.buffer_idx])
         node.buffer_idx = buffer_idx
         node.hit_count = init_hit_count
         self.evict_buffer_set.add(node)
@@ -192,7 +175,7 @@ class HybridRadixCache(RadixCache):
             mem_index = torch.concat(release_mems)
             self.mem_manager.free(mem_index)
             if len(release_buffers) > 0:
-                self.mem_manager.free_buffer(release_buffers)
+                self.buffer_mem_manager.free(release_buffers)
         return
 
     def evict(self, need_remove_tokens, evict_buffer_callback, evict_callback):

@@ -11,10 +11,10 @@ from lightllm.models.qwen3next.layer_infer.post_layer_infer import Qwen3NextPost
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager
+from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.req_manager import ReqManagerWithBuffer
+from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
 logger = init_logger(__name__)
@@ -30,7 +30,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     post_layer_infer_class = Qwen3NextPostLayerInfer
 
     def __init__(self, kvargs) -> None:
-        self.mem_manager: Qwen3NextMemoryManager = None
+        self.mem_manager: Qwen3NextHybridMemManager = None
 
         def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
             return torch.empty(size, device="cuda", dtype=torch.int8)
@@ -82,7 +82,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
         assert start_args.mamba_ssm_data_type in ssm_dtype_dict
 
-        self.mem_manager = Qwen3NextMemoryManager(
+        self.mem_manager = Qwen3NextHybridMemManager(
             full_attn_cache_size=self.max_total_token_num,
             linear_attn_cache_size=mamba_cache_size,
             dtype=self.data_type,
@@ -113,5 +113,5 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self.req_manager = ReqManagerWithBuffer(self.max_req_num, create_max_seq_len, self.mem_manager)
+        self.req_manager = ReqManagerForMamba(self.max_req_num, create_max_seq_len, self.mem_manager)
         return

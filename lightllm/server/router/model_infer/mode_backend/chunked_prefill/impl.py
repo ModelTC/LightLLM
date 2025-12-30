@@ -267,6 +267,15 @@ class ChunkedPrefillBackend(ModeBackend):
                 key="mtp_accept_len",
                 gpu_tensor=mtp_accept_len,
             )
+
+            # Broadcast buffers based on accept_len for linear attention states
+            if hasattr(g_infer_context.req_manager, "broadcast_buffer_for_mtp"):
+                g_infer_context.req_manager.broadcast_buffer_for_mtp(
+                    b_req_idx=model_input.b_req_idx,
+                    mtp_accept_len=mtp_accept_len,
+                    b_req_mtp_start_loc=b_req_mtp_start_loc,
+                )
+
             verify_event = torch.cuda.Event()
             verify_event.record()
 

@@ -176,7 +176,7 @@ class ModeBackend:
                 get_unique_server_name(),
                 self.model.mem_manager.size,
                 self.rank_in_node,
-                mem_manager=self.model.mem_manager,
+                kv_cache_mem_manager=self.model.mem_manager,
             )
             if self.use_dynamic_prompt_cache
             else None
@@ -314,7 +314,7 @@ class ModeBackend:
                 "data_type": main_kvargs.get("data_type", "float16"),
                 "graph_max_batch_size": main_kvargs.get("graph_max_batch_size", 16),
                 "graph_max_len_in_batch": main_kvargs.get("graph_max_len_in_batch", 8196),
-                "disable_cudagraph": main_kvargs.get("disable_cudagraph", False),
+                "disable_cudagraph": True,  # Disable CUDA graphs for MTP draft models
                 "mem_fraction": main_kvargs["mem_fraction"],
                 "batch_max_tokens": main_kvargs.get("batch_max_tokens", None),
                 "quant_type": main_kvargs.get("quant_type", None),

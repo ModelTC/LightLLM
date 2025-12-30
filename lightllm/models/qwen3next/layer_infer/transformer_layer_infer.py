@@ -6,7 +6,7 @@ from lightllm.models.qwen3_moe.layer_infer.transformer_layer_infer import Qwen3M
 from functools import partial
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-from lightllm.models.qwen3next.mem_manager import Qwen3NextMemoryManager
+from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from typing import Tuple
 from typing_extensions import override
@@ -20,6 +20,7 @@ from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gate
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.qwen3next.triton_kernel.gemma_rmsnorm import gemma_rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.alloc_buffer_kernel import get_buffer_index_for_mtp
 
 logger = init_logger(__name__)
 
@@ -252,11 +253,11 @@ class Qwen3NextGatedDeltaNetInfer:
         infer_cls: Qwen3NextTransformerLayerInfer,
     ):
         assert layer_weight.is_linear, "layer_weight must be linear"
-        assert isinstance(infer_state.mem_manager, Qwen3NextMemoryManager)
+        assert isinstance(infer_state.mem_manager, Qwen3NextHybridMemManager)
 
         input = input.view(-1, infer_cls.embed_dim_)
-        buffer_idx = infer_state.req_manager.req_to_buffer_index[infer_state.b_req_idx]
-        conv_states, ssm_states = infer_state.mem_manager.get_buffer(self.layer_idx_)
+        buffer_idx = infer_state.req_manager.req_to_buffer_index[infer_state.b_req_idx, 0]
+        conv_states, ssm_states = infer_state.mem_manager.get_mamba_cache(self.layer_idx_)
 
         mixed_qkvzba = layer_weight.linear_in_proj.mm(input)
         q, k, v, z, b, a = self._fix_query_key_value_ba_ordering(mixed_qkvzba)
