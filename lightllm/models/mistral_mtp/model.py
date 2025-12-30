@@ -2,6 +2,7 @@ from typing import List
 from lightllm.models.mistral.model import MistralTpPartModel
 from lightllm.models.mistral_mtp.layer_weights.pre_and_post_layer_weight import MistralMTPPreAndPostLayerWeight
 from lightllm.models.mistral_mtp.layer_infer.pre_layer_infer import MistralMTPPreLayerInfer
+from lightllm.models.mistral_mtp.layer_infer.post_layer_infer import MistralMTPPostLayerInfer
 from lightllm.models.mistral_mtp.layer_infer.transformer_layer_infer import MistralMTPTransformerLayerInfer
 from lightllm.models.mistral_mtp.layer_weights.transformer_layer_weight import MistralMTPTransformerLayerWeight
 from lightllm.common.basemodel import TpPartBaseModel
@@ -14,6 +15,8 @@ class MistralMTPModel(MistralTpPartModel):
 
     transformer_weight_class = MistralMTPTransformerLayerWeight
     transformer_layer_infer_class = MistralMTPTransformerLayerInfer
+
+    post_layer_infer_class = MistralMTPPostLayerInfer
 
     def __init__(self, kvargs: dict):
         self._pre_init(kvargs)
