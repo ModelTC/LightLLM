@@ -1,11 +1,11 @@
 import torch
-from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
+from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.mistral_mtp.layer_weights.pre_and_post_layer_weight import MistralMTPPreAndPostLayerWeight
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 
 
-class MistralMTPPreLayerInfer(Deepseek3MTPPreLayerInfer):
+class MistralMTPPreLayerInfer(LlamaPreLayerInfer):
     """ """
 
     def __init__(self, network_config, mode):
