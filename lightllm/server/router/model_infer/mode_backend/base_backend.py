@@ -319,12 +319,11 @@ class ModeBackend:
                 "quant_cfg": main_kvargs.get("quant_cfg", None),
                 "run_mode": "normal",
                 "main_model": self.model,
-                "mem_layer_start": self.model.config["num_hidden_layers"] + i * mtp_model_cfg["num_hidden_layers"],
-                "mtp_index": i,
+                "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
-            if mtp_model_cfg["model_type"] == "deepseekv3":
+            if mtp_model_cfg["model_type"] == "deepseek_v3":
                 self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
             elif mtp_model_cfg["model_type"] == "qwen3_moe":
                 self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))

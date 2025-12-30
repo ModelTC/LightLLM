@@ -1,6 +1,7 @@
+from typing import List
 from lightllm.models.mistral.model import MistralTpPartModel
 from lightllm.models.mistral_mtp.layer_weights.pre_and_post_layer_weight import MistralMTPPreAndPostLayerWeight
-from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
+from lightllm.models.mistral_mtp.layer_infer.pre_layer_infer import MistralMTPPreLayerInfer
 from lightllm.models.mistral_mtp.layer_infer.transformer_layer_infer import MistralMTPTransformerLayerInfer
 from lightllm.models.mistral_mtp.layer_weights.transformer_layer_weight import MistralMTPTransformerLayerWeight
 from lightllm.common.basemodel import TpPartBaseModel
@@ -10,7 +11,7 @@ from .layer_weights.hf_load_utils import load_hf_weights
 class MistralMTPModel(MistralTpPartModel):
 
     pre_and_post_weight_class = MistralMTPPreAndPostLayerWeight
-    pre_layer_infer_class = Deepseek3MTPPreLayerInfer
+    pre_layer_infer_class = MistralMTPPreLayerInfer
 
     transformer_weight_class = MistralMTPTransformerLayerWeight
     transformer_layer_infer_class = MistralMTPTransformerLayerInfer
@@ -22,7 +23,7 @@ class MistralMTPModel(MistralTpPartModel):
 
     def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
-        self.mem_layer_start = kvargs.pop("mem_layer_start", 0)
+        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
         return
 
     def _init_some_value(self):
@@ -74,7 +75,4 @@ class MistralMTPModel(MistralTpPartModel):
 
     def _init_infer_layer(self):
         super()._init_infer_layer()
-        # reset the layer_num_ of the self.layers_infer
-        for layer in self.layers_infer:
-            layer.layer_num_ = layer.layer_num_ + self.mem_layer_start
         return

@@ -1,3 +1,4 @@
+from typing import List
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3_moe_mtp.layer_weights.pre_and_post_layer_weight import Qwen3MOEMTPPreAndPostLayerWeight
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
@@ -22,8 +23,7 @@ class Qwen3MOEMTPModel(Qwen3MOEModel):
 
     def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
-        self.mem_layer_start = kvargs.pop("mem_layer_start", 0)
-        self.mtp_index = kvargs.pop("mtp_index")
+        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
         return
 
     def _init_custom(self):
@@ -43,6 +43,7 @@ class Qwen3MOEMTPModel(Qwen3MOEModel):
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type, network_config=self.config, mode=self.mode
         )
+        mtp_index = len(self.mtp_previous_draft_models)
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 i,
@@ -51,7 +52,7 @@ class Qwen3MOEMTPModel(Qwen3MOEModel):
                 mode=self.mode,
                 quant_cfg=self.quant_cfg,
             )
-            for i in range(self.mtp_index, self.mtp_index + self.config["n_layer"])
+            for i in range(mtp_index, mtp_index + self.config["n_layer"])
         ]
         if self.load_way == "HF":
             load_hf_weights(
@@ -70,7 +71,12 @@ class Qwen3MOEMTPModel(Qwen3MOEModel):
 
     def _init_infer_layer(self):
         super()._init_infer_layer()
+        total_pre_layers_num = len(self.main_model.layers_infer)
+        total_pre_layers_num += sum(
+            [len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models]
+        )
+
         # reset the layer_num_ of the self.layers_infer
         for layer in self.layers_infer:
-            layer.layer_num_ = layer.layer_num_ + self.mem_layer_start - self.mtp_index
+            layer.layer_num_ = layer.layer_num_ + total_pre_layers_num
         return

@@ -1,3 +1,4 @@
+from typing import List
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.deepseek_mtp.layer_weights.pre_and_post_layer_weight import Deepseek3MTPPreAndPostLayerWeight
@@ -16,7 +17,7 @@ class Deepseek3MTPModel(Deepseek2TpPartModel):
 
     def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
-        self.mem_layer_start = kvargs.pop("mem_layer_start", 0)
+        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
         return
 
     def _init_custom(self):
@@ -40,7 +41,11 @@ class Deepseek3MTPModel(Deepseek2TpPartModel):
 
     def _init_infer_layer(self):
         super()._init_infer_layer()
+        total_pre_layers_num = len(self.main_model.layers_infer)
+        total_pre_layers_num += sum(
+            [len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models]
+        )
         # reset the layer_num_ of the self.layers_infer
         for layer in self.layers_infer:
-            layer.layer_num_ = layer.layer_num_ + self.mem_layer_start
+            layer.layer_num_ = layer.layer_num_ + total_pre_layers_num
         return
