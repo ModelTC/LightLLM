@@ -41,7 +41,6 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
-from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 
 class ModeBackend:
