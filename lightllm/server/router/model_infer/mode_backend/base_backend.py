@@ -258,9 +258,9 @@ class ModeBackend:
             assert False, f"error mtp mode {self.args.mtp_mode}"
 
         for i in range(num_mtp_modules):
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
+            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
             mtp_model_kvargs = {
-                "weight_dir": self.args.mtp_draft_model_dir,
+                "weight_dir": self.args.mtp_draft_model_dir[i],
                 "max_total_token_num": self.model.mem_manager.size,
                 "load_way": main_kvargs["load_way"],
                 "mode": main_kvargs["mode"],
@@ -280,9 +280,10 @@ class ModeBackend:
                 "run_mode": "normal",
                 "main_model": self.model,
                 "mem_layer_start": self.model.config["num_hidden_layers"] + i * mtp_model_cfg["num_hidden_layers"],
+                "mtp_index": i,
             }
 
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
+            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
             if mtp_model_cfg["model_type"] == "deepseekv3":
                 self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
             elif mtp_model_cfg["model_type"] == "qwen3_moe":
