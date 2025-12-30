@@ -19,6 +19,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoChatMOETransformerLayerWeight
 from lightllm.models.neo_chat.layer_weights.pre_and_post_layer_weight import NeoChatMOEPreAndPostLayerWeight
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
+from lightllm.models.neo_chat.infer_state import NeoChatInferStateInfo
 
 IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
@@ -65,10 +66,10 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
             max_pixels=self.max_pixel,
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
-        token_num = (grid_h * grid_w) * (self.downsample_ratio ** 2)
-        # grid_thwd是为了mrope准备的，这里不需要
-        img.grid_thwd = (1, grid_h, grid_w, 0)
-        return int(token_num)
+        token_num = int((grid_h * grid_w) * (self.downsample_ratio ** 2))
+        # 这里的grid_h和grid_w需要* self.downsample_ratio么？再仔细看下代码
+        img.grid_thwd = (1, int(grid_h * self.downsample_ratio), int(grid_w * self.downsample_ratio), 1 - token_num)
+        return token_num
 
     # only change the impl of the encode func:
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
@@ -87,23 +88,23 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         start_idx = 0
         while True:
             try:
-                start_idx = origin_ids.index(self.image_start_id, start_idx)
+                start_idx = origin_ids.index(self.image_start_id)
                 if start_idx + 1 >= len(origin_ids):
                     break
                 if origin_ids[start_idx + 1] == self.image_end_id:
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.images[image_id].token_id
                     token_num = multimodal_params.images[image_id].token_num
+                    multimodal_params.images[image_id].start_idx = len(input_ids)
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.image_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]
-                    start_idx = 0
                     image_id += 1
                 else:
                     raise ValueError("image token error")
             except ValueError:
                 break
-        input_ids.extend(origin_ids[start_idx:])
+        input_ids.extend(origin_ids)
         return input_ids
 
 
@@ -116,7 +117,7 @@ class NeoTpPartModel(Qwen3MOEModel):
     pre_and_post_weight_class = NeoChatMOEPreAndPostLayerWeight
     transformer_weight_class = NeoChatMOETransformerLayerWeight
 
-    infer_state_class = LlamaInferStateInfo
+    infer_state_class = NeoChatInferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)
