@@ -112,44 +112,6 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         )
         return
 
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
-        )
-        self.trans_layers_weight = [
-            self.transformer_weight_class(
-                i,
-                self.data_type,
-                network_config=self.config,
-                mode=self.mode,
-                quant_cfg=self.quant_cfg,
-            )
-            for i in range(self.config["n_layer"])
-        ]
-        load_hf_weights(
-            self.data_type,
-            weight_dir=self.weight_dir_,
-            pre_post_layer=self.pre_post_weight,
-            transformer_layer_list=self.trans_layers_weight,
-            weight_dict=self.weight_dict,
-        )
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
-        return
-
-    def _init_infer_layer(self):
-        self.pre_infer = self.pre_layer_infer_class(network_config=self.config, mode=self.mode)
-        self.post_infer = self.post_layer_infer_class(network_config=self.config, mode=self.mode)
-        self.layers_infer = [
-            self.transformer_layer_infer_class(
-                i,
-                network_config=self.config,
-                mode=self.mode,
-            )
-            for i in range(self.config["n_layer"])
-        ]
-        return
-
     def _init_to_get_yarn_rotary(self):
         from lightllm.models.llama.yarn_rotary_utils import find_correction_range, linear_ramp_mask, get_deepseek_mscale
 

@@ -156,7 +156,7 @@ class TpPartBaseModel:
         self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path)
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
-    def _init_weights(self):
+    def _init_weights(self, start_layer_index=0):
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type, network_config=self.config, mode=self.mode
         )
@@ -168,7 +168,7 @@ class TpPartBaseModel:
                 mode=self.mode,
                 quant_cfg=self.quant_cfg,
             )
-            for i in range(self.config["n_layer"])
+            for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
         ]
         load_hf_weights(
             self.data_type,
@@ -214,12 +214,12 @@ class TpPartBaseModel:
         self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, self.mem_manager)
         return
 
-    def _init_infer_layer(self):
+    def _init_infer_layer(self, start_layer_index=0):
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config, mode=self.mode)
         self.post_infer = self.post_layer_infer_class(network_config=self.config, mode=self.mode)
         self.layers_infer = [
             self.transformer_layer_infer_class(i, network_config=self.config, mode=self.mode)
-            for i in range(self.config["n_layer"])
+            for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
         ]
         return
 

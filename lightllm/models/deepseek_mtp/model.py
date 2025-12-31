@@ -33,19 +33,16 @@ class Deepseek3MTPModel(Deepseek2TpPartModel):
         self.mem_manager = self.main_model.mem_manager
         return
 
-    def _init_weights(self):
-        super()._init_weights()
+    def _init_weights(self, start_layer_index=None):
+        super()._init_weights(start_layer_index=0)
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
         return
 
-    def _init_infer_layer(self):
-        super()._init_infer_layer()
+    def _init_infer_layer(self, start_layer_index=None):
         total_pre_layers_num = len(self.main_model.layers_infer)
         total_pre_layers_num += sum(
             [len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models]
         )
-        # reset the layer_num_ of the self.layers_infer
-        for layer in self.layers_infer:
-            layer.layer_num_ = layer.layer_num_ + total_pre_layers_num
+        super()._init_infer_layer(start_layer_index=total_pre_layers_num)
         return

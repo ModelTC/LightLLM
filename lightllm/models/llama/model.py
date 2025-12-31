@@ -8,9 +8,6 @@ from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInf
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.models.llama.layer_weights.ds_load_utils import load_ds_weights
-from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
-
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.flashattention_infer_struct import FlashAttentionStateInfo
 from lightllm.models.llama.flashinfer_struct import LlamaFlashInferStateInfo
@@ -132,42 +129,6 @@ class LlamaTpPartModel(TpPartBaseModel):
             self._init_to_get_rotary()
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
-        return
-
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
-        )
-        self.trans_layers_weight = [
-            self.transformer_weight_class(
-                i,
-                self.data_type,
-                network_config=self.config,
-                mode=self.mode,
-                quant_cfg=self.quant_cfg,
-            )
-            for i in range(self.config["n_layer"])
-        ]
-        if self.load_way == "HF":
-            load_hf_weights(
-                self.data_type,
-                weight_dir=self.weight_dir_,
-                pre_post_layer=self.pre_post_weight,
-                transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict,
-            )
-        else:
-            load_ds_weights(
-                self.data_type,
-                weight_dir=self.weight_dir_,
-                pre_post_layer=self.pre_post_weight,
-                transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict,
-                prefix="model.layers.",
-                num_layer=self.config["n_layer"],
-            )
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
         return
 
     def _init_to_get_rotary(self, default_base=10000):

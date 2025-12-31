@@ -1,16 +1,10 @@
-import os
-import json
-import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.bloom.layer_infer.pre_layer_infer import BloomPreLayerInfer
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
 from lightllm.models.bloom.layer_weights.pre_and_post_layer_weight import BloomPreAndPostLayerWeight
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
-from lightllm.models.bloom.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel import InferStateInfo, TpPartBaseModel
-
-from lightllm.common.build_utils import repair_config
 
 
 @ModelRegistry("bloom")
@@ -40,29 +34,4 @@ class BloomTpPartModel(TpPartBaseModel):
 
     def _reset_num_key_value_heads(self):
         self.config["num_key_value_heads"] = self.config["num_attention_heads"]
-        return
-
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
-        )
-        self.trans_layers_weight = [
-            self.transformer_weight_class(
-                i,
-                self.data_type,
-                network_config=self.config,
-                mode=self.mode,
-                quant_cfg=self.quant_cfg,
-            )
-            for i in range(self.config["n_layer"])
-        ]
-        load_hf_weights(
-            self.data_type,
-            weight_dir=self.weight_dir_,
-            pre_post_layer=self.pre_post_weight,
-            transformer_layer_list=self.trans_layers_weight,
-            weight_dict=self.weight_dict,
-        )
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
         return
