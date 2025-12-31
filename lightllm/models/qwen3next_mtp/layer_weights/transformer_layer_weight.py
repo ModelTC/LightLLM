@@ -1,30 +1,27 @@
 import os
+import torch
+import math
+import numpy as np
+from lightllm.common.basemodel import TransformerLayerWeight
+from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
+from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
     NormWeight,
-    FusedMoeWeightEP,
-    create_tp_moe_wegiht_obj,
 )
-from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
+from functools import partial
+from typing_extensions import override
+from lightllm.common.basemodel.layer_weights.meta_weights import TpParameterWeight
 
 
 class Qwen3NextMTPTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
-    """
-    Qwen3Next MTP Transformer Layer Weight.
-    MTP layers use 'mtp.layers.{layer_num}' prefix instead of 'model.layers.{layer_num}'.
-    MTP layers are always full attention (not linear attention) with MoE FFN.
-    """
-
     def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        # MTP always uses MoE
-        self.n_routed_experts = network_config["num_experts"]
-        self.is_moe = True
-        super(Qwen3MOETransformerLayerWeight, self).__init__(layer_num, data_type, network_config, mode, quant_cfg)
+        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
         return
 
+    @override
     def _init_weight_names(self):
-        # Override weight names to use 'mtp.layers' prefix
         self._q_weight_name = f"mtp.layers.{self.layer_num_}.self_attn.q_proj.weight"
         self._q_norm_name = f"mtp.layers.{self.layer_num_}.self_attn.q_norm.weight"
         self._q_bias_name = None
@@ -42,55 +39,37 @@ class Qwen3NextMTPTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         self._ffn_norm_weight_name = f"mtp.layers.{self.layer_num_}.post_attention_layernorm.weight"
         self._ffn_norm_bias_name = None
 
+    @override
     def _init_weight(self):
-        self._init_qkv()
-        self._init_o()
         self._init_moe()
-        self._init_norm()
         self._init_shared_expert_weight()
 
-    def _init_moe(self):
-        moe_intermediate_size = self.network_config_["moe_intermediate_size"]
-        self.moe_gate = ROWMMWeight(
-            weight_names=f"mtp.layers.{self.layer_num_}.mlp.gate.weight",
-            data_type=self.data_type_,
-            layer_num=self.layer_num_,
-            name="moe_gate",
-            tp_rank=0,
-            tp_world_size=1,
+        self.att_norm_weight_ = NormWeight(
+            self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
         )
-        moe_mode = os.getenv("MOE_MODE", "TP")
-        assert moe_mode in ["EP", "TP"]
-        if moe_mode == "TP":
-            self.experts = create_tp_moe_wegiht_obj(
-                gate_proj_name="gate_proj",
-                down_proj_name="down_proj",
-                up_proj_name="up_proj",
-                e_score_correction_bias_name="",
-                weight_prefix=f"mtp.layers.{self.layer_num_}.mlp.experts",
-                n_routed_experts=self.n_routed_experts,
-                split_inter_size=moe_intermediate_size // self.tp_world_size_,
-                data_type=self.data_type_,
-                network_config=self.network_config_,
-                layer_num=self.layer_num_,
-                quant_cfg=self.quant_cfg,
-                num_fused_shared_experts=0,
-            )
-        elif moe_mode == "EP":
-            self.experts = FusedMoeWeightEP(
-                gate_proj_name="gate_proj",
-                down_proj_name="down_proj",
-                up_proj_name="up_proj",
-                e_score_correction_bias_name="",
-                weight_prefix=f"mtp.layers.{self.layer_num_}.mlp.experts",
-                n_routed_experts=self.n_routed_experts,
-                data_type=self.data_type_,
-                network_config=self.network_config_,
-                layer_num=self.layer_num_,
-                quant_cfg=self.quant_cfg,
-            )
-        else:
-            raise ValueError(f"Unsupported moe mode: {moe_mode}")
+        self.ffn_norm_weight_ = NormWeight(
+            self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
+        )
+
+        self._init_qkv()
+        self._init_o()
+        self.q_norm_weight_ = NormWeight(weight_name=self._q_norm_name, data_type=self.data_type_)
+        self.k_norm_weight_ = NormWeight(weight_name=self._k_norm_name, data_type=self.data_type_)
+        self._o_gate_weight_name = f"mtp.layers.{self.layer_num_}.self_attn.o_gate_proj.weight"
+        self.o_gate_proj = ROWMMWeight(
+            weight_names=self._o_gate_weight_name,
+            data_type=self.data_type_,
+            bias_names=None,
+            quant_cfg=self.quant_cfg,
+            layer_num=self.layer_num_,
+            name="o_gate_proj",
+        )
+        return
+
+    @override
+    def load_hf_weights(self, weights):
+        self._split_q_with_gate(weights)
+        super().load_hf_weights(weights)
 
     def _init_shared_expert_weight(self):
         prefix = f"mtp.layers.{self.layer_num_}.mlp.shared_expert"
@@ -118,3 +97,13 @@ class Qwen3NextMTPTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             tp_rank=0,
             tp_world_size=1,
         )
+
+    def _split_q_with_gate(self, weights):
+        if self._q_weight_name in weights:
+            weight = weights[self._q_weight_name]
+            num_heads = self.tp_q_head_num_ * self.tp_world_size_
+            weight = weight.view(num_heads * 2, self.head_dim, -1)
+            _q_proj = weight[0::2].reshape(-1, weight.shape[-1])
+            _gate_proj = weight[1::2].reshape(-1, weight.shape[-1])
+            weights[self._q_weight_name] = _q_proj
+            weights[self._o_gate_weight_name] = _gate_proj

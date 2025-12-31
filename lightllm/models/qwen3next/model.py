@@ -42,6 +42,14 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         g_infer_context.use_buffer_manager = True
         super().__init__(kvargs)
 
+    def _init_inferstate_cls(self):
+        """Initialize the appropriate infer state class based on enabled features."""
+        if get_env_start_args().enable_fa3:
+            from lightllm.models.qwen3next.infer_struct import Qwen3NextFlashAttentionStateInfo
+
+            self.infer_state_class = Qwen3NextFlashAttentionStateInfo
+            logger.info("Using Qwen3NextFlashAttentionStateInfo for FA3")
+
     @override
     def autotune_layers(self):
         return self.config["full_attention_interval"]

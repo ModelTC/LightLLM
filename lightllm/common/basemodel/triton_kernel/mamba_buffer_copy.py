@@ -634,14 +634,14 @@ def copy_buffer_broadcast(
         # 5D case: Use vectorized PyTorch operations
         layer_num, buffer_size, d1, d2, d3 = src_buffer.shape
 
-        # Expand src_indexes: [num_src] -> [layer_num, num_src, 1, d1, d2, d3]
-        src_idx_expanded = src_indexes.view(1, -1, 1, 1, 1, 1).expand(layer_num, -1, 1, d1, d2, d3)
+        # Expand src_indexes: [num_src] -> [layer_num, num_src, d1, d2, d3]
+        src_idx_expanded = src_indexes.view(1, -1, 1, 1, 1).expand(layer_num, -1, d1, d2, d3)
 
-        # Gather source data: [layer_num, num_src, 1, d1, d2, d3]
+        # Gather source data: [layer_num, num_src, d1, d2, d3]
         src_data = torch.gather(src_buffer, 1, src_idx_expanded)
 
         # Expand to all destinations: [layer_num, num_src, num_dst_per_src, d1, d2, d3]
-        src_data_broadcast = src_data.expand(-1, -1, num_dst_per_src, -1, -1, -1)
+        src_data_broadcast = src_data.unsqueeze(2).expand(-1, -1, num_dst_per_src, -1, -1, -1)
 
         # Expand dst_indexes: [num_src, num_dst_per_src] -> [layer_num, num_src, num_dst_per_src, d1, d2, d3]
         dst_idx_expanded = dst_indexes.view(1, num_src, num_dst_per_src, 1, 1, 1).expand(layer_num, -1, -1, d1, d2, d3)

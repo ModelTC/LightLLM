@@ -107,6 +107,28 @@ class MambaCacheManager(TokenAllocator):
         )
         return
 
+    def free(self, free_index: Union[torch.Tensor, List[int]]):
+        """
+        Free the allocated cache buffers and clear them.
+
+        Args:
+            free_index: Buffer indices to free (tensor or list of ints)
+        """
+        # Convert to tensor if needed for indexing
+        if isinstance(free_index, list):
+            free_index_tensor = torch.tensor(free_index, dtype=torch.long, device="cuda")
+        else:
+            free_index_tensor = free_index.to(device="cuda", dtype=torch.long)
+
+        # Clear the buffers for the freed indices
+        # Shape: [layer_num, buffer_index, *shape]
+        self.conv_state_cache.buffer[:, free_index_tensor].zero_()
+        self.ssm_state_cache.buffer[:, free_index_tensor].zero_()
+
+        # Call parent's free method to update allocator state
+        super().free(free_index)
+        return
+
 
 class ReadOnlyStaticsMambaCacheManager:
     """

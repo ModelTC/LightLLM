@@ -70,3 +70,76 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
             pass
 
     return
+
+
+def load_hf_weights_mtp(
+    data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None, weight_dict=None, keyword_filter="mtp"
+):
+    if isinstance(data_type, str):
+        data_type = torch.float16 if data_type == "fp16" else torch.float32
+    if pre_post_layer is not None:
+        assert pre_post_layer.data_type_ == data_type, "type is not right"
+    if transformer_layer_list is not None:
+        assert transformer_layer_list[0].data_type_ == data_type, "type is not right"
+    if weight_dict:
+        if pre_post_layer is not None:
+            pre_post_layer.load_hf_weights(weight_dict)
+        if transformer_layer_list is not None:
+            for layer in transformer_layer_list:
+                layer.load_hf_weights(weight_dict)
+        del weight_dict
+        return
+
+    use_safetensors = True
+    files = utils.PetrelHelper.list(weight_dir, extension="all")
+    candidate_files = list(filter(lambda x: x.endswith(".safetensors"), files))
+
+    if len(candidate_files) == 0:
+        use_safetensors = False
+        candidate_files = list(filter(lambda x: x.endswith(".bin"), files))
+
+    assert len(candidate_files) != 0, "can only support pytorch tensor and safetensors format for weights."
+
+    # Filter files based on keyword_filter using index.json
+    if use_safetensors and keyword_filter:
+        index_file = "model.safetensors.index.json"
+        index_path = os.path.join(weight_dir, index_file)
+
+        # Check if index file exists
+        if utils.PetrelHelper.exists(index_path):
+            # Load index file using load_json
+            index_data = utils.PetrelHelper.load_json(index_path)
+
+            # Extract weight_map
+            weight_map = index_data.get("weight_map", {})
+
+            # Find all safetensors files that contain weights with keyword_filter
+            filtered_files = set()
+            for weight_name, safetensors_file in weight_map.items():
+                if keyword_filter in weight_name:
+                    filtered_files.add(safetensors_file)
+
+            # Only keep files that contain filtered weights
+            if filtered_files:
+                candidate_files = [f for f in candidate_files if f in filtered_files]
+
+    from functools import partial
+    from multiprocessing.pool import ThreadPool as Pool
+
+    partial_func = partial(
+        load_func,
+        use_safetensors=use_safetensors,
+        pre_post_layer=pre_post_layer,
+        transformer_layer_list=transformer_layer_list,
+        weight_dir=weight_dir,
+    )
+    worker = int(os.environ.get("LOADWORKER", 16))
+    with Pool(worker) as p:
+        iterator = p.imap_unordered(partial_func, candidate_files, chunksize=1)
+        desc_str = f"pid {os.getpid()} Loading MTP model weights with {worker} workers"
+        iterator = tqdm(iterator, total=len(candidate_files), desc=desc_str)
+
+        for _ in iterator:
+            pass
+
+    return

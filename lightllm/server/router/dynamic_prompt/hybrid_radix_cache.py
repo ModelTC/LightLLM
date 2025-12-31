@@ -15,7 +15,7 @@ class HybridRadixCache(RadixCache):
         super().__init__(unique_name, total_token_num, rank_in_node, kv_cache_mem_manager)
         assert hasattr(kv_cache_mem_manager, "mamba_cache_mem_manager")
         self.buffer_mem_manager: MambaCacheManager = kv_cache_mem_manager.mamba_cache_mem_manager
-        self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: (x.hit_count,))
+        self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: (x.buffer_time,))
 
     def free_radix_cache_to_get_enough_buffer(self, need_buffer_num):
         if need_buffer_num > self.buffer_mem_manager.can_use_mem_size:
@@ -82,14 +82,9 @@ class HybridRadixCache(RadixCache):
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             self.dec_node_ref_counter(req.shared_kv_node)
             self.add_node_ref_counter(new_shared_kv_node)
-            init_hit_count = 1
-            if req.mamba_buffer_insert_len > 0:
-                init_hit_count = 5
-                req.mamba_buffer_insert_len = 0
-            self.set_buffer_idx_to_node(new_shared_kv_node, new_buffer_indexes[i].item(), init_hit_count)
-            # 由于在请求未结束时插入 radix cache， 所以需要额外维护需要释放的token index
+            self.add_buffer_idx_to_node(new_shared_kv_node, new_buffer_indexes[i].item())
             req.extra_need_to_free_token_index.append(
-                g_infer_context.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len].cpu()
+                g_infer_context.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
             )
             req.shared_kv_node = new_shared_kv_node
 
@@ -105,7 +100,7 @@ class HybridRadixCache(RadixCache):
 
             if tree_node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
-            tree_node.ref_counter -= 1
+            tree_node.ref_counter -= 1  # 只减少当前节点，不递归
 
             if tree_node.is_leaf() and tree_node.ref_counter == 0:
                 evict_token_list.append(tree_node.token_mem_index_value)
@@ -133,7 +128,7 @@ class HybridRadixCache(RadixCache):
         while update_node != self.root_node:
             if update_node.buffer_idx is not None:
                 self.evict_buffer_set.discard(update_node)
-                update_node.hit_count += 1
+                update_node.update_buffer_time()
                 self.evict_buffer_set.add(update_node)
             update_node = update_node.parent
 
@@ -141,7 +136,7 @@ class HybridRadixCache(RadixCache):
         self._inc_hit_rate(len(key), len(value))
         return tree_node, miss_prefix_len, value
 
-    def set_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int, init_hit_count: int = 1):
+    def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int):
         """Set buffer_idx for a node and add it to evict_buffer_set."""
         self.evict_buffer_set.discard(node)
         if node.is_leaf():
@@ -149,7 +144,7 @@ class HybridRadixCache(RadixCache):
         if node.buffer_idx is not None:
             self.buffer_mem_manager.free([node.buffer_idx])
         node.buffer_idx = buffer_idx
-        node.hit_count = init_hit_count
+        node.update_buffer_time()
         self.evict_buffer_set.add(node)
         if node.is_leaf():
             self.evict_tree_set.add(node)

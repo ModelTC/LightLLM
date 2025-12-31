@@ -1,24 +1,19 @@
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.models.qwen3next_mtp.layer_infer.pre_layer_infer import Qwen3NextMTPPreLayerInfer
-from lightllm.models.qwen3next_mtp.layer_infer.post_layer_infer import Qwen3NextMTPPostLayerInfer
-from lightllm.models.qwen3next_mtp.layer_infer.transformer_layer_infer import Qwen3NextMTPTransformerLayerInfer
 from lightllm.models.qwen3next_mtp.layer_weights.pre_and_post_layer_weight import Qwen3NextMTPPreAndPostLayerWeight
 from lightllm.models.qwen3next_mtp.layer_weights.transformer_layer_weight import Qwen3NextMTPTransformerLayerWeight
 from lightllm.common.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 
 
 class Qwen3NextMTPModel(Qwen3NextTpPartModel):
 
-    # weight classes
     pre_and_post_weight_class = Qwen3NextMTPPreAndPostLayerWeight
+    pre_layer_infer_class = Qwen3NextMTPPreLayerInfer
     transformer_weight_class = Qwen3NextMTPTransformerLayerWeight
 
-    # infer classes
-    pre_layer_infer_class = Qwen3NextMTPPreLayerInfer
-    post_layer_infer_class = Qwen3NextMTPPostLayerInfer
-    transformer_layer_infer_class = Qwen3NextMTPTransformerLayerInfer
-
     def __init__(self, kvargs: dict):
+        self.mtp_n_layers = 1
         self._pre_init(kvargs)
         super().__init__(kvargs)
         return
@@ -26,18 +21,19 @@ class Qwen3NextMTPModel(Qwen3NextTpPartModel):
     def _pre_init(self, kvargs: dict):
         """Extract main model and memory layer start from kwargs."""
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
-        self.mem_layer_start = kvargs.pop("mem_layer_start", 0)
+        self.mem_layer_start = kvargs.pop("mem_layer_start")
         return
 
+    def autotune_layers(self):
+        return 1
+
+    def _init_some_value(self):
+        self.layers_num = self.mtp_n_layers
+
     def _init_config(self):
-        """Initialize config, using mtp_num_hidden_layers if available."""
         super()._init_config()
-        # Override layer num for MTP
-        if "mtp_num_hidden_layers" in self.config:
-            self.config["n_layer"] = self.config["mtp_num_hidden_layers"]
-        else:
-            # Default to 1 MTP layer if not specified
-            self.config["n_layer"] = 1
+        self.config["n_layers"] = self.mtp_n_layers
+        self.config["num_hidden_layers"] = self.mtp_n_layers
         return
 
     def _init_custom(self):
@@ -57,19 +53,43 @@ class Qwen3NextMTPModel(Qwen3NextTpPartModel):
         return
 
     def _init_weights(self):
-        """Initialize weights, sharing embedding and lm_head with main model."""
-        super()._init_weights()
-        # Share embedding weights with main model
+        self.pre_post_weight = self.pre_and_post_weight_class(
+            self.data_type, network_config=self.config, mode=self.mode
+        )
+        self.trans_layers_weight = [
+            self.transformer_weight_class(
+                i,
+                self.data_type,
+                network_config=self.config,
+                mode=self.mode,
+                quant_cfg=self.quant_cfg,
+            )
+            for i in range(self.mtp_n_layers)
+        ]
+        load_hf_weights(
+            self.data_type,
+            weight_dir=self.weight_dir_,
+            pre_post_layer=self.pre_post_weight,
+            transformer_layer_list=self.trans_layers_weight,
+            weight_dict=self.weight_dict,
+        )
+        self.pre_post_weight.verify_load()
+        [weight.verify_load() for weight in self.trans_layers_weight]
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
-        # Share lm_head weights with main model
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
         return
 
     def _init_infer_layer(self):
-        """Initialize inference layers, adjusting layer numbers for KV cache offset."""
-        super()._init_infer_layer()
-        # Adjust layer_num_ for KV cache indexing
-        # MTP layers' KV cache is stored after main model's layers
-        for layer in self.layers_infer:
-            layer.layer_num_ = layer.layer_num_ + self.mem_layer_start
+        self.pre_infer = self.pre_layer_infer_class(network_config=self.config, mode=self.mode)
+        self.post_infer = self.post_layer_infer_class(network_config=self.config, mode=self.mode)
+        self.layers_infer = [
+            self.transformer_layer_infer_class(
+                i * self.config["full_attention_interval"] - 1,  # 确保是full attention layer
+                network_config=self.config,
+                mode=self.mode,
+            )
+            for i in range(self.mtp_n_layers)
+        ]
+        for i, layer in enumerate(self.layers_infer):
+            layer.layer_num_ = i + self.mem_layer_start
         return

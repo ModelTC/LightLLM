@@ -256,7 +256,9 @@ class Qwen3NextGatedDeltaNetInfer:
         assert isinstance(infer_state.mem_manager, Qwen3NextHybridMemManager)
 
         input = input.view(-1, infer_cls.embed_dim_)
-        buffer_idx = infer_state.req_manager.req_to_buffer_index[infer_state.b_req_idx, 0]
+        buffer_idx = get_buffer_index_for_mtp(
+            infer_state.b_req_idx, infer_state.b_mtp_index, infer_state.req_manager.req_to_buffer_index
+        )
         conv_states, ssm_states = infer_state.mem_manager.get_mamba_cache(self.layer_idx_)
 
         mixed_qkvzba = layer_weight.linear_in_proj.mm(input)

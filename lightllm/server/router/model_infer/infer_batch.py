@@ -33,12 +33,12 @@ class InferenceContext:
     infer_req_ids = None
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
+    mtp_step: int = 0
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
 
     use_mamba_model: bool = False
-    use_mamba_mtp: bool = False
 
     def register(
         self,
@@ -69,7 +69,7 @@ class InferenceContext:
                 self.radix_cache, HybridRadixCache
             ), "Mamba model only support HybridRadixCache"
             assert isinstance(self.req_manager, ReqManagerForMamba), "Mamba model only support ReqManagerForMamba"
-            self.use_mamba_mtp = get_env_start_args().mtp_step > 0
+            self.mtp_step = get_env_start_args().mtp_step
         return
 
     def init_cpu_embed_cache_client(self):
@@ -91,10 +91,9 @@ class InferenceContext:
             return
 
         if self.radix_cache is not None:
-            self.radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs))
+            self.radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs) * (self.mtp_step + 1))
 
-        req_idxs = [r.req_idx for r in req_objs]
-        request_indices_gpu = torch.tensor(req_idxs, device="cuda", dtype=torch.int64)
+        request_indices_gpu = torch.tensor([r.req_idx for r in req_objs], device="cuda", dtype=torch.int64)
         self.req_manager.alloc_buffer_for_req(request_indices_gpu)
 
         if self.radix_cache is None:
@@ -197,13 +196,9 @@ class InferenceContext:
                 req.extra_need_to_free_token_index = []
 
             if node.buffer_idx is None:
-                # Handle both 1D (non-MTP) and 2D (MTP) buffer index tensors
                 req_to_buffer_index = self.req_manager.req_to_buffer_index
-                if req_to_buffer_index.dim() == 1:
-                    buffer_idx = req_to_buffer_index[req.req_idx].item()
-                else:
-                    buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
-                self.radix_cache.set_buffer_idx_to_node(node, buffer_idx)
+                buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+                self.radix_cache.add_buffer_idx_to_node(node, buffer_idx)
                 # 该请求的 buffer 已经被插入到 radix cache 中，不需要手动释放
                 return False
         return True
@@ -214,16 +209,8 @@ class InferenceContext:
             need_free_base_buffer = self.free_a_req_mem_for_mamba(free_token_index, req)
             req_to_buffer_index = self.req_manager.req_to_buffer_index
             if need_free_base_buffer:
-                # Free all buffers (main + MTP if applicable)
-                if req_to_buffer_index.dim() == 1:
-                    # Non-MTP: free single buffer
-                    free_buffer_index.append(req_to_buffer_index[req.req_idx].item())
-                else:
-                    # MTP: free all buffers
-                    free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
-            elif self.use_mamba_mtp:
-                # Free only MTP buffers (not the main buffer at index 0)
-                # This only happens when use_mamba_mtp is True, which means req_to_buffer_index is 2D
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+            elif self.mtp_step > 0:
                 free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
         else:
             self.free_a_req_mem(free_token_index, req)
@@ -336,7 +323,8 @@ class InferenceContext:
                 can_alloc_token_num -= prefill_need_token_num
                 revovered_reqs.append(req)
 
-            self._alloc_and_copy_req_buffers(revovered_reqs)
+            if self.use_mamba_model:
+                self._alloc_and_copy_req_buffers(revovered_reqs)
             g_infer_state_lock.release()
         return
 
@@ -462,6 +450,7 @@ class InferReq:
         self.nixl_trans_device_id: int = -1
 
         # 在开启radix cache的情况下，用于标记命中情况，用于插入算法
+        self.mamba_model_match_len = 0
         self.mamba_buffer_insert_len = 0
         self.extra_need_to_free_token_index = []
 

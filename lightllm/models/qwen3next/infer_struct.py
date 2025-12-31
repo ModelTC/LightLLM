@@ -63,4 +63,16 @@ class Qwen3NextFlashAttentionStateInfo(FlashAttentionStateInfo):
             else:
                 self.b_att_seq_len = self.b_seq_len
 
+        # Initialize FP8 calibration scales for flash attention
+        # This must be done in the parent class's _init_flash_attention_state first
+        if "offline_calibration_fp8kv" in model.mode and not self.is_prefill:
+            # In MTP mode, k_descale and v_descale need to match b_att_seq_len
+            # The parent class expands them to batch_size, but we need att_batch_size
+            if args_mtp_step > 0:
+                # Sample k_descale and v_descale to match att_batch_size
+                if hasattr(self, "k_descale") and self.k_descale is not None:
+                    self.k_descale = self.k_descale[:, args_mtp_step::mtp_size, :].contiguous()
+                if hasattr(self, "v_descale") and self.v_descale is not None:
+                    self.v_descale = self.v_descale[:, args_mtp_step::mtp_size, :].contiguous()
+
         return

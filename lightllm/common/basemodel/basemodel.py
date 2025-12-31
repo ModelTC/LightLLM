@@ -282,6 +282,7 @@ class TpPartBaseModel:
         infer_state.prefix_total_token_num = model_input.prefix_total_token_num
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
+        infer_state.b_mtp_index = model_input.b_mtp_index
         infer_state.b_seq_len = model_input.b_seq_len
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:

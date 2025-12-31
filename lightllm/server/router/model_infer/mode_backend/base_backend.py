@@ -300,7 +300,6 @@ class ModeBackend:
             assert False, f"error mtp mode {self.args.mtp_mode}"
 
         for i in range(num_mtp_modules):
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
             mtp_model_kvargs = {
                 "weight_dir": self.args.mtp_draft_model_dir,
                 "max_total_token_num": self.model.mem_manager.size,
@@ -321,8 +320,7 @@ class ModeBackend:
                 "quant_cfg": main_kvargs.get("quant_cfg", None),
                 "run_mode": "normal",
                 "main_model": self.model,
-                "mem_layer_start": self.model.config["num_hidden_layers"]
-                + i * mtp_model_cfg.get("num_hidden_layers", 1),
+                "mem_layer_start": self.model.config["num_hidden_layers"],
             }
 
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)

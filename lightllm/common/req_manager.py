@@ -264,7 +264,12 @@ class ReqManagerForMamba(ReqManager):
         alloc_buffer_for_req_triton(req_index, buffer_indexes, self.req_to_buffer_index, self.mtp_step)
 
     def copy_buffer_from_another_buffer(self, src_buffer_index: torch.Tensor, tgt_req_index: torch.Tensor):
-        self.buffer_mem_manager.copy_buffer_p2p(src_buffer_index, self.req_to_buffer_index[tgt_req_index, 0])
+        # 获取目标请求的所有 MTP buffer (从 buffer[0] 到 buffer[mtp_step])
+        mtp_range = torch.arange(0, self.mtp_step + 1, dtype=torch.int32, device="cuda")
+        all_mtp_buffers = self.req_to_buffer_index[tgt_req_index[:, None], mtp_range[None, :]]
+
+        # 将 shared buffer 广播到所有 MTP step
+        self.buffer_mem_manager.copy_buffer_broadcast(src_buffer_index, all_mtp_buffers)
         return
 
     def broadcast_buffer_for_mtp(

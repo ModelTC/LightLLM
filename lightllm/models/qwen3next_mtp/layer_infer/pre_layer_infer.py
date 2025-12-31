@@ -29,16 +29,6 @@ class Qwen3NextMTPPreLayerInfer(LlamaPreLayerInfer):
     def _mtp_forward(
         self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: Qwen3NextMTPPreAndPostLayerWeight
     ):
-        """
-        MTP pre-layer forward: combines embedding and hidden state through projection.
-
-        Args:
-            input_embdings: Embedding of draft tokens (next tokens to predict)
-            infer_state: Contains deepseekv3_mtp_draft_input_hiddens - hidden state from main model
-                        (this is a generic MTP field used by all MTP models)
-            layer_weight: MTP pre-post layer weights
-        """
-        # Use the generic MTP input hiddens field (same as DeepSeek MTP)
         tgt_embdings = infer_state.deepseekv3_mtp_draft_input_hiddens
         assert input_embdings.shape[0] == tgt_embdings.shape[0]
 
