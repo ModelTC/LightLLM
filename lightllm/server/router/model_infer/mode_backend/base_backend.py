@@ -323,10 +323,13 @@ class ModeBackend:
 
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
             if mtp_model_cfg["model_type"] == "deepseek_v3":
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
             elif mtp_model_cfg["model_type"] == "qwen3_moe":
+                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
                 self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
             elif mtp_model_cfg["model_type"] == "mistral":
+                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
                 self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
             else:
                 assert False, f"error mtp mode {mtp_model_cfg['model_type']}"
