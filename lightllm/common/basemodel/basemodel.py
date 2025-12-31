@@ -24,7 +24,7 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
+from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
@@ -188,12 +188,13 @@ class TpPartBaseModel:
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
+        added_mtp_layer_num = get_added_mtp_kv_layer_num()
         self.mem_manager: MemoryManager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=self.config["num_attention_heads"] // self.tp_world_size_,
             head_dim=self.config["n_embed"] // self.config["num_attention_heads"],
-            layer_num=self.config["n_layer"],
+            layer_num=self.config["n_layer"] + added_mtp_layer_num,
             mem_fraction=self.mem_fraction,
         )
         return
