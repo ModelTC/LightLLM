@@ -43,15 +43,12 @@ class Qwen2TpPartModel(LlamaTpPartModel):
         head_dim_ = self.config.get("head_dim", head_dim_)
         tp_k_head_num_ = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
-        # mtp 模式下需要在mem manger上扩展draft model使用的layer
-        added_mtp_layer_num = get_added_mtp_kv_layer_num()
-
         self.mem_manager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=tp_k_head_num_,
             head_dim=head_dim_,
-            layer_num=self.config["num_hidden_layers"] + added_mtp_layer_num,
+            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
             mem_fraction=self.mem_fraction,
         )
         return

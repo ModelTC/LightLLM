@@ -188,13 +188,12 @@ class TpPartBaseModel:
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        added_mtp_layer_num = get_added_mtp_kv_layer_num()
         self.mem_manager: MemoryManager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=self.config["num_attention_heads"] // self.tp_world_size_,
             head_dim=self.config["n_embed"] // self.config["num_attention_heads"],
-            layer_num=self.config["n_layer"] + added_mtp_layer_num,
+            layer_num=self.config["n_layer"] + get_added_mtp_kv_layer_num(),
             mem_fraction=self.mem_fraction,
         )
         return

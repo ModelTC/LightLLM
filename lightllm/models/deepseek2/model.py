@@ -95,15 +95,12 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     def _init_mem_manager(self):
         manager_class = select_mem_manager_class()
 
-        # mtp 模式下需要在mem manger上扩展draft model使用的layer
-        added_mtp_layer_num = get_added_mtp_kv_layer_num()
-
         self.mem_manager = manager_class(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=1,
             head_dim=self.config["kv_lora_rank"] + self.config["qk_rope_head_dim"],
-            layer_num=self.config["num_hidden_layers"] + added_mtp_layer_num,
+            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
             mem_fraction=self.mem_fraction,
         )
         return
