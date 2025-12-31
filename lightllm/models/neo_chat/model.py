@@ -19,7 +19,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoChatMOETransformerLayerWeight
 from lightllm.models.neo_chat.layer_weights.pre_and_post_layer_weight import NeoChatMOEPreAndPostLayerWeight
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.models.neo_chat.infer_state import NeoChatInferStateInfo
+from lightllm.models.neo_chat.infer_struct import NeoChatInferStateInfo
 
 IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"

@@ -29,7 +29,7 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
                     position_delta += image["grid_thwd"][3]
                 b_position_delta[batch_idx] = position_delta
             position_ids = self.position_ids + torch.tensor(b_position_delta, device=self.position_ids.device)
-            self.position_ids = position_ids.unsqueeze(0).expand(3, -1)
+            self.position_ids = position_ids.unsqueeze(0).expand(3, -1).clone()
             self.position_ids[1:].zero_()
 
         self.position_ids = self.position_ids.contiguous()
@@ -43,7 +43,9 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
 
     def get_neo_position(self, multimodal_params: List[dict]) -> torch.Tensor:
         if len(multimodal_params) == 0:
-            return self.position_ids.unsqueeze(0).expand(3, -1)
+            position_ids = self.position_ids.new_zeros((3, self.position_ids.size(0)))
+            position_ids[0].copy_(self.position_ids)
+            return position_ids
         b_image_start_idx = []
         b_image_nums = []
         b_image_start_num = []
@@ -71,7 +73,9 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
 
         # 没有任何图片
         if image_start_num == 0:
-            return self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
+            position_ids = self.position_ids.new_zeros((3, self.position_ids.size(0)))
+            position_ids[0].copy_(self.position_ids)
+            return position_ids.contiguous()
         b_image_start_idx = torch.tensor(b_image_start_idx, device="cpu").cuda(non_blocking=True)
         b_image_thwd = torch.tensor(b_image_thwd, device="cpu").cuda(non_blocking=True)  # image_num x 4
         b_image_nums = torch.tensor(b_image_nums, device="cpu").cuda(non_blocking=True)

@@ -3,7 +3,7 @@ from functools import partial
 from typing import Tuple
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.models.neo_chat.infer_state import NeoChatInferStateInfo
+from lightllm.models.neo_chat.infer_struct import NeoChatInferStateInfo
 from lightllm.models.neo_chat.triton_kernel.context_attention_fwd_neo import context_attention_fwd_neo
 from lightllm.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
 from lightllm.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd
