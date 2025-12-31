@@ -24,6 +24,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 from .control_state import ControlState
 
 logger = init_logger(__name__)
@@ -106,7 +107,9 @@ class ChunkedPrefillBackend(ModeBackend):
         prefill_reqs: List[InferReq],
     ):
         # 第一阶段: 模型推理
-        model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        model_input, run_reqs = prepare_prefill_inputs(
+            prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
+        )
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
@@ -124,6 +127,12 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+
+        # 针对 HybridRadixCache 进行特殊处理
+        if g_infer_context.use_buffer_manager and g_infer_context.radix_cache is not None:
+            g_infer_state_lock.acquire()
+            g_infer_context.radix_cache.insert_for_hybrid_radix_cache(run_reqs)
+            g_infer_state_lock.release()
 
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
@@ -258,6 +267,15 @@ class ChunkedPrefillBackend(ModeBackend):
                 key="mtp_accept_len",
                 gpu_tensor=mtp_accept_len,
             )
+
+            # Broadcast buffers based on accept_len for linear attention states
+            if hasattr(g_infer_context.req_manager, "broadcast_buffer_for_mtp"):
+                g_infer_context.req_manager.broadcast_buffer_for_mtp(
+                    b_req_idx=model_input.b_req_idx,
+                    mtp_accept_len=mtp_accept_len,
+                    b_req_mtp_start_loc=b_req_mtp_start_loc,
+                )
+
             verify_event = torch.cuda.Event()
             verify_event.record()
 

@@ -608,4 +608,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
+    parser.add_argument("--mamba_cache_size", type=int, default=3000, help="""The size of linear attn cache. """)
+    parser.add_argument(
+        "--mamba_ssm_data_type",
+        type=str,
+        choices=["bfloat16", "float32"],
+        default="float32",
+        help="the data type of the model weight",
+    )
     return parser

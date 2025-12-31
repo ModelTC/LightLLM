@@ -22,6 +22,7 @@ class InferStateInfo:
         self.batch_size: int = None
         self.total_token_num: int = None
         self.b_req_idx: torch.Tensor = None
+        self.b_mtp_index: torch.Tensor = None  # MTP index for each batch item (0: main, 1-mtp_step: candidates)
         self.b_start_loc: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
 
@@ -112,6 +113,7 @@ class InferStateInfo:
             ) = gen_decode_params(self.b_seq_len)
             # TODO: check the correctness
             self.max_kv_seq_len = self.max_len_in_batch
+            self.max_q_seq_len = self.b_q_seq_len.max().item() if self.b_q_seq_len.numel() > 0 else 1
             self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):

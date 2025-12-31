@@ -282,6 +282,7 @@ class TpPartBaseModel:
         infer_state.prefix_total_token_num = model_input.prefix_total_token_num
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
+        infer_state.b_mtp_index = model_input.b_mtp_index
         infer_state.b_seq_len = model_input.b_seq_len
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
@@ -993,8 +994,8 @@ class TpPartBaseModel:
     def _gen_special_model_input(self, token_num: int):
         special_model_input = {}
 
-        is_deepseekv3_mtp_draft_model = "Deepseek3MTPModel" in str(self.__class__)
-        if is_deepseekv3_mtp_draft_model:
+        is_mtp_draft_model = "Deepseek3MTPModel" in str(self.__class__) or "Qwen3NextMTPModel" in str(self.__class__)
+        if is_mtp_draft_model:
             special_model_input["deepseekv3_mtp_draft_input_hiddens"] = torch.randn(
                 token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
             )
