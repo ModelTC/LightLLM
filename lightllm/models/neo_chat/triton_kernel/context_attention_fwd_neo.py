@@ -181,8 +181,8 @@ def context_attention_fwd_neo(
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
     assert Lk in {16, 32, 64, 128, 256}
-
-    sm_scale = 1.0 / (Lq ** 0.5) * 1.4426950408889634
+    base_head_dim = Lq // 2
+    sm_scale = 1.0 / (base_head_dim ** 0.5) * 1.4426950408889634
 
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
