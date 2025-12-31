@@ -46,9 +46,9 @@ class ModelInput:
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输入变量。只在特殊的模型模式下才会具体使用和生效。
 
-    # deepseekv3_mtp_draft_input_hiddens 用于 deepseekv3 模型 mtp 模式下
+    # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
-    deepseekv3_mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+    mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
     def to_cuda(self):
         if self.input_ids is not None:
@@ -90,12 +90,12 @@ class ModelOutput:
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输出变量。只在特殊的模型模式下才会具体使用和生效。
 
-    # deepseekv3_mtp_main_output_hiddens 用于在mtp模式下，llm main model
-    # 输出最后一层的hidden state 状态用于 draft 模型的 deepseekv3_mtp_draft_input_hiddens
+    # mtp_main_output_hiddens 用于在mtp模式下，llm main model
+    # 输出最后一层的hidden state 状态用于 draft 模型的 mtp_draft_input_hiddens
     # 输入
-    deepseekv3_mtp_main_output_hiddens: Optional[torch.Tensor] = None
+    mtp_main_output_hiddens: Optional[torch.Tensor] = None
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
-        if self.deepseekv3_mtp_main_output_hiddens is not None:
-            self.deepseekv3_mtp_main_output_hiddens = tensor_to_no_ref_tensor(self.deepseekv3_mtp_main_output_hiddens)
+        if self.mtp_main_output_hiddens is not None:
+            self.mtp_main_output_hiddens = tensor_to_no_ref_tensor(self.mtp_main_output_hiddens)

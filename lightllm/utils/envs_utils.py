@@ -241,9 +241,9 @@ def enable_huge_page():
 def get_added_mtp_kv_layer_num() -> int:
     # mtp 模式下需要在mem manger上扩展draft model使用的layer
     added_mtp_layer_num = 0
-    if get_env_start_args().mtp_mode == "deepseekv3_eagle":
+    if get_env_start_args().mtp_mode == "eagle_with_att":
         added_mtp_layer_num += 1
-    elif get_env_start_args().mtp_mode == "deepseekv3_vanilla":
+    elif get_env_start_args().mtp_mode == "vanilla_with_att":
         added_mtp_layer_num += get_env_start_args().mtp_step
 
     return added_mtp_layer_num

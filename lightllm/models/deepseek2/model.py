@@ -12,7 +12,7 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
+from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 
@@ -96,11 +96,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         manager_class = select_mem_manager_class()
 
         # mtp 模式下需要在mem manger上扩展draft model使用的layer
-        added_mtp_layer_num = 0
-        if get_env_start_args().mtp_mode == "deepseekv3_eagle":
-            added_mtp_layer_num += 1
-        elif get_env_start_args().mtp_mode == "deepseekv3_vanilla":
-            added_mtp_layer_num += get_env_start_args().mtp_step
+        added_mtp_layer_num = get_added_mtp_kv_layer_num()
 
         self.mem_manager = manager_class(
             self.max_total_token_num,

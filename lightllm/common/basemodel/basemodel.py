@@ -89,7 +89,12 @@ class TpPartBaseModel:
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
-        self.is_deepseekv3_mtp_mode = self.args.mtp_mode in ["deepseekv3_vanilla", "deepseekv3_eagle"]
+        self.is_mtp_mode = self.args.mtp_mode in [
+            "vanilla_with_att",
+            "eagle_with_att",
+            "vanilla_no_att",
+            "eagle_no_att",
+        ]
         self.prefill_graph: PrefillCudaGraph = None
 
         self._init_config()
@@ -303,7 +308,7 @@ class TpPartBaseModel:
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
 
         # 特殊模型，特殊模式的特定变量初始化操作。
-        infer_state.deepseekv3_mtp_draft_input_hiddens = model_input.deepseekv3_mtp_draft_input_hiddens
+        infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
         return infer_state
 
@@ -343,9 +348,9 @@ class TpPartBaseModel:
                 )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
-        if new_model_input.deepseekv3_mtp_draft_input_hiddens is not None:
-            new_model_input.deepseekv3_mtp_draft_input_hiddens = pad2dim_tensor_to_new_batch(
-                input=new_model_input.deepseekv3_mtp_draft_input_hiddens,
+        if new_model_input.mtp_draft_input_hiddens is not None:
+            new_model_input.mtp_draft_input_hiddens = pad2dim_tensor_to_new_batch(
+                input=new_model_input.mtp_draft_input_hiddens,
                 new_batch_size=new_batch_size,
             )
 
@@ -388,9 +393,9 @@ class TpPartBaseModel:
         ]
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
-        if new_model_input.deepseekv3_mtp_draft_input_hiddens is not None:
-            new_model_input.deepseekv3_mtp_draft_input_hiddens = pad2dim_tensor_to_new_batch(
-                input=new_model_input.deepseekv3_mtp_draft_input_hiddens,
+        if new_model_input.mtp_draft_input_hiddens is not None:
+            new_model_input.mtp_draft_input_hiddens = pad2dim_tensor_to_new_batch(
+                input=new_model_input.mtp_draft_input_hiddens,
                 new_batch_size=new_handle_token_num,
             )
 
@@ -405,9 +410,9 @@ class TpPartBaseModel:
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
 
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
-        if new_model_output.deepseekv3_mtp_main_output_hiddens is not None:
-            _hidden_states = new_model_output.deepseekv3_mtp_main_output_hiddens
-            new_model_output.deepseekv3_mtp_main_output_hiddens = _hidden_states[0:origin_batch_size]
+        if new_model_output.mtp_main_output_hiddens is not None:
+            _hidden_states = new_model_output.mtp_main_output_hiddens
+            new_model_output.mtp_main_output_hiddens = _hidden_states[0:origin_batch_size]
 
         return new_model_output
 
@@ -421,9 +426,9 @@ class TpPartBaseModel:
             new_model_output.logits = new_model_output.logits[0:-1]
 
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
-        if new_model_output.deepseekv3_mtp_main_output_hiddens is not None:
-            _hidden_states = new_model_output.deepseekv3_mtp_main_output_hiddens
-            new_model_output.deepseekv3_mtp_main_output_hiddens = _hidden_states[0:origin_handle_token_num]
+        if new_model_output.mtp_main_output_hiddens is not None:
+            _hidden_states = new_model_output.mtp_main_output_hiddens
+            new_model_output.mtp_main_output_hiddens = _hidden_states[0:origin_handle_token_num]
 
         return new_model_output
 
@@ -559,8 +564,8 @@ class TpPartBaseModel:
         model_output = ModelOutput(logits=predict_logits)
 
         # 特殊模型特殊模式的额外输出
-        if self.is_deepseekv3_mtp_mode:
-            model_output.deepseekv3_mtp_main_output_hiddens = input_embs
+        if self.is_mtp_mode:
+            model_output.mtp_main_output_hiddens = input_embs
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -581,14 +586,14 @@ class TpPartBaseModel:
         post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
         predict_logits: torch.Tensor = post_method(input_embs, infer_state, self.pre_post_weight)
 
-        if self.is_deepseekv3_mtp_mode:
+        if self.is_mtp_mode:
             graph_out_hiddens = input_embs.contiguous()
 
         model_output = ModelOutput(logits=predict_logits.contiguous())
 
         # 特殊模型特殊模式的额外输出
-        if self.is_deepseekv3_mtp_mode:
-            model_output.deepseekv3_mtp_main_output_hiddens = graph_out_hiddens
+        if self.is_mtp_mode:
+            model_output.mtp_main_output_hiddens = graph_out_hiddens
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -756,9 +761,9 @@ class TpPartBaseModel:
         model_output = ModelOutput(logits=predict_logits.contiguous())
         model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
-        if self.is_deepseekv3_mtp_mode:
-            model_output.deepseekv3_mtp_main_output_hiddens = input_embs.contiguous()
-            model_output1.deepseekv3_mtp_main_output_hiddens = input_embs1.contiguous()
+        if self.is_mtp_mode:
+            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
         return model_output, model_output1
 
@@ -779,16 +784,16 @@ class TpPartBaseModel:
             input_embs, input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
-        if self.is_deepseekv3_mtp_mode:
+        if self.is_mtp_mode:
             graph_out_hiddens = input_embs.contiguous()
             graph_out_hiddens1 = input_embs1.contiguous()
 
         model_output = ModelOutput(logits=predict_logits.contiguous())
         model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
-        if self.is_deepseekv3_mtp_mode:
-            model_output.deepseekv3_mtp_main_output_hiddens = graph_out_hiddens
-            model_output1.deepseekv3_mtp_main_output_hiddens = graph_out_hiddens1
+        if self.is_mtp_mode:
+            model_output.mtp_main_output_hiddens = graph_out_hiddens
+            model_output1.mtp_main_output_hiddens = graph_out_hiddens1
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()
@@ -993,16 +998,16 @@ class TpPartBaseModel:
     def _gen_special_model_input(self, token_num: int):
         special_model_input = {}
 
-        is_deepseekv3_mtp_draft_model = (
+        is_mtp_draft_model = (
             "Deepseek3MTPModel" in str(self.__class__)
             or "Qwen3MOEMTPModel" in str(self.__class__)
             or "MistralMTPModel" in str(self.__class__)
         )
-        if is_deepseekv3_mtp_draft_model:
-            special_model_input["deepseekv3_mtp_draft_input_hiddens"] = torch.randn(
+        if is_mtp_draft_model:
+            special_model_input["mtp_draft_input_hiddens"] = torch.randn(
                 token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
             )
         else:
-            special_model_input["deepseekv3_mtp_draft_input_hiddens"] = None
+            special_model_input["mtp_draft_input_hiddens"] = None
 
         return special_model_input

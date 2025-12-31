@@ -124,7 +124,9 @@ class StartArgs:
     )
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
-    mtp_mode: Optional[str] = field(default=None)
+    mtp_mode: Optional[str] = field(
+        default=None, metadata={"choices": ["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att"]}
+    )
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)

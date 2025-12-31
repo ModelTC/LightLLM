@@ -289,9 +289,9 @@ class ModeBackend:
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
-        if self.args.mtp_mode == "deepseekv3_vanilla":
+        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
             num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode == "deepseekv3_eagle":
+        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
             num_mtp_modules = 1
         else:
             assert False, f"error mtp mode {self.args.mtp_mode}"

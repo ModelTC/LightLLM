@@ -71,10 +71,10 @@ class InferStateInfo:
         # inferstate的基类中，但是为了代码的简洁和方便，都放在基类中
         # 进行管理。注意这些成员变量只会在特定的模型和模式下才会生效。
 
-        # deepseekv3 mtp draft model 使用的额外输入参数,
-        # 在开启 mtp_mode == deepseekv3 时，mtp draft model
+        # mtp draft model 使用的额外输入参数,
+        # 在开启 mtp_mode 时，mtp draft model
         # 的输入会用到，其他模型和场景都不会用到
-        self.deepseekv3_mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+        self.mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
         # 在单节点多dp的运行模式下，在进行prefill的阶段，如果出现了dp之间数据不平衡的现象，
         # 可以将推理的数据，进行重新分配到各个dp，在做 att 之前，重新 all to all 到各自的

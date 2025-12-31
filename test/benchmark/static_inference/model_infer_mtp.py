@@ -148,7 +148,7 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
 
     # Draft model Prefill
     # For simplicity, we'll just take the input of main_model to draft model.
-    model_input.deepseekv3_mtp_draft_input_hiddens = model_output.deepseekv3_mtp_main_output_hiddens
+    model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
     for draft_model_id in range(len(draft_models)):
         draft_model = draft_models[draft_model_id]
         model_output = draft_model.forward(model_input)
@@ -156,7 +156,7 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
         predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
         predict_ids = predict_ids.detach().cpu().numpy()
         draft_ids.append(predict_ids)
-        model_input.deepseekv3_mtp_draft_input_hiddens = model_output.deepseekv3_mtp_main_output_hiddens
+        model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
 
     torch.cuda.synchronize()
     prefill_end_time = time.time()
@@ -218,7 +218,7 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
 
         # draft decode
         model_input.input_ids = predict_ids.reshape(-1)
-        model_input.deepseekv3_mtp_draft_input_hiddens = model_output.deepseekv3_mtp_main_output_hiddens
+        model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
 
         for draft_model_id in range(len(draft_models)):
             draft_model = draft_models[draft_model_id]
@@ -228,11 +228,11 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
             prob_out = torch.softmax(model_output.logits, dim=-1)
             predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
             model_input.input_ids = predict_ids.reshape(-1)
-            model_input.deepseekv3_mtp_draft_input_hiddens = model_output.deepseekv3_mtp_main_output_hiddens
+            model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
 
         # accept all draft ids by default.
         model_input.input_ids = predict_ids.reshape(-1)
-        model_input.deepseekv3_mtp_draft_input_hiddens = model_output.deepseekv3_mtp_main_output_hiddens
+        model_input.mtp_draft_input_hiddens = model_output.mtp_main_output_hiddens
         torch.cuda.synchronize()
         if i % 100 == 0 or i == output_len - 1:
             step_end_time = time.time()
