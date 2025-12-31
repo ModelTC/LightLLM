@@ -5,7 +5,6 @@ from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MT
 from lightllm.models.qwen3_moe_mtp.layer_infer.transformer_layer_infer import Qwen3MOEMTPTransformerLayerInfer
 from lightllm.models.qwen3_moe_mtp.layer_weights.transformer_layer_weight import Qwen3MOEMTPTransformerLayerWeight
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 
 
 class Qwen3MOEMTPModel(Qwen3MOEModel):
@@ -39,44 +38,20 @@ class Qwen3MOEMTPModel(Qwen3MOEModel):
         self.mem_manager = self.main_model.mem_manager
         return
 
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
-        )
+    def _init_weights(self, start_layer_index=None):
+        assert start_layer_index is None
         mtp_index = len(self.mtp_previous_draft_models)
-        self.trans_layers_weight = [
-            self.transformer_weight_class(
-                i,
-                self.data_type,
-                network_config=self.config,
-                mode=self.mode,
-                quant_cfg=self.quant_cfg,
-            )
-            for i in range(mtp_index, mtp_index + self.config["n_layer"])
-        ]
-        if self.load_way == "HF":
-            load_hf_weights(
-                self.data_type,
-                weight_dir=self.weight_dir_,
-                pre_post_layer=self.pre_post_weight,
-                transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict,
-            )
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
+        super()._init_weights(start_layer_index=mtp_index)
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
         # self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
         # self.pre_post_weight.final_norm_weight_ = self.main_model.pre_post_weight.final_norm_weight_
         return
 
-    def _init_infer_layer(self):
-        super()._init_infer_layer()
+    def _init_infer_layer(self, start_layer_index=None):
+        assert start_layer_index is None
         total_pre_layers_num = len(self.main_model.layers_infer)
         total_pre_layers_num += sum(
             [len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models]
         )
-
-        # reset the layer_num_ of the self.layers_infer
-        for layer in self.layers_infer:
-            layer.layer_num_ = layer.layer_num_ + total_pre_layers_num
+        super()._init_infer_layer(start_layer_index=total_pre_layers_num)
         return
