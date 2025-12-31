@@ -8,7 +8,12 @@ import time
 import numpy as np
 import triton
 from functools import lru_cache
-from lightllm.utils.envs_utils import get_env_start_args, enable_huge_page, get_llm_data_type
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    enable_huge_page,
+    get_llm_data_type,
+    get_added_mtp_kv_layer_num,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
@@ -111,7 +116,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
     if args.mtp_mode is not None:
         # TODO 可能会存在不同mtp模式的精度问题
-        cpu_cache_meta.layer_num += 1
+        cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
     cpu_cache_page_num = int(
         (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.calcu_one_page_size())
