@@ -57,6 +57,6 @@ class BloomPostLayerInfer(PostLayerInferTpl):
             )
         logic_batch = None
 
-        ans_logics = gather_data.permute(1, 0).float()
+        ans_logics = gather_data.permute(1, 0).float().contiguous()
         gather_data = None
         return ans_logics
