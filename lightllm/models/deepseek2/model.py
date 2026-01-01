@@ -146,8 +146,3 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         self._sin_cached = (freqs.sin() * _mscale).to(self.data_type).cuda()
 
         return
-
-    @final
-    def _context_forward(self, input_ids, infer_state):
-        predict_logics = super()._context_forward(input_ids, infer_state)
-        return predict_logics
