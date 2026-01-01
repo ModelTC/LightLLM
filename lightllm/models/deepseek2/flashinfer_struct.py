@@ -14,15 +14,15 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
         self.decode_wrapper = None
         self.flashinfer_extra_state = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
+    def init_some_extra_state(self, model):
+        super().init_some_extra_state(model)
         self.flashinfer_extra_state = model.flashinfer_extra_state
 
         import flashinfer
 
         if not self.is_prefill:
             if get_env_start_args().enable_flashinfer_decode:
-                self.q_indptr = torch.arange(self.batch_size + 1, dtype=torch.int32).to(input_ids.device)
+                self.q_indptr = torch.arange(self.batch_size + 1, dtype=torch.int32).to(self.input_ids.device)
                 if self.batch_size <= model.graph_max_batch_size:
                     self.kv_indices = self.flashinfer_extra_state.kv_indices_buffer[self.microbatch_index][
                         : self.batch_size * self.flashinfer_extra_state.max_seq_length
@@ -31,7 +31,7 @@ class Deepseek2FlashInferStateInfo(Deepseek2InferStateInfo):
                     self.kv_indices = torch.empty(
                         self.batch_size * self.flashinfer_extra_state.max_seq_length,
                         dtype=torch.int32,
-                        device=input_ids.device,
+                        device=self.input_ids.device,
                     )
                 repack_kv_index(
                     self.req_manager.req_to_token_indexs,

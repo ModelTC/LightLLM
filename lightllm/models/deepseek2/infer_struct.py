@@ -10,8 +10,8 @@ class Deepseek2InferStateInfo(LlamaInferStateInfo):
         super().__init__()
         self.kv_starts = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
+    def init_some_extra_state(self, model):
+        super().init_some_extra_state(model)
         if not self.is_prefill:
             self.kv_starts = self.b1_cu_kv_seq_len
 

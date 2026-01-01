@@ -25,12 +25,12 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
             ]
         return cls._shared_page_table_buffer
 
-    def _init_flash_attention_state(self, model, input_ids: torch.Tensor):
+    def _init_flash_attention_state(self, model):
         if self.is_prefill:
             self.cu_seqlens_q = self.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.b1_cu_kv_seq_len.int()
             self.page_table = torch.empty(
-                (self.batch_size, self.max_seq_len), dtype=torch.int32, device=input_ids.device
+                (self.batch_size, self.max_seq_len), dtype=torch.int32, device=self.input_ids.device
             )
             self.page_table.copy_(model.req_manager.req_to_token_indexs[self.b_req_idx, : self.max_seq_len])
         else:
@@ -49,7 +49,7 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
                 ].reshape(att_batch_size, model.graph_max_len_in_batch)
             else:
                 self.page_table = torch.empty(
-                    (att_batch_size, self.max_len_in_batch), dtype=torch.int32, device=input_ids.device
+                    (att_batch_size, self.max_len_in_batch), dtype=torch.int32, device=self.input_ids.device
                 )
 
             page_table_copy(
@@ -64,7 +64,7 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
 
         if "offline_calibration_fp8kv" in model.mode:
             if self.is_prefill:
-                device = input_ids.device
+                device = self.input_ids.device
                 # q_scale和token_batch_ids在对q做per head量化使用，为了节省资源在推理外部初始化
                 self.q_scale = torch.empty(
                     (self.batch_size, self.mem_manager.head_num), dtype=torch.float32, device=device
@@ -84,7 +84,7 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
                 else torch.ones(
                     (self.mem_manager.layer_num, self.batch_size, head_num),
                     dtype=torch.float32,
-                    device=input_ids.device,
+                    device=self.input_ids.device,
                 )
             )
             self.v_descale = (
@@ -95,12 +95,12 @@ class FlashAttentionStateInfo(LlamaInferStateInfo):
                 else torch.ones(
                     (self.mem_manager.layer_num, self.batch_size, head_num),
                     dtype=torch.float32,
-                    device=input_ids.device,
+                    device=self.input_ids.device,
                 )
             )
         return
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
-        self._init_flash_attention_state(model, input_ids)
+    def init_some_extra_state(self, model):
+        super().init_some_extra_state(model)
+        self._init_flash_attention_state(model)
         return

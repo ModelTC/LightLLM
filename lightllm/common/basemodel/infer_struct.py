@@ -19,6 +19,7 @@ class InferStateInfo:
     """
 
     def __init__(self):
+        self.input_ids: torch.Tensor = None
         self.batch_size: int = None
         self.total_token_num: int = None
         self.b_req_idx: torch.Tensor = None
@@ -88,7 +89,8 @@ class InferStateInfo:
         self.dp_output_split_sizes: List[List[int]] = None
         self.dp_input_split_sizes: List[List[int]] = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
+    def init_some_extra_state(self, model):
+
         if self.is_prefill:
             (
                 self.b_q_seq_len,
@@ -97,7 +99,7 @@ class InferStateInfo:
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
             ) = gen_prefill_params(
-                input_token_num=input_ids.shape[0],
+                input_token_num=self.input_ids.shape[0],
                 b_ready_cache_len=self.b_ready_cache_len,
                 b_seq_len=self.b_seq_len,
             )

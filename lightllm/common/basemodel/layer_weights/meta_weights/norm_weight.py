@@ -1,6 +1,8 @@
 import torch
+from typing import Optional
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.common.basemodel.triton_kernel.rmsnorm import rmsnorm_forward
 
 
 class NormWeight(BaseWeightTpl):
@@ -9,8 +11,8 @@ class NormWeight(BaseWeightTpl):
         self.weight_name = weight_name
         self.bias_name = bias_name
         self.data_type_ = data_type
-        self.weight = None
-        self.bias = None
+        self.weight: torch.Tensor = None
+        self.bias: Optional[torch.Tensor] = None
 
     def load_hf_weights(self, weights):
         if self.weight_name in weights:
@@ -26,6 +28,17 @@ class NormWeight(BaseWeightTpl):
         if self.bias_name is not None:
             load_ok = load_ok and self.bias is not None
         return load_ok
+
+
+class NoTpNormWeight(NormWeight):
+    def __init__(self, weight_name, data_type, bias_name=None):
+        super().__init__(weight_name=weight_name, data_type=data_type, bias_name=bias_name)
+        self.tp_world_size_ = 1
+        self.tp_rank_ = 0
+
+    def rmsnorm_forward(self, input: torch.Tensor, eps: float) -> torch.Tensor:
+        assert self.bias is None
+        return rmsnorm_forward(x=input, weight=self.weight, eps=eps)
 
 
 class GEMMANormWeight(NormWeight):

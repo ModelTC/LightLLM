@@ -10,8 +10,8 @@ class LlamaInferStateInfo(InferStateInfo):
         self.position_cos = None
         self.position_sin = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
+    def init_some_extra_state(self, model):
+        super().init_some_extra_state(model)
         if self.is_prefill:
             self.max_seq_len = self.max_kv_seq_len
             self.q_max_seq_len = self.max_q_seq_len
