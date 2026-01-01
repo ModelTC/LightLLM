@@ -95,7 +95,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
                 (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
             )
             all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-            input = gather_input[0 : len(infer_state.position_cos), :]
+            input = gather_input[0 : len(infer_state.input_ids), :]
 
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)

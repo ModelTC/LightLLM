@@ -104,8 +104,8 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
                 group=infer_state.dist_group,
                 async_op=False,
             )
-            # len(infer_state.position_sin) 获取真实输入长度
-            input_embdings = gather_data[0 : infer_state.handle_token_num]
+            # len(infer_state.input_ids) 获取真实输入长度
+            input_embdings = gather_data[0 : len(infer_state.input_ids)]
 
         if infer_state.need_dp_prefill_balance:
             input_embdings = infer_state._all_to_all_unbalance_get(data=input_embdings)

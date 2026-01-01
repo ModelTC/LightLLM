@@ -224,7 +224,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
             )
             all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-            input = gather_input[0 : len(infer_state.position_cos), :]
+            input = gather_input[0 : len(infer_state.input_ids), :]
 
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
@@ -415,8 +415,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
         o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
-        layer_weight.o_proj.mm(input, out=o_tensor[0 : len(infer_state.position_cos), :])
-        e_o_tensor = o_tensor[len(infer_state.position_cos) :, :]
+        layer_weight.o_proj.mm(input, out=o_tensor[0 : len(infer_state.input_ids), :])
+        e_o_tensor = o_tensor[len(infer_state.input_ids) :, :]
         if e_o_tensor.shape[0] > 0:
             e_o_tensor.fill_(0)
 
