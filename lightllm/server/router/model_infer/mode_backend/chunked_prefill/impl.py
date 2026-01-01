@@ -40,7 +40,7 @@ class ChunkedPrefillBackend(ModeBackend):
         if get_env_start_args().mtp_mode:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
-            self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
+            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att"]
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
             self._draft_decode_func = self._draft_decode_eagle if self.is_mtp_eagle else self._draft_decode_vanilla
         else:

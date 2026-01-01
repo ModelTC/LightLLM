@@ -34,7 +34,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
-            self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
+            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att"]
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
