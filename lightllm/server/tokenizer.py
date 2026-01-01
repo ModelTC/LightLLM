@@ -30,6 +30,7 @@ from ..models.qwen_vl.model import QWenVLTokenizer
 from ..models.qwen2_vl.model import QWen2VLTokenizer
 from ..models.qwen3_vl.model import QWen3VLTokenizer
 from ..models.internvl.model import InternvlTokenizer
+from ..models.neo_chat.model import NeoChatTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
@@ -104,5 +105,7 @@ def get_tokenizer(
         tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
     elif model_type == "gemma3":
         tokenizer = Gemma3Tokenizer(tokenizer, model_cfg)
+    elif model_type == "neo_chat":
+        tokenizer = NeoChatTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
 
     return tokenizer
