@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMMWeight
-from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import NormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import NoTpNormWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
 
@@ -66,12 +66,12 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_norm(self):
         super()._init_norm()
-        self.k_norm_weight_ = NormWeight(self._k_norm_weight_name, self.data_type_, bias_name=None)
-        self.q_norm_weight_ = NormWeight(self._q_norm_weight_name, self.data_type_, bias_name=None)
-        self.pre_feedforward_layernorm_weight_ = NormWeight(
+        self.k_norm_weight_ = NoTpNormWeight(self._k_norm_weight_name, self.data_type_, bias_name=None)
+        self.q_norm_weight_ = NoTpNormWeight(self._q_norm_weight_name, self.data_type_, bias_name=None)
+        self.pre_feedforward_layernorm_weight_ = NoTpNormWeight(
             self._pre_feedforward_layernorm_name, self.data_type_, bias_name=None
         )
-        self.post_feedforward_layernorm_weight_ = NormWeight(
+        self.post_feedforward_layernorm_weight_ = NoTpNormWeight(
             self._post_feedforward_layernorm_name, self.data_type_, bias_name=None
         )
 

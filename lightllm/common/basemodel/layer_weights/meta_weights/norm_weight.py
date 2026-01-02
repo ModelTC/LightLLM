@@ -5,7 +5,7 @@ from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.basemodel.triton_kernel.rmsnorm import rmsnorm_forward
 
 
-class NormWeight(BaseWeightTpl):
+class _NormWeight(BaseWeightTpl):
     def __init__(self, weight_name, data_type, bias_name=None):
         super().__init__()
         self.weight_name = weight_name
@@ -13,12 +13,6 @@ class NormWeight(BaseWeightTpl):
         self.data_type_ = data_type
         self.weight: torch.Tensor = None
         self.bias: Optional[torch.Tensor] = None
-
-    def load_hf_weights(self, weights):
-        if self.weight_name in weights:
-            self.weight = weights[self.weight_name].to(self.data_type_).cuda(get_current_device_id())
-        if self.bias_name in weights:
-            self.bias = weights[self.bias_name].to(self.data_type_).cuda(get_current_device_id())
 
     def verify_load(self):
         load_ok = True
@@ -32,29 +26,39 @@ class NormWeight(BaseWeightTpl):
     def rmsnorm_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
+        assert input.ndim == 2 and self.weight.ndim == 1
         assert self.bias is None
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
         return rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out)
 
 
-class NoTpNormWeight(NormWeight):
+class NoTpNormWeight(_NormWeight):
     def __init__(self, weight_name, data_type, bias_name=None):
         super().__init__(weight_name=weight_name, data_type=data_type, bias_name=bias_name)
         self.tp_world_size_ = 1
         self.tp_rank_ = 0
 
+    def load_hf_weights(self, weights):
+        if self.weight_name in weights:
+            self.weight = weights[self.weight_name].to(self.data_type_).cuda(get_current_device_id())
+        if self.bias_name in weights:
+            self.bias = weights[self.bias_name].to(self.data_type_).cuda(get_current_device_id())
 
-class GEMMANormWeight(NormWeight):
+
+class NoTpGEMMANormWeight(_NormWeight):
     def __init__(self, weight_name, data_type, bias_name=None):
         super().__init__(weight_name, data_type, bias_name)
+        assert self.bias_name is None
+        self.tp_world_size_ = 1
+        self.tp_rank_ = 0
 
     def load_hf_weights(self, weights):
         if self.weight_name in weights:
             self.weight = (weights[self.weight_name] + 1).to(self.data_type_).cuda(get_current_device_id())
 
 
-class TpNormWeight(NormWeight):
+class TpNormWeight(_NormWeight):
     def __init__(self, weight_name, data_type, split_n_embed, bias_name=None):
         super().__init__(weight_name, data_type, bias_name)
         self.split_n_embed = split_n_embed
@@ -69,7 +73,7 @@ class TpNormWeight(NormWeight):
             self.bias = weights[self.bias_name][start:end].to(self.data_type_).cuda(get_current_device_id())
 
 
-class TpHeadNormWeight(NormWeight):
+class TpHeadNormWeight(_NormWeight):
     def __init__(self, weight_name, data_type, tp_head_num, bias_name=None):
         super().__init__(weight_name, data_type, bias_name)
         self.tp_head_num = tp_head_num
