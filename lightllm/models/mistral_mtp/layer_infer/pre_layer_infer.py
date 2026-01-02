@@ -2,7 +2,6 @@ import torch
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.mistral_mtp.layer_weights.pre_and_post_layer_weight import MistralMTPPreAndPostLayerWeight
-from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 
 
 class MistralMTPPreLayerInfer(LlamaPreLayerInfer):
@@ -19,10 +18,23 @@ class MistralMTPPreLayerInfer(LlamaPreLayerInfer):
         assert (
             input_embdings.shape[0] == tgt_embdings.shape[0]
         ), f"shape {input_embdings.shape} != shape {tgt_embdings.shape}"
-        rmsnorm_forward(input_embdings, weight=layer_weight.enorm_weight_, eps=self.eps_, out=input_embdings)
 
-        tgt_embdings = rmsnorm_forward(tgt_embdings, weight=layer_weight.final_norm_weight_, eps=self.eps_)
-        rmsnorm_forward(tgt_embdings, weight=layer_weight.hnorm_weight_, eps=self.eps_, out=tgt_embdings)
+        layer_weight.enorm_weight_.rmsnorm_forward(
+            input=input_embdings,
+            eps=self.eps_,
+            out=input_embdings,
+        )
+
+        tgt_embdings = layer_weight.final_norm_weight_.rmsnorm_forward(
+            input=tgt_embdings,
+            eps=self.eps_,
+            alloc_func=self.alloc_tensor,
+        )
+        layer_weight.hnorm_weight_.rmsnorm_forward(
+            input=tgt_embdings,
+            eps=self.eps_,
+            out=tgt_embdings,
+        )
 
         cat_embdings = torch.cat((input_embdings, tgt_embdings), dim=-1)
 
@@ -37,10 +49,23 @@ class MistralMTPPreLayerInfer(LlamaPreLayerInfer):
     ):
         tgt_embdings = infer_state.mtp_draft_input_hiddens
         assert input_embdings.shape[0] == tgt_embdings.shape[0]
-        rmsnorm_forward(input_embdings, weight=layer_weight.enorm_weight_, eps=self.eps_, out=input_embdings)
 
-        tgt_embdings = rmsnorm_forward(tgt_embdings, weight=layer_weight.final_norm_weight_, eps=self.eps_)
-        rmsnorm_forward(tgt_embdings, weight=layer_weight.hnorm_weight_, eps=self.eps_, out=tgt_embdings)
+        layer_weight.enorm_weight_.rmsnorm_forward(
+            input=input_embdings,
+            eps=self.eps_,
+            out=input_embdings,
+        )
+
+        tgt_embdings = layer_weight.final_norm_weight_.rmsnorm_forward(
+            input=tgt_embdings,
+            eps=self.eps_,
+            alloc_func=self.alloc_tensor,
+        )
+        layer_weight.hnorm_weight_.rmsnorm_forward(
+            input=tgt_embdings,
+            eps=self.eps_,
+            out=tgt_embdings,
+        )
 
         cat_embdings = torch.cat((input_embdings, tgt_embdings), dim=-1)
 
