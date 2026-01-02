@@ -29,13 +29,6 @@ class NormWeight(BaseWeightTpl):
             load_ok = load_ok and self.bias is not None
         return load_ok
 
-
-class NoTpNormWeight(NormWeight):
-    def __init__(self, weight_name, data_type, bias_name=None):
-        super().__init__(weight_name=weight_name, data_type=data_type, bias_name=bias_name)
-        self.tp_world_size_ = 1
-        self.tp_rank_ = 0
-
     def rmsnorm_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
@@ -43,6 +36,13 @@ class NoTpNormWeight(NormWeight):
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
         return rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out)
+
+
+class NoTpNormWeight(NormWeight):
+    def __init__(self, weight_name, data_type, bias_name=None):
+        super().__init__(weight_name=weight_name, data_type=data_type, bias_name=bias_name)
+        self.tp_world_size_ = 1
+        self.tp_rank_ = 0
 
 
 class GEMMANormWeight(NormWeight):
@@ -67,3 +67,25 @@ class TpNormWeight(NormWeight):
             self.weight = weights[self.weight_name][start:end].to(self.data_type_).cuda(get_current_device_id())
         if self.bias_name in weights:
             self.bias = weights[self.bias_name][start:end].to(self.data_type_).cuda(get_current_device_id())
+
+
+class TpHeadNormWeight(NormWeight):
+    def __init__(self, weight_name, data_type, tp_head_num, bias_name=None):
+        super().__init__(weight_name, data_type, bias_name)
+        self.tp_head_num = tp_head_num
+        assert self.tp_head_num > 0
+
+    def load_hf_weights(self, weights):
+        start = self.tp_head_num * self.tp_rank_
+        end = self.tp_head_num * (self.tp_rank_ + 1)
+
+        if self.weight_name in weights:
+            self.weight: torch.Tensor = (
+                weights[self.weight_name][start:end].to(self.data_type_).cuda(get_current_device_id())
+            )
+            assert self.weight.ndim == 2
+        if self.bias_name in weights:
+            self.bias: torch.Tensor = (
+                weights[self.bias_name][start:end].to(self.data_type_).cuda(get_current_device_id())
+            )
+            assert self.bias.ndim == 2
