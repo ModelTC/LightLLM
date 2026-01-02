@@ -9,13 +9,13 @@ class LlamaPreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
 
-        self.embdding_weight_ = EmbeddingWeight(
+        self.wte_weight_ = EmbeddingWeight(
             weight_name="model.embed_tokens.weight",
             data_type=self.data_type_,
         )
         tie_word_embeddings = self.network_config_.get("tie_word_embeddings", False)
         if tie_word_embeddings:
-            self.lm_head_weight_ = self.embdding_weight_
+            self.lm_head_weight_ = self.wte_weight_
         else:
             self.lm_head_weight_ = LMHeadWeight(
                 weight_name="lm_head.weight",
