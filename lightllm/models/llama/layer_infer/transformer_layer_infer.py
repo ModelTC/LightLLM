@@ -14,7 +14,6 @@ from lightllm.models.llama.triton_kernel.context_flashattention_nopad import (
 from lightllm.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd, token_att_fwd_int8k
 from lightllm.models.llama.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
 from lightllm.models.llama.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2, token_att_fwd2_int8v
-from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 
@@ -190,16 +189,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
-        out = self.alloc_tensor(input.shape, input.dtype)
-        rmsnorm_forward(input, weight=layer_weight.att_norm_weight_.weight, eps=self.eps_, out=out)
-        return out
+        return layer_weight.att_norm_weight_.rmsnorm_forward(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     def _ffn_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
-        out = self.alloc_tensor(input.shape, input.dtype)
-        rmsnorm_forward(input, weight=layer_weight.ffn_norm_weight_.weight, eps=self.eps_, out=out)
-        return out
+        return layer_weight.ffn_norm_weight_.rmsnorm_forward(
+            input=input,
+            eps=self.eps_,
+            alloc_func=self.alloc_tensor,
+        )
 
     def _get_qkv(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
