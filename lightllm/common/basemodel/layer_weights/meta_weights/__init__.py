@@ -9,5 +9,5 @@ from .mm_weight import (
 from .norm_weight import NoTpGEMMANormWeight, TpNormWeight, NoTpNormWeight, TpHeadNormWeight
 from .fused_moe_weight_tp import create_tp_moe_wegiht_obj
 from .fused_moe_weight_ep import FusedMoeWeightEP
-from .embedding_weight import EmbeddingWeight, LMHeadWeight
+from .embedding_weight import EmbeddingWeight, LMHeadWeight, NoTpPosEmbeddingWeight
 from .att_sink_weight import TpAttSinkWeight

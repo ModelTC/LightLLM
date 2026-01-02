@@ -17,10 +17,9 @@ class BloomPreAndPostLayerWeight(PreAndPostLayerWeight):
             data_type=self.data_type_,
             bias_name="ln_f.bias",
         )
-        vocab_size = self.network_config_["vocab_size"]
+
         self.wte_weight_ = EmbeddingWeight(
             weight_name="word_embeddings.weight",
             data_type=self.data_type_,
-            vocab_size=vocab_size,
         )
         self.lm_head_weight_ = self.wte_weight_
