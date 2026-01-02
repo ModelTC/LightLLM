@@ -4,7 +4,6 @@ import numpy as np
 
 from lightllm.common.basemodel.layer_weights.meta_weights.gpt_oss_fused_moe_weight_tp import GPTOSSFusedMoeWeightTP
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMMWeight
-from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import NormWeight, TpNormWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.utils.log_utils import init_logger
