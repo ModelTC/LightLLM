@@ -22,8 +22,8 @@ class EmbeddingWeight(BaseWeightTpl):
             # init some params
             self.vocab_size = len(t_weight)
             split_indexes = np.linspace(0, self.vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
-            self.tp_vocab_start_id = split_indexes[self.tp_rank_]
-            self.tp_vocab_end_id = split_indexes[self.tp_rank_ + 1]
+            self.tp_vocab_start_id = int(split_indexes[self.tp_rank_])
+            self.tp_vocab_end_id = int(split_indexes[self.tp_rank_ + 1])
 
             logger.info(f"loaded weight vocab_size: {self.vocab_size}")
 

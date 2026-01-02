@@ -498,11 +498,9 @@ class TpPartBaseModel:
 
             if self.graph.need_capture(find_graph_batch_size):
                 infer_state.is_cuda_graph = True
-                model_output: ModelOutput = self.graph.capture_decode(
-                    self._token_forward, padded_model_input.input_ids, infer_state
-                )
+                model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
             else:
-                model_output: ModelOutput = self.graph.replay(padded_model_input.input_ids, infer_state)
+                model_output: ModelOutput = self.graph.replay(infer_state)
 
             model_output = self._create_unpad_decode_model_output(
                 model_output, origin_batch_size=model_input.batch_size
