@@ -1,6 +1,3 @@
-import os
-import torch
-import numpy as np
 from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, NoTpNormWeight
 
@@ -15,7 +12,7 @@ class LlamaPreAndPostLayerWeight(PreAndPostLayerWeight):
         )
         tie_word_embeddings = self.network_config_.get("tie_word_embeddings", False)
         if tie_word_embeddings:
-            self.lm_head_weight_ = self.wte_weight_
+            self.lm_head_weight_: LMHeadWeight = self.wte_weight_
         else:
             self.lm_head_weight_ = LMHeadWeight(
                 weight_name="lm_head.weight",

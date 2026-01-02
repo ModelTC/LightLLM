@@ -1,9 +1,4 @@
-import os
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
-import triton
 from typing import Tuple
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer

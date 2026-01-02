@@ -1,7 +1,4 @@
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
 from functools import partial
 from typing import Tuple
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
