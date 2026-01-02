@@ -3,6 +3,7 @@ from typing import Optional
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.basemodel.triton_kernel.rmsnorm import rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.layernorm import layernorm_forward
 
 
 class _NormWeight(BaseWeightTpl):
@@ -31,6 +32,19 @@ class _NormWeight(BaseWeightTpl):
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
         return rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out)
+
+    def layernorm_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        assert input.ndim == 2 and self.weight.ndim == 1
+        assert self.bias is not None
+
+        _tout = layernorm_forward(x=input, weight=self.weight, bias=self.bias, eps=eps)
+        if out is None:
+            return _tout
+        else:
+            out.copy_(_tout)
+            return out
 
 
 class NoTpNormWeight(_NormWeight):
