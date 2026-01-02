@@ -36,9 +36,13 @@ class NoTpNormWeight(NormWeight):
         self.tp_world_size_ = 1
         self.tp_rank_ = 0
 
-    def rmsnorm_forward(self, input: torch.Tensor, eps: float) -> torch.Tensor:
+    def rmsnorm_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
         assert self.bias is None
-        return rmsnorm_forward(x=input, weight=self.weight, eps=eps)
+        if out is None:
+            out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
+        return rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out)
 
 
 class GEMMANormWeight(NormWeight):

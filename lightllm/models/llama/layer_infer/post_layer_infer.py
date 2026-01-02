@@ -19,7 +19,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         return
 
     def _norm(self, input, infer_state, layer_weight: LlamaPreAndPostLayerWeight) -> torch.Tensor:
-        return layer_weight.final_norm_weight_.rmsnorm_forward(input=input, eps=self.eps_)
+        return layer_weight.final_norm_weight_.rmsnorm_forward(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     def _slice_get_last_input(self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo):
         embed_dim_ = input_embdings.shape[1]
