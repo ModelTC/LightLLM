@@ -14,7 +14,6 @@ class Deepseek3MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
         self.eh_proj_weight_ = ROWMMWeight(
             weight_names="model.layers.0.eh_proj.weight",
             data_type=self.data_type_,
-            layer_num=0,
             name="eh_proj",
             tp_rank=0,
             tp_world_size=1,

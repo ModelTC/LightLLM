@@ -13,9 +13,7 @@ class Internlm2RewardPreAndPostLayerWeight(PreAndPostLayerWeight):
         self.score_head_ = ROWMMWeight(
             weight_names="v_head.weight",
             data_type=self.data_type_,
-            quant_cfg=None,
-            layer_num=0,
-            name="kv_a_proj_with_mqa",
+            name="score_head",
             tp_rank=0,
             tp_world_size=1,
         )

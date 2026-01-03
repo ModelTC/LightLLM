@@ -16,7 +16,7 @@ class MiniCPMPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
             self.lm_head_weight_ = copy.copy(self.lm_head_weight_)
 
         self.lm_head_weight_.weight = self.lm_head_weight_.weight / self.lm_head_scale
-        self.wte_weight_ = self.wte_weight_ * self.scale_emb
+        self.wte_weight_.weight = self.wte_weight_.weight * self.scale_emb
         errors = "weights load not ok"
         weights = [self.wte_weight_, self.lm_head_weight_, self.final_norm_weight_]
         for i in range(len(weights)):
