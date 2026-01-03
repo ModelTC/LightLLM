@@ -45,7 +45,7 @@ class CoherePostLayerInfer(LlamaPostLayerInfer):
                 group=infer_state.dist_group,
                 async_op=False,
             )
-        gather_data *= self.logits_scale
+        gather_data = gather_data * self.logits_scale
         logic_batch = None
         ans_logics = self.alloc_tensor(
             (token_num, vocab_size),
