@@ -68,11 +68,9 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
     def _init_weight(self):
         super()._init_weight()
 
-        n_split_head = self.network_config_["num_attention_heads"] // self.tp_world_size_
         self.attn_sinks = TpAttSinkWeight(
             weight_name=f"model.layers.{self.layer_num_}.self_attn.sinks",
             data_type=torch.bfloat16,
-            tp_head_num=n_split_head,
         )
 
     def _init_ffn(self):
