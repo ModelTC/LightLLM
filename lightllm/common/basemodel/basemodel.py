@@ -514,7 +514,7 @@ class TpPartBaseModel:
                 infer_state.mem_index,
             )
             infer_state.init_some_extra_state(self)
-            model_output = self._token_forward(model_input.input_ids, infer_state)
+            model_output = self._token_forward(infer_state)
 
         return model_output
 
