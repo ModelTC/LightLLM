@@ -32,3 +32,6 @@ class TpAttSinkWeight(BaseWeightTpl):
         self.weight = (
             weights[self.weight_name][start_head_index:end_head_index].to(self.data_type_).cuda(get_current_device_id())
         )
+
+    def verify_load(self):
+        return self.weight is not None

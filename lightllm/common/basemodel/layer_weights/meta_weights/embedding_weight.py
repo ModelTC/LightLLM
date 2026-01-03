@@ -17,27 +17,24 @@ class EmbeddingWeight(BaseWeightTpl):
         self.weight: torch.Tensor = None
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
-        if self.weight_name in weights and self.weight is None:
-            t_weight = weights[self.weight_name]
-            # init some params
-            self.vocab_size = len(t_weight)
-            split_indexes = np.linspace(0, self.vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
-            self.tp_vocab_start_id = int(split_indexes[self.tp_rank_])
-            self.tp_vocab_end_id = int(split_indexes[self.tp_rank_ + 1])
+        if self.weight_name not in weights or self.weight is not None:
+            return
 
-            logger.info(f"loaded weight vocab_size: {self.vocab_size}")
+        t_weight = weights[self.weight_name]
+        # init some params
+        self.vocab_size = len(t_weight)
+        split_indexes = np.linspace(0, self.vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
+        self.tp_vocab_start_id = int(split_indexes[self.tp_rank_])
+        self.tp_vocab_end_id = int(split_indexes[self.tp_rank_ + 1])
 
-            self.weight = (
-                t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :]
-                .to(self.data_type_)
-                .cuda(get_current_device_id())
-            )
+        logger.info(f"loaded weight vocab_size: {self.vocab_size}")
+
+        self.weight = (
+            t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_).cuda(get_current_device_id())
+        )
 
     def verify_load(self):
-        load_ok = True
-        load_ok = load_ok and self.weight is not None
-
-        return load_ok
+        return self.weight is not None
 
     def embedding(self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty):
         if out is None:
@@ -83,17 +80,16 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl):
         self.tp_rank_ = 0
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
-        if self.weight_name in weights and self.weight is None:
-            t_weight = weights[self.weight_name]
-            self.weight = t_weight.to(self.data_type_).cuda(get_current_device_id())
-            self.end_position_id: int = t_weight.shape[0]
-            logger.info(f"loaded weight end_position_id: {self.end_position_id}")
+        if self.weight_name not in weights or self.weight is not None:
+            return
+
+        t_weight = weights[self.weight_name]
+        self.weight = t_weight.to(self.data_type_).cuda(get_current_device_id())
+        self.end_position_id: int = t_weight.shape[0]
+        logger.info(f"loaded weight end_position_id: {self.end_position_id}")
 
     def verify_load(self):
-        load_ok = True
-        load_ok = load_ok and self.weight is not None
-
-        return load_ok
+        return self.weight is not None
 
     def embedding(self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty):
         if out is None:
