@@ -16,22 +16,8 @@ class TpAttSinkWeight(BaseWeightTpl):
             return
 
         t_weight = weights[self.weight_name]
-        all_head_num = t_weight.shape[0]
-        tp_head_num = all_head_num // self.tp_world_size_
-
-        if tp_head_num > 0:
-            start_head_index = self.tp_rank_ * tp_head_num
-            end_head_index = (self.tp_rank_ + 1) * tp_head_num
-        else:
-            # 当 tp_world_size 大于 all_head_num 时的特殊处理
-            scale_size = self.tp_world_size_ // all_head_num
-            assert self.tp_world_size_ % all_head_num == 0
-            start_head_index = self.tp_rank_ // scale_size
-            end_head_index = start_head_index + 1
-
-        self.weight = (
-            weights[self.weight_name][start_head_index:end_head_index].to(self.data_type_).cuda(get_current_device_id())
-        )
+        start_head_index, end_head_index = self._get_head_tp_split_params(weight=t_weight)
+        self.weight = t_weight[start_head_index:end_head_index].to(self.data_type_).cuda(get_current_device_id())
 
     def verify_load(self):
         return self.weight is not None

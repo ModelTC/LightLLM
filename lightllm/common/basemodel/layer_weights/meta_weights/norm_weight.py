@@ -27,7 +27,7 @@ class _NormWeight(BaseWeightTpl):
     def rmsnorm_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
-        assert input.ndim == 2 and self.weight.ndim == 1
+        assert input.ndim in [2, 3] and self.weight.ndim == 1
         assert self.bias is None
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
@@ -54,9 +54,9 @@ class NoTpNormWeight(_NormWeight):
         self.tp_rank_ = 0
 
     def load_hf_weights(self, weights):
-        if self.weight_name in weights:
+        if self.weight_name in weights and self.weight is None:
             self.weight = weights[self.weight_name].to(self.data_type_).cuda(get_current_device_id())
-        if self.bias_name in weights:
+        if self.bias_name in weights and self.bias is None:
             self.bias = weights[self.bias_name].to(self.data_type_).cuda(get_current_device_id())
 
 
@@ -68,7 +68,7 @@ class NoTpGEMMANormWeight(_NormWeight):
         self.tp_rank_ = 0
 
     def load_hf_weights(self, weights):
-        if self.weight_name in weights:
+        if self.weight_name in weights and self.weight is None:
             self.weight = (weights[self.weight_name] + 1).to(self.data_type_).cuda(get_current_device_id())
 
 
@@ -81,29 +81,29 @@ class TpNormWeight(_NormWeight):
         start = self.split_n_embed * self.tp_rank_
         end = self.split_n_embed * (self.tp_rank_ + 1)
 
-        if self.weight_name in weights:
+        if self.weight_name in weights and self.weight is None:
             self.weight = weights[self.weight_name][start:end].to(self.data_type_).cuda(get_current_device_id())
-        if self.bias_name in weights:
+        if self.bias_name in weights and self.bias is None:
             self.bias = weights[self.bias_name][start:end].to(self.data_type_).cuda(get_current_device_id())
 
 
 class TpHeadNormWeight(_NormWeight):
-    def __init__(self, weight_name, data_type, tp_head_num, bias_name=None):
+    def __init__(self, weight_name, data_type, bias_name=None):
         super().__init__(weight_name, data_type, bias_name)
-        self.tp_head_num = tp_head_num
-        assert self.tp_head_num > 0
 
     def load_hf_weights(self, weights):
-        start = self.tp_head_num * self.tp_rank_
-        end = self.tp_head_num * (self.tp_rank_ + 1)
-
-        if self.weight_name in weights:
+        if self.weight_name in weights and self.weight is None:
+            t_weight = weights[self.weight_name]
+            start_head_index, end_head_index = self._get_head_tp_split_params(weight=t_weight)
             self.weight: torch.Tensor = (
-                weights[self.weight_name][start:end].to(self.data_type_).cuda(get_current_device_id())
+                t_weight[start_head_index:end_head_index].to(self.data_type_).cuda(get_current_device_id())
             )
             assert self.weight.ndim == 2
-        if self.bias_name in weights:
+
+        if self.bias_name in weights and self.bias is None:
+            t_bias = weights[self.bias_name]
+            start_head_index, end_head_index = self._get_head_tp_split_params(weight=t_bias)
             self.bias: torch.Tensor = (
-                weights[self.bias_name][start:end].to(self.data_type_).cuda(get_current_device_id())
+                t_bias[start_head_index:end_head_index].to(self.data_type_).cuda(get_current_device_id())
             )
             assert self.bias.ndim == 2
