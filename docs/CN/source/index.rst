@@ -53,6 +53,8 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    多模态部署 <tutorial/multimodal>
    奖励模型部署 <tutorial/reward_model>
    OpenAI 接口使用 <tutorial/openai>
+   工具调用（Function Calling） <tutorial/function_calling>
+   思考解析（Reasoning Parser） <tutorial/reasoning_parser>
    APIServer 参数详解 <tutorial/api_server_args_zh>
    lightllm api介绍 <tutorial/api_param>
    
