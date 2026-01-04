@@ -305,9 +305,9 @@ GPT-OSS
 --------
 
 **核心文件**:
-- ``lightllm/server/reasoning_parser.py`` - 解析器实现（910行）
+- ``lightllm/server/reasoning_parser.py`` - 解析器实现
 - ``lightllm/server/api_openai.py`` - API 集成
-- ``test/test_api/test_openai_api.py`` - 测试示例（752-794行）
+- ``test/test_api/test_openai_api.py`` - 测试示例
 
 **相关 PR**:
 - PR #1154: 添加推理解析器
