@@ -20,7 +20,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         img_start_locs_in_cache = []
         device = layer_weight.wte_weight_.weight.device
         dtype = layer_weight.wte_weight_.weight.dtype
-        hidden_size = layer_weight.wte_weight_.shape[1]
+        hidden_size = layer_weight.wte_weight_.weight.shape[1]
 
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
@@ -56,7 +56,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         multimodal_emb(
             out=out,
             prompt_ids=input_ids,
-            text_weight_embs=layer_weight.wte_weight_,
+            text_weight_embs=layer_weight.wte_weight_.weight,
             embed_cache=cpu_embed_cache_tensor,
             img_token_lens=infer_state.img_token_lens,
             img_start_token_ids=infer_state.img_start_token_ids,

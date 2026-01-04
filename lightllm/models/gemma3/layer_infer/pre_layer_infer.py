@@ -18,7 +18,7 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
         img_start_locs_in_cache = []
         device = layer_weight.wte_weight_.weight.device
         dtype = layer_weight.wte_weight_.weight.dtype
-        hidden_size = layer_weight.wte_weight_.shape[1]
+        hidden_size = layer_weight.wte_weight_.weight.shape[1]
         weight_mask = torch.zeros((len(input_ids)), dtype=torch.float32, device=device)
 
         # TODO
@@ -65,7 +65,7 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
         multimodal_emb(
             out=out,
             prompt_ids=input_ids,
-            text_weight_embs=layer_weight.wte_weight_,
+            text_weight_embs=layer_weight.wte_weight_.weight,
             embed_cache=cpu_embed_cache_tensor,
             img_token_lens=img_token_lens,
             img_start_token_ids=img_start_token_ids,
