@@ -256,7 +256,7 @@ Technical Details
 -----------------
 
 **Core Files**:
-- ``lightllm/server/function_call_parser.py`` - Parser implementation (1267 lines)
+- ``lightllm/server/function_call_parser.py`` - Parser implementation
 - ``lightllm/server/api_openai.py`` - API integration
 - ``lightllm/server/build_prompt.py`` - Tool injection
 - ``test/test_api/test_openai_api.py`` - Test examples
