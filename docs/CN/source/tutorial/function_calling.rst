@@ -256,7 +256,7 @@ DeepSeek-V3.1
 --------
 
 **核心文件**:
-- ``lightllm/server/function_call_parser.py`` - 解析器实现（1267行）
+- ``lightllm/server/function_call_parser.py`` - 解析器实现
 - ``lightllm/server/api_openai.py`` - API 集成
 - ``lightllm/server/build_prompt.py`` - 工具注入
 - ``test/test_api/test_openai_api.py`` - 测试示例
