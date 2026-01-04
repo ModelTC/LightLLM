@@ -72,20 +72,6 @@ Qwen3
     # Enable reasoning
     data = {"chat_template_kwargs": {"enable_thinking": True}}
 
-GLM-4.5
-~~~~~~~
-
-**Parser**: ``glm45``
-
-**Format**: Same as Qwen3
-
-Kimi
-~~~~
-
-**Kimi Thinking**: ``kimi`` - Uses ``◁think▷`` and ``◁/think▷`` tokens
-
-**Kimi K2**: ``kimi_k2`` - Uses DeepSeek-R1 format
-
 GPT-OSS
 ~~~~~~~
 
@@ -103,14 +89,6 @@ GPT-OSS
     <|return|>
 
 **Features**: Complex state machine parsing, supports multiple channels (analysis, commentary, final)
-
-Other Models
-~~~~~~~~~~~~
-
-- **MiniMax**: ``minimax``, ``minimax-append-think``
-- **Step3**: ``step3``
-- **NanoV3**: ``nano_v3``
-- **InternS1**: ``interns1``
 
 Basic Usage
 -----------

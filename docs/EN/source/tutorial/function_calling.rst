@@ -77,21 +77,6 @@ DeepSeek-V3.1
 
 **Format**: Simplified V3 format, parameters directly inlined without code blocks
 
-Kimi K2
-~~~~~~~
-
-**Parser**: ``kimi_k2``
-
-**Format**:
-
-.. code-block:: xml
-
-    <|tool_calls_section_begin|>
-    <|tool_call_begin|>functions.func_name:0
-    <|tool_call_argument_begin|>{"param": "value"}
-    <|tool_call_end|>
-    <|tool_calls_section_end|>
-
 Basic Usage
 -----------
 

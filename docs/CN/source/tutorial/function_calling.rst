@@ -77,21 +77,6 @@ DeepSeek-V3.1
 
 **格式**: 简化的 V3 格式，参数直接内联，无代码块包围
 
-Kimi K2
-~~~~~~~
-
-**解析器**: ``kimi_k2``
-
-**格式**:
-
-.. code-block:: xml
-
-    <|tool_calls_section_begin|>
-    <|tool_call_begin|>functions.func_name:0
-    <|tool_call_argument_begin|>{"param": "value"}
-    <|tool_call_end|>
-    <|tool_calls_section_end|>
-
 基本使用
 --------
 

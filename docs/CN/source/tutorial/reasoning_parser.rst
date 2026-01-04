@@ -72,20 +72,6 @@ Qwen3
     # 启用推理
     data = {"chat_template_kwargs": {"enable_thinking": True}}
 
-GLM-4.5
-~~~~~~~
-
-**解析器**: ``glm45``
-
-**格式**: 同 Qwen3
-
-Kimi
-~~~~
-
-**Kimi Thinking**: ``kimi`` - 使用 ``◁think▷`` 和 ``◁/think▷`` 标记
-
-**Kimi K2**: ``kimi_k2`` - 使用 DeepSeek-R1 格式
-
 GPT-OSS
 ~~~~~~~
 
@@ -103,14 +89,6 @@ GPT-OSS
     <|return|>
 
 **特点**: 复杂状态机解析，支持多通道（analysis, commentary, final）
-
-其他模型
-~~~~~~~~
-
-- **MiniMax**: ``minimax``, ``minimax-append-think``
-- **Step3**: ``step3``
-- **NanoV3**: ``nano_v3``
-- **InternS1**: ``interns1``
 
 基本使用
 --------
