@@ -305,9 +305,9 @@ Technical Details
 -----------------
 
 **Core Files**:
-- ``lightllm/server/reasoning_parser.py`` - Parser implementation (910 lines)
+- ``lightllm/server/reasoning_parser.py`` - Parser implementation
 - ``lightllm/server/api_openai.py`` - API integration
-- ``test/test_api/test_openai_api.py`` - Test examples (lines 752-794)
+- ``test/test_api/test_openai_api.py`` - Test examples
 
 **Related PRs**:
 - PR #1154: Add reasoning parser
