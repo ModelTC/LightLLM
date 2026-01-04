@@ -12,7 +12,7 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
+from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 
@@ -95,59 +95,14 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     def _init_mem_manager(self):
         manager_class = select_mem_manager_class()
 
-        # mtp 模式下需要在mem manger上扩展draft model使用的layer
-        added_mtp_layer_num = 0
-        if get_env_start_args().mtp_mode == "deepseekv3_eagle":
-            added_mtp_layer_num += 1
-        elif get_env_start_args().mtp_mode == "deepseekv3_vanilla":
-            added_mtp_layer_num += get_env_start_args().mtp_step
-
         self.mem_manager = manager_class(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=1,
             head_dim=self.config["kv_lora_rank"] + self.config["qk_rope_head_dim"],
-            layer_num=self.config["num_hidden_layers"] + added_mtp_layer_num,
+            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
             mem_fraction=self.mem_fraction,
         )
-        return
-
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
-        )
-        self.trans_layers_weight = [
-            self.transformer_weight_class(
-                i,
-                self.data_type,
-                network_config=self.config,
-                mode=self.mode,
-                quant_cfg=self.quant_cfg,
-            )
-            for i in range(self.config["n_layer"])
-        ]
-        load_hf_weights(
-            self.data_type,
-            weight_dir=self.weight_dir_,
-            pre_post_layer=self.pre_post_weight,
-            transformer_layer_list=self.trans_layers_weight,
-            weight_dict=self.weight_dict,
-        )
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
-        return
-
-    def _init_infer_layer(self):
-        self.pre_infer = self.pre_layer_infer_class(network_config=self.config, mode=self.mode)
-        self.post_infer = self.post_layer_infer_class(network_config=self.config, mode=self.mode)
-        self.layers_infer = [
-            self.transformer_layer_infer_class(
-                i,
-                network_config=self.config,
-                mode=self.mode,
-            )
-            for i in range(self.config["n_layer"])
-        ]
         return
 
     def _init_to_get_yarn_rotary(self):
@@ -191,8 +146,3 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         self._sin_cached = (freqs.sin() * _mscale).to(self.data_type).cuda()
 
         return
-
-    @final
-    def _context_forward(self, input_ids, infer_state):
-        predict_logics = super()._context_forward(input_ids, infer_state)
-        return predict_logics

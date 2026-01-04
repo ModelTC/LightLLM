@@ -197,7 +197,8 @@ def normal_or_p_d_start(args):
 
         assert (
             args.batch_max_tokens >= args.chunked_prefill_size
-        ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size"
+        ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
+        f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:

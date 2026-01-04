@@ -16,10 +16,10 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         self.position_cos = None
         self.position_sin = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
+    def init_some_extra_state(self, model):
         rope_scaling = model.config.get("rope_scaling", {})
         self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", None))
-        InferStateInfo.init_some_extra_state(self, model, input_ids)
+        InferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
             self.position_ids = self.get_mrope_position(self.multimodal_params)
         else:
@@ -38,7 +38,7 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         if get_env_start_args().enable_fa3:
             self.max_seq_len = self.max_kv_seq_len
             self.q_max_seq_len = self.max_q_seq_len
-            self.init_flash_attention_state_func(model, input_ids)
+            self.init_flash_attention_state_func(model)
         return
 
     def get_mrope_position(self, multimodal_params: List[dict]) -> torch.Tensor:

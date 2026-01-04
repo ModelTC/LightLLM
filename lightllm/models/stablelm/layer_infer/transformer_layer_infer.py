@@ -1,11 +1,7 @@
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
 from functools import partial
 from typing import Tuple
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
 from lightllm.models.stablelm.layer_weights.transformer_layer_weight import StablelmTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
@@ -57,19 +53,17 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
     ) -> torch.Tensor:
-        return layernorm_forward(
-            input.view(-1, self.embed_dim_),
-            weight=layer_weight.att_norm_weight_.weight,
-            bias=layer_weight.att_norm_weight_.bias,
+        return layer_weight.att_norm_weight_.layernorm_forward(
+            input=input.view(-1, self.embed_dim_),
             eps=self.eps_,
+            alloc_func=self.alloc_tensor,
         )
 
     def _ffn_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
     ) -> torch.Tensor:
-        return layernorm_forward(
-            input.view(-1, self.embed_dim_),
-            weight=layer_weight.ffn_norm_weight_.weight,
-            bias=layer_weight.ffn_norm_weight_.bias,
+        return layer_weight.ffn_norm_weight_.layernorm_forward(
+            input=input.view(-1, self.embed_dim_),
             eps=self.eps_,
+            alloc_func=self.alloc_tensor,
         )

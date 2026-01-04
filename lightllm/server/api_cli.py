@@ -542,13 +542,17 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mtp_mode",
-        choices=["deepseekv3_vanilla", "deepseekv3_eagle", None],
+        choices=["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att", None],
         default=None,
-        help="""supported mtp mode, None is not enable mtp, """,
+        help="""Supported MTP modes.
+        None: Disables MTP.
+        *_with_att: Uses the MTP model with an attention mechanism to predict the next draft token.
+        *_no_att: Uses the MTP model without an attention module to predict the next draft token.""",
     )
     parser.add_argument(
         "--mtp_draft_model_dir",
         type=str,
+        nargs="+",
         default=None,
         help="""Path to the draft model for the MTP multi-prediction feature,
         used for loading the MTP multi-output token model.""",

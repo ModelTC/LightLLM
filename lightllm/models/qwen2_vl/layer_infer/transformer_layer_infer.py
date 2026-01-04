@@ -1,10 +1,5 @@
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
 from typing import Tuple
-from functools import partial
-
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 

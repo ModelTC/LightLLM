@@ -7,8 +7,8 @@ from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
-    NormWeight,
-    TpNormWeight,
+    NoTpNormWeight,
+    TpVitPadNormWeight,
 )
 from lightllm.utils.dist_utils import get_current_device_id
 
@@ -119,17 +119,16 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_norm(self):
-        self.att_norm_weight_ = NormWeight(
+        self.att_norm_weight_ = NoTpNormWeight(
             self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
         )
-        self.ffn_norm_weight_ = NormWeight(
+        self.ffn_norm_weight_ = NoTpNormWeight(
             self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
         )
         if self.qk_norm:
-            n_embed = self.network_config_["hidden_size"]
-            split_n_embed = (n_embed + self.padding_hidden_size) // self.tp_world_size_
-            self.q_norm_weight_ = TpNormWeight(self._q_norm_weight_name, self.data_type_, split_n_embed)
-            self.k_norm_weight_ = TpNormWeight(self._k_norm_weight_name, self.data_type_, split_n_embed)
+            head_num = self.network_config_["num_attention_heads"]
+            self.q_norm_weight_ = TpVitPadNormWeight(self._q_norm_weight_name, self.data_type_, head_num=head_num)
+            self.k_norm_weight_ = TpVitPadNormWeight(self._k_norm_weight_name, self.data_type_, head_num=head_num)
 
     def load_hf_weights(self, weights):
         if f"vision_model.encoder.layers.{self.layer_num_}.attn.qkv.weight" in weights:
@@ -158,12 +157,6 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
             weights[self._k_bias_name] = k_bias_
             weights[self._v_bias_name] = v_bias_
             del weights[f"vision_model.encoder.layers.{self.layer_num_}.attn.qkv.bias"]
-
-        if self.qk_norm and self._q_norm_weight_name in weights:
-            weights[self._q_norm_weight_name] = F.pad(weights[self._q_norm_weight_name], (0, self.padding_hidden_size))
-
-        if self.qk_norm and self._k_norm_weight_name in weights:
-            weights[self._k_norm_weight_name] = F.pad(weights[self._k_norm_weight_name], (0, self.padding_hidden_size))
 
         if f"vision_model.encoder.layers.{self.layer_num_}.ls1" in weights:
             ls1 = weights[f"vision_model.encoder.layers.{self.layer_num_}.ls1"]

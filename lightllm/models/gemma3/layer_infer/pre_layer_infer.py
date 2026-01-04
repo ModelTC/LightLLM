@@ -16,9 +16,9 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
         img_start_token_ids = []
         img_token_lens = []
         img_start_locs_in_cache = []
-        device = layer_weight.wte_weight_.device
-        dtype = layer_weight.wte_weight_.dtype
-        hidden_size = layer_weight.wte_weight_.shape[1]
+        device = layer_weight.wte_weight_.weight.device
+        dtype = layer_weight.wte_weight_.weight.dtype
+        hidden_size = layer_weight.wte_weight_.weight.shape[1]
         weight_mask = torch.zeros((len(input_ids)), dtype=torch.float32, device=device)
 
         # TODO
@@ -65,18 +65,18 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
         multimodal_emb(
             out=out,
             prompt_ids=input_ids,
-            text_weight_embs=layer_weight.wte_weight_,
+            text_weight_embs=layer_weight.wte_weight_.weight,
             embed_cache=cpu_embed_cache_tensor,
             img_token_lens=img_token_lens,
             img_start_token_ids=img_start_token_ids,
             img_start_locs_in_cache=img_start_locs_in_cache,
-            tp_text_start_token_id=self.vob_start_id_,
-            tp_text_end_token_id=self.vob_end_id_,
+            tp_text_start_token_id=layer_weight.wte_weight_.tp_vocab_start_id,
+            tp_text_end_token_id=layer_weight.wte_weight_.tp_vocab_end_id,
             tp_world_size=self.tp_world_size_,
         )
         input_dtype = out.dtype
         if self.tp_world_size_ > 1:
-            all_reduce(out, group=infer_state.dist_group, op=torch.dist.ReduceOp.SUM, async_op=False)
+            all_reduce(out, group=infer_state.dist_group, op=torch.distributed.ReduceOp.SUM, async_op=False)
         return (out.float() * weight_mask.unsqueeze(1).float()).to(input_dtype)
 
     def token_forward(self, input_ids, infer_state, layer_weight):

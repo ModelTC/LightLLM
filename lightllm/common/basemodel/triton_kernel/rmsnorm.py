@@ -44,12 +44,13 @@ def _rms_norm_fwd_fused(
         tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
 
 
-def rmsnorm_forward(x: torch.Tensor, weight, eps, out=None):
+def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None):
     # allocate output
     y = torch.empty_like(x) if out is None else out
     # reshape input data into 2D tensor
     x_arg = x.view(-1, x.shape[-1])
     y_arg = y.view(-1, x.shape[-1])
+    assert x_arg.shape[-1] == weight.shape[0] and x_arg.shape == y_arg.shape
     assert y.data_ptr() == y_arg.data_ptr()
     M, N = x_arg.shape
     # Less than 64KB per feature: enqueue fused kernel

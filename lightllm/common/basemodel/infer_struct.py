@@ -19,6 +19,7 @@ class InferStateInfo:
     """
 
     def __init__(self):
+        self.input_ids: torch.Tensor = None
         self.batch_size: int = None
         self.total_token_num: int = None
         self.b_req_idx: torch.Tensor = None
@@ -71,10 +72,10 @@ class InferStateInfo:
         # inferstate的基类中，但是为了代码的简洁和方便，都放在基类中
         # 进行管理。注意这些成员变量只会在特定的模型和模式下才会生效。
 
-        # deepseekv3 mtp draft model 使用的额外输入参数,
-        # 在开启 mtp_mode == deepseekv3 时，mtp draft model
+        # mtp draft model 使用的额外输入参数,
+        # 在开启 mtp_mode 时，mtp draft model
         # 的输入会用到，其他模型和场景都不会用到
-        self.deepseekv3_mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+        self.mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
         # 在单节点多dp的运行模式下，在进行prefill的阶段，如果出现了dp之间数据不平衡的现象，
         # 可以将推理的数据，进行重新分配到各个dp，在做 att 之前，重新 all to all 到各自的
@@ -88,7 +89,8 @@ class InferStateInfo:
         self.dp_output_split_sizes: List[List[int]] = None
         self.dp_input_split_sizes: List[List[int]] = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
+    def init_some_extra_state(self, model):
+
         if self.is_prefill:
             (
                 self.b_q_seq_len,
@@ -97,7 +99,7 @@ class InferStateInfo:
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
             ) = gen_prefill_params(
-                input_token_num=input_ids.shape[0],
+                input_token_num=self.input_ids.shape[0],
                 b_ready_cache_len=self.b_ready_cache_len,
                 b_seq_len=self.b_seq_len,
             )
@@ -210,6 +212,9 @@ class InferStateInfo:
             self._unbalance_position_sin = self.position_sin
 
             self.position_sin = self._all_to_all_balance_get(self.position_sin)
+
+        self._unbalance_input_ids = self.input_ids
+        self.input_ids = new_input_ids
 
         return new_input_ids
 

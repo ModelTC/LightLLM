@@ -23,8 +23,8 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
             ]
         return cls._shared_page_table_buffer
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
+    def init_some_extra_state(self, model):
+        super().init_some_extra_state(model)
         args_mtp_step = get_env_start_args().mtp_step
         if self.is_prefill:
             self.cu_seqlens_q = self.b1_cu_q_seq_len
@@ -51,7 +51,7 @@ class Deepseek2FlashAttentionStateInfo(Deepseek2InferStateInfo):
                 ].view(att_batch_size, model.graph_max_len_in_batch)
             else:
                 self.page_table = torch.empty((att_batch_size, self.max_len_in_batch), dtype=torch.int32).to(
-                    input_ids.device
+                    self.input_ids.device
                 )
             page_table_copy(
                 page_table=self.page_table[:, :max_seq_len_k],

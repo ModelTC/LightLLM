@@ -29,6 +29,9 @@ def _fwd_kernel_token_att2(
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
 
+    stride_vbs = tl.cast(stride_vbs, tl.int64)
+    stride_pbs = tl.cast(stride_pbs, tl.int64)
+
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)

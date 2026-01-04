@@ -32,9 +32,9 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         img_start_token_ids = []
         img_token_lens = []
         img_start_locs_in_cache = []
-        device = layer_weight.wte_weight_.device
-        dtype = layer_weight.wte_weight_.dtype
-        hidden_size = layer_weight.wte_weight_.shape[1]
+        device = layer_weight.wte_weight_.weight.device
+        dtype = layer_weight.wte_weight_.weight.dtype
+        hidden_size = layer_weight.wte_weight_.weight.shape[1]
 
         for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
@@ -68,13 +68,13 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         multimodal_emb(
             out=out,
             prompt_ids=input_ids,
-            text_weight_embs=layer_weight.wte_weight_,
+            text_weight_embs=layer_weight.wte_weight_.weight,
             embed_cache=cpu_embed_cache_tensor,
             img_token_lens=img_token_lens,
             img_start_token_ids=img_start_token_ids,
             img_start_locs_in_cache=img_start_locs_in_cache,
-            tp_text_start_token_id=self.vob_start_id_,
-            tp_text_end_token_id=self.vob_end_id_,
+            tp_text_start_token_id=layer_weight.wte_weight_.tp_vocab_start_id,
+            tp_text_end_token_id=layer_weight.wte_weight_.tp_vocab_end_id,
             tp_world_size=self.tp_world_size_,
         )
         if self.tp_world_size_ > 1:

@@ -69,7 +69,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         return hidden_states.view(num_tokens, hidden_dim)
 
     def _context_sliding_attention_flashattention(
-        self, q, kv, infer_state: FlashAttentionStateInfo, layer_weight, out=None
+        self, q, kv, infer_state: FlashAttentionStateInfo, layer_weight: GptOssTransformerLayerWeight, out=None
     ):
         if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
             window_size = (self.sliding_window - 1, self.sliding_window - 1)
@@ -106,7 +106,9 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         return o
 
-    def _token_sliding_attention_flashattention(self, q, infer_state: FlashAttentionStateInfo, layer_weight, out=None):
+    def _token_sliding_attention_flashattention(
+        self, q, infer_state: FlashAttentionStateInfo, layer_weight: GptOssTransformerLayerWeight, out=None
+    ):
         if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
             window_size = (self.sliding_window - 1, self.sliding_window - 1)
         else:

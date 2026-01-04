@@ -1,23 +1,15 @@
-import torch
-import numpy as np
-from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
+from lightllm.common.basemodel import PreAndPostLayerWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, NoTpNormWeight
 
 
-class Internlm2PreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
+class Internlm2PreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
-        return
+        self.wte_weight_ = EmbeddingWeight(weight_name="model.tok_embeddings.weight", data_type=self.data_type_)
+        self.lm_head_weight_ = LMHeadWeight(weight_name="output.weight", data_type=self.data_type_)
 
-    def load_hf_weights(self, weights):
-        vob_size = self.network_config_["vocab_size"]
-        split_indexes = np.linspace(0, vob_size, self.tp_world_size_ + 1, dtype=np.int64)
-        split_start = split_indexes[self.tp_rank_]
-        split_end = split_indexes[self.tp_rank_ + 1]
-        if "model.tok_embeddings.weight" in weights:
-            self.wte_weight_ = self._cuda(weights["model.tok_embeddings.weight"][split_start:split_end, :])
-        if "output.weight" in weights:
-            self.lm_head_weight_ = self._cuda(weights["output.weight"][split_start:split_end, :])
-        if "model.norm.weight" in weights:
-            self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
-
+        self.final_norm_weight_ = NoTpNormWeight(
+            weight_name="model.norm.weight",
+            data_type=self.data_type_,
+        )
         return
