@@ -4,6 +4,9 @@ from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.basemodel.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.layernorm import layernorm_forward
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class _NormWeight(BaseWeightTpl):
@@ -72,19 +75,50 @@ class NoTpGEMMANormWeight(_NormWeight):
             self.weight = (weights[self.weight_name] + 1).to(self.data_type_).cuda(get_current_device_id())
 
 
-class TpNormWeight(_NormWeight):
-    def __init__(self, weight_name, data_type, split_n_embed, bias_name=None):
+class TpVitPadNormWeight(_NormWeight):
+    def __init__(self, weight_name, data_type, head_num: int, bias_name=None):
         super().__init__(weight_name, data_type, bias_name)
-        self.split_n_embed = split_n_embed
+        self.head_num = head_num
+
+    def _pad_tensor_param(self, weight: torch.Tensor):
+        assert weight.ndim == 1
+        hidden_size = weight.shape[0]
+        head_dim = hidden_size // self.head_num
+        assert hidden_size % self.head_num == 0
+
+        if self.head_num % self.tp_world_size_ == 0:
+            return weight
+        else:
+            logger.warning(f"padding {self.weight_name} weights in TpVitPadNormWeight")
+            pad_head_num = self.tp_world_size_ - (self.head_num % self.tp_world_size_)
+            pad_dims = pad_head_num * head_dim
+            weight = torch.nn.functional.pad(weight, (0, pad_dims), mode="constant", value=0.0)
+            return weight
 
     def load_hf_weights(self, weights):
-        start = self.split_n_embed * self.tp_rank_
-        end = self.split_n_embed * (self.tp_rank_ + 1)
-
         if self.weight_name in weights and self.weight is None:
-            self.weight = weights[self.weight_name][start:end].to(self.data_type_).cuda(get_current_device_id())
+            t_weight = weights[self.weight_name]
+            t_weight = self._pad_tensor_param(t_weight)
+            new_hidden_size = t_weight.shape[0]
+            split_n_embed = new_hidden_size // self.tp_world_size_
+            assert new_hidden_size % self.tp_world_size_ == 0
+
+            start = split_n_embed * self.tp_rank_
+            end = split_n_embed * (self.tp_rank_ + 1)
+
+            self.weight = t_weight[start:end].to(self.data_type_).cuda(get_current_device_id())
+
         if self.bias_name in weights and self.bias is None:
-            self.bias = weights[self.bias_name][start:end].to(self.data_type_).cuda(get_current_device_id())
+            t_bias = weights[self.bias_name]
+            t_bias = self._pad_tensor_param(t_bias)
+            new_hidden_size = t_bias.shape[0]
+            split_n_embed = new_hidden_size // self.tp_world_size_
+            assert new_hidden_size % self.tp_world_size_ == 0
+
+            start = split_n_embed * self.tp_rank_
+            end = split_n_embed * (self.tp_rank_ + 1)
+
+            self.bias = t_bias[start:end].to(self.data_type_).cuda(get_current_device_id())
 
 
 class TpHeadNormWeight(_NormWeight):
