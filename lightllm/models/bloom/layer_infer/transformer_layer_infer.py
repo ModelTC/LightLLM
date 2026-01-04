@@ -1,16 +1,10 @@
-import time
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
 from typing import Tuple
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
 from lightllm.models.bloom.triton_kernel.context_flashattention_nopad import context_attention_fwd
 from lightllm.models.bloom.triton_kernel.token_flashattention_nopad import token_attention_fwd
-from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.utils.infer_utils import mark_cost_time
 
 
 class BloomTransformerLayerInfer(TransformerLayerInferTpl):
@@ -27,20 +21,18 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         self.embed_dim_ = network_config["n_embed"]
         return
 
-    def _att_norm(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
-        return layernorm_forward(
-            input.view(-1, self.embed_dim_),
-            weight=layer_weight.att_norm_weight_.weight,
-            bias=layer_weight.att_norm_weight_.bias,
-            eps=self.eps_,
+    def _att_norm(
+        self, input: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight
+    ) -> torch.Tensor:
+        return layer_weight.att_norm_weight_.layernorm_forward(
+            input=input.view(-1, self.embed_dim_), eps=self.eps_, alloc_func=self.alloc_tensor
         )
 
-    def _ffn_norm(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
-        return layernorm_forward(
-            input.view(-1, self.embed_dim_),
-            weight=layer_weight.ffn_norm_weight_.weight,
-            bias=layer_weight.ffn_norm_weight_.bias,
-            eps=self.eps_,
+    def _ffn_norm(
+        self, input: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight
+    ) -> torch.Tensor:
+        return layer_weight.ffn_norm_weight_.layernorm_forward(
+            input=input.view(-1, self.embed_dim_), eps=self.eps_, alloc_func=self.alloc_tensor
         )
 
     def _get_qkv(

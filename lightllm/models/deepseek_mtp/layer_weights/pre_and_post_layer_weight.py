@@ -1,29 +1,40 @@
-import numpy as np
-from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
+from lightllm.common.basemodel import PreAndPostLayerWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import (
+    EmbeddingWeight,
+    LMHeadWeight,
+    NoTpNormWeight,
+    ROWMMWeight,
+)
 
 
-class Deepseek3MTPPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
+class Deepseek3MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
-        # 与DeepseekV3模型共享
-        self.wte_weight_ = None
-        self.lm_head_weight_ = None
-        return
 
-    def load_hf_weights(self, weights):
-        if "model.layers.0.eh_proj.weight" in weights:
-            self.eh_proj_weight_ = self._cuda(weights["model.layers.0.eh_proj.weight"]).t()
-        if "model.layers.0.enorm.weight" in weights:
-            self.enorm_weight_ = self._cuda(weights["model.layers.0.enorm.weight"])
-        if "model.layers.0.hnorm.weight" in weights:
-            self.hnorm_weight_ = self._cuda(weights["model.layers.0.hnorm.weight"])
-        if "model.layers.0.shared_head.norm.weight" in weights:
-            self.final_norm_weight_ = self._cuda(weights["model.layers.0.shared_head.norm.weight"])
-        return
+        self.eh_proj_weight_ = ROWMMWeight(
+            weight_names="model.layers.0.eh_proj.weight",
+            data_type=self.data_type_,
+            name="eh_proj",
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self.enorm_weight_ = NoTpNormWeight(
+            weight_name="model.layers.0.enorm.weight",
+            data_type=self.data_type_,
+            bias_name=None,
+        )
+        self.hnorm_weight_ = NoTpNormWeight(
+            weight_name="model.layers.0.hnorm.weight",
+            data_type=self.data_type_,
+            bias_name=None,
+        )
+        self.final_norm_weight_ = NoTpNormWeight(
+            weight_name="model.layers.0.shared_head.norm.weight",
+            data_type=self.data_type_,
+            bias_name=None,
+        )
 
-    def verify_load(self):
-        errors = "weights load not ok"
-        weights = [self.eh_proj_weight_, self.enorm_weight_, self.hnorm_weight_, self.final_norm_weight_]
-        for i in range(len(weights)):
-            assert weights[i] is not None, "index:" + str(i) + " " + errors
+        # 与DeepseekV3模型共享, 不通过 load 加载
+        self.wte_weight_: EmbeddingWeight = None
+        self.lm_head_weight_: LMHeadWeight = None
         return

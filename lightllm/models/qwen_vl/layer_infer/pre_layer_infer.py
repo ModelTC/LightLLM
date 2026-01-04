@@ -32,8 +32,8 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         img_start_token_ids = []
         img_token_lens = []
         img_start_locs_in_cache = []
-        device = layer_weight.wte_weight_.device
-        dtype = layer_weight.wte_weight_.dtype
+        device = layer_weight.wte_weight_.weight.device
+        dtype = layer_weight.wte_weight_.weight.dtype
         hidden_size = layer_weight.wte_weight_.shape[1]
 
         for batch_id, p in enumerate(infer_state.multimodal_params):
@@ -73,8 +73,8 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             img_token_lens=img_token_lens,
             img_start_token_ids=img_start_token_ids,
             img_start_locs_in_cache=img_start_locs_in_cache,
-            tp_text_start_token_id=self.vob_start_id_,
-            tp_text_end_token_id=self.vob_end_id_,
+            tp_text_start_token_id=layer_weight.wte_weight_.tp_vocab_start_id,
+            tp_text_end_token_id=layer_weight.wte_weight_.tp_vocab_end_id,
             tp_world_size=self.tp_world_size_,
         )
         if self.tp_world_size_ > 1:

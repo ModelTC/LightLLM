@@ -40,7 +40,7 @@ class ChunkedPrefillBackend(ModeBackend):
         if get_env_start_args().mtp_mode:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
-            self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
+            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att"]
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
             self._draft_decode_func = self._draft_decode_eagle if self.is_mtp_eagle else self._draft_decode_vanilla
         else:
@@ -325,7 +325,7 @@ class ChunkedPrefillBackend(ModeBackend):
             draft_model_input = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input,
                 b_next_token_ids=draft_next_token_ids_gpu,
-                deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
+                mtp_draft_input_hiddens=draft_model_output.mtp_main_output_hiddens,
             )
             draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
@@ -349,7 +349,7 @@ class ChunkedPrefillBackend(ModeBackend):
         for draft_model_idx in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
@@ -393,7 +393,7 @@ class ChunkedPrefillBackend(ModeBackend):
         for _step in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)

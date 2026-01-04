@@ -3,7 +3,6 @@ import torch
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.qwen2_reward.layer_weights.pre_and_post_layer_weight import Qwen2RewardPreAndPostLayerWeight
-from einops import rearrange
 
 
 class Qwen2RewardPostLayerInfer(LlamaPostLayerInfer):
@@ -15,8 +14,8 @@ class Qwen2RewardPostLayerInfer(LlamaPostLayerInfer):
         input_embdings = None
         last_input = self._norm(last_input, infer_state, layer_weight)
 
-        last_input = torch.addmm(layer_weight.score_up_bias, last_input, layer_weight.score_up_weight)
+        last_input = layer_weight.score_up_weight_.mm(last_input)
         last_input = torch.nn.functional.relu(last_input)
-        score = torch.addmm(layer_weight.score_down_bias, last_input, layer_weight.score_down_weight)
+        score = layer_weight.score_down_weight_.mm(last_input)
 
         return score

@@ -4,7 +4,7 @@ import numpy as np
 
 from lightllm.common.basemodel.layer_weights.meta_weights.gpt_oss_fused_moe_weight_tp import GPTOSSFusedMoeWeightTP
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMMWeight
-from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import NormWeight, TpNormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.utils.log_utils import init_logger
 
@@ -57,8 +57,6 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
     def _init_weight_names(self):
         super()._init_weight_names()
 
-        self._attn_sink_name = f"model.layers.{self.layer_num_}.self_attn.sinks"
-
         self._q_bias_name = f"model.layers.{self.layer_num_}.self_attn.q_proj.bias"
         self._k_bias_name = f"model.layers.{self.layer_num_}.self_attn.k_proj.bias"
         self._v_bias_name = f"model.layers.{self.layer_num_}.self_attn.v_proj.bias"
@@ -70,8 +68,10 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
     def _init_weight(self):
         super()._init_weight()
 
-        n_split_head = self.network_config_["num_attention_heads"] // self.tp_world_size_
-        self.attn_sinks = TpNormWeight(self._attn_sink_name, torch.bfloat16, n_split_head)
+        self.attn_sinks = TpAttSinkWeight(
+            weight_name=f"model.layers.{self.layer_num_}.self_attn.sinks",
+            data_type=torch.bfloat16,
+        )
 
     def _init_ffn(self):
         self._init_moe()

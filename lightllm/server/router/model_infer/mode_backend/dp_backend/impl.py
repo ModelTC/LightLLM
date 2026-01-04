@@ -34,7 +34,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
-            self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
+            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att"]
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
@@ -534,7 +534,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         for draft_model_idx in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids_gpu
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
@@ -585,7 +585,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         for _step in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids_gpu
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
@@ -672,13 +672,13 @@ class DPChunkedPrefillBackend(ModeBackend):
                 draft_model_input0 = prepare_mtp_prefill_inputs(
                     model_input=draft_model_input0,
                     b_next_token_ids=draft_next_token_ids_gpu0,
-                    deepseekv3_mtp_draft_input_hiddens=draft_model_output0.deepseekv3_mtp_main_output_hiddens,
+                    mtp_draft_input_hiddens=draft_model_output0.mtp_main_output_hiddens,
                 )
 
                 draft_model_input1 = prepare_mtp_prefill_inputs(
                     model_input=draft_model_input1,
                     b_next_token_ids=draft_next_token_ids_gpu1,
-                    deepseekv3_mtp_draft_input_hiddens=draft_model_output1.deepseekv3_mtp_main_output_hiddens,
+                    mtp_draft_input_hiddens=draft_model_output1.mtp_main_output_hiddens,
                 )
 
                 draft_model_output0, draft_model_output1 = self.draft_models[
@@ -836,7 +836,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             draft_model_input = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input,
                 b_next_token_ids=draft_next_token_ids_gpu,
-                deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
+                mtp_draft_input_hiddens=draft_model_output.mtp_main_output_hiddens,
             )
             draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
@@ -874,13 +874,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         for draft_model_idx in range(self.mtp_step):
 
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
-            draft_model_input0.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output0.deepseekv3_mtp_main_output_hiddens
-            )
+            draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1
-            draft_model_input1.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output1.deepseekv3_mtp_main_output_hiddens
-            )
+            draft_model_input1.mtp_draft_input_hiddens = draft_model_output1.mtp_main_output_hiddens
 
             draft_model_output0, draft_model_output1 = self.draft_models[draft_model_idx].microbatch_overlap_decode(
                 draft_model_input0, draft_model_input1
@@ -949,13 +945,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         for _step in range(self.mtp_step):
 
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
-            draft_model_input0.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output0.deepseekv3_mtp_main_output_hiddens
-            )
+            draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1
-            draft_model_input1.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output1.deepseekv3_mtp_main_output_hiddens
-            )
+            draft_model_input1.mtp_draft_input_hiddens = draft_model_output1.mtp_main_output_hiddens
 
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output0, draft_model_output1 = self.draft_models[draft_model_idx].microbatch_overlap_decode(

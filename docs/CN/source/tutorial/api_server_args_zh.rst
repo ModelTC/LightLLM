@@ -447,10 +447,12 @@ MTP 多预测参数
 
 .. option:: --mtp_mode
 
-    支持的 mtp 模式，建议使用 deepseekv3_eagle获得更好的性能体验，可选值：
+    支持的 mtp 模式，建议使用 eagle_with_att获得更好的性能体验，可选值：
     
-    * ``deepseekv3_vanilla``
-    * ``deepseekv3_eagle``
+    * ``vanilla_with_att``
+    * ``eagle_with_att``
+    * ``vanilla_no_att``
+    * ``eagle_no_att``
     * ``None``: 不启用 mtp（默认）
 
 .. option:: --mtp_draft_model_dir

@@ -1,6 +1,4 @@
 import torch
-import math
-import numpy as np
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
 

@@ -7,7 +7,7 @@ from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
-    NormWeight,
+    NoTpNormWeight,
     FusedMoeWeightEP,
     ROWBMMWeight,
     create_tp_moe_wegiht_obj,
@@ -299,14 +299,16 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self._load_mlp(f"model.layers.{self.layer_num_}.mlp")
 
     def _init_norm(self):
-        self.att_norm_weight_ = NormWeight(f"model.layers.{self.layer_num_}.input_layernorm.weight", self.data_type_)
-        self.ffn_norm_weight_ = NormWeight(
+        self.att_norm_weight_ = NoTpNormWeight(
+            f"model.layers.{self.layer_num_}.input_layernorm.weight", self.data_type_
+        )
+        self.ffn_norm_weight_ = NoTpNormWeight(
             f"model.layers.{self.layer_num_}.post_attention_layernorm.weight", self.data_type_
         )
-        self.kv_a_layernorm_ = NormWeight(
+        self.kv_a_layernorm_ = NoTpNormWeight(
             f"model.layers.{self.layer_num_}.self_attn.kv_a_layernorm.weight", self.data_type_
         )
         if self.q_lora_rank is not None:
-            self.q_a_layernorm_ = NormWeight(
+            self.q_a_layernorm_ = NoTpNormWeight(
                 f"model.layers.{self.layer_num_}.self_attn.q_a_layernorm.weight", self.data_type_
             )

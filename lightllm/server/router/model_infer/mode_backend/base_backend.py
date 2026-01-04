@@ -35,11 +35,12 @@ from lightllm.distributed import dist_group_manager
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
+from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
-from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 
 class ModeBackend:
@@ -288,17 +289,17 @@ class ModeBackend:
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
-        if self.args.mtp_mode == "deepseekv3_vanilla":
+        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
             num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode == "deepseekv3_eagle":
+        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
             num_mtp_modules = 1
         else:
             assert False, f"error mtp mode {self.args.mtp_mode}"
 
         for i in range(num_mtp_modules):
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
+            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
             mtp_model_kvargs = {
-                "weight_dir": self.args.mtp_draft_model_dir,
+                "weight_dir": self.args.mtp_draft_model_dir[i],
                 "max_total_token_num": self.model.mem_manager.size,
                 "load_way": main_kvargs["load_way"],
                 "mode": main_kvargs["mode"],
@@ -317,13 +318,21 @@ class ModeBackend:
                 "quant_cfg": main_kvargs.get("quant_cfg", None),
                 "run_mode": "normal",
                 "main_model": self.model,
-                "mem_layer_start": self.model.config["num_hidden_layers"] + i * mtp_model_cfg["num_hidden_layers"],
+                "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
-            assert mtp_model_cfg["model_type"] == "deepseek_v3"
-            assert mtp_model_cfg["architectures"][0] == "DeepseekV3ForCausalLMNextN"
-            self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
+            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
+            if mtp_model_cfg["model_type"] == "deepseek_v3":
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
+            elif mtp_model_cfg["model_type"] == "qwen3_moe":
+                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
+                self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
+            elif mtp_model_cfg["model_type"] == "mistral":
+                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
+                self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
+            else:
+                assert False, f"error mtp mode {mtp_model_cfg['model_type']}"
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return

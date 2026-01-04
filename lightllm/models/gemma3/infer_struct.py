@@ -12,8 +12,8 @@ class Gemma3InferStateInfo(InferStateInfo):
         self.position_sin_local = None
         self.position_cos_local = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
-        super().init_some_extra_state(model, input_ids)
+    def init_some_extra_state(self, model):
+        super().init_some_extra_state(model)
         if self.is_prefill:
             self.max_seq_len = self.max_kv_seq_len
             position_ids = self.position_ids

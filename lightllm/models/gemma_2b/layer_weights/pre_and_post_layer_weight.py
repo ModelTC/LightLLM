@@ -1,25 +1,21 @@
-import torch
-import numpy as np
-from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
+from lightllm.common.basemodel import PreAndPostLayerWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, NoTpGEMMANormWeight
 
 
-class Gemma_2bPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
+class Gemma_2bPreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
-        return
 
-    def load_hf_weights(self, weights):
-        vob_size = self.network_config_["vocab_size"]
-        split_indexes = np.linspace(0, vob_size, self.tp_world_size_ + 1, dtype=np.int64)
-        split_start = split_indexes[self.tp_rank_]
-        split_end = split_indexes[self.tp_rank_ + 1]
-        if "model.embed_tokens.weight" in weights:
-            # print(weights['model.embed_tokens.weight'].shape)
-            self.wte_weight_ = self._cuda(weights["model.embed_tokens.weight"][split_start:split_end, :])
-            self.lm_head_weight_ = self.wte_weight_
+        self.wte_weight_ = EmbeddingWeight(
+            weight_name="model.embed_tokens.weight",
+            data_type=self.data_type_,
+        )
+        self.lm_head_weight_ = self.wte_weight_
 
-        if "model.norm.weight" in weights:
-            self.final_norm_weight_ = self._cuda(weights["model.norm.weight"])
-            self.final_norm_weight_ = self.final_norm_weight_ + 1
+        self.final_norm_weight_ = NoTpGEMMANormWeight(
+            weight_name="model.norm.weight",
+            data_type=self.data_type_,
+            bias_name=None,
+        )
 
         return

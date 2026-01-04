@@ -14,7 +14,6 @@ from lightllm.models.llama.triton_kernel.context_flashattention_nopad import (
 from lightllm.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd, token_att_fwd_int8k
 from lightllm.models.llama.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
 from lightllm.models.llama.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2, token_att_fwd2_int8v
-from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 
@@ -190,16 +189,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
-        out = self.alloc_tensor(input.shape, input.dtype)
-        rmsnorm_forward(input, weight=layer_weight.att_norm_weight_.weight, eps=self.eps_, out=out)
-        return out
+        return layer_weight.att_norm_weight_.rmsnorm_forward(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     def _ffn_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
-        out = self.alloc_tensor(input.shape, input.dtype)
-        rmsnorm_forward(input, weight=layer_weight.ffn_norm_weight_.weight, eps=self.eps_, out=out)
-        return out
+        return layer_weight.ffn_norm_weight_.rmsnorm_forward(
+            input=input,
+            eps=self.eps_,
+            alloc_func=self.alloc_tensor,
+        )
 
     def _get_qkv(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
@@ -224,7 +223,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
             )
             all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-            input = gather_input[0 : len(infer_state.position_cos), :]
+            input = gather_input[0 : len(infer_state.input_ids), :]
 
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
@@ -415,8 +414,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
         o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
-        layer_weight.o_proj.mm(input, out=o_tensor[0 : len(infer_state.position_cos), :])
-        e_o_tensor = o_tensor[len(infer_state.position_cos) :, :]
+        layer_weight.o_proj.mm(input, out=o_tensor[0 : len(infer_state.input_ids), :])
+        e_o_tensor = o_tensor[len(infer_state.input_ids) :, :]
         if e_o_tensor.shape[0] > 0:
             e_o_tensor.fill_(0)
 
@@ -883,10 +882,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             k_cache=cache_k,
             v_cache=cache_v,
             page_table=infer_state.page_table,
-            cache_seqlens=infer_state.b_seq_len,
+            cache_seqlens=infer_state.b_att_seq_len,
             cu_seqlens_q=infer_state.cu_seqlens_q,
             cu_seqlens_k_new=infer_state.cu_seqlens_k,
-            max_seqlen_q=1,
+            max_seqlen_q=infer_state.max_q_seq_len,
             softmax_scale=sm_scale,
             causal=True,
             window_size=(-1, -1),
