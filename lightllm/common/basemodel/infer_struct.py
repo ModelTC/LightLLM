@@ -213,6 +213,9 @@ class InferStateInfo:
 
             self.position_sin = self._all_to_all_balance_get(self.position_sin)
 
+        self._unbalance_input_ids = self.input_ids
+        self.input_ids = new_input_ids
+
         return new_input_ids
 
     def _all_to_all_balance_get(self, data: torch.Tensor):
