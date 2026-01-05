@@ -33,8 +33,9 @@ class BaseAttBackend:
 
 @dataclass
 class BasePrefillAttState(ABC):
+
     backend: BaseAttBackend = None
-    infer_state = None
+    infer_state: object = None
 
     @abstractmethod
     def init_state(self):
@@ -61,7 +62,7 @@ class BasePrefillAttState(ABC):
 @dataclass
 class BaseDecodeAttState(ABC):
     backend: BaseAttBackend = None
-    infer_state = None
+    infer_state: object = None
 
     @abstractmethod
     def init_state(self):

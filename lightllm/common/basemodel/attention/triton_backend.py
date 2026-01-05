@@ -109,7 +109,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         token_attention_fwd(
             q,
             k,
-            k,
+            v,
             out,
             layer_weight.tp_alibi,
             infer_state.req_manager.req_to_token_indexs,
