@@ -152,10 +152,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             # )
         elif "triton_flashdecoding" in self.mode:
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-        elif "triton_gqa_attention" in self.mode:
-            # self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_gqa_attention_normal,
-            #  self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         elif "triton_gqa_flashdecoding" in self.mode:
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
 
@@ -605,26 +601,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.req_manager.req_to_token_indexs,
             infer_state.b_req_idx,
             infer_state.b_start_loc,
-            infer_state.b_seq_len,
-        )
-        return o_tensor
-
-    def _token_decode_gqa_attention_normal(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
-        batch_size = infer_state.batch_size
-        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-        # 对 gqa模型进行推理优化的代码
-        from ..triton_kernel.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
-
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        gqa_decode_attention_fwd(
-            q.view(calcu_shape1),
-            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-            infer_state.mem_manager.kv_buffer[self.layer_num_][
-                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-            ],
-            o_tensor.view(calcu_shape1),
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
             infer_state.b_seq_len,
         )
         return o_tensor

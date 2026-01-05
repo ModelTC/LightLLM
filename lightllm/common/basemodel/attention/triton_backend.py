@@ -176,7 +176,6 @@ class TritonDecodeAttState(BaseDecodeAttState):
 
         out = alloc_func(q.shape, q.dtype)
 
-        print("wzj use gqa decode")
         gqa_token_decode_attention_flash_decoding(
             q=q,
             infer_state=self.infer_state,
@@ -186,4 +185,51 @@ class TritonDecodeAttState(BaseDecodeAttState):
             alloc_tensor_func=alloc_func,
         )
 
+        return out
+
+    def _normal_decode_gqa_flash_decoding_att_vsm(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer_weight,
+        alloc_func=torch.empty,
+    ):
+        # TODO USE , 在特定场景下比 _normal_decode_gqa_flash_decoding_att 省显存
+        from ..triton_kernel.att.gqa_flash_decoding_vsm import gqa_token_decode_attention_flash_decoding_vsm
+
+        out = alloc_func(q.shape, q.dtype)
+
+        gqa_token_decode_attention_flash_decoding_vsm(
+            q=q,
+            k=k,
+            v=v,
+            infer_state=self.infer_state,
+            out=out,
+            alloc_tensor_func=alloc_func,
+        )
+        return out
+
+    def _normal_decode_gqa_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer_weight,
+        alloc_func=torch.empty,
+    ):
+        # TODO USE , 在特定场景下比 _normal_decode_gqa_flash_decoding_att 省显存
+        from ..triton_kernel.att.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
+
+        out = alloc_func(q.shape, q.dtype)
+
+        gqa_decode_attention_fwd(
+            q=q,
+            k=k,
+            v=v,
+            out=out,
+            req_to_tokens=self.infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=self.infer_state.b_req_idx,
+            b_seq_len=self.infer_state.b_seq_len,
+        )
         return out
