@@ -1,7 +1,10 @@
+import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-import torch
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 class BaseAttBackend:
@@ -35,7 +38,7 @@ class BaseAttBackend:
 class BasePrefillAttState(ABC):
 
     backend: BaseAttBackend = None
-    infer_state: object = None
+    infer_state: "InferStateInfo" = None
 
     @abstractmethod
     def init_state(self):
@@ -52,7 +55,6 @@ class BasePrefillAttState(ABC):
         k: torch.tensor,
         v: torch.tensor,
         layer_weight,
-        out: Optional[torch.Tensor] = None,
         alloc_func=torch.empty,
         use_alibi=False,
     ) -> torch.Tensor:
@@ -62,7 +64,7 @@ class BasePrefillAttState(ABC):
 @dataclass
 class BaseDecodeAttState(ABC):
     backend: BaseAttBackend = None
-    infer_state: object = None
+    infer_state: "InferStateInfo" = None
 
     @abstractmethod
     def init_state(self):
@@ -79,7 +81,6 @@ class BaseDecodeAttState(ABC):
         k: torch.Tensor,
         v: torch.Tensor,
         layer_weight,
-        out: Optional[torch.Tensor] = None,
         alloc_func=torch.empty,
         use_alibi=False,
     ) -> torch.Tensor:

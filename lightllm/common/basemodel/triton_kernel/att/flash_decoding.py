@@ -1,12 +1,11 @@
 import torch
 
 
-def token_decode_attention_flash_decoding(
-    q, infer_state, q_head_num, head_dim, cache_k, cache_v, out=None, alloc_tensor_func=torch.empty
-):
+def token_decode_attention_flash_decoding(q, infer_state, cache_k, cache_v, out=None, alloc_tensor_func=torch.empty):
     BLOCK_SEQ = 256
     batch_size = infer_state.batch_size
     max_len_in_batch = infer_state.max_len_in_batch
+    q_head_num, head_dim = q.shape[1], q.shape[2]
     calcu_shape1 = (batch_size, q_head_num, head_dim)
 
     from .flash_decoding_stage1 import flash_decode_stage1
