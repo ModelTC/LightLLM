@@ -3,6 +3,7 @@ from typing import Tuple
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
 from lightllm.common.basemodel import InferStateInfo
+from lightllm.common.basemodel.attention.base_att import AttControl
 
 
 class BloomTransformerLayerInfer(TransformerLayerInferTpl):
@@ -57,8 +58,8 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
             k=_k,
             v=_v,
             layer_weight=layer_weight,
+            att_control=AttControl(use_alibi=True),
             alloc_func=self.alloc_tensor,
-            use_alibi=True,
         )
         o_tensor = o_tensor.view(q.shape)
         return o_tensor
@@ -71,7 +72,12 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         _k = kv[:, 0 : self.tp_k_head_num_, :]
         _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
         o_tensor = infer_state.decode_att_state.decode_att(
-            q=_q, k=_k, v=_v, layer_weight=layer_weight, alloc_func=self.alloc_tensor, use_alibi=True
+            q=_q,
+            k=_k,
+            v=_v,
+            layer_weight=layer_weight,
+            att_control=AttControl(use_alibi=True),
+            alloc_func=self.alloc_tensor,
         )
         return o_tensor.view(q.shape)
 

@@ -35,6 +35,15 @@ class BaseAttBackend:
 
 
 @dataclass
+class AttControl:
+    """
+    prefill_att 和 decode_att 的入参，用于控制att backend 内部的行为, 选择正确的att 实现。
+    """
+
+    use_alibi: bool = (False,)
+
+
+@dataclass
 class BasePrefillAttState(ABC):
 
     backend: BaseAttBackend = None
@@ -55,8 +64,8 @@ class BasePrefillAttState(ABC):
         k: torch.tensor,
         v: torch.tensor,
         layer_weight,
+        att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
-        use_alibi=False,
     ) -> torch.Tensor:
         raise NotImplementedError("not impl")
 
@@ -81,7 +90,16 @@ class BaseDecodeAttState(ABC):
         k: torch.Tensor,
         v: torch.Tensor,
         layer_weight,
+        att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
-        use_alibi=False,
     ) -> torch.Tensor:
         pass
+
+
+@dataclass
+class AttControl:
+    """
+    prefill_att 和 decode_att 的入参，用于控制att backend 内部的行为, 选择正确的att 实现。
+    """
+
+    use_alibi: bool = False

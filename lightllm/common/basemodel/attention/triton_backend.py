@@ -1,6 +1,6 @@
 import dataclasses
 import torch
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
 
 
@@ -26,10 +26,10 @@ class TritonPrefillAttState(BasePrefillAttState):
         k: torch.Tensor,
         v: torch.Tensor,
         layer_weight,
+        att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
-        use_alibi=False,
     ) -> torch.Tensor:
-        if use_alibi:
+        if att_control.use_alibi:
             return self._alibi_prefill_att(q=q, k=k, v=v, layer_weight=layer_weight, alloc_func=alloc_func)
         else:
             return self._nomarl_prefill_att(q=q, k=k, v=v, layer_weight=layer_weight, alloc_func=alloc_func)
@@ -96,10 +96,10 @@ class TritonDecodeAttState(BaseDecodeAttState):
         k: torch.Tensor,
         v: torch.Tensor,
         layer_weight,
+        att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
-        use_alibi=False,
     ):
-        if use_alibi:
+        if att_control.use_alibi:
             return self._alibi_decode_att(q=q, k=k, v=v, layer_weight=layer_weight, alloc_func=alloc_func)
         else:
             q_head_num = q.shape[1]
