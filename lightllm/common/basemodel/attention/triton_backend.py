@@ -239,3 +239,48 @@ class TritonDecodeAttState(BaseDecodeAttState):
             b_seq_len=self.infer_state.b_seq_len,
         )
         return out
+
+    def _normal_decode_stage3_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer_weight,
+        alloc_func=torch.empty,
+    ):
+        total_token_num = self.infer_state.total_token_num
+        batch_size = self.infer_state.batch_size
+        q_head_num = q.shape[1]
+        head_dim = q.shape[2]
+
+        calcu_shape1 = (batch_size, q_head_num, head_dim)
+        att_m_tensor = alloc_func((q_head_num, total_token_num), torch.float32)
+
+        from ..triton_kernel.att.decode_att.mha.stage3_decode_att.token_attention_nopad_att1 import token_att_fwd
+
+        token_att_fwd(
+            q.view(calcu_shape1),
+            k,
+            att_m_tensor,
+            Req_to_tokens=self.infer_state.req_manager.req_to_token_indexs,
+            B_req_idx=self.infer_state.b_req_idx,
+            B_Start_Loc=self.infer_state.b_start_loc,
+            B_Seqlen=self.infer_state.b_seq_len,
+            max_len_in_batch=self.infer_state.max_len_in_batch,
+        )
+
+        o_tensor = alloc_func(q.shape, q.dtype)
+        from ..triton_kernel.att.decode_att.mha.stage3_decode_att.token_attention_softmax_and_reducev import (
+            token_softmax_reducev_fwd,
+        )
+
+        token_softmax_reducev_fwd(
+            att_m_tensor,
+            v,
+            o_tensor.view(calcu_shape1),
+            req_to_tokens=self.infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=self.infer_state.b_req_idx,
+            b_start_loc=self.infer_state.b_start_loc,
+            b_seq_len=self.infer_state.b_seq_len,
+        )
+        return o_tensor

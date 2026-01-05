@@ -165,9 +165,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             #     self._token_attention_kernel = partial(
             #         LlamaTransformerLayerInfer._token_decode_attention_flashinfer, self
             #     )
-            # else:
-            #     self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_normal,
-            # self)
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         else:
             raise Exception(f"Unsupported mode: {self.mode}")
@@ -560,42 +557,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             q.view(calcu_shape1),
             (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
             out=o_tensor.view(calcu_shape1),
-        )
-        return o_tensor
-
-    def _token_decode_attention_normal(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
-        total_token_num = infer_state.total_token_num
-        batch_size = infer_state.batch_size
-        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-
-        att_m_tensor = self.alloc_tensor((self.tp_q_head_num_, total_token_num), torch.float32)
-
-        token_att_fwd(
-            q.view(calcu_shape1),
-            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-            att_m_tensor,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_start_loc,
-            infer_state.b_seq_len,
-            infer_state.max_len_in_batch,
-        )
-
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        from lightllm.models.llama.triton_kernel.token_attention_softmax_and_reducev import (
-            token_softmax_reducev_fwd,
-        )
-
-        token_softmax_reducev_fwd(
-            att_m_tensor,
-            infer_state.mem_manager.kv_buffer[self.layer_num_][
-                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-            ],
-            o_tensor.view(calcu_shape1),
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_start_loc,
-            infer_state.b_seq_len,
         )
         return o_tensor
 
