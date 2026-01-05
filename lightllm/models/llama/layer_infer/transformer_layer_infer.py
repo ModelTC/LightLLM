@@ -138,9 +138,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             #     LlamaTransformerLayerInfer._token_decode_attention_ppl_fp16_flashdecoding, self
             # )
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-        elif "triton_int8kv" in self.mode:
-            # self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_int8kv, self)
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_int8kv, self)
         elif "offline_calibration_fp8kv" in self.mode:
             assert get_env_start_args().enable_flashinfer_prefill and get_env_start_args().enable_flashinfer_decode
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_fp8kv, self)
@@ -558,48 +555,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
             out=o_tensor.view(calcu_shape1),
         )
-        return o_tensor
-
-    def _token_decode_attention_int8kv(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
-        total_token_num = infer_state.total_token_num
-        batch_size = infer_state.batch_size
-        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-        att_m_tensor = self.alloc_tensor((self.tp_q_head_num_, total_token_num), q.dtype)
-        token_att_fwd_int8k(
-            q.view(calcu_shape1),
-            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-            infer_state.mem_manager.scale_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-            att_m_tensor,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_start_loc,
-            infer_state.b_seq_len,
-            infer_state.max_len_in_batch,
-        )
-
-        prob = self.alloc_tensor(att_m_tensor.shape, att_m_tensor.dtype)
-        token_softmax_fwd(
-            att_m_tensor, infer_state.b_start_loc, infer_state.b_seq_len, prob, infer_state.max_len_in_batch
-        )
-        att_m_tensor = None
-
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        token_att_fwd2_int8v(
-            prob,
-            infer_state.mem_manager.kv_buffer[self.layer_num_][
-                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-            ],
-            infer_state.mem_manager.scale_buffer[self.layer_num_][
-                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-            ],
-            o_tensor.view(calcu_shape1),
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_start_loc,
-            infer_state.b_seq_len,
-            infer_state.max_len_in_batch,
-        )
-        prob = None
         return o_tensor
 
     def _token_decode_attention_ppl_int8kv(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
