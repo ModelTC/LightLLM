@@ -337,6 +337,28 @@ def make_argument_parser() -> argparse.ArgumentParser:
         only deepseekv3 model supported now.""",
     )
     parser.add_argument(
+        "--llm_prefill_att_backend",
+        type=str,
+        choices=[None, "triton", "fa3", "flashinfer"],
+        default=None,
+        help="""prefill attention kernel used in llm""",
+    )
+    parser.add_argument(
+        "--llm_decode_att_backend",
+        type=str,
+        choices=[None, "triton", "fa3", "flashinfer"],
+        default=None,
+        help="""decode attention kernel used in llm""",
+    )
+    parser.add_argument(
+        "--llm_kv_type",
+        type=str,
+        choices=[None, ""],
+        default=None,
+        help="""kv type used in llm""",
+    )
+
+    parser.add_argument(
         "--enable_flashinfer_prefill",
         action="store_true",
         help="""inference backend will use the attention kernel of flashinfer for prefill,

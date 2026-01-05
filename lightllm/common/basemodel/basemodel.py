@@ -32,6 +32,7 @@ from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
+from .attention import TritonAttBackend
 
 logger = init_logger(__name__)
 
@@ -119,6 +120,7 @@ class TpPartBaseModel:
         self._init_inferstate_cls()
         # wait必须在init cudagraph 之前，避免错误捕获
         self._wait_other_modules_ready()
+        self._init_att_backend()
         self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
@@ -238,6 +240,12 @@ class TpPartBaseModel:
         self.vocab_size = self.config["vocab_size"]
         return
 
+    def _init_att_backend(self):
+        self.prefill_att_backend = TritonAttBackend()
+        self.decode_att_backend = TritonAttBackend()
+        assert id(self.prefill_att_backend) == id(self.decode_att_backend)
+        return
+
     def _init_cudagraph(self):
         self.graph = (
             None if self.disable_cudagraph else CudaGraph(self.graph_max_batch_size, self.graph_max_len_in_batch)
@@ -310,6 +318,11 @@ class TpPartBaseModel:
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
+
+        if infer_state.is_prefill:
+            infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
+        else:
+            infer_state.decode_att_state = self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
 
         return infer_state
 

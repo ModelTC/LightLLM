@@ -11,6 +11,7 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank
+from .attention import BasePrefillAttState, BaseDecodeAttState
 
 
 class InferStateInfo:
@@ -19,6 +20,10 @@ class InferStateInfo:
     """
 
     def __init__(self):
+        # prefill 和 decode 使用的 att 状态对象
+        self.prefill_att_state: BasePrefillAttState = None
+        self.decode_att_state: BaseDecodeAttState = None
+
         self.input_ids: torch.Tensor = None
         self.batch_size: int = None
         self.total_token_num: int = None
@@ -90,6 +95,10 @@ class InferStateInfo:
         self.dp_input_split_sizes: List[List[int]] = None
 
     def init_some_extra_state(self, model):
+        if self.is_prefill:
+            self.prefill_att_state.init_state()
+        else:
+            self.decode_att_state.init_state()
 
         if self.is_prefill:
             (

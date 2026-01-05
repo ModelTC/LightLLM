@@ -2,8 +2,6 @@ import torch
 from typing import Tuple
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
-from lightllm.models.bloom.triton_kernel.context_flashattention_nopad import context_attention_fwd
-from lightllm.models.bloom.triton_kernel.token_flashattention_nopad import token_attention_fwd
 from lightllm.common.basemodel import InferStateInfo
 
 
@@ -43,45 +41,39 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         return q, cache_kv
 
     def _context_attention_kernel(
-        self, q, kv, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        infer_state: InferStateInfo,
+        layer_weight: BloomTransformerLayerWeight,
+        out=None,
     ) -> torch.Tensor:
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
         kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        context_attention_fwd(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            kv[:, 0 : self.tp_k_head_num_, :],
-            kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-            infer_state.b_req_idx,
-            layer_weight.tp_alibi,
-            infer_state.b_start_loc,
-            infer_state.b_seq_len,
-            infer_state.b_ready_cache_len,
-            infer_state.max_len_in_batch,
-            infer_state.req_manager.req_to_token_indexs,
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        _k = kv[:, 0 : self.tp_k_head_num_, :]
+        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
+        o_tensor = infer_state.prefill_att_state.prefill_att(
+            q=_q,
+            k=_k,
+            v=_v,
+            layer_weight=layer_weight,
+            alloc_func=self.alloc_tensor,
+            use_alibi=True,
         )
+        o_tensor = o_tensor.view(q.shape)
         return o_tensor
 
     def _token_attention_kernel(
-        self, q, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
+        self, q: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
     ) -> torch.Tensor:
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
         kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        token_attention_fwd(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            kv[:, 0 : self.tp_k_head_num_, :],
-            kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-            layer_weight.tp_alibi,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_start_loc,
-            infer_state.b_seq_len,
-            infer_state.max_len_in_batch,
-            infer_state.total_token_num,
-            alloc_tensor_func=self.alloc_tensor,
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        _k = kv[:, 0 : self.tp_k_head_num_, :]
+        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
+        o_tensor = infer_state.decode_att_state.decode_att(
+            q=_q, k=_k, v=_v, layer_weight=layer_weight, alloc_func=self.alloc_tensor, use_alibi=True
         )
-        return o_tensor
+        return o_tensor.view(q.shape)
 
     def _get_o(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
         o_tensor = layer_weight.o_proj.mm(input.view(-1, self.tp_o_head_num_ * self.head_dim_))
