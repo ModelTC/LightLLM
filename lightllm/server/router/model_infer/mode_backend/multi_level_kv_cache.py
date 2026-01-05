@@ -5,7 +5,7 @@ import dataclasses
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.envs_utils import get_env_start_args, disable_cpu_kvcache_sync
+from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
@@ -30,7 +30,7 @@ class MultiLevelKvCacheModule(object):
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
 
         # 一些算子模式需要同步计算和 cpu cache 的 load 和 offload 操作
-        self.need_sync_compute_stream: bool = self.args.enable_fa3 and not disable_cpu_kvcache_sync()
+        self.need_sync_compute_stream: bool = True
 
     def wait(self):
         """
@@ -72,7 +72,7 @@ class MultiLevelKvCacheModule(object):
                         g_infer_context.get_overlap_stream().synchronize()
 
                     # TODO 更有效的分配策略。
-                    grid_num = 16 if self.need_sync_compute_stream or (not self.args.enable_fa3) else 1
+                    grid_num = 16
 
                     mem_manager = self.backend.model.mem_manager
                     if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
@@ -226,7 +226,7 @@ class MultiLevelKvCacheModule(object):
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
             # TODO 更有效的分配策略。
-            grid_num = 16 if self.need_sync_compute_stream or (not self.args.enable_fa3) else 1
+            grid_num = 16
 
             mem_manager = self.backend.model.mem_manager
             if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:

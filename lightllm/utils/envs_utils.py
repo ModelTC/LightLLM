@@ -190,14 +190,6 @@ def use_whisper_sdpa_attention() -> bool:
 
 
 @lru_cache(maxsize=None)
-def disable_cpu_kvcache_sync() -> bool:
-    """
-    实验用环境遍历，未来可能会移除
-    """
-    return enable_env_vars("LIGHTLLM_DISABLE_CPU_CACHE_SYNC")
-
-
-@lru_cache(maxsize=None)
 def enable_radix_tree_timer_merge() -> bool:
     """
     使能定期合并 radix tree的叶节点, 防止插入查询性能下降。
