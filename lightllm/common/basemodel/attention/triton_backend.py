@@ -64,7 +64,7 @@ class TritonPrefillAttState(BasePrefillAttState):
     def _nomarl_prefill_att(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_weight, alloc_func=torch.empty
     ):
-        from ..triton_kernel.att.context_flashattention_nopad import context_attention_fwd
+        from ..triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd
 
         out = alloc_func(q.shape, q.dtype)
         context_attention_fwd(
@@ -150,7 +150,9 @@ class TritonDecodeAttState(BaseDecodeAttState):
         layer_weight,
         alloc_func=torch.empty,
     ):
-        from ..triton_kernel.att.flash_decoding import token_decode_attention_flash_decoding
+        from ..triton_kernel.att.decode_att.mha.flash_decoding.flash_decoding import (
+            token_decode_attention_flash_decoding,
+        )
 
         out = alloc_func(q.shape, q.dtype)
 
@@ -172,7 +174,9 @@ class TritonDecodeAttState(BaseDecodeAttState):
         layer_weight,
         alloc_func=torch.empty,
     ):
-        from ..triton_kernel.att.gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
+        from ..triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding import (
+            gqa_token_decode_attention_flash_decoding,
+        )
 
         out = alloc_func(q.shape, q.dtype)
 
@@ -196,7 +200,9 @@ class TritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         # TODO USE , 在特定场景下比 _normal_decode_gqa_flash_decoding_att 省显存
-        from ..triton_kernel.att.gqa_flash_decoding_vsm import gqa_token_decode_attention_flash_decoding_vsm
+        from ..triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_vsm import (
+            gqa_token_decode_attention_flash_decoding_vsm,
+        )
 
         out = alloc_func(q.shape, q.dtype)
 
@@ -219,7 +225,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         # TODO USE , 在特定场景下比 _normal_decode_gqa_flash_decoding_att 省显存
-        from ..triton_kernel.att.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
+        from ..triton_kernel.att.decode_att.gqa.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
 
         out = alloc_func(q.shape, q.dtype)
 
