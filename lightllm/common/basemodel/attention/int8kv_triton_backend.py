@@ -44,20 +44,20 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
         self.backend: Int8kvTritonAttBackend = self.backend  # for typing
         if self.backend.quant_group_size == 8:
             pass
-        # context_attention_fwd_ppl_int8kv(
-        #     q.view(-1, self.tp_q_head_num_, self.head_dim_),
-        #     kv_dequant[:, 0 : self.tp_k_head_num_, :, :],
-        #     kv_dequant[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :, :],
-        #     o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-        #     infer_state.b_start_loc,
-        #     infer_state.b_seq_len,
-        #     infer_state.max_len_in_batch,
-        #     infer_state.b_ready_cache_len,
-        # )
+        k, k_scale = k
+        v, v_scale = v
+        o = self._groupsize_quant_prefill_att(
+            q=q,
+            k=k,
+            k_scale=k_scale,
+            v=v,
+            v_scale=v_scale,
+            layer_weight=layer_weight,
+            alloc_func=alloc_func,
+        )
+        return o
 
-        return self._nomarl_prefill_att(q=q, k=k, v=v, layer_weight=layer_weight, alloc_func=alloc_func)
-
-    def _groupsize8_quant_prefill_att(
+    def _groupsize_quant_prefill_att(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -76,6 +76,7 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
         total_token_num = self.infer_state.total_token_num
         k_dequant = alloc_func((total_token_num, k.shape[1], k.shape[2]), dtype=q.dtype, device=q.device)
         v_dequant = alloc_func((total_token_num, v.shape[1], v.shape[2]), dtype=q.dtype, device=q.device)
+        o_tensor = alloc_func(q.shape, dtype=q.dtype, device=q.device)
 
         max_kv_seq_len = self.infer_state.max_kv_seq_len
 
@@ -96,16 +97,19 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
             quant_group_size=self.backend.quant_group_size,
         )
 
-        # context_attention_fwd_ppl_int8kv(
-        #     q.view(-1, self.tp_q_head_num_, self.head_dim_),
-        #     kv_dequant[:, 0 : self.tp_k_head_num_, :, :],
-        #     kv_dequant[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :, :],
-        #     o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-        #     infer_state.b_start_loc,
-        #     infer_state.b_seq_len,
-        #     infer_state.max_len_in_batch,
-        #     infer_state.b_ready_cache_len,
-        # )
+        from ..triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_ppl_int8kv
+
+        context_attention_fwd_ppl_int8kv(
+            q=q,
+            k=k_dequant,
+            v=v_dequant,
+            o=o_tensor,
+            b_start_loc=self.infer_state.b_start_loc,
+            b_kv_start_loc=self.b_kv_start_loc,
+            b_seq_len=self.infer_state.b_seq_len,
+            max_q_input_len=self.infer_state.max_q_seq_len,
+            b_prompt_cache_len=self.infer_state.b_ready_cache_len,
+        )
 
 
 @dataclasses.dataclass
