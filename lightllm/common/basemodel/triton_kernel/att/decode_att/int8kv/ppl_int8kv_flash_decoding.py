@@ -5,8 +5,6 @@ from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 def token_decode_attention_flash_decoding(
     q,
     infer_state,
-    q_head_num,
-    head_dim,
     cache_k,
     cache_k_scale,
     cache_v,
@@ -15,11 +13,12 @@ def token_decode_attention_flash_decoding(
     alloc_tensor_func=torch.empty,
 ):
     BLOCK_SEQ = 256
+    q_head_num, head_dim = q.shape[1], q.shape[2]
     batch_size = infer_state.batch_size
     max_len_in_batch = infer_state.max_len_in_batch
     calcu_shape1 = (batch_size, q_head_num, head_dim)
 
-    from .flash_decoding_stage2 import flash_decode_stage2
+    from ..mha.flash_decoding.flash_decoding_stage2 import flash_decode_stage2
 
     o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
 

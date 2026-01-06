@@ -138,6 +138,16 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
             return self.diverse_decode_att(
                 q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, layer_weight=layer_weight, alloc_func=alloc_func
             )
+        else:
+            return self.ppl_mha_int8kv_decode_att(
+                q=q,
+                k=k,
+                k_scale=k_scale,
+                v=v,
+                v_scale=v_scale,
+                layer_weight=layer_weight,
+                alloc_func=alloc_func,
+            )
 
     def diverse_decode_att(
         self,
@@ -150,7 +160,31 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
 
-        from ..triton_kernel.att.decode_att.int8kv_gqa.ppl_int8kv_flash_decoding_diverse import (
+        from ..triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse import (
+            token_decode_attention_flash_decoding,
+        )
+
+        return token_decode_attention_flash_decoding(
+            q=q,
+            infer_state=self.infer_state,
+            cache_k=k,
+            cache_k_scale=k_scale,
+            cache_v=v,
+            cache_v_scale=v_scale,
+            alloc_tensor_func=alloc_func,
+        )
+
+    def ppl_mha_int8kv_decode_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        k_scale: torch.Tensor,
+        v: torch.Tensor,
+        v_scale: torch.Tensor,
+        layer_weight,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        from ..triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding import (
             token_decode_attention_flash_decoding,
         )
 
