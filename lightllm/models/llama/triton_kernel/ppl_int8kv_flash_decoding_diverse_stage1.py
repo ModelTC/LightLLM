@@ -18,12 +18,14 @@ class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
         batch_size: int,
         avg_seq_len_in_batch: int,
         gqa_group_size: int,
+        max_batch_group_size: int,
         q_head_dim: int,
         block_seq: int,
         out_dtype: str,
     ) -> dict:
         key_params = {
             "gqa_group_size": gqa_group_size,
+            "max_batch_group_size": max_batch_group_size,
             "q_head_dim": q_head_dim,
             "block_seq": block_seq,
             "out_dtype": str(out_dtype),
@@ -54,6 +56,7 @@ class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
     def save_config(
         cls,
         gqa_group_size: int,
+        max_batch_group_size: int,
         q_head_dim: int,
         block_seq: int,
         out_dtype: str,
@@ -61,6 +64,7 @@ class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
     ):
         key_params = {
             "gqa_group_size": gqa_group_size,
+            "max_batch_group_size": max_batch_group_size,
             "q_head_dim": q_head_dim,
             "block_seq": block_seq,
             "out_dtype": str(out_dtype),
@@ -242,6 +246,7 @@ def flash_decode_stage1(
             batch_size=int(q.shape[0]),
             avg_seq_len_in_batch=avg_seq_len_in_batch,
             gqa_group_size=int(q.shape[1] // k.shape[1]),
+            max_batch_group_size=max_batch_group_size,
             q_head_dim=int(q.shape[2]),
             block_seq=block_seq,
             out_dtype=q.dtype,
