@@ -40,7 +40,7 @@ class AttControl:
     prefill_att 和 decode_att 的入参，用于控制att backend 内部的行为, 选择正确的att 实现。
     """
 
-    use_alibi: bool = (False,)
+    use_alibi: bool = False
 
 
 @dataclass
