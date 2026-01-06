@@ -76,13 +76,9 @@ class MultiLevelKvCacheModule(object):
 
                     mem_manager = self.backend.model.mem_manager
                     if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
-                        cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
-                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[
-                            :, :, :, :, 0 : cpu_cache_meta.head_dim
-                        ]
-                        cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
-                            :, :, :, :, cpu_cache_meta.head_dim :
-                        ].view(mem_manager.scale_buffer.dtype)
+                        # Use merged SHM tensor to avoid non-contiguous slice views.
+                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
+                        cpu_kv_cache_scale = None
                         gpu_kv_cache_scale = mem_manager.scale_buffer
                     else:
                         cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
@@ -96,7 +92,7 @@ class MultiLevelKvCacheModule(object):
                         gpu_kv_cache_scale=gpu_kv_cache_scale,
                         cpu_kv_cache=cpu_kv_cache,
                         cpu_kv_cache_scale=cpu_kv_cache_scale,
-                        page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
+                        page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu", pin_memory=True),
                         tp_index=self.backend.rank_in_dp,
                         tp_world_size=self.backend.dp_world_size,
                         grid_num=grid_num,
@@ -230,11 +226,9 @@ class MultiLevelKvCacheModule(object):
 
             mem_manager = self.backend.model.mem_manager
             if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
-                cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
-                cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0 : cpu_cache_meta.head_dim]
-                cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
-                    :, :, :, :, cpu_cache_meta.head_dim :
-                ].view(mem_manager.scale_buffer.dtype)
+                # Use merged SHM tensor to avoid non-contiguous slice views.
+                cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
+                cpu_kv_cache_scale = None
                 gpu_kv_cache_scale = mem_manager.scale_buffer
             else:
                 cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor

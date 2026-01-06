@@ -227,14 +227,14 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     logger.info(f"Shared cpu kv cache tensor memory at address: {shm_addr}")
 
     # Best-effort memory prefaulting in background to speed up subsequent cudaHostRegister
-    def _pre_warm_memory():
-        page_size = _get_default_hugepage_size() if use_hugetlb else 4096
-        arr = np.ctypeslib.as_array(ctypes.cast(shm_addr, ctypes.POINTER(ctypes.c_uint8)), shape=(size_to_alloc,))
-        volatile_sum = int(arr[::page_size].sum())
-        logger.info(f"pre warmed shared memory pages successfully, checksum={volatile_sum})")
+    # def _pre_warm_memory():
+    #     page_size = _get_default_hugepage_size() if use_hugetlb else 4096
+    #     arr = np.ctypeslib.as_array(ctypes.cast(shm_addr, ctypes.POINTER(ctypes.c_uint8)), shape=(size_to_alloc,))
+    #     volatile_sum = int(arr[::page_size].sum())
+    #     logger.info(f"pre warmed shared memory pages successfully, checksum={volatile_sum})")
 
-    th = threading.Thread(target=_pre_warm_memory, name=f"cpu_cache_pre_warm_{key}", daemon=True)
-    th.start()
+    # th = threading.Thread(target=_pre_warm_memory, name=f"cpu_cache_pre_warm_{key}", daemon=True)
+    # th.start()
 
     return shm_addr
 
@@ -242,13 +242,14 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
 @lru_cache(maxsize=None)
 def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle":
     """Start async cudaHostRegister on the given [shm_ptr, shm_ptr+size) and return a handle."""
-    chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
+    # chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
     tasks: list[tuple[int, int]] = []
     offset = 0
-    while offset < size:
-        seg_len = min(chunk_bytes, size - offset)
-        tasks.append((offset, seg_len))
-        offset += seg_len
+    # while offset < size:
+    #     seg_len = min(chunk_bytes, size - offset)
+    #     tasks.append((offset, seg_len))
+    #     offset += seg_len
+    tasks.append((offset, size))
 
     handle = AsyncRegistrationHandle(total_tasks=len(tasks))
 
@@ -256,10 +257,9 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
         cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
         cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
         cuda.cudaHostRegister.restype = ctypes.c_int
-        cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
-        cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
-
-        cudaHostRegisterFlag = 3
+        # Do NOT use cudaHostRegisterMapped (no zero-copy / no host pointer dereference on GPU).
+        # Keep Portable to allow the pinned mapping across CUDA contexts.
+        cudaHostRegisterFlag = 1
 
         torch.cuda.set_device(get_current_device_id())
         # TODO 这个地方的分块注册是否具备合法性和合理性。
@@ -269,13 +269,6 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
             if r != 0:
                 raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
             handle.task_count += 1
-
-        device_ptr = ctypes.c_void_p()
-        host_ptr = ctypes.c_void_p(shm_ptr)
-        res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
-        if res != 0:
-            raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
-        assert host_ptr.value == device_ptr.value
         handle.tasks_finished.set()
 
     th = threading.Thread(target=_worker, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
@@ -287,7 +280,7 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
 class AsyncRegistrationHandle:
     """A handle for async host memory registration.
 
-    - wait(): blocks until registration finishes, prints tqdm progress, and returns device pointer (int).
+    - wait(): blocks until registration finishes and prints tqdm progress.
     """
 
     def __init__(self, total_tasks: int):
