@@ -61,11 +61,12 @@ def _fwd_kernel_destindex_copy_quantize_int4_kv(
             q_src_data_0 = tl.where(q_src_data_0 > 7, 7, q_src_data_0)
             q_src_data_0 = tl.where(q_src_data_0 < -7, -7, q_src_data_0)
             q_src_data_0 = tl.cast(q_src_data_0, tl.uint8)
+            q_src_data_0 = q_src_data_0.to(tl.uint8, bitcast=True)
 
             q_src_data_1 = (src_data_1 / data_scale[:, None]).to(tl.int8)
             q_src_data_1 = tl.where(q_src_data_1 > 7, 7, q_src_data_1)
             q_src_data_1 = tl.where(q_src_data_1 < -7, -7, q_src_data_1)
-            q_src_data_1 = tl.cast(q_src_data_1, tl.uint8)
+            q_src_data_1 = q_src_data_1.to(tl.uint8, bitcast=True)
 
             low_4 = ((q_src_data_0 & 0x80) >> 4) | (q_src_data_0 & 0xF)
             high_4 = (((q_src_data_1 & 0x80) >> 4) | (q_src_data_1 & 0xF)) << 4
@@ -206,7 +207,7 @@ def _fwd_dequantize_int4kv(
             + group_offs[None, :, None] * k_sg
             + offs_d[None, None, :] // 2
         )
-        k_high = tl.cast((tl.cast(k_int8, tl.uint8) & 0xF0) >> 4, tl.int8)
+        k_high = ((k_int8.to(tl.uint8, bitcast=True) & 0xF0) >> 4).to(tl.int8, bitcast=True)
         k_low = k_int8 & 0x0F
         k_high = tl.where(k_high >= 8, k_high - 16, k_high)
         k_low = tl.where(k_low >= 8, k_low - 16, k_low)
@@ -242,7 +243,7 @@ def _fwd_dequantize_int4kv(
             + group_offs[None, :, None] * v_sg
             + offs_d[None, None, :]
         )
-        v_high = tl.cast((tl.cast(v_int8, tl.uint8) & 0xF0) >> 4, tl.int8)
+        v_high = ((v_int8.to(tl.uint8, bitcast=True) & 0xF0) >> 4).to(tl.int8, bitcast=True)
         v_low = v_int8 & 0x0F
         v_high = tl.where(v_high >= 8, v_high - 16, v_high)
         v_low = tl.where(v_low >= 8, v_low - 16, v_low)
