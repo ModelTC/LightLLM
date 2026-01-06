@@ -94,7 +94,9 @@ class Monitor:
 
         ratio_buckets = [(i + 1) / 10.0 for i in range(-1, 10)]
         self.create_histogram("lightllm_cache_ratio", ratio_buckets)
-        self.create_histogram("lightllm_request_mtp_avg_token_per_step", self.duration_buckets)
+
+        mtp_avg_token_per_step_buckets = [i / 10.0 + 1.0 for i in range(0, 10 * args.mtp_step)]
+        self.create_histogram("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step_buckets)
 
     def create_histogram(self, name, buckets, labelnames=None):
         if labelnames is None:
