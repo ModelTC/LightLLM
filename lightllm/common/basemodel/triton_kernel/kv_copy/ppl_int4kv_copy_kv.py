@@ -134,3 +134,237 @@ def destindex_copy_int4kv(
         num_stages=1,
     )
     return
+
+
+@triton.jit
+def _fwd_dequantize_int4kv(
+    k,
+    k_ss,
+    k_sh,
+    k_sg,
+    k_sd,
+    k_scale,
+    k_scale_ss,
+    k_scale_sh,
+    k_scale_sg,
+    k_scale_sd,
+    v,
+    v_ss,
+    v_sh,
+    v_sg,
+    v_sd,
+    v_scale,
+    v_scale_ss,
+    v_scale_sh,
+    v_scale_sg,
+    v_scale_sd,
+    req_to_token_indexs,
+    stride_req_to_tokens_b,
+    stride_req_to_tokens_s,
+    b_seq_len,
+    b_req_idx,
+    b_kv_start_loc,
+    k_out,
+    k_out_ss,
+    k_out_sh,
+    k_out_sg,
+    k_out_sd,
+    v_out,
+    v_out_ss,
+    v_out_sh,
+    v_out_sg,
+    v_out_sd,
+    k_head_num,
+    v_head_num,
+    group_count,
+    group_dim,
+    SEQ_BLOCK_SIZE: tl.constexpr,
+    GROUP_COUNT_BLOCK_SIZE: tl.constexpr,
+    BLOCK_GROUP_DIM: tl.constexpr,
+):
+    start_block_index = tl.program_id(0)
+    cur_batch = tl.program_id(1)
+    cur_batch_req_idx = tl.load(b_req_idx + cur_batch)
+    cur_seq_len = tl.load(b_seq_len + cur_batch)
+    if start_block_index * SEQ_BLOCK_SIZE >= cur_seq_len:
+        return
+
+    out_start_loc = tl.load(b_kv_start_loc + cur_batch)
+
+    offs_kv_loc = (start_block_index * SEQ_BLOCK_SIZE + tl.arange(0, SEQ_BLOCK_SIZE)) % cur_seq_len
+    kv_loc = tl.load(req_to_token_indexs + cur_batch_req_idx * stride_req_to_tokens_b + offs_kv_loc).to(tl.int64)
+
+    offs_d = tl.arange(0, BLOCK_GROUP_DIM) % group_dim
+    offs_scale_d = tl.arange(0, 1)
+    group_offs = tl.arange(0, GROUP_COUNT_BLOCK_SIZE) % group_count
+
+    for k_head_index in tl.range(0, k_head_num, step=1, num_stages=3):
+        k_int8 = tl.load(
+            k
+            + kv_loc[:, None, None] * k_ss
+            + k_head_index * k_sh
+            + group_offs[None, :, None] * k_sg
+            + offs_d[None, None, :] // 2
+        )
+        k_high = (k_int8 & 0xF0) >> 4
+        k_low = k_int8 & 0x0F
+        k_high = tl.where(k_high >= 8, k_high - 16, k_high)
+        k_low = tl.where(k_low >= 8, k_low - 16, k_low)
+
+        k_int4 = tl.where(
+            offs_d[None, None, :] % 2 == 0,
+            k_low,
+            k_high,
+        )
+
+        k_scale_data = tl.load(
+            k_scale
+            + kv_loc[:, None, None] * k_scale_ss
+            + k_head_index * k_scale_sh
+            + group_offs[None, :, None] * k_scale_sg
+            + offs_scale_d[None, None, :]
+        )
+        k_out_data = k_int4.to(k_out.dtype.element_ty) * k_scale_data
+        tl.store(
+            k_out
+            + (out_start_loc + offs_kv_loc[:, None, None]) * k_out_ss
+            + k_head_index * k_out_sh
+            + group_offs[None, :, None] * k_out_sg
+            + offs_d[None, None, :],
+            k_out_data,
+        )
+
+    for v_head_index in tl.range(0, v_head_num, step=1, num_stages=3):
+        v_int8 = tl.load(
+            v
+            + kv_loc[:, None, None] * v_ss
+            + v_head_index * v_sh
+            + group_offs[None, :, None] * v_sg
+            + offs_d[None, None, :]
+        )
+        v_high = (v_int8 & 0xF0) >> 4
+        v_low = v_int8 & 0x0F
+        v_high = tl.where(v_high >= 8, v_high - 16, v_high)
+        v_low = tl.where(v_low >= 8, v_low - 16, v_low)
+
+        v_int4 = tl.where(
+            offs_d[None, None, :] % 2 == 0,
+            v_low,
+            v_high,
+        )
+        v_scale_data = tl.load(
+            v_scale
+            + kv_loc[:, None, None] * v_scale_ss
+            + v_head_index * v_scale_sh
+            + group_offs[None, :, None] * v_scale_sg
+            + offs_scale_d[None, None, :]
+        )
+        v_out_data = v_int4.to(v_out.dtype.element_ty) * v_scale_data
+        tl.store(
+            v_out
+            + (out_start_loc + offs_kv_loc[:, None, None]) * v_out_ss
+            + v_head_index * v_out_sh
+            + group_offs[None, :, None] * v_out_sg
+            + offs_d[None, None, :],
+            v_out_data,
+        )
+    return
+
+
+@torch.no_grad()
+def dequantize_int4kv(
+    k: torch.Tensor,
+    k_scale: torch.Tensor,
+    v: torch.Tensor,
+    v_scale: torch.Tensor,
+    req_to_token_indexs: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    b_kv_start_loc: torch.Tensor,
+    k_out: torch.Tensor,
+    v_out: torch.Tensor,
+    max_len_in_batch: int,
+    quant_group_size: int,
+):
+    batch_size = b_seq_len.shape[0]
+    k_head_num = k.shape[1]
+    k_head_dim = k.shape[2] * 2
+    v_head_num = v.shape[1]
+    v_head_dim = v.shape[2] * 2
+    assert k_head_dim % quant_group_size == 0, "error head dim, can not been supported to copy quant kv"
+    assert v_head_dim % quant_group_size == 0, "error head dim, can not been supported to copy quant kv"
+    assert k_head_dim == v_head_dim, "error head dim, can not been supported to copy quant kv"
+    assert k_head_dim // v_scale.shape[2] == quant_group_size, "error head dim, can not been supported to copy quant kv"
+    assert k_head_dim in [64, 128, 256]
+
+    group_count = k_head_dim // quant_group_size
+    group_dim = quant_group_size
+
+    k = k.view((k.shape[0], k.shape[1], group_count, group_dim // 2))  # int4kv 以 int8 存储的
+    v = v.view((v.shape[0], v.shape[1], group_count, group_dim // 2))
+    k_scale = k_scale.view((k_scale.shape[0], k_scale.shape[1], group_count, 1))
+    v_scale = v_scale.view((v_scale.shape[0], v_scale.shape[1], group_count, 1))
+
+    # 使拆分的grid 具有足够的并行度
+    SEQ_BLOCK_SIZE = 128
+    while triton.cdiv(max_len_in_batch, SEQ_BLOCK_SIZE) * batch_size < 512:
+        SEQ_BLOCK_SIZE = SEQ_BLOCK_SIZE // 2
+        if SEQ_BLOCK_SIZE <= 1:
+            break
+
+    if SEQ_BLOCK_SIZE <= 1:
+        SEQ_BLOCK_SIZE = 8
+
+    grid = (triton.cdiv(max_len_in_batch, SEQ_BLOCK_SIZE), batch_size)
+    num_warps = 4
+    k_out = k_out.view((k_out.shape[0], k_out.shape[1], group_count, group_dim))
+    v_out = v_out.view((v_out.shape[0], v_out.shape[1], group_count, group_dim))
+
+    _fwd_dequantize_int4kv[grid](
+        k=k,
+        k_ss=k.stride(0),
+        k_sh=k.stride(1),
+        k_sg=k.stride(2),
+        k_sd=k.stride(3),
+        k_scale=k_scale,
+        k_scale_ss=k_scale.stride(0),
+        k_scale_sh=k_scale.stride(1),
+        k_scale_sg=k_scale.stride(2),
+        k_scale_sd=k_scale.stride(2),
+        v=v,
+        v_ss=v.stride(0),
+        v_sh=v.stride(1),
+        v_sg=v.stride(2),
+        v_sd=v.stride(3),
+        v_scale=v_scale,
+        v_scale_ss=v_scale.stride(0),
+        v_scale_sh=v_scale.stride(1),
+        v_scale_sg=v_scale.stride(2),
+        v_scale_sd=v_scale.stride(3),
+        req_to_token_indexs=req_to_token_indexs,
+        stride_req_to_tokens_b=req_to_token_indexs.stride(0),
+        stride_req_to_tokens_s=req_to_token_indexs.stride(1),
+        b_seq_len=b_seq_len,
+        b_req_idx=b_req_idx,
+        b_kv_start_loc=b_kv_start_loc,
+        k_out=k_out,
+        k_out_ss=k_out.stride(0),
+        k_out_sh=k_out.stride(1),
+        k_out_sg=k_out.stride(2),
+        k_out_sd=k_out.stride(3),
+        v_out=v_out,
+        v_out_ss=v_out.stride(0),
+        v_out_sh=v_out.stride(1),
+        v_out_sg=v_out.stride(2),
+        v_out_sd=v_out.stride(3),
+        k_head_num=k_head_num,
+        v_head_num=v_head_num,
+        group_count=group_count,
+        group_dim=group_dim,
+        SEQ_BLOCK_SIZE=SEQ_BLOCK_SIZE,
+        GROUP_COUNT_BLOCK_SIZE=triton.next_power_of_2(group_count),
+        BLOCK_GROUP_DIM=triton.next_power_of_2(group_dim),
+        num_warps=num_warps,
+        num_stages=1,
+    )
+    return
