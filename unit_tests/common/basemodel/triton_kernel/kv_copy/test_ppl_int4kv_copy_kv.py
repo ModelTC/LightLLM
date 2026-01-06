@@ -20,7 +20,7 @@ def test_quanted_and_dequant():
     quant_group_size = 8
 
     # Create original data
-    original_kv = torch.randn(batch_size * seq_len, head_num, head_dim, dtype=torch.float32).clamp_(-0.5, 0.5).cuda()
+    original_kv = torch.randn(batch_size * seq_len, head_num, head_dim, dtype=torch.float32).clamp_(-1, 1).cuda()
     dest_loc = torch.arange(batch_size * seq_len, dtype=torch.int64).cuda()
 
     # Quantize
@@ -39,7 +39,7 @@ def test_quanted_and_dequant():
 
     dequantize_int4kv(
         k=kv_buffer[:, 0:k_head_num, :],
-        k_scale=kv_scale_buffer[:, k_head_num:, :],
+        k_scale=kv_scale_buffer[:, 0:k_head_num, :],
         v=kv_buffer[:, k_head_num:, :],
         v_scale=kv_scale_buffer[:, k_head_num:, :],
         req_to_token_indexs=req_to_token_indexs,
@@ -54,7 +54,7 @@ def test_quanted_and_dequant():
 
     logger.info("Round-trip test completed!")
 
-    # assert torch.allclose(recovered_kv, original_kv, atol=1e-2, rtol=0)
+    assert torch.allclose(recovered_kv, original_kv, atol=2 / 14 * 2, rtol=0)
     cos = torch.nn.CosineSimilarity(0)
     assert cos(recovered_kv.flatten().float(), original_kv.flatten().float()) > 0.99
 
