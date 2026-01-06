@@ -12,7 +12,7 @@ def rename_weight_keys(weights):
             weights[k.replace(prefix, "")] = weights.pop(k)
 
 
-class NeoChatMOEPreAndPostLayerWeight(Qwen2PreAndPostLayerWeight):
+class NeoChatPreAndPostLayerWeight(Qwen2PreAndPostLayerWeight):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
         return

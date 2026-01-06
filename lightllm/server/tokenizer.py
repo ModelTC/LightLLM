@@ -30,7 +30,7 @@ from ..models.qwen_vl.model import QWenVLTokenizer
 from ..models.qwen2_vl.model import QWen2VLTokenizer
 from ..models.qwen3_vl.model import QWen3VLTokenizer
 from ..models.internvl.model import InternvlTokenizer
-from ..models.neo_chat.model import NeoChatTokenizer
+from ..models.neo_chat_moe.model import NeoChatTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.

@@ -3,19 +3,19 @@ from functools import partial
 from typing import Tuple
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.models.neo_chat.infer_struct import NeoChatInferStateInfo
-from lightllm.models.neo_chat.triton_kernel.context_attention_fwd_neo import context_attention_fwd_neo
+from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
+from lightllm.models.neo_chat_moe.triton_kernel.context_attention_fwd_neo import context_attention_fwd_neo
 from lightllm.models.llama.triton_kernel.context_flashattention_nopad import context_attention_fwd
 from lightllm.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd
-from lightllm.models.qwen3_moe.layer_infer.transformer_layer_infer import Qwen3MOETransformerLayerInfer
-from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoChatMOETransformerLayerWeight
+from lightllm.models.qwen3.layer_infer.transformer_layer_infer import Qwen3TransformerLayerInfer
+from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoChatTransformerLayerWeight
 from lightllm.distributed import all_reduce
 import torch.distributed as dist
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.qwen3.triton_kernel.qk_norm import qk_rmsnorm_forward
 
 
-class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
+class NeoChatTransformerLayerInfer(Qwen3TransformerLayerInfer):
     def __init__(self, data_type, network_config, mode):
         super().__init__(data_type, network_config, mode)
         return
@@ -26,7 +26,7 @@ class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         self._copy_kv_to_mem_cache = self._copy_kv_to_mem_cache_normal
         return
 
-    def _get_qkv(self, input, infer_state: NeoChatInferStateInfo, layer_weight: NeoChatMOETransformerLayerWeight):
+    def _get_qkv(self, input, infer_state: NeoChatInferStateInfo, layer_weight: NeoChatTransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)  # [T, Hq*D]
 
