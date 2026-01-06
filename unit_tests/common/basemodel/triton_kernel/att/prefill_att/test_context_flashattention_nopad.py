@@ -9,35 +9,34 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-def torch_context_attention_fwd2(q, k, v, o, b_start_loc, b_seq_len, b_prompt_cache_len):
+def torch_context_attention_fwd2(q, k, v, o, b_start_loc, b_kv_start_loc, b_seq_len, b_prompt_cache_len):
     batch = b_start_loc.shape[0]
-    k = k.transpose(1, 2)
-    v = v.transpose(1, 2)
+
     for i in range(batch):
         start_loc = b_start_loc[i]
+        kv_start_loc = b_kv_start_loc[i]
         seq_len = b_seq_len[i]
         prompt_cache_len = b_prompt_cache_len[i]
         cur_q = q[start_loc : start_loc + seq_len - prompt_cache_len, :, :]
         cur_q = cur_q.clone().to(torch.float32)
-        cur_k = k[i, :seq_len, :]
+        cur_k = k[kv_start_loc : (kv_start_loc + seq_len), :, :]
         cur_k = cur_k.clone().to(torch.float32)
 
-        cur_v = v[i, :seq_len, :]
+        cur_v = v[kv_start_loc : (kv_start_loc + seq_len), :, :]
         cur_v = cur_v.clone().to(torch.float32)
 
-        cur_q = cur_q.transpose(0, 1)
-        cur_k = cur_k.transpose(0, 1)
-        cur_v = cur_v.transpose(0, 1)
+        dk = cur_q.shape[-1]
+        cur_q = cur_q.permute(1, 0, 2)
+        cur_k = cur_k.permute(1, 2, 0)
+        cur_v = cur_v.permute(1, 0, 2)
         dk = cur_q.shape[-1]
 
-        p = torch.matmul(cur_q, cur_k.transpose(-2, -1)) / torch.sqrt(torch.tensor(dk, dtype=torch.float32))
+        p = torch.matmul(cur_q, cur_k) / torch.sqrt(torch.tensor(dk, dtype=torch.float32))
 
-        q_index = torch.arange(cur_q.shape[1]).unsqueeze(-1).to(p.device)
-        k_index = torch.arange(cur_k.shape[1]).unsqueeze(0).to(p.device)
-        mask = (q_index + prompt_cache_len >= k_index).int()
-        mask = mask.unsqueeze(0).expand(cur_q.shape[0], -1, -1)
+        q_index = (torch.arange(cur_q.shape[1]).to(p.device) + prompt_cache_len).view(-1, 1)
+        k_index = torch.arange(seq_len).to(p.device).view(1, -1)
 
-        p = p.masked_fill(mask == 0, float("-inf"))
+        p[:, (q_index < k_index)] = float("-inf")
 
         s = torch.nn.functional.softmax(p, dim=-1)
 
@@ -58,11 +57,11 @@ def torch_context_attention_fwd2(q, k, v, o, b_start_loc, b_seq_len, b_prompt_ca
 def test_context_attention_fwd_ppl_int8kv(B, H, N_CTX, D_HEAD, prompt_cache_len):
     dtype = torch.float16
     prompt_cache_len = 0
-    if prompt_cache_len > N_CTX:
+    if prompt_cache_len >= N_CTX - 1:
         return
 
     q = torch.empty((B * (N_CTX - prompt_cache_len), H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2)
-    kv = torch.empty((B, 2 * H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2)
+    kv = torch.empty((B * N_CTX, 2 * H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2)
     k = kv[:, :H, :]
     v = kv[:, H:, :]
 
@@ -82,9 +81,8 @@ def test_context_attention_fwd_ppl_int8kv(B, H, N_CTX, D_HEAD, prompt_cache_len)
             b_start_loc[i] = b_start_loc[i - 1] + N_CTX - prompt_cache_len
         b_prompt_cache_len[i] = prompt_cache_len
 
-    torch_context_attention_fwd2(q, k, v, torch_o, b_start_loc, b_seq_len, b_prompt_cache_len)
-
     b_kv_start_loc = torch.cumsum(b_seq_len, dim=0, dtype=torch.int32) - b_seq_len
+    torch_context_attention_fwd2(q, k, v, torch_o, b_start_loc, b_kv_start_loc, b_seq_len, b_prompt_cache_len)
     context_attention_fwd_ppl_int8kv(
         q=q,
         k=k,

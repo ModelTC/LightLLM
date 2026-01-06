@@ -408,7 +408,7 @@ def _fwd_kernel_int8kv(
         #     other=0,
         # )
         off_k = (
-            +(kv_start_loc + start_n + offs_n[None, :]) * stride_ks
+            (kv_start_loc + start_n + offs_n[None, :]) * stride_ks
             + cur_kv_head * stride_kh
             + offs_d[:, None] * stride_kd
         )
@@ -434,7 +434,7 @@ def _fwd_kernel_int8kv(
         #     other=0.0,
         # )
         off_v = (
-            +(kv_start_loc + start_n + offs_n[:, None]) * stride_vs
+            (kv_start_loc + start_n + offs_n[:, None]) * stride_vs
             + cur_kv_head * stride_vh
             + offs_d[None, :] * stride_vd
         )
