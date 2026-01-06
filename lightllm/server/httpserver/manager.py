@@ -645,6 +645,9 @@ class HttpServerManager:
                         )
                         self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
                         self.metric_client.counter_inc("lightllm_request_success")
+                        self.metric_client.histogram_observe(
+                            "lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step
+                        )
 
                         return
                 req_status.out_token_info_list.clear()

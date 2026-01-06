@@ -26,6 +26,7 @@ MONITOR_INFO = {
     "lightllm_cache_length": "Length of tokens which hit prompt cache",
     "lightllm_cache_ratio": "cache length / input_length",
     "lightllm_batch_current_max_tokens": "dynamic max token used for current batch",
+    "lightllm_request_mtp_avg_token_per_step": "Average number of tokens per step",
 }
 
 
@@ -93,6 +94,9 @@ class Monitor:
 
         ratio_buckets = [(i + 1) / 10.0 for i in range(-1, 10)]
         self.create_histogram("lightllm_cache_ratio", ratio_buckets)
+
+        mtp_avg_token_per_step_buckets = [i / 10.0 + 1.0 for i in range(0, 10 * args.mtp_step)]
+        self.create_histogram("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step_buckets)
 
     def create_histogram(self, name, buckets, labelnames=None):
         if labelnames is None:
