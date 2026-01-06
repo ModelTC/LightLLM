@@ -1,7 +1,7 @@
 import torch
 import time
 import pytest
-from lightllm.common.basemodel.triton_kernel.kv_copy.ppl_quant_copy_kv import (
+from lightllm.common.basemodel.triton_kernel.kv_copy.ppl_int8kv_copy_kv import (
     dequantize_int8kv,
     destindex_copy_quantize_kv,
 )

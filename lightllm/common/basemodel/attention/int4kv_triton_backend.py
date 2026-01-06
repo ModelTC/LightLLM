@@ -5,19 +5,19 @@ from typing import Optional, Tuple
 from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 
 
-class Int8kvTritonAttBackend(BaseAttBackend):
+class Int4kvTritonAttBackend(BaseAttBackend):
     def __init__(self, quant_group_size: int):
         self.quant_group_size: int = quant_group_size
 
-    def create_att_prefill_state(self, infer_state) -> "Int8kvTritonPrefillAttState":
-        return Int8kvTritonPrefillAttState(backend=self, infer_state=infer_state)
+    def create_att_prefill_state(self, infer_state) -> "Int4kvTritonPrefillAttState":
+        return Int4kvTritonPrefillAttState(backend=self, infer_state=infer_state)
 
-    def create_att_decode_state(self, infer_state) -> "Int8kvTritonDecodeAttState":
-        return Int8kvTritonDecodeAttState(backend=self, infer_state=infer_state)
+    def create_att_decode_state(self, infer_state) -> "Int4kvTritonDecodeAttState":
+        return Int4kvTritonDecodeAttState(backend=self, infer_state=infer_state)
 
 
 @dataclasses.dataclass
-class Int8kvTritonPrefillAttState(BasePrefillAttState):
+class Int4kvTritonPrefillAttState(BasePrefillAttState):
 
     # 用于反量化的时候使用，可以减少反量化占用的显存数量。按需使用。
     b_kv_start_loc: torch.Tensor = None
@@ -28,7 +28,7 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
             - self.infer_state.b_seq_len
         )
 
-    def copy_for_prefill_cuda_graph(self, new_state: "Int8kvTritonPrefillAttState"):
+    def copy_for_prefill_cuda_graph(self, new_state: "Int4kvTritonPrefillAttState"):
         pass
 
     def prefill_att(
@@ -42,7 +42,7 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
     ) -> torch.Tensor:
         assert att_control.use_alibi is False
 
-        self.backend: Int8kvTritonAttBackend = self.backend  # for typing
+        self.backend: Int4kvTritonAttBackend = self.backend  # for typing
         if self.backend.quant_group_size == 8:
             pass
         k, k_scale = k
@@ -115,11 +115,11 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class Int8kvTritonDecodeAttState(BaseDecodeAttState):
+class Int4kvTritonDecodeAttState(BaseDecodeAttState):
     def init_state(self):
         pass
 
-    def copy_for_decode_cuda_graph(self, new_state: "Int8kvTritonDecodeAttState"):
+    def copy_for_decode_cuda_graph(self, new_state: "Int4kvTritonDecodeAttState"):
         pass
 
     def decode_att(
