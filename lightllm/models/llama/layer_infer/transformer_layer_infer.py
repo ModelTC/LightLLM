@@ -7,9 +7,6 @@ from typing import Tuple
 from functools import partial
 
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd, token_att_fwd_int8k
-from lightllm.models.llama.triton_kernel.token_attention_nopad_softmax import token_softmax_fwd
-from lightllm.models.llama.triton_kernel.token_attention_nopad_reduceV import token_att_fwd2, token_att_fwd2_int8v
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 
