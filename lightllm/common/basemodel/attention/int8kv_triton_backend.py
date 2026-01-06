@@ -2,6 +2,7 @@ import dataclasses
 import torch
 from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, Tuple
+from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 
 
 class Int8kvTritonAttBackend(BaseAttBackend):
@@ -131,23 +132,14 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         assert att_control.use_alibi is False
-        q = q
         k, k_scale = k
         v, v_scale = v
-        if k_scale.ndim == 3 and k_scale.shape[2] == 1:
-            return self._per_head_quant_decode_stage3_att(
-                q=q,
-                k=k,
-                k_scale=k_scale,
-                v=v,
-                v_scale=v,
-                layer_weight=layer_weight,
-                alloc_func=alloc_func,
+        if enable_diverse_mode_gqa_decode_fast_kernel():
+            return self.diverse_decode_att(
+                q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, layer_weight=layer_weight, alloc_func=alloc_func
             )
-        else:
-            raise NotImplementedError("not support decode att")
 
-    def _per_head_quant_decode_stage3_att(
+    def diverse_decode_att(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -156,5 +148,18 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         v_scale: torch.Tensor,
         layer_weight,
         alloc_func=torch.empty,
-    ):
-        raise NotImplementedError("error")
+    ) -> torch.Tensor:
+
+        from ..triton_kernel.att.decode_att.int8kv_gqa.ppl_int8kv_flash_decoding_diverse import (
+            token_decode_attention_flash_decoding,
+        )
+
+        return token_decode_attention_flash_decoding(
+            q=q,
+            infer_state=self.infer_state,
+            cache_k=k,
+            cache_k_scale=k_scale,
+            cache_v=v,
+            cache_v_scale=v_scale,
+            alloc_tensor_func=alloc_func,
+        )

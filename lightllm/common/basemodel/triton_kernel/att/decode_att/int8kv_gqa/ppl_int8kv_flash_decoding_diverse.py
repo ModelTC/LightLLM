@@ -10,8 +10,6 @@ from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 def token_decode_attention_flash_decoding(
     q,
     infer_state: InferStateInfo,
-    q_head_num,
-    head_dim,
     cache_k,
     cache_k_scale,
     cache_v,
@@ -27,6 +25,9 @@ def token_decode_attention_flash_decoding(
 
     stream1 = shared_streams_dict["stream1"]
     stream2 = shared_streams_dict["stream2"]
+
+    q_head_num = q.shape[1]
+    head_dim = q.shape[2]
 
     BLOCK_SEQ = 256
     batch_size = infer_state.batch_size
