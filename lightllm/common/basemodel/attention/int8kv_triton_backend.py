@@ -66,7 +66,7 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
         v_scale: torch.Tensor,
         layer_weight,
         alloc_func=torch.empty,
-    ):
+    ) -> torch.Tensor:
         # o_tensor = alloc_func(q.shape, q.dtype, device=q.device)
         # batch_size = self.infer_state.b_seq_len.shape[0]
 
@@ -110,6 +110,7 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
             max_q_input_len=self.infer_state.max_q_seq_len,
             b_prompt_cache_len=self.infer_state.b_ready_cache_len,
         )
+        return o_tensor
 
 
 @dataclasses.dataclass
