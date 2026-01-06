@@ -343,18 +343,17 @@ def _fwd_kernel_int8kv(
     sm_scale,
     Out,
     B_Start_Loc,
+    B_kv_start_loc,
     B_Seqlen,
     b_prompt_cache_len,
     stride_qbs,
     stride_qh,
     stride_qd,
-    stride_kb,
-    stride_kh,
     stride_ks,
+    stride_kh,
     stride_kd,
-    stride_vb,
-    stride_vh,
     stride_vs,
+    stride_vh,
     stride_vd,
     stride_obs,
     stride_oh,
@@ -374,6 +373,7 @@ def _fwd_kernel_int8kv(
     prompt_cache_len = tl.load(b_prompt_cache_len + cur_batch)
     cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch) - prompt_cache_len
+    kv_start_loc = tl.load(B_kv_start_loc + cur_batch)
 
     block_start_loc = BLOCK_M * start_m
 
@@ -393,6 +393,9 @@ def _fwd_kernel_int8kv(
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
+    stride_ks = tl.cast(stride_ks, tl.int64)
+    stride_vs = tl.cast(stride_vs, tl.int64)
+
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
     block_end_loc = tl.minimum(block_start_loc + BLOCK_M + prompt_cache_len, cur_batch_seq_len + prompt_cache_len)
     # causal mask
@@ -405,8 +408,7 @@ def _fwd_kernel_int8kv(
         #     other=0,
         # )
         off_k = (
-            cur_batch * stride_kb
-            + (start_n + offs_n[None, :]) * stride_ks
+            +(kv_start_loc + start_n + offs_n[None, :]) * stride_ks
             + cur_kv_head * stride_kh
             + offs_d[:, None] * stride_kd
         )
@@ -432,8 +434,7 @@ def _fwd_kernel_int8kv(
         #     other=0.0,
         # )
         off_v = (
-            cur_batch * stride_vb
-            + (start_n + offs_n[:, None]) * stride_vs
+            +(kv_start_loc + start_n + offs_n[:, None]) * stride_vs
             + cur_kv_head * stride_vh
             + offs_d[None, :] * stride_vd
         )
@@ -455,7 +456,9 @@ def _fwd_kernel_int8kv(
 
 
 @torch.no_grad()
-def context_attention_fwd_ppl_int8kv(q, k, v, o, b_start_loc, b_seq_len, max_input_len, b_prompt_cache_len):
+def context_attention_fwd_ppl_int8kv(
+    q, k, v, o, b_start_loc, b_kv_start_loc, b_seq_len, max_q_input_len, b_prompt_cache_len
+):
     BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -468,34 +471,33 @@ def context_attention_fwd_ppl_int8kv(q, k, v, o, b_start_loc, b_seq_len, max_inp
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
-    grid = lambda meta: (triton.cdiv(max_input_len, meta["BLOCK_M"]), batch * head, 1)
+    grid = lambda meta: (triton.cdiv(max_q_input_len, meta["BLOCK_M"]), batch * head, 1)
     BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
 
     _fwd_kernel_int8kv[grid](
-        q,
-        k,
-        v,
-        sm_scale,
-        o,
-        b_start_loc,
-        b_seq_len,
-        b_prompt_cache_len,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        k.stride(3),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        v.stride(3),
-        o.stride(0),
-        o.stride(1),
-        o.stride(2),
+        Q=q,
+        K=k,
+        V=v,
+        sm_scale=sm_scale,
+        Out=o,
+        B_Start_Loc=b_start_loc,
+        B_kv_start_loc=b_kv_start_loc,
+        B_Seqlen=b_seq_len,
+        b_prompt_cache_len=b_prompt_cache_len,
+        stride_qbs=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_qd=q.stride(2),
+        stride_ks=k.stride(0),
+        stride_kh=k.stride(1),
+        stride_kd=k.stride(2),
+        stride_vs=v.stride(0),
+        stride_vh=v.stride(1),
+        stride_vd=v.stride(2),
+        stride_obs=o.stride(0),
+        stride_oh=o.stride(1),
+        stride_od=o.stride(2),
         kv_group_num=kv_group_num,
         H=head,
         BLOCK_DMODEL=Lk,
