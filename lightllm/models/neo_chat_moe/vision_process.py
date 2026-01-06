@@ -1,0 +1,141 @@
+import re
+import math
+import torch
+import string
+import numpy as np
+import pandas as pd
+from PIL import Image
+import torch.distributed as dist
+import torchvision.transforms as T
+
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def round_by_factor(number: int, factor: int) -> int:
+    """Returns the closest integer to 'number' that is divisible by 'factor'."""
+    return round(number / factor) * factor
+
+
+def ceil_by_factor(number: int, factor: int) -> int:
+    """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
+    return math.ceil(number / factor) * factor
+
+
+def floor_by_factor(number: int, factor: int) -> int:
+    """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
+    return math.floor(number / factor) * factor
+
+
+# copy from https://github.com/QwenLM/Qwen2.5-VL/blob/main/qwen-vl-utils/src/qwen_vl_utils/vision_process.py#L60
+def smart_resize(
+    height: int, width: int, factor: int = 32, min_pixels: int = 65536, max_pixels: int = 4194304
+) -> tuple[int, int]:
+    """
+    Rescales the image so that the following conditions are met:
+
+    1. Both dimensions (height and width) are divisible by 'factor'.
+
+    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+
+    3. The aspect ratio of the image is maintained as closely as possible.
+    """
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            f"absolute aspect ratio must be smaller than {200}, got {max(height, width) / min(height, width)}"
+        )
+    h_bar = max(factor, round_by_factor(height, factor))
+    w_bar = max(factor, round_by_factor(width, factor))
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = max(factor, floor_by_factor(height / beta, factor))
+        w_bar = max(factor, floor_by_factor(width / beta, factor))
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = ceil_by_factor(height * beta, factor)
+        w_bar = ceil_by_factor(width * beta, factor)
+    return h_bar, w_bar
+
+
+def dynamic_preprocess_native_resolution(image, size_factor=32, min_pixels=65536, max_pixels=4194304, **kwargs):
+    width, height = image.size
+    resized_height, resized_width = smart_resize(
+        height,
+        width,
+        factor=size_factor,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+    )
+    image = image.resize((resized_width, resized_height))
+
+    return image
+
+
+def preprocess_pixel_values(pixel_values, patch_size=16):
+    c, h, w = pixel_values.shape
+    grid_h = h // patch_size
+    grid_w = w // patch_size
+
+    flatten_pixel_values = (
+        pixel_values.view(c, grid_h, patch_size, grid_w, patch_size)
+        .permute(1, 3, 0, 2, 4)  # [grid_h, grid_w, c, patch_size, patch_size]
+        .reshape(grid_h * grid_w, c * patch_size ** 2)
+    )
+
+    grid_hw = torch.tensor([[grid_h, grid_w]]).to(device=pixel_values.device)
+
+    return flatten_pixel_values, grid_hw
+
+
+def get_contrasting_background(image):
+    """
+    Calculate the color (white or black) that is different from the average foreground color
+    to use as the background color
+    """
+    image_np = np.array(image)
+    if (image_np[:, :, 3] == 0).any():
+        non_transparent_pixels = image_np[:, :, :3][image_np[:, :, 3] > 0]
+        if non_transparent_pixels.size == 0:
+            return None
+        pixel_mean = non_transparent_pixels.mean()
+        contrasting_color = (0, 0, 0) if pixel_mean > 382.5 else (255, 255, 255)
+        return contrasting_color
+    else:
+        return None
+
+
+def load_image_native(image, patch_size=16, downsample_ratio=0.5, min_pixels=65536, max_pixels=4194304, upscale=False):
+    """
+    Load and preprocess an image file, converting it to RGB mode,
+    resizing, normalizing, and optionally adding a thumbnail version.
+    """
+    if image.mode == "RGBA":
+        bg_color = get_contrasting_background(image)
+        if bg_color:
+            background = Image.new("RGB", image.size, bg_color)
+            background.paste(image, mask=image.split()[3])
+            image = background.convert("RGB")
+        else:
+            image = image.convert("RGB")
+    else:
+        image = image.convert("RGB")
+
+    if upscale:
+        image = image.resize((image.width * 2, image.height * 2), Image.BILINEAR)
+
+    transform = T.Compose(
+        [
+            T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+            T.ToTensor(),
+            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
+
+    new_image = dynamic_preprocess_native_resolution(
+        image, size_factor=int(patch_size // downsample_ratio), min_pixels=min_pixels, max_pixels=max_pixels
+    )
+    pixel_values, grid_hw = preprocess_pixel_values(transform(new_image).to(torch.float32), patch_size=patch_size)
+
+    print(f"Transfer image_size from ({image.height, image.width}) to ({new_image.height, new_image.width})")
+
+    return pixel_values, grid_hw
