@@ -44,17 +44,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return
 
     def _bind_attention(self):
-        if get_env_start_args().enable_fa3:
-            if True:
-                pass
-            return
-        elif get_env_start_args().enable_flashinfer_prefill:
-            self._context_attention_kernel = partial(
-                LlamaTransformerLayerInfer._context_attention_flashinfer_kernel, self
-            )
-        else:
-            pass
-
         if "int8kv" in self.mode:
             pass
         elif "offline_calibration_fp8kv" in self.mode:
