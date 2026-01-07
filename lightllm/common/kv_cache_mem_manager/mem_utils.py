@@ -5,7 +5,6 @@ from . import (
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
-    Deepseek2FP8KVMemoryManager,
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
@@ -26,9 +25,6 @@ def select_mem_manager_class():
 
     if issubclass(model_class, Deepseek2TpPartModel):
         mem_class = Deepseek2MemoryManager
-        if "triton_fp8kv" in mode:
-            mem_class = Deepseek2FP8KVMemoryManager
-
         logger.info(f"Model kv cache using mode {mode}, mem_manager class: {mem_class}")
         return mem_class
 

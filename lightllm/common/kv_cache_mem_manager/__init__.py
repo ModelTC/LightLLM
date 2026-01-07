@@ -4,7 +4,6 @@ from .export_calibration_mem_manager import ExportCalibrationMemoryManager
 from .ppl_int8kv_mem_manager import PPLINT8KVMemoryManager
 from .ppl_int4kv_mem_manager import PPLINT4KVMemoryManager
 from .deepseek2_mem_manager import Deepseek2MemoryManager
-from .deepseek2_fp8kv_mem_manager import Deepseek2FP8KVMemoryManager
 
 __all__ = [
     "MemoryManager",
@@ -14,5 +13,4 @@ __all__ = [
     "PPLINT4KVMemoryManager",
     "PPLINT8KVMemoryManager",
     "Deepseek2MemoryManager",
-    "Deepseek2FP8KVMemoryManager",
 ]
