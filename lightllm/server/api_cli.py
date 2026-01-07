@@ -353,9 +353,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm_kv_type",
         type=str,
-        choices=[None, ""],
+        choices=[None, "int8kv", "int4kv", "fp8kv"],
         default=None,
-        help="""kv type used in llm""",
+        help="""kv type used in llm, None for dtype that llm used in config.json""",
     )
     parser.add_argument(
         "--llm_kv_quant_group_size",
