@@ -20,6 +20,46 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         self.embed_dim_ = network_config["n_embed"]
         return
 
+    def _context_attention_kernel(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        infer_state: InferStateInfo,
+        layer_weight: BloomTransformerLayerWeight,
+        out=None,
+    ) -> torch.Tensor:
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        _k = kv[:, 0 : self.tp_k_head_num_, :]
+        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
+        o_tensor = infer_state.prefill_att_state.prefill_att(
+            q=_q,
+            k=_k,
+            v=_v,
+            layer_weight=layer_weight,
+            att_control=AttControl(use_alibi=True, tp_alibi=layer_weight.tp_alibi),
+            alloc_func=self.alloc_tensor,
+        )
+        o_tensor = o_tensor.view(q.shape)
+        return o_tensor
+
+    def _token_attention_kernel(
+        self, q: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
+    ) -> torch.Tensor:
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        _k = kv[:, 0 : self.tp_k_head_num_, :]
+        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
+        o_tensor = infer_state.decode_att_state.decode_att(
+            q=_q,
+            k=_k,
+            v=_v,
+            layer_weight=layer_weight,
+            att_control=AttControl(use_alibi=True, tp_alibi=layer_weight.tp_alibi),
+            alloc_func=self.alloc_tensor,
+        )
+        return o_tensor.view(q.shape)
+
     def _att_norm(
         self, input: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight
     ) -> torch.Tensor:
@@ -40,46 +80,6 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         q = layer_weight.q_proj.mm(input.view(-1, self.embed_dim_))
         cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         return q, cache_kv
-
-    def _context_attention_kernel(
-        self,
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        infer_state: InferStateInfo,
-        layer_weight: BloomTransformerLayerWeight,
-        out=None,
-    ) -> torch.Tensor:
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        _k = kv[:, 0 : self.tp_k_head_num_, :]
-        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            layer_weight=layer_weight,
-            att_control=AttControl(use_alibi=True),
-            alloc_func=self.alloc_tensor,
-        )
-        o_tensor = o_tensor.view(q.shape)
-        return o_tensor
-
-    def _token_attention_kernel(
-        self, q: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
-    ) -> torch.Tensor:
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        _k = kv[:, 0 : self.tp_k_head_num_, :]
-        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            layer_weight=layer_weight,
-            att_control=AttControl(use_alibi=True),
-            alloc_func=self.alloc_tensor,
-        )
-        return o_tensor.view(q.shape)
 
     def _get_o(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
         o_tensor = layer_weight.o_proj.mm(input.view(-1, self.tp_o_head_num_ * self.head_dim_))
