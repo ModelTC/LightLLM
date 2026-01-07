@@ -5,7 +5,6 @@ import triton
 import triton.language as tl
 from typing import List
 from lightllm.utils.log_utils import init_logger
-from .gqa_flash_decoding_config import MlaDecodeAttentionKernelConfig
 from lightllm.utils.device_utils import get_device_sm_count
 
 logger = init_logger(__name__)
@@ -37,6 +36,8 @@ def gqa_token_decode_attention_flash_decoding_fp8(
             avg_seq_len_in_batch = max_len_in_batch
         else:
             avg_seq_len_in_batch = infer_state.total_token_num // batch_size
+
+        from .gqa_flash_decoding_config import MlaDecodeAttentionKernelConfig
 
         run_config = MlaDecodeAttentionKernelConfig.try_to_get_best_config(
             batch_size=batch_size,
