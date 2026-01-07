@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
@@ -26,6 +27,9 @@ class BaseAttBackend:
             cls._instances[cls] = instance
         # 返回已有的实例
         return cls._instances[cls]
+
+    def __init__(self, model: "TpPartBaseModel"):
+        self.model = model
 
     def create_att_prefill_state(self) -> "BasePrefillAttState":
         raise NotImplementedError("not impl")

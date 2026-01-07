@@ -44,10 +44,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        _k = kv[:, 0 : self.tp_k_head_num_, :]
-        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
         o_tensor = infer_state.prefill_att_state.prefill_att(
             q=_q,
             k=_k,
@@ -64,10 +62,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        _k = kv[:, 0 : self.tp_k_head_num_, :]
-        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
         o_tensor = infer_state.decode_att_state.decode_att(
             q=_q, k=_k, v=_v, layer_weight=layer_weight, alloc_func=self.alloc_tensor
         )

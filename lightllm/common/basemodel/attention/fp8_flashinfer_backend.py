@@ -1,16 +1,11 @@
 import dataclasses
 import torch
 from .base_att import AttControl
-from typing import Optional, TYPE_CHECKING
-from ..triton_kernel.repack_kv_index import repack_kv_index
 from .flashinfer_backend import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
-
-if TYPE_CHECKING:
-    from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
 class Fp8FlashInferAttBackend(FlashInferAttBackend):
-    def __init__(self, model: "TpPartBaseModel"):
+    def __init__(self, model):
         super().__init__(model=model)
         self.kv_data_type = torch.float8_e4m3fn
 

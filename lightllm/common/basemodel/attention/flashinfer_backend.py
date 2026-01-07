@@ -1,18 +1,13 @@
 import dataclasses
 import torch
 from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from typing import Optional, TYPE_CHECKING
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 from ..triton_kernel.repack_kv_index import repack_kv_index
 
-if TYPE_CHECKING:
-    from lightllm.common.basemodel.basemodel import TpPartBaseModel
-
 
 class FlashInferAttBackend(BaseAttBackend):
-    def __init__(self, model: "TpPartBaseModel"):
-        super().__init__()
-        self.model = model
+    def __init__(self, model):
+        super().__init__(model=model)
         tp_world_size = get_dp_world_size()
         self.tp_q_head_num = model.config["num_attention_heads"] // tp_world_size
         self.tp_kv_head_num = max(model.config["num_key_value_heads"] // tp_world_size, 1)

@@ -1,13 +1,14 @@
 import dataclasses
 import torch
+from lightllm.utils.envs_utils import get_env_start_args
 from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, Tuple
-from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 
 
 class Int4kvTritonAttBackend(BaseAttBackend):
-    def __init__(self, quant_group_size: int):
-        self.quant_group_size: int = quant_group_size
+    def __init__(self, model):
+        super().__init__(model)
+        self.quant_group_size: int = get_env_start_args().llm_kv_quant_group_size
 
     def create_att_prefill_state(self, infer_state) -> "Int4kvTritonPrefillAttState":
         return Int4kvTritonPrefillAttState(backend=self, infer_state=infer_state)

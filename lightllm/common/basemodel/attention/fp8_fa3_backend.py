@@ -15,14 +15,10 @@ if HAS_VLLM:
 else:
     scaled_fp8_quant = None
 
-if TYPE_CHECKING:
-    from lightllm.common.basemodel.basemodel import TpPartBaseModel
-
 
 class Fp8Fa3AttBackend(BaseAttBackend):
-    def __init__(self, model: "TpPartBaseModel"):
-        super().__init__()
-        self.model = model
+    def __init__(self, model):
+        super().__init__(model=model)
         self.get_page_table_buffer()  # init
 
     def get_page_table_buffer(self):

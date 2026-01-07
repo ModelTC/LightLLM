@@ -32,7 +32,7 @@ from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
-from .attention import TritonAttBackend
+from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 
 logger = init_logger(__name__)
 
@@ -120,7 +120,12 @@ class TpPartBaseModel:
         self._init_inferstate_cls()
         # wait必须在init cudagraph 之前，避免错误捕获
         self._wait_other_modules_ready()
+
         self._init_att_backend()
+
+        logger.info(f"use prefill att backend: {self.prefill_att_backend.__class__.__name__}")
+        logger.info(f"use decode att backend: {self.decode_att_backend.__class__.__name__}")
+
         self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
@@ -241,9 +246,8 @@ class TpPartBaseModel:
         return
 
     def _init_att_backend(self):
-        self.prefill_att_backend = TritonAttBackend()
-        self.decode_att_backend = TritonAttBackend()
-        assert id(self.prefill_att_backend) == id(self.decode_att_backend)
+        self.prefill_att_backend = get_prefill_att_backend_class()(model=self)
+        self.decode_att_backend = get_decode_att_backend_class()(model=self)
         return
 
     def _init_cudagraph(self):

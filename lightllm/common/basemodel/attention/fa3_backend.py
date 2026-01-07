@@ -2,20 +2,16 @@ import dataclasses
 import torch
 from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
+from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 
-if TYPE_CHECKING:
-    from lightllm.common.basemodel.basemodel import TpPartBaseModel
-
 
 class Fa3AttBackend(BaseAttBackend):
-    def __init__(self, model: "TpPartBaseModel"):
-        super().__init__()
-        self.model = model
+    def __init__(self, model):
+        super().__init__(model=model)
         self.get_page_table_buffer()  # init
 
     def get_page_table_buffer(self):

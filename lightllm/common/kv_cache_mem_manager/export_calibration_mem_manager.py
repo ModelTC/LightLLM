@@ -1,4 +1,5 @@
 import torch
+from typing import Tuple, Any
 from .offline_fp8_quant_mem_manager import OfflineFP8QuantMemManager
 
 
@@ -20,3 +21,8 @@ class ExportCalibrationMemoryManager(OfflineFP8QuantMemManager):
             self.kv_buffer[layer_index].view(torch.float8_e4m3fn),
         )
         return
+
+    def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
+        k = self.kv_buffer[layer_index][:, : self.head_num, :]
+        v = self.kv_buffer[layer_index][:, self.head_num :, :]
+        return k, v

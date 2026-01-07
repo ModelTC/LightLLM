@@ -3,7 +3,7 @@ import os
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from typing import List, Union
+from typing import List, Union, Tuple, Any
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
@@ -74,6 +74,11 @@ class MemoryManager:
 
         destindex_copy_kv(kv, mem_index, self.kv_buffer[layer_index])
         return
+
+    def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
+        k = self.kv_buffer[layer_index][:, : self.head_num, :]
+        v = self.kv_buffer[layer_index][:, self.head_num :, :]
+        return k, v
 
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
