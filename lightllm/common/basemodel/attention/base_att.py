@@ -1,7 +1,7 @@
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING, Tuple, Union
+from typing import Optional, TYPE_CHECKING, Tuple, Union, Dict
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -55,6 +55,16 @@ class AttControl:
     """
 
     use_alibi: bool = False
+    tp_alibi: torch.Tensor = None
+    use_sliding_window: bool = False
+    sliding_window: Tuple[int, int] = (-1, -1)
+    use_att_sink: bool = False
+    sink_weight: torch.Tensor = None
+    # mla 专用传参项
+    mla_prefill: bool = False
+    mla_prefill_dict: Dict = None
+    mla_decode: bool = False
+    mla_decode_dict: Dict = None
 
 
 @dataclass
@@ -106,17 +116,3 @@ class BaseDecodeAttState(ABC):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         pass
-
-
-@dataclass
-class AttControl:
-    """
-    prefill_att 和 decode_att 的入参，用于控制att backend 内部的行为, 选择正确的att 实现。
-    """
-
-    use_alibi: bool = False
-    tp_alibi: torch.Tensor = None
-    use_sliding_window: bool = False
-    sliding_window: Tuple[int, int] = (-1, -1)
-    use_att_sink: bool = False
-    sink_weight: torch.Tensor = None
