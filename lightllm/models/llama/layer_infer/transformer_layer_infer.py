@@ -273,15 +273,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     #     gate_out, up_out = None, None
     #     return ffn2_out
 
-    def _copy_kv_to_mem_cache_normal(self, buffer, mem_index, mem_manager):
-        destindex_copy_kv(buffer, mem_index, mem_manager.kv_buffer[self.layer_num_])
-        return
-
-    def _copy_kv_to_mem_cache_with_calibration(self, buffer, mem_index, mem_manager):
-        destindex_copy_kv(buffer, mem_index, mem_manager.kv_buffer[self.layer_num_])
-        mem_manager.update_calibration_data(buffer, self.layer_num_)
-        return
-
     def _copy_kv_to_mem_cache_fp8kv(self, buffer, mem_index, mem_manager):
         scales = mem_manager.scales
         destindex_copy_kv_fp8(

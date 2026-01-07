@@ -19,7 +19,6 @@ from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, g
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
-    INT8KVMemoryManager,
     CalibrationFP8KVMemoryManager,
     ExportCalibrationMemoryManager,
     PPLINT8KVMemoryManager,

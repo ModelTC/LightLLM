@@ -1,6 +1,5 @@
 from . import (
     MemoryManager,
-    INT8KVMemoryManager,
     CalibrationFP8KVMemoryManager,
     ExportCalibrationMemoryManager,
     PPLINT8KVMemoryManager,
@@ -41,9 +40,6 @@ def select_mem_manager_class():
     elif "ppl_int4kv_flashdecoding" in mode:
         memory_manager_class = PPLINT4KVMemoryManager
         logger.info(f"Model kv cache using mode {mode}")
-    elif "triton_int8kv" in mode:
-        memory_manager_class = INT8KVMemoryManager
-        logger.info("Model kv cache using mode triton int8kv")
     elif "triton_fp8kv" in mode:
         raise Exception("currently only for deepseek")
     elif "offline_calibration_fp8kv" in mode:
@@ -61,4 +57,4 @@ def select_mem_manager_class():
 @lru_cache(maxsize=None)
 def used_mem_manager_has_scale() -> bool:
     mem_class = select_mem_manager_class()
-    return mem_class in [PPLINT8KVMemoryManager, PPLINT4KVMemoryManager, INT8KVMemoryManager]
+    return mem_class in [PPLINT8KVMemoryManager, PPLINT4KVMemoryManager]
