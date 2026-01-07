@@ -196,19 +196,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         )
         return o_tensor
 
-    def _context_attention_flashinfer_kernel(
-        self, q, kv, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
-    ) -> torch.Tensor:
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        kv = kv.unsqueeze(1)
-        infer_state.prefill_wrapper.run(
-            q.view(q.shape[0], -1, self.head_dim_),
-            (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
-            out=o_tensor.view(q.shape[0], -1, self.head_dim_),
-        )
-        return o_tensor
-
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
@@ -354,19 +341,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             (k, v),
             k_scale=k_descale,
             v_scale=v_descale,
-            out=o_tensor.view(calcu_shape1),
-        )
-        return o_tensor
-
-    def _token_decode_attention_flashinfer(self, q, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None):
-        batch_size = infer_state.batch_size
-        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].unsqueeze(1)
-        infer_state.decode_wrapper.run(
-            q.view(calcu_shape1),
-            (kv[:, :, : self.tp_k_head_num_, :], kv[:, :, self.tp_k_head_num_ :, :]),
             out=o_tensor.view(calcu_shape1),
         )
         return o_tensor
