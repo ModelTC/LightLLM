@@ -15,23 +15,7 @@ class Fa3AttBackend(BaseAttBackend):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__()
         self.model = model
-        tp_world_size = get_dp_world_size()
-        self.tp_q_head_num = model.config["num_attention_heads"] // tp_world_size
-        self.tp_kv_head_num = max(model.config["num_key_value_heads"] // tp_world_size, 1)
-        head_dim = model.config["hidden_size"] // model.config["num_attention_heads"]
-        self.head_dim = model.config.get("head_dim", head_dim)
-        self.workspace_buffer = torch.empty(512 * 1024 * 1024, dtype=torch.int8, device=get_current_device_id())
-        self.max_seq_length = model.max_seq_length
-        self.kv_indices_buffer = [
-            torch.empty(
-                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
-            torch.empty(
-                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
-        ]
-        self.q_data_type = model.data_type
-        self.kv_data_type = model.data_type
+        self.get_page_table_buffer()  # init
 
     def get_page_table_buffer(self):
         """
