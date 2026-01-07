@@ -33,6 +33,7 @@ from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
+from .attention import BaseAttBackend
 
 logger = init_logger(__name__)
 
@@ -246,8 +247,8 @@ class TpPartBaseModel:
         return
 
     def _init_att_backend(self):
-        self.prefill_att_backend = get_prefill_att_backend_class()(model=self)
-        self.decode_att_backend = get_decode_att_backend_class()(model=self)
+        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class()(model=self)
+        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class()(model=self)
         return
 
     def _init_cudagraph(self):
@@ -481,6 +482,7 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event.record()
 
         infer_state.init_some_extra_state(self)
+        infer_state.init_att_state()
         model_output = self._context_forward(infer_state)
         if is_padded_model_input:
             model_output = self._create_unpad_prefill_model_output(
@@ -512,6 +514,7 @@ class TpPartBaseModel:
                 infer_state.mem_index,
             )
             infer_state.init_some_extra_state(self)
+            infer_state.init_att_state()
 
             if self.graph.need_capture(find_graph_batch_size):
                 infer_state.is_cuda_graph = True
@@ -531,6 +534,7 @@ class TpPartBaseModel:
                 infer_state.mem_index,
             )
             infer_state.init_some_extra_state(self)
+            infer_state.init_att_state()
             model_output = self._token_forward(infer_state)
 
         return model_output
@@ -639,6 +643,7 @@ class TpPartBaseModel:
             max_q_seq_len=infer_state0.max_q_seq_len,
         )
         infer_state0.init_some_extra_state(self)
+        infer_state0.init_att_state()
 
         infer_state1 = self._create_inferstate(model_input1, 1)
         init_req_to_token_indexes(
@@ -651,6 +656,7 @@ class TpPartBaseModel:
             max_q_seq_len=infer_state1.max_q_seq_len,
         )
         infer_state1.init_some_extra_state(self)
+        infer_state1.init_att_state()
 
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
@@ -705,6 +711,8 @@ class TpPartBaseModel:
                 infer_state0.mem_index,
             )
             infer_state0.init_some_extra_state(self)
+            infer_state0.init_att_state()
+
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -713,6 +721,7 @@ class TpPartBaseModel:
                 infer_state1.mem_index,
             )
             infer_state1.init_some_extra_state(self)
+            infer_state1.init_att_state()
 
             if self.graph.need_capture(find_graph_batch_size):
                 infer_state0.is_cuda_graph = True
@@ -741,6 +750,8 @@ class TpPartBaseModel:
                 infer_state0.mem_index,
             )
             infer_state0.init_some_extra_state(self)
+            infer_state0.init_att_state()
+
             infer_state1 = self._create_inferstate(model_input1, 1)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -749,6 +760,7 @@ class TpPartBaseModel:
                 infer_state1.mem_index,
             )
             infer_state1.init_some_extra_state(self)
+            infer_state1.init_att_state()
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
         return model_output0, model_output1

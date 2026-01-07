@@ -120,6 +120,7 @@ class InferStateInfo:
             self.max_kv_seq_len = self.max_len_in_batch
             self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
+    def init_att_state(self):
         if self.is_prefill:
             self.prefill_att_state.init_state()
         else:
