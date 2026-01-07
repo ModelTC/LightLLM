@@ -50,7 +50,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             q=_q,
             k=_k,
             v=_v,
-            layer_weight=layer_weight,
             alloc_func=self.alloc_tensor,
         )
         o_tensor = o_tensor.view(q.shape)
@@ -64,9 +63,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     ) -> torch.Tensor:
         _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=_q, k=_k, v=_v, layer_weight=layer_weight, alloc_func=self.alloc_tensor
-        )
+        o_tensor = infer_state.decode_att_state.decode_att(q=_q, k=_k, v=_v, alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)
 
     def _att_norm(
