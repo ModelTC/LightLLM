@@ -1,15 +1,11 @@
 import torch
 import triton
-import torch.functional as F
 import torch.distributed as dist
-import numpy as np
-from typing import Tuple
 from functools import partial
 
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.flashinfer_struct import LlamaFlashInferStateInfo
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv, destindex_copy_quantize_kv
@@ -18,18 +14,8 @@ from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
-from lightllm.common.basemodel.triton_kernel.q_per_head_fp8_quant import q_per_head_fp8_quant
-from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
-
-if HAS_VLLM:
-    scaled_fp8_quant = vllm_ops.scaled_fp8_quant
-else:
-    scaled_fp8_quant = None
 
 logger = init_logger(__name__)
-
-from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 
 
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
@@ -61,23 +47,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         if get_env_start_args().enable_fa3:
             if True:
                 pass
-            elif not self.mode:
-                # self._context_attention_kernel = partial(
-                #     LlamaTransformerLayerInfer._context_attention_flashattention, self
-                # )
-                # self._token_attention_kernel = partial(
-                #     LlamaTransformerLayerInfer._token_decode_attention_flashattention, self
-                # )
-                self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-            else:
-                raise Exception(f"Unsupported mode for fa3 backend: {self.mode}")
             return
         elif get_env_start_args().enable_flashinfer_prefill:
             self._context_attention_kernel = partial(
                 LlamaTransformerLayerInfer._context_attention_flashinfer_kernel, self
             )
         else:
-            # self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
             pass
 
         if "int8kv" in self.mode:
@@ -233,47 +208,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             out=o_tensor.view(q.shape[0], -1, self.head_dim_),
         )
         return o_tensor
-
-    def _context_attention_flashattention_fp8(self, q, kv, infer_state, layer_weight, out=None):
-        q, q_scale = q_per_head_fp8_quant(
-            q.view(q.shape[0], self.tp_k_head_num_, -1),
-            infer_state.b_seq_len,
-            infer_state.cu_seqlens_q,
-            infer_state.q_scale,
-            infer_state.token_batch_ids,
-        )
-        cache_k = (
-            (infer_state.mem_manager.kv_buffer[self.layer_num_][:, : self.tp_k_head_num_, :])
-            .reshape(-1, 1, self.tp_k_head_num_, self.head_dim_)
-            .view(torch.float8_e4m3fn)
-        )
-        cache_v = (
-            (
-                infer_state.mem_manager.kv_buffer[self.layer_num_][
-                    :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                ]
-            )
-            .reshape(-1, 1, self.tp_v_head_num_, self.head_dim_)
-            .view(torch.float8_e4m3fn)
-        )
-        o = flash_attn_with_kvcache(
-            q=q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            k_cache=cache_k,
-            v_cache=cache_v,
-            page_table=infer_state.page_table,
-            cache_seqlens=infer_state.b_seq_len,
-            cu_seqlens_q=infer_state.cu_seqlens_q,
-            cu_seqlens_k_new=infer_state.cu_seqlens_k,
-            max_seqlen_q=infer_state.q_max_seq_len,
-            causal=True,
-            window_size=(-1, -1),
-            softcap=0.0,
-            q_descale=q_scale,
-            k_descale=infer_state.k_descale[self.layer_num_],
-            v_descale=infer_state.v_descale[self.layer_num_],
-            return_softmax_lse=False,
-        )
-        return o
 
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
@@ -436,91 +370,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             out=o_tensor.view(calcu_shape1),
         )
         return o_tensor
-
-    def _token_decode_attention_ppl_int8kv(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
-        batch_size = infer_state.batch_size
-        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-
-        # group_int8kv_decode_attention(at::Tensor o, at::Tensor q, at::Tensor k, at::Tensor k_s,  at::Tensor v,
-        # at::Tensor v_s, at::Tensor b_loc, at::Tensor b_seq_len, int max_len_in_batch)
-        light_ops.group8_int8kv_decode_attention(
-            o_tensor.view(calcu_shape1),
-            q.view(calcu_shape1),
-            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-            infer_state.mem_manager.scale_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-            infer_state.mem_manager.kv_buffer[self.layer_num_][
-                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-            ],
-            infer_state.mem_manager.scale_buffer[self.layer_num_][
-                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-            ],
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_seq_len,
-            infer_state.max_len_in_batch,
-        )
-
-        return o_tensor
-
-    def _token_decode_attention_ppl_fp16(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
-        batch_size = infer_state.batch_size
-        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        from lightllm_ppl_fp16_kernel import fp16_decode_attention
-
-        # group_int8kv_decode_attention(at::Tensor o, at::Tensor q, at::Tensor k, at::Tensor k_s,
-        # at::Tensor v,  at::Tensor v_s, at::Tensor b_loc, at::Tensor b_seq_len, int max_len_in_batch)
-        fp16_decode_attention(
-            o_tensor.view(calcu_shape1),
-            1.0 / (self.head_dim_ ** 0.5),
-            q.view(calcu_shape1),
-            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :],
-            infer_state.mem_manager.kv_buffer[self.layer_num_][
-                :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-            ],
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_seq_len,
-            infer_state.max_len_in_batch,
-        )
-
-        return o_tensor
-
-    def _token_decode_attention_flashattention_fp8(self, q, infer_state, layer_weight, out=None):
-        cache_k = (
-            (infer_state.mem_manager.kv_buffer[self.layer_num_][:, : self.tp_k_head_num_, :])
-            .reshape(-1, 1, self.tp_k_head_num_, self.head_dim_)
-            .view(torch.float8_e4m3fn)
-        )
-        cache_v = (
-            (
-                infer_state.mem_manager.kv_buffer[self.layer_num_][
-                    :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
-                ]
-            )
-            .reshape(-1, 1, self.tp_v_head_num_, self.head_dim_)
-            .view(torch.float8_e4m3fn)
-        )
-        q, q_scale = scaled_fp8_quant(q.view(q.shape[0] * self.tp_k_head_num_, -1), use_per_token_if_dynamic=True)
-        o = flash_attn_with_kvcache(
-            q=q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            k_cache=cache_k,
-            v_cache=cache_v,
-            page_table=infer_state.page_table,
-            cache_seqlens=infer_state.b_seq_len,
-            cu_seqlens_q=infer_state.cu_seqlens_q,
-            cu_seqlens_k_new=infer_state.cu_seqlens_k,
-            max_seqlen_q=1,
-            causal=False,
-            window_size=(-1, -1),
-            softcap=0.0,
-            q_descale=q_scale.view(infer_state.batch_size, self.tp_k_head_num_),
-            k_descale=infer_state.k_descale[self.layer_num_],
-            v_descale=infer_state.v_descale[self.layer_num_],
-            return_softmax_lse=False,
-        )
-        return o
 
     def overlap_tpsp_token_forward(
         self,
