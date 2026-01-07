@@ -3,7 +3,7 @@ import os
 import torch.distributed as dist
 from lightllm.server.pd_io_struct import KVMoveTask
 from .mem_manager import MemoryManager
-from typing import List, Union
+from typing import List, Union, Any
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_d_node, kv_trans_v2_for_p_node
@@ -35,6 +35,10 @@ class Deepseek2MemoryManager(MemoryManager):
             self.kv_buffer[layer_index][:, :, kv_lora_rank:],
         )
         return
+
+    def get_att_input_params(self, layer_index: int) -> Any:
+        kv = self.kv_buffer[layer_index]
+        return kv
 
     def get_cell_size(self):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)

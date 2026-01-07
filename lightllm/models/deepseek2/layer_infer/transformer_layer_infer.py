@@ -8,14 +8,11 @@ from typing import Tuple
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.models.deepseek2.triton_kernel.destindex_copy_kv_fp8 import destindex_copy_kv_fp8
-from lightllm.models.deepseek2.triton_kernel.context_flashattention_nopad import (
-    context_attention_fwd,
-)
+from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.models.deepseek2.triton_kernel.context_flashattention_nopad_fp8 import context_attention_fwd_fp8
 from lightllm.models.deepseek2.triton_kernel.context_flashattention_nopad_with_v import context_attention_fwd_with_v
 from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
 from lightllm.models.deepseek2.triton_kernel.repeat_rope import repeat_rope
-from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
 from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding_fp8 import gqa_token_decode_attention_flash_decoding_fp8
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -511,20 +508,16 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        out = gqa_token_decode_attention_flash_decoding(
-            q_nope,
-            q_rope,
-            kv[:, :, : -self.qk_rope_head_dim],
-            kv[:, :, -self.qk_rope_head_dim :],
-            infer_state,
-            self.tp_q_head_num_,
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            self.qk_nope_head_dim,
-            self.softmax_scale,
-            alloc_tensor_func=self.alloc_tensor,
+        kv = infer_state.mem_manager.get_att_input_params()
+
+        out = infer_state.decode_att_state.decode_att(
+            q=(q_nope, q_rope),
+            k=kv,
+            v=None,
+            att_control=AttControl(mla_decode=True, mla_decode_dict={"softmax_scale": self.softmax_scale}),
+            alloc_func=self.alloc_tensor,
         )
+
         return out
 
     def _copy_kv_to_mem_cache_normal(self, buffer, mem_index, mem_manager):
