@@ -92,21 +92,23 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.use_alibi is False
+        assert (
+            att_control.use_alibi is False
+            and att_control.use_sliding_window is False
+            and att_control.use_att_sink is False
+        )
         return self._nomarl_prefill_att(
             q=q,
             k=k,
             v=v,
-            layer_weight=layer_weight,
             alloc_func=alloc_func,
         )
 
     def _nomarl_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_weight, alloc_func=torch.empty
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: FlashInferAttBackend = self.backend  # for typing
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
@@ -198,16 +200,18 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        assert att_control.use_alibi is False
+        assert (
+            att_control.use_alibi is False
+            and att_control.use_sliding_window is False
+            and att_control.use_att_sink is False
+        )
         return self._normal_decode_att(
             q=q,
             k=k,
             v=v,
-            layer_weight=layer_weight,
             alloc_func=alloc_func,
         )
 
@@ -216,7 +220,6 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         alloc_func=torch.empty,
     ):
         o_tensor = alloc_func(q.shape, q.dtype)

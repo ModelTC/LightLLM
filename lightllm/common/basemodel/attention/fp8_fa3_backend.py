@@ -9,6 +9,7 @@ from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.q_per_head_fp8_quant import q_per_head_fp8_quant
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
+from typing import Union
 
 if HAS_VLLM:
     scaled_fp8_quant = vllm_ops.scaled_fp8_quant
@@ -42,6 +43,16 @@ class Fp8Fa3AttBackend(BaseAttBackend):
 
     def create_att_decode_state(self, infer_state) -> "Fp8Fa3DecodeAttState":
         return Fp8Fa3DecodeAttState(backend=self, infer_state=infer_state)
+
+    def _find_layer_index(
+        self, k: torch.Tensor, v: torch.Tensor, att_state: Union["Fp8Fa3PrefillAttState", "Fp8Fa3DecodeAttState"]
+    ) -> int:
+        kv_buffer = att_state.infer_state.mem_manager.kv_buffer
+        layer_count = len(kv_buffer)
+        find_dict = {kv_buffer[i].data_ptr(): i for i in range(layer_count)}
+        key = min(k.data_ptr(), v.data_ptr())
+        assert key in find_dict
+        return find_dict[key]
 
 
 @dataclasses.dataclass
@@ -105,21 +116,23 @@ class Fp8Fa3PrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.use_alibi is False
+        assert (
+            att_control.use_alibi is False
+            and att_control.use_sliding_window is False
+            and att_control.use_att_sink is False
+        )
         return self._fp8_prefill_att(
             q=q,
             k=k,
             v=v,
-            layer_weight=layer_weight,
             alloc_func=alloc_func,
         )
 
     def _fp8_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_weight, alloc_func=torch.empty
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: Fp8Fa3AttBackend = self.backend  # for typing
 
@@ -133,6 +146,7 @@ class Fp8Fa3PrefillAttState(BasePrefillAttState):
         k_head_dim = k.shape[2]
         cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
+        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
         o = flash_attn_with_kvcache(
             q=q,
             k_cache=cache_k,
@@ -146,8 +160,8 @@ class Fp8Fa3PrefillAttState(BasePrefillAttState):
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale,
-            k_descale=self.k_descale[layer_weight.layer_num_],
-            v_descale=self.v_descale[layer_weight.layer_num_],
+            k_descale=self.k_descale[layer_index],
+            v_descale=self.v_descale[layer_index],
             return_softmax_lse=False,
         )
         return o
@@ -261,16 +275,18 @@ class Fp8Fa3DecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        assert att_control.use_alibi is False
+        assert (
+            att_control.use_alibi is False
+            and att_control.use_sliding_window is False
+            and att_control.use_att_sink is False
+        )
         return self._fp8_decode_att(
             q=q,
             k=k,
             v=v,
-            layer_weight=layer_weight,
             alloc_func=alloc_func,
         )
 
@@ -279,7 +295,6 @@ class Fp8Fa3DecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         alloc_func=torch.empty,
     ):
         k_head_num = k.shape[1]
@@ -287,6 +302,8 @@ class Fp8Fa3DecodeAttState(BaseDecodeAttState):
 
         cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
+
+        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
 
         q_head_num = q.shape[1]
         q, q_scale = scaled_fp8_quant(q.view(q.shape[0] * k_head_num, -1), use_per_token_if_dynamic=True)
@@ -303,8 +320,8 @@ class Fp8Fa3DecodeAttState(BaseDecodeAttState):
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale.view(self.infer_state.batch_size, k_head_num),
-            k_descale=self.k_descale[layer_weight.layer_num_],
-            v_descale=self.v_descale[layer_weight.layer_num_],
+            k_descale=self.k_descale[layer_index],
+            v_descale=self.v_descale[layer_index],
             return_softmax_lse=False,
         )
         return o

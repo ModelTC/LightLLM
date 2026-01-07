@@ -38,15 +38,17 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: Tuple[torch.Tensor, torch.Tensor],
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.use_alibi is False
+        assert (
+            att_control.use_alibi is False
+            and att_control.use_sliding_window is False
+            and att_control.use_att_sink is False
+        )
 
         self.backend: Int8kvTritonAttBackend = self.backend  # for typing
-        if self.backend.quant_group_size == 8:
-            pass
+
         k, k_scale = k
         v, v_scale = v
         o = self._groupsize_quant_prefill_att(
@@ -55,7 +57,6 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
             k_scale=k_scale,
             v=v,
             v_scale=v_scale,
-            layer_weight=layer_weight,
             alloc_func=alloc_func,
         )
         return o
@@ -67,7 +68,6 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
         k_scale: torch.Tensor,
         v: torch.Tensor,
         v_scale: torch.Tensor,
-        layer_weight,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         # o_tensor = alloc_func(q.shape, q.dtype, device=q.device)
@@ -129,17 +129,18 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: Tuple[torch.Tensor, torch.Tensor],
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        assert att_control.use_alibi is False
+        assert (
+            att_control.use_alibi is False
+            and att_control.use_sliding_window is False
+            and att_control.use_att_sink is False
+        )
         k, k_scale = k
         v, v_scale = v
         if enable_diverse_mode_gqa_decode_fast_kernel():
-            return self.diverse_decode_att(
-                q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, layer_weight=layer_weight, alloc_func=alloc_func
-            )
+            return self.diverse_decode_att(q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, alloc_func=alloc_func)
         else:
             return self.ppl_mha_int8kv_decode_att(
                 q=q,
@@ -147,7 +148,6 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
                 k_scale=k_scale,
                 v=v,
                 v_scale=v_scale,
-                layer_weight=layer_weight,
                 alloc_func=alloc_func,
             )
 
@@ -158,7 +158,6 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         k_scale: torch.Tensor,
         v: torch.Tensor,
         v_scale: torch.Tensor,
-        layer_weight,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
 
@@ -183,7 +182,6 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         k_scale: torch.Tensor,
         v: torch.Tensor,
         v_scale: torch.Tensor,
-        layer_weight,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         from ..triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding import (

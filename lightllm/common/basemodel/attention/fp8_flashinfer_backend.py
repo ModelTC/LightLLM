@@ -29,29 +29,31 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.use_alibi is False
+        assert (
+            att_control.use_alibi is False
+            and att_control.use_sliding_window is False
+            and att_control.use_att_sink is False
+        )
         return self._fp8_prefill_att(
             q=q,
             k=k,
             v=v,
-            layer_weight=layer_weight,
             alloc_func=alloc_func,
         )
 
     def _fp8_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_weight, alloc_func=torch.empty
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ) -> torch.Tensor:
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-
+        layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
         offline_scales = self.offline_scales
-        k_descale = offline_scales[layer_weight.layer_num_][0] if offline_scales is not None else None
-        v_descale = offline_scales[layer_weight.layer_num_][1] if offline_scales is not None else None
+        k_descale = offline_scales[layer_index][0] if offline_scales is not None else None
+        v_descale = offline_scales[layer_index][1] if offline_scales is not None else None
         self.prefill_wrapper.run(
             q,
             (k, v),
@@ -75,16 +77,18 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        assert att_control.use_alibi is False
+        assert (
+            att_control.use_alibi is False
+            and att_control.use_sliding_window is False
+            and att_control.use_att_sink is False
+        )
         return self._fp8_decode_att(
             q=q,
             k=k,
             v=v,
-            layer_weight=layer_weight,
             alloc_func=alloc_func,
         )
 
@@ -93,7 +97,6 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         alloc_func=torch.empty,
     ):
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
@@ -101,8 +104,10 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         offline_scales = self.offline_scales
-        k_descale = offline_scales[layer_weight.layer_num_][0] if offline_scales is not None else None
-        v_descale = offline_scales[layer_weight.layer_num_][1] if offline_scales is not None else None
+        layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
+
+        k_descale = offline_scales[layer_index][0] if offline_scales is not None else None
+        v_descale = offline_scales[layer_index][1] if offline_scales is not None else None
         self.decode_wrapper.run(
             q,
             (k, v),

@@ -65,7 +65,6 @@ class Fa3PrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
@@ -74,14 +73,24 @@ class Fa3PrefillAttState(BasePrefillAttState):
             q=q,
             k=k,
             v=v,
-            layer_weight=layer_weight,
+            att_control=att_control,
             alloc_func=alloc_func,
         )
 
     def _nomarl_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_weight, alloc_func=torch.empty
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, att_control: AttControl, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: Fa3AttBackend = self.backend  # for typing
+
+        if att_control.use_sliding_window:
+            window_size = att_control.sliding_window
+        else:
+            window_size = (-1, -1)
+
+        if att_control.use_att_sink:
+            sink_weight: torch.Tensor = att_control.sink_weight
+        else:
+            sink_weight = None
 
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
@@ -97,11 +106,12 @@ class Fa3PrefillAttState(BasePrefillAttState):
             max_seqlen_q=self.infer_state.max_q_seq_len,
             softmax_scale=sm_scale,
             causal=True,
-            window_size=(-1, -1),
+            window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,
             v_descale=v_descale,
             return_softmax_lse=False,
+            sinks=sink_weight,
         )
         return o
 
@@ -184,7 +194,6 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
@@ -193,7 +202,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             q=q,
             k=k,
             v=v,
-            layer_weight=layer_weight,
+            att_control=att_control,
             alloc_func=alloc_func,
         )
 
@@ -202,9 +211,19 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
+        att_control: AttControl,
         alloc_func=torch.empty,
     ):
+        if att_control.use_sliding_window:
+            window_size = att_control.sliding_window
+        else:
+            window_size = (-1, -1)
+
+        if att_control.use_att_sink:
+            sink_weight: torch.Tensor = att_control.sink_weight
+        else:
+            sink_weight = None
+
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)
@@ -219,10 +238,11 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             max_seqlen_q=self.decode_max_q_seq_len,
             softmax_scale=sm_scale,
             causal=True,
-            window_size=(-1, -1),
+            window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,
             v_descale=v_descale,
             return_softmax_lse=False,
+            sinks=sink_weight,
         )
         return o

@@ -1,7 +1,7 @@
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Tuple, Union
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -37,6 +37,16 @@ class BaseAttBackend:
     def create_att_decode_state(self) -> "BaseDecodeAttState":
         raise NotImplementedError("not impl")
 
+    def _find_layer_index(
+        self, k: torch.Tensor, v: torch.Tensor, att_state: Union["BasePrefillAttState", "BaseDecodeAttState"]
+    ) -> int:
+        kv_buffer = att_state.infer_state.mem_manager.kv_buffer
+        layer_count = len(kv_buffer)
+        find_dict = {kv_buffer[i].data_ptr(): i for i in range(layer_count)}
+        key = min(k.data_ptr(), v.data_ptr())
+        assert key in find_dict
+        return find_dict[key]
+
 
 @dataclass
 class AttControl:
@@ -67,7 +77,6 @@ class BasePrefillAttState(ABC):
         q: torch.Tensor,
         k: torch.tensor,
         v: torch.tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
@@ -93,7 +102,6 @@ class BaseDecodeAttState(ABC):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        layer_weight,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
@@ -107,3 +115,8 @@ class AttControl:
     """
 
     use_alibi: bool = False
+    tp_alibi: torch.Tensor = None
+    use_sliding_window: bool = False
+    sliding_window: Tuple[int, int] = (-1, -1)
+    use_att_sink: bool = False
+    sink_weight: torch.Tensor = None
