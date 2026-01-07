@@ -12,17 +12,17 @@ backend_dict = {
     None: {
         "triton": TritonAttBackend,
         "fa3": Fa3AttBackend,
-        "flash_infer": FlashInferAttBackend,
+        "flashinfer": FlashInferAttBackend,
     },
     "int4kv": {
         "triton": Int4kvTritonAttBackend,
         "fa3": Fp8Fa3AttBackend,
-        "flash_infer": Fp8FlashInferAttBackend,
+        "flashinfer": Fp8FlashInferAttBackend,
     },
     "int8kv": {
         "triton": Int8kvTritonAttBackend,
         "fa3": Fp8Fa3AttBackend,
-        "flash_infer": Fp8FlashInferAttBackend,
+        "flashinfer": Fp8FlashInferAttBackend,
     },
 }
 
