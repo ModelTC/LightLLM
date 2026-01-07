@@ -150,6 +150,7 @@ def padded_prepare_decode_inputs(
         seq_len = req.get_cur_total_len()
         assert req.cur_kv_len == seq_len - 1
         b_seq_len.append(seq_len)
+        b_q_seq_len.append(1)
         total_token_num += seq_len
         b_mtp_index.append(0)
         batch_multimodal_params.append(req.multimodal_params)
@@ -160,10 +161,9 @@ def padded_prepare_decode_inputs(
             total_token_num += seq_len
             b_req_idx.append(req.req_idx)
             b_seq_len.append(seq_len)
+            b_q_seq_len.append(1)
             b_mtp_index.append(step + 1)
             batch_multimodal_params.append(req.multimodal_params)
-
-        b_q_seq_len.append(req.mtp_step + 1)
 
     # padding fake req for decode
     for _ in range(padded_req_num):
@@ -171,17 +171,17 @@ def padded_prepare_decode_inputs(
         total_token_num += seq_len
         b_req_idx.append(g_infer_context.req_manager.HOLD_REQUEST_ID)
         b_seq_len.append(seq_len)
+        b_q_seq_len.append(1)
         b_mtp_index.append(0)
         batch_multimodal_params.append({"images": [], "audios": []})
         for step in range(args_mtp_step):
             seq_len += 1
             total_token_num += seq_len
             b_seq_len.append(seq_len)
+            b_q_seq_len.append(1)
             b_req_idx.append(g_infer_context.req_manager.HOLD_REQUEST_ID)
             b_mtp_index.append(step + 1)
             batch_multimodal_params.append({"images": [], "audios": []})
-
-        b_q_seq_len.append(1 + args_mtp_step)
 
     max_kv_seq_len = max(b_seq_len)
     max_q_seq_len = max(b_q_seq_len)
