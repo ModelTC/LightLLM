@@ -134,47 +134,18 @@ class Int4kvTritonDecodeAttState(BaseDecodeAttState):
         assert att_control.use_alibi is False
         k, k_scale = k
         v, v_scale = v
-        if enable_diverse_mode_gqa_decode_fast_kernel():
-            return self.diverse_decode_att(
-                q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, layer_weight=layer_weight, alloc_func=alloc_func
-            )
-        else:
-            return self.ppl_mha_int8kv_decode_att(
-                q=q,
-                k=k,
-                k_scale=k_scale,
-                v=v,
-                v_scale=v_scale,
-                layer_weight=layer_weight,
-                alloc_func=alloc_func,
-            )
 
-    def diverse_decode_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        k_scale: torch.Tensor,
-        v: torch.Tensor,
-        v_scale: torch.Tensor,
-        layer_weight,
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-
-        from ..triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse import (
-            token_decode_attention_flash_decoding,
-        )
-
-        return token_decode_attention_flash_decoding(
+        return self.ppl_int4kv_decode_att(
             q=q,
-            infer_state=self.infer_state,
-            cache_k=k,
-            cache_k_scale=k_scale,
-            cache_v=v,
-            cache_v_scale=v_scale,
-            alloc_tensor_func=alloc_func,
+            k=k,
+            k_scale=k_scale,
+            v=v,
+            v_scale=v_scale,
+            layer_weight=layer_weight,
+            alloc_func=alloc_func,
         )
 
-    def ppl_mha_int8kv_decode_att(
+    def ppl_int4kv_decode_att(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -184,7 +155,7 @@ class Int4kvTritonDecodeAttState(BaseDecodeAttState):
         layer_weight,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        from ..triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding import (
+        from ..triton_kernel.att.decode_att.int4kv.ppl_int4kv_flash_decoding import (
             token_decode_attention_flash_decoding,
         )
 
