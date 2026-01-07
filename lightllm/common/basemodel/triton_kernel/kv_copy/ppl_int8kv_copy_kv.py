@@ -49,11 +49,11 @@ def _fwd_kernel_destindex_copy_quantize_kv(
 
 
 @torch.no_grad()
-def destindex_copy_quantize_kv(K, DestLoc, Out, Out_scale):
+def destindex_copy_quantize_kv(K, DestLoc, Out, Out_scale, quant_group_dim):
     seq_len = DestLoc.shape[0]
     head_num = K.shape[1]
     head_dim = K.shape[2]
-    quant_group_dim = 8
+    assert triton.next_power_of_2(quant_group_dim) == quant_group_dim, "error quant group dim"
 
     assert head_dim % quant_group_dim == 0, "error head dim, can not been supported to copy quant kv"
     grid = (seq_len, head_num)

@@ -282,12 +282,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         mem_manager.update_calibration_data(buffer, self.layer_num_)
         return
 
-    def _copy_kv_to_mem_cache_int8kv(self, buffer, mem_index, mem_manager):
-        destindex_copy_quantize_kv(
-            buffer, mem_index, mem_manager.kv_buffer[self.layer_num_], mem_manager.scale_buffer[self.layer_num_]
-        )
-        return
-
     def _copy_kv_to_mem_cache_fp8kv(self, buffer, mem_index, mem_manager):
         scales = mem_manager.scales
         destindex_copy_kv_fp8(
@@ -295,22 +289,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             mem_index,
             scales[self.layer_num_] if scales is not None else None,
             mem_manager.kv_buffer[self.layer_num_].view(torch.float8_e4m3fn),
-        )
-        return
-
-    def _copy_kv_to_mem_cache_ppl_int8kv(self, buffer, mem_index, mem_manager):
-        from lightllm.models.llama.triton_kernel.ppl_quant_copy_kv import destindex_copy_quantize_kv
-
-        destindex_copy_quantize_kv(
-            buffer, mem_index, mem_manager.kv_buffer[self.layer_num_], mem_manager.scale_buffer[self.layer_num_]
-        )
-        return
-
-    def _copy_kv_to_mem_cache_ppl_int4kv(self, buffer, mem_index, mem_manager):
-        from lightllm.models.llama.triton_kernel.ppl_int4kv_copy_kv import destindex_copy_int4kv
-
-        destindex_copy_int4kv(
-            buffer, mem_index, mem_manager.kv_buffer[self.layer_num_], mem_manager.scale_buffer[self.layer_num_]
         )
         return
 
