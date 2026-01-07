@@ -121,6 +121,7 @@ class StartArgs:
     llm_prefill_att_backend: str = field(default=None, metadata={"choices": [None, "triton", "fa3", "flashinfer"]})
     llm_decode_att_backend: str = field(default=None, metadata={"choices": [None, "triton", "fa3", "flashinfer"]})
     llm_kv_type: str = field(default=None, metadata={"choices": [None, ""]})
+    llm_kv_quant_group_size: int = field(default=8)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
     penalty_counter_mode: str = field(
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}

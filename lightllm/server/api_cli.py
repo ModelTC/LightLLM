@@ -357,6 +357,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="""kv type used in llm""",
     )
+    parser.add_argument(
+        "--llm_kv_quant_group_size",
+        type=int,
+        default=8,
+        help="""kv quant group size used in llm kv, when llm_kv_type is quanted type,such as int8kv,
+        this params will be effective.
+        """,
+    )
 
     parser.add_argument(
         "--enable_flashinfer_prefill",
