@@ -96,11 +96,6 @@ class InferStateInfo:
 
     def init_some_extra_state(self, model):
         if self.is_prefill:
-            self.prefill_att_state.init_state()
-        else:
-            self.decode_att_state.init_state()
-
-        if self.is_prefill:
             (
                 self.b_q_seq_len,
                 self.b1_cu_q_seq_len,
@@ -124,6 +119,11 @@ class InferStateInfo:
             # TODO: check the correctness
             self.max_kv_seq_len = self.max_len_in_batch
             self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
+
+        if self.is_prefill:
+            self.prefill_att_state.init_state()
+        else:
+            self.decode_att_state.init_state()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():

@@ -19,7 +19,7 @@ class Fa3AttBackend(BaseAttBackend):
         用于减少 decode graph 捕获的时候, 造成显存二次方增长的情况.
         """
         model = self.model
-        if self._shared_page_table_buffer is None:
+        if not hasattr(self, "_shared_page_table_buffer"):
             self._shared_page_table_buffer = [
                 torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
                     get_current_device_id()
@@ -88,8 +88,8 @@ class Fa3PrefillAttState(BasePrefillAttState):
         sm_scale = 1.0 / (Lq ** 0.5)
         o = flash_attn_with_kvcache(
             q=q,
-            k_cache=k,
-            v_cache=v,
+            k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
+            v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
             page_table=self.page_table,
             cache_seqlens=self.infer_state.b_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
@@ -147,7 +147,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             self.infer_state.batch_size <= model.graph_max_batch_size
             and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
         ):
-            page_buffer = self.backend.get_page_table_buffer(model.graph_max_batch_size, model.graph_max_len_in_batch)
+            page_buffer = self.backend.get_page_table_buffer()
             self.page_table = page_buffer[self.infer_state.microbatch_index][
                 : att_batch_size * model.graph_max_len_in_batch
             ].reshape(att_batch_size, model.graph_max_len_in_batch)
@@ -210,8 +210,8 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         sm_scale = 1.0 / (Lq ** 0.5)
         o = flash_attn_with_kvcache(
             q=q,
-            k_cache=k,
-            v_cache=v,
+            k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
+            v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
             page_table=self.page_table,
             cache_seqlens=self.b_att_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,

@@ -26,7 +26,7 @@ class Fp8Fa3AttBackend(BaseAttBackend):
         用于减少 decode graph 捕获的时候, 造成显存二次方增长的情况.
         """
         model = self.model
-        if self._shared_page_table_buffer is None:
+        if not hasattr(self, "_shared_page_table_buffer"):
             self._shared_page_table_buffer = [
                 torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
                     get_current_device_id()
