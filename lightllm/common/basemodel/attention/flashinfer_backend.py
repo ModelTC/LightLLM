@@ -109,13 +109,11 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_weight, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: FlashInferAttBackend = self.backend  # for typing
-
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
         self.prefill_wrapper.run(
-            q.view(q.shape[0], -1, self.backend.head_dim),
-            k.unsqueeze(1)[:, :, :, :],
-            v.unsqueeze(1)[:, :, :, :],
-            out=o_tensor.view(q.shape[0], -1, self.backend.head_dim),
+            q,
+            (k.unsqueeze(1), v.unsqueeze(1)),
+            out=o_tensor,
         )
         return o_tensor
 
@@ -224,8 +222,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         o_tensor = alloc_func(q.shape, q.dtype)
         self.decode_wrapper.run(
             q,
-            k.unsqueeze(1)[:, :, :, :],
-            v.unsqueeze(1)[:, :, :, :],
+            (k.unsqueeze(1), v.unsqueeze(1)),
             out=o_tensor,
         )
         return o_tensor
