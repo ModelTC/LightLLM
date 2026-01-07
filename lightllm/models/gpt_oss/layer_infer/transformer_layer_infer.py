@@ -6,7 +6,6 @@ from functools import partial
 from typing import Optional
 
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
-from lightllm.models.llama.flashattention_infer_struct import FlashAttentionStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.utils.log_utils import init_logger
@@ -51,9 +50,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = hidden_states * torch.rsqrt(variance + eps)
         return (weight * hidden_states).to(input_dtype)  # main diff with Llama
 
-    def _ffn(
-        self, input, infer_state: FlashAttentionStateInfo, layer_weight: GptOssTransformerLayerWeight
-    ) -> torch.Tensor:
+    def _ffn(self, input, infer_state, layer_weight: GptOssTransformerLayerWeight) -> torch.Tensor:
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
         router_logits = layer_weight.moe_gate.mm(hidden_states)
@@ -69,7 +66,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         return hidden_states.view(num_tokens, hidden_dim)
 
     def _context_sliding_attention_flashattention(
-        self, q, kv, infer_state: FlashAttentionStateInfo, layer_weight: GptOssTransformerLayerWeight, out=None
+        self, q, kv, infer_state, layer_weight: GptOssTransformerLayerWeight, out=None
     ):
         if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
             window_size = (self.sliding_window - 1, self.sliding_window - 1)
@@ -107,7 +104,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         return o
 
     def _token_sliding_attention_flashattention(
-        self, q, infer_state: FlashAttentionStateInfo, layer_weight: GptOssTransformerLayerWeight, out=None
+        self, q, infer_state, layer_weight: GptOssTransformerLayerWeight, out=None
     ):
         if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
             window_size = (self.sliding_window - 1, self.sliding_window - 1)

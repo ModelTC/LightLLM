@@ -1,7 +1,6 @@
 import torch
 
 from .mem_manager import MemoryManager
-from ..basemodel.triton_kernel.kv_copy.ppl_int4kv_copy_kv import destindex_copy_int4kv
 
 
 class PPLINT4KVMemoryManager(MemoryManager):
@@ -14,6 +13,8 @@ class PPLINT4KVMemoryManager(MemoryManager):
         """
         将每一层生成的kv拷贝到mem manager对应mem_index 位置中
         """
+        from ..basemodel.triton_kernel.kv_copy.ppl_int4kv_copy_kv import destindex_copy_int4kv
+
         destindex_copy_int4kv(
             kv,
             mem_index,

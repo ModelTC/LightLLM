@@ -5,7 +5,6 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from typing import List, Union
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
-from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
@@ -71,6 +70,8 @@ class MemoryManager:
         """
         将每一层生成的kv拷贝到mem manager对应mem_index 位置中
         """
+        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
+
         destindex_copy_kv(kv, mem_index, self.kv_buffer[layer_index])
         return
 

@@ -1,6 +1,5 @@
 import torch
 from .offline_fp8_quant_mem_manager import OfflineFP8QuantMemManager
-from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import destindex_copy_kv_fp8
 
 
 class ExportCalibrationMemoryManager(OfflineFP8QuantMemManager):
@@ -11,6 +10,8 @@ class ExportCalibrationMemoryManager(OfflineFP8QuantMemManager):
         """
         将每一层生成的kv拷贝到mem manager对应mem_index 位置中
         """
+        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import destindex_copy_kv_fp8
+
         scales = self.scales
         destindex_copy_kv_fp8(
             kv,

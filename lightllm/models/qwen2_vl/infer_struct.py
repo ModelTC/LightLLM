@@ -4,13 +4,10 @@ import numpy as np
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen2_vl.triton_kernel.get_mrope_position_ids import get_mrope_position_triton
-from lightllm.models.llama.flashattention_infer_struct import FlashAttentionStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 
 
 class Qwen2VLInferStateInfo(LlamaInferStateInfo):
-    init_flash_attention_state_func = FlashAttentionStateInfo._init_flash_attention_state
-
     def __init__(self):
         super().__init__()
         self.position_cos = None

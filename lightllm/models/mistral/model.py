@@ -8,7 +8,6 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.models.llama.flashattention_infer_struct import FlashAttentionStateInfo
 from lightllm.models.mistral.layer_infer.transformer_layer_infer import MistralTransformerLayerInfer
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
@@ -44,8 +43,7 @@ class MistralTpPartModel(TpPartBaseModel):
         return
 
     def _init_inferstate_cls(self):
-        if get_env_start_args().enable_fa3:
-            self.infer_state_class = FlashAttentionStateInfo
+        pass
 
     def _init_mem_manager(self):
         # Dealing with head_dim_!=n_embed // num_attention_heads scenarios, such as mistral 13B
