@@ -60,7 +60,6 @@ def _fwd_kernel_destindex_copy_quantize_int4_kv(
             q_src_data_0 = (src_data_0 / data_scale[:, None]).to(tl.int8)
             q_src_data_0 = tl.where(q_src_data_0 > 7, 7, q_src_data_0)
             q_src_data_0 = tl.where(q_src_data_0 < -7, -7, q_src_data_0)
-            q_src_data_0 = tl.cast(q_src_data_0, tl.uint8)
             q_src_data_0 = q_src_data_0.to(tl.uint8, bitcast=True)
 
             q_src_data_1 = (src_data_1 / data_scale[:, None]).to(tl.int8)
@@ -71,7 +70,7 @@ def _fwd_kernel_destindex_copy_quantize_int4_kv(
             low_4 = ((q_src_data_0 & 0x80) >> 4) | (q_src_data_0 & 0xF)
             high_4 = (((q_src_data_1 & 0x80) >> 4) | (q_src_data_1 & 0xF)) << 4
 
-            out_data = low_4 | high_4
+            out_data = (low_4 | high_4).to(tl.int8, bitcast=True)
 
             o_ptrs = (
                 Out + dest_index * stride_o_bs + cur_head * stride_o_h + offs_g[:, None] * stride_o_g + offs_d[None, :]
@@ -130,7 +129,7 @@ def destindex_copy_int4kv(
         token_num=len(DestLoc),
         HEAD_NUM=head_num,
         BLOCK_GROUP_COUNT=triton.next_power_of_2(group_count),
-        BLOCK_GROUP_DIM=triton.next_power_of_2(group_dim),
+        BLOCK_GROUP_DIM=group_dim,
         num_warps=4,
         num_stages=1,
     )
@@ -195,7 +194,7 @@ def _fwd_dequantize_int4kv(
     offs_kv_loc = (start_block_index * SEQ_BLOCK_SIZE + tl.arange(0, SEQ_BLOCK_SIZE)) % cur_seq_len
     kv_loc = tl.load(req_to_token_indexs + cur_batch_req_idx * stride_req_to_tokens_b + offs_kv_loc).to(tl.int64)
 
-    offs_d = tl.arange(0, BLOCK_GROUP_DIM) % group_dim
+    offs_d = tl.arange(0, BLOCK_GROUP_DIM)
     offs_scale_d = tl.arange(0, 1)
     group_offs = tl.arange(0, GROUP_COUNT_BLOCK_SIZE) % group_count
 
@@ -241,7 +240,7 @@ def _fwd_dequantize_int4kv(
             + kv_loc[:, None, None] * v_ss
             + v_head_index * v_sh
             + group_offs[None, :, None] * v_sg
-            + offs_d[None, None, :]
+            + offs_d[None, None, :] // 2
         )
         v_high = ((v_int8.to(tl.uint8, bitcast=True) & 0xF0) >> 4).to(tl.int8, bitcast=True)
         v_low = v_int8 & 0x0F
@@ -300,6 +299,8 @@ def dequantize_int4kv(
 
     group_count = k_head_dim // quant_group_size
     group_dim = quant_group_size
+
+    assert triton.next_power_of_2(group_dim) == group_dim
 
     k = k.view((k.shape[0], k.shape[1], group_count, group_dim // 2))  # int4kv 以 int8 存储的
     v = v.view((v.shape[0], v.shape[1], group_count, group_dim // 2))
@@ -364,7 +365,7 @@ def dequantize_int4kv(
         group_dim=group_dim,
         SEQ_BLOCK_SIZE=SEQ_BLOCK_SIZE,
         GROUP_COUNT_BLOCK_SIZE=triton.next_power_of_2(group_count),
-        BLOCK_GROUP_DIM=triton.next_power_of_2(group_dim),
+        BLOCK_GROUP_DIM=group_dim,
         num_warps=num_warps,
         num_stages=1,
     )

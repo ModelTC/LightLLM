@@ -30,7 +30,7 @@ def test_quanted_and_dequant():
     destindex_copy_int4kv(original_kv, dest_loc, kv_buffer, kv_scale_buffer, quant_group_size)
 
     # Dequantize
-    req_to_token_indexs = torch.arange(seq_len, dtype=torch.int64).unsqueeze(0).cuda()
+    req_to_token_indexs = torch.arange(seq_len, dtype=torch.int64).view(1, -1).cuda()
     b_seq_len = torch.tensor([seq_len], dtype=torch.int32).cuda()
     b_req_idx = torch.tensor([0], dtype=torch.int32).cuda()
     b_kv_start_loc = torch.tensor([0], dtype=torch.int32).cuda()
@@ -53,11 +53,9 @@ def test_quanted_and_dequant():
     )
 
     logger.info("Round-trip test completed!")
-
-    # assert torch.allclose(recovered_kv, original_kv, atol=2 / 14 * 2, rtol=0)
+    assert torch.allclose(recovered_kv, original_kv, atol=2 / 14, rtol=0)
     cos = torch.nn.CosineSimilarity(0)
-    print(recovered_kv.flatten().float()[0:10], original_kv.flatten().float()[0:10], flush=True)
-    assert cos(recovered_kv.flatten().float()[0:10], original_kv.flatten().float()[0:10]) > 0.99
+    assert cos(recovered_kv.flatten().float(), original_kv.flatten().float()) > 0.99
 
 
 if __name__ == "__main__":
