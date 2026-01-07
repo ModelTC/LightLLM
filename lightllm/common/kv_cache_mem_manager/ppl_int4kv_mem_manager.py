@@ -1,6 +1,7 @@
 import torch
 
 from .mem_manager import MemoryManager
+from ..basemodel.triton_kernel.kv_copy.ppl_int4kv_copy_kv import destindex_copy_int4kv
 
 
 class PPLINT4KVMemoryManager(MemoryManager):
@@ -8,6 +9,19 @@ class PPLINT4KVMemoryManager(MemoryManager):
         self.kv_dtype = torch.int8
         self.group_quant_size = 8
         super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy=always_copy, mem_fraction=mem_fraction)
+
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        """
+        将每一层生成的kv拷贝到mem manager对应mem_index 位置中
+        """
+        destindex_copy_int4kv(
+            kv,
+            mem_index,
+            self.kv_buffer[layer_index],
+            self.scale_buffer[layer_index],
+            quant_group_size=self.group_quant_size,
+        )
+        return
 
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim // 2 * self.layer_num * torch._utils._element_size(
