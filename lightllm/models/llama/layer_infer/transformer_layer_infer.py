@@ -35,7 +35,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
     def _bind_func(self):
         self._bind_norm()
-        self._bind_attention()
         return
 
     def _bind_norm(self):
@@ -43,38 +42,41 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self._ffn_norm = partial(LlamaTransformerLayerInfer._ffn_norm, self)
         return
 
-    def _bind_attention(self):
-        if "int8kv" in self.mode:
-            pass
-        elif "offline_calibration_fp8kv" in self.mode:
-            assert get_env_start_args().enable_flashinfer_prefill and get_env_start_args().enable_flashinfer_decode
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_fp8kv, self)
-            # self._context_attention_kernel = partial(
-            #     LlamaTransformerLayerInfer._context_attention_flashinfer_kernel_fp8, self
-            # )
-            # self._token_attention_kernel = partial(
-            #     LlamaTransformerLayerInfer._token_decode_attention_flashinfer_fp8, self
-            # )
-        elif "triton_flashdecoding" in self.mode:
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-        elif "triton_gqa_flashdecoding" in self.mode:
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-        elif "export_fp8kv_calibration" in self.mode:
-            # self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_flashinfer,
-            #  self)
-            self._copy_kv_to_mem_cache = partial(
-                LlamaTransformerLayerInfer._copy_kv_to_mem_cache_with_calibration, self
-            )
-        elif not self.mode:
-            # if get_env_start_args().enable_flashinfer_decode:
-            #     self._token_attention_kernel = partial(
-            #         LlamaTransformerLayerInfer._token_decode_attention_flashinfer, self
-            #     )
-            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-        else:
-            raise Exception(f"Unsupported mode: {self.mode}")
+    def _context_attention_kernel(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: LlamaTransformerLayerWeight,
+    ) -> torch.Tensor:
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        _k = kv[:, 0 : self.tp_k_head_num_, :]
+        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
+        o_tensor = infer_state.prefill_att_state.prefill_att(
+            q=_q,
+            k=_k,
+            v=_v,
+            layer_weight=layer_weight,
+            alloc_func=self.alloc_tensor,
+        )
+        o_tensor = o_tensor.view(q.shape)
+        return o_tensor
 
-        return
+    def _token_attention_kernel(
+        self,
+        q: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: LlamaTransformerLayerWeight,
+    ) -> torch.Tensor:
+        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        _k = kv[:, 0 : self.tp_k_head_num_, :]
+        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
+        o_tensor = infer_state.decode_att_state.decode_att(
+            q=_q, k=_k, v=_v, layer_weight=layer_weight, alloc_func=self.alloc_tensor
+        )
+        return o_tensor.view(q.shape)
 
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
@@ -130,60 +132,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
 
         return q, cache_kv
-
-    def _context_attention_kernel(
-        self,
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        infer_state: LlamaInferStateInfo,
-        layer_weight: LlamaTransformerLayerWeight,
-        out=None,
-    ) -> torch.Tensor:
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        _k = kv[:, 0 : self.tp_k_head_num_, :]
-        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            layer_weight=layer_weight,
-            alloc_func=self.alloc_tensor,
-        )
-        o_tensor = o_tensor.view(q.shape)
-        return o_tensor
-
-    def _token_attention_kernel(
-        self, q: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight, out=None
-    ) -> torch.Tensor:
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        _k = kv[:, 0 : self.tp_k_head_num_, :]
-        _v = kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=_q, k=_k, v=_v, layer_weight=layer_weight, alloc_func=self.alloc_tensor
-        )
-        return o_tensor.view(q.shape)
-
-    def _context_attention_flashinfer_kernel_fp8(
-        self, q, kv, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None
-    ) -> torch.Tensor:
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        kv = kv.unsqueeze(1)
-        k = kv[:, :, : self.tp_k_head_num_, :].view(torch.float8_e4m3fn)
-        v = kv[:, :, self.tp_k_head_num_ :, :].view(torch.float8_e4m3fn)
-        offline_scales = infer_state.mem_manager.scales_list
-        k_descale = offline_scales[self.layer_num_][0] if offline_scales is not None else None
-        v_descale = offline_scales[self.layer_num_][1] if offline_scales is not None else None
-        infer_state.prefill_wrapper.run(
-            q.view(q.shape[0], -1, self.head_dim_),
-            (k, v),
-            k_scale=k_descale,
-            v_scale=v_descale,
-            out=o_tensor.view(q.shape[0], -1, self.head_dim_),
-        )
-        return o_tensor
 
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
@@ -272,36 +220,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     #     ffn2_out = torch.mm(gate_out, layer_weight.down_proj)
     #     gate_out, up_out = None, None
     #     return ffn2_out
-
-    def _copy_kv_to_mem_cache_fp8kv(self, buffer, mem_index, mem_manager):
-        scales = mem_manager.scales
-        destindex_copy_kv_fp8(
-            buffer,
-            mem_index,
-            scales[self.layer_num_] if scales is not None else None,
-            mem_manager.kv_buffer[self.layer_num_].view(torch.float8_e4m3fn),
-        )
-        return
-
-    def _token_decode_attention_flashinfer_fp8(self, q, infer_state: LlamaFlashInferStateInfo, layer_weight, out=None):
-        batch_size = infer_state.batch_size
-        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_].unsqueeze(1)
-        k = kv[:, :, : self.tp_k_head_num_, :].view(torch.float8_e4m3fn)
-        v = kv[:, :, self.tp_k_head_num_ :, :].view(torch.float8_e4m3fn)
-        offline_scales = infer_state.mem_manager.scales_list
-        k_descale = offline_scales[self.layer_num_][0] if offline_scales is not None else None
-        v_descale = offline_scales[self.layer_num_][1] if offline_scales is not None else None
-        infer_state.decode_wrapper.run(
-            q.view(calcu_shape1),
-            (k, v),
-            k_scale=k_descale,
-            v_scale=v_descale,
-            out=o_tensor.view(calcu_shape1),
-        )
-        return o_tensor
 
     def overlap_tpsp_token_forward(
         self,
