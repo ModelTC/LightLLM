@@ -336,7 +336,7 @@ def context_attention_fwd_no_prompt_cache(q, k, v, o, b_start_loc, b_seq_len, ma
 
 
 @triton.jit
-def _fwd_kernel_int8kv(
+def _fwd_kernel_contiguous_kv(
     Q,
     K,
     V,
@@ -456,7 +456,7 @@ def _fwd_kernel_int8kv(
 
 
 @torch.no_grad()
-def context_attention_fwd_ppl_int8kv(
+def context_attention_fwd_contiguous_kv(
     q, k, v, o, b_start_loc, b_kv_start_loc, b_seq_len, max_q_input_len, b_prompt_cache_len
 ):
     BLOCK_M = 128 if not is_tesla() else 64
@@ -476,7 +476,7 @@ def context_attention_fwd_ppl_int8kv(
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
 
-    _fwd_kernel_int8kv[grid](
+    _fwd_kernel_contiguous_kv[grid](
         Q=q,
         K=k,
         V=v,
@@ -598,86 +598,5 @@ def test():
     assert torch.allclose(torch_o, o, atol=1e-2, rtol=0)
 
 
-def torch_context_attention_fwd2(q, k, v, o, b_start_loc, b_seq_len, b_prompt_cache_len):
-
-    batch = b_start_loc.shape[0]
-    k = k.transpose(1, 2)
-    v = v.transpose(1, 2)
-    for i in range(batch):
-        start_loc = b_start_loc[i]
-        seq_len = b_seq_len[i]
-        prompt_cache_len = b_prompt_cache_len[i]
-        cur_q = q[start_loc : start_loc + seq_len - prompt_cache_len, :, :]
-        cur_q = cur_q.clone().to(torch.float32)
-        cur_k = k[i, :seq_len, :]
-        cur_k = cur_k.clone().to(torch.float32)
-
-        cur_v = v[i, :seq_len, :]
-        cur_v = cur_v.clone().to(torch.float32)
-
-        cur_q = cur_q.transpose(0, 1)
-        cur_k = cur_k.transpose(0, 1)
-        cur_v = cur_v.transpose(0, 1)
-        dk = cur_q.shape[-1]
-
-        p = torch.matmul(cur_q, cur_k.transpose(-2, -1)) / torch.sqrt(torch.tensor(dk, dtype=torch.float32))
-
-        q_index = torch.arange(cur_q.shape[1]).unsqueeze(-1).to(p.device)
-        k_index = torch.arange(cur_k.shape[1]).unsqueeze(0).to(p.device)
-        mask = (q_index + prompt_cache_len >= k_index).int()
-        mask = mask.unsqueeze(0).expand(cur_q.shape[0], -1, -1)
-
-        p = p.masked_fill(mask == 0, float("-inf"))
-
-        s = F.softmax(p, dim=-1)
-
-        o[start_loc : start_loc + seq_len - prompt_cache_len, :, :] = torch.matmul(s, cur_v).transpose(0, 1)
-
-
-def test2():
-    import torch
-    import numpy as np
-
-    Z, H, N_CTX, D_HEAD = 16, 16, 2048, 128
-    dtype = torch.float16
-    prompt_cache_len = 0
-    q = torch.empty((Z * (N_CTX - prompt_cache_len), H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2)
-    kv = torch.empty((Z, 2 * H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2)
-    k = kv[:, :H]
-    v = kv[:, H:]
-    # v = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2)
-    o = torch.empty((Z * (N_CTX - prompt_cache_len), H, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2)
-    torch_o = torch.empty((Z * (N_CTX - prompt_cache_len), H, D_HEAD), dtype=dtype, device="cuda").normal_(
-        mean=0.3, std=0.2
-    )
-    max_input_len = N_CTX
-    b_start_loc = torch.zeros((Z,), dtype=torch.int32, device="cuda")
-    b_seq_len = torch.ones((Z,), dtype=torch.int32, device="cuda")
-    b_prompt_cache_len = torch.zeros(Z, dtype=torch.int32, device="cuda")
-
-    for i in range(Z):
-        b_seq_len[i] = N_CTX
-        if i != 0:
-            b_start_loc[i] = b_start_loc[i - 1] + N_CTX - prompt_cache_len
-        b_prompt_cache_len[i] = prompt_cache_len
-    torch_context_attention_fwd2(q, k, v, torch_o, b_start_loc, b_seq_len, b_prompt_cache_len)
-
-    import time
-
-    torch.cuda.synchronize()
-    a = time.time()
-    for i in range(1000):
-        context_attention_fwd_ppl_int8kv(q, k, v, o, b_start_loc, b_seq_len, max_input_len, b_prompt_cache_len)
-    torch.cuda.synchronize()
-    b = time.time()
-    # print(o.shape, torch_out.shape)
-    print((b - a))
-
-    print("max ", torch.max(torch.abs(torch_o - o)))
-    print("mean ", torch.mean(torch.abs(torch_o - o)))
-    assert torch.allclose(torch_o, o, atol=1e-2, rtol=0)
-
-
 if __name__ == "__main__":
     test()
-    test2()

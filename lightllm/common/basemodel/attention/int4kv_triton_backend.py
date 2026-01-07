@@ -81,9 +81,9 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
 
         max_kv_seq_len = self.infer_state.max_kv_seq_len
 
-        from ..triton_kernel.kv_copy.ppl_int8kv_copy_kv import dequantize_int8kv
+        from ..triton_kernel.kv_copy.ppl_int4kv_copy_kv import dequantize_int4kv
 
-        dequantize_int8kv(
+        dequantize_int4kv(
             k=k,
             k_scale=k_scale,
             v=v,
@@ -98,9 +98,9 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
             quant_group_size=self.backend.quant_group_size,
         )
 
-        from ..triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_ppl_int8kv
+        from ..triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
 
-        context_attention_fwd_ppl_int8kv(
+        context_attention_fwd_contiguous_kv(
             q=q,
             k=k_dequant,
             v=v_dequant,

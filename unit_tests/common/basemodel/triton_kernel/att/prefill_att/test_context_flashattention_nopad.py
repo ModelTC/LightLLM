@@ -2,7 +2,7 @@ import torch
 import time
 import pytest
 from lightllm.common.basemodel.triton_kernel.att.prefill_att.context_flashattention_nopad import (
-    context_attention_fwd_ppl_int8kv,
+    context_attention_fwd_contiguous_kv,
 )
 from lightllm.utils.log_utils import init_logger
 
@@ -54,7 +54,7 @@ def torch_context_attention_fwd2(q, k, v, o, b_start_loc, b_kv_start_loc, b_seq_
         for prompt_cache_len in [0, 56, 200]
     ],
 )
-def test_context_attention_fwd_ppl_int8kv(B, H, N_CTX, D_HEAD, prompt_cache_len):
+def test_context_attention_fwd_contiguous_kv(B, H, N_CTX, D_HEAD, prompt_cache_len):
     dtype = torch.float16
     prompt_cache_len = 0
     if prompt_cache_len >= N_CTX - 1:
@@ -83,7 +83,7 @@ def test_context_attention_fwd_ppl_int8kv(B, H, N_CTX, D_HEAD, prompt_cache_len)
 
     b_kv_start_loc = torch.cumsum(b_seq_len, dim=0, dtype=torch.int32) - b_seq_len
     torch_context_attention_fwd2(q, k, v, torch_o, b_start_loc, b_kv_start_loc, b_seq_len, b_prompt_cache_len)
-    context_attention_fwd_ppl_int8kv(
+    context_attention_fwd_contiguous_kv(
         q=q,
         k=k,
         v=v,
