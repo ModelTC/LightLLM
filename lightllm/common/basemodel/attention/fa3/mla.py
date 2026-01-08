@@ -34,8 +34,8 @@ class MlaFa3AttBackend(BaseAttBackend):
     def create_att_prefill_state(self, infer_state) -> "MlaFa3PrefillAttState":
         return MlaFa3PrefillAttState(backend=self, infer_state=infer_state)
 
-    def create_att_decode_state(self, infer_state) -> "Fa3DecodeAttState":
-        return Fa3DecodeAttState(backend=self, infer_state=infer_state)
+    def create_att_decode_state(self, infer_state) -> "MlaFa3DecodeAttState":
+        return MlaFa3DecodeAttState(backend=self, infer_state=infer_state)
 
 
 @dataclasses.dataclass
@@ -100,7 +100,7 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class Fa3DecodeAttState(BaseDecodeAttState):
+class MlaFa3DecodeAttState(BaseDecodeAttState):
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
@@ -169,7 +169,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             self.decode_max_q_seq_len = 1
         return
 
-    def copy_for_decode_cuda_graph(self, new_state: "Fa3DecodeAttState"):
+    def copy_for_decode_cuda_graph(self, new_state: "MlaFa3DecodeAttState"):
         pass
 
     def decode_att(
