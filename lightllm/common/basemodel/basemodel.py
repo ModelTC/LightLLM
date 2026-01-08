@@ -350,6 +350,7 @@ class TpPartBaseModel:
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = new_batch_size
         new_model_input.total_token_num += padded_batch_size * 2
+        new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
         new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), mode="constant", value=1)
         new_model_input.b_req_idx = F.pad(
             new_model_input.b_req_idx, (0, padded_batch_size), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
