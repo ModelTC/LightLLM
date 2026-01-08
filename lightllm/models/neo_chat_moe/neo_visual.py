@@ -247,12 +247,15 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
+                a = img.extra_params["min_pixels"]
+                b = img.extra_params["max_pixels"]
+                print(f"self.min_pixels is {a} ,max_pixelx is {b}")
                 pixel_values, image_grid_hw = load_image_native(
                     image_data,
                     patch_size=self.patch_size,
                     downsample_ratio=self.downsample_ratio,
-                    min_pixels=self.min_pixels,
-                    max_pixels=self.max_pixels,
+                    min_pixels=img.extra_params["min_pixels"],
+                    max_pixels=img.extra_params["max_pixels"],
                 )
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_hw)
@@ -261,7 +264,6 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
 
             # must devide merge_length
             cur_num = int(img_tensors[-1].shape[0] * (self.downsample_ratio ** 2))
-            print(f"cur_num is {cur_num}")
             valid_ids.append([valid_id, valid_id + cur_num])
             valid_id += cur_num
 

@@ -46,6 +46,15 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
     def init_imageitem_extral_params(
         self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams
     ):
+        img.extra_params["min_pixels"] = (
+            sampling_params.min_pixels if sampling_params.min_pixels > 0 else self.min_pixel
+        )
+        img.extra_params["max_pixels"] = (
+            sampling_params.max_pixels if sampling_params.max_pixels > 0 else self.max_pixel
+        )
+        assert (
+            img.extra_params["min_pixels"] <= img.extra_params["max_pixels"]
+        ), "min_pixels should be less than or equal to max_pixels"
         return
 
     def init_audioitem_extral_params(
@@ -62,8 +71,8 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
             height=height,
             width=width,
             factor=int(self.patch_size // self.downsample_ratio),
-            min_pixels=self.min_pixel,
-            max_pixels=self.max_pixel,
+            min_pixels=img.extra_params["min_pixels"],
+            max_pixels=img.extra_params["max_pixels"],
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
         token_num = int((grid_h * grid_w) * (self.downsample_ratio ** 2))
