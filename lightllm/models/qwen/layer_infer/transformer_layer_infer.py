@@ -1,7 +1,4 @@
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
 from typing import Tuple
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd

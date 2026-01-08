@@ -1,7 +1,5 @@
 import os
-import re
 import json
-import numpy as np
 import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
@@ -14,8 +12,6 @@ from lightllm.models.gemma3.layer_infer.transformer_layer_infer import Gemma3Tra
 from lightllm.models.gemma3.layer_weights.pre_and_post_layer_weight import Gemma3PreAndPostLayerWeight
 from lightllm.models.gemma3.layer_weights.transformer_layer_weight import Gemma3TransformerLayerWeight
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
-from lightllm.models.llava.layer_weights.pre_and_post_layer_weight import LlavaPreAndPostLayerWeight
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
 from lightllm.common.build_utils import repair_config

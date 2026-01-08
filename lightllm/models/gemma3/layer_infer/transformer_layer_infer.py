@@ -1,12 +1,6 @@
 import torch
-import torch.functional as F
 import torch.distributed as dist
 import torch.nn as nn
-import numpy as np
-from typing import Tuple
-from functools import partial
-import triton
-
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.distributed import all_reduce
 from lightllm.models.gemma3.layer_weights.transformer_layer_weight import Gemma3TransformerLayerWeight

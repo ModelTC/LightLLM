@@ -1,5 +1,3 @@
-import os
-import json
 import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel import TpPartBaseModel
