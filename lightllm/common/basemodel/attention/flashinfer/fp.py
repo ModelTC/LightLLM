@@ -179,6 +179,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "FlashInferDecodeAttState"):
+        super().copy_for_decode_cuda_graph(new_state)
         self.decode_wrapper.plan(
             new_state.kv_starts,
             new_state.kv_indices,

@@ -139,9 +139,9 @@ class InferStateInfo:
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
 
-        self.decode_att_state.copy_for_decode_cuda_graph()
+        self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
         if self.decode_att_state1 is not None:
-            self.decode_att_state1.copy_for_decode_cuda_graph()
+            self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return
 
     def prefill_dp_balance(self, input_ids: torch.Tensor):

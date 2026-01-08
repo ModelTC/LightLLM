@@ -98,9 +98,12 @@ class BaseDecodeAttState(ABC):
     def init_state(self):
         pass
 
-    @abstractmethod
     def copy_for_decode_cuda_graph(self, new_state: "BaseDecodeAttState"):
-        pass
+        for attr_name, attr_value in vars(new_state).items():
+            if isinstance(attr_value, torch.Tensor):
+                attr_ = getattr(self, attr_name, None)
+                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
+                    attr_.copy_(attr_value, non_blocking=True)
 
     @abstractmethod
     def decode_att(

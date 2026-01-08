@@ -165,7 +165,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "Fp8Fa3DecodeAttState"):
-        pass
+        super().copy_for_decode_cuda_graph(new_state)
 
     def decode_att(
         self,

@@ -72,6 +72,9 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         super().init_state()
         self.offline_scales = self.infer_state.mem_manager.scales_list
 
+    def copy_for_decode_cuda_graph(self, new_state):
+        return super().copy_for_decode_cuda_graph(new_state)
+
     def decode_att(
         self,
         q: torch.Tensor,

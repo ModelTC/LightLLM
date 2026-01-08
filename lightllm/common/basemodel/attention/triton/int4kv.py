@@ -118,7 +118,7 @@ class Int4kvTritonDecodeAttState(BaseDecodeAttState):
         pass
 
     def copy_for_decode_cuda_graph(self, new_state: "Int4kvTritonDecodeAttState"):
-        pass
+        super().copy_for_decode_cuda_graph(new_state)
 
     def decode_att(
         self,

@@ -167,7 +167,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaFa3DecodeAttState"):
-        pass
+        super().copy_for_decode_cuda_graph(new_state)
 
     def decode_att(
         self,

@@ -169,6 +169,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaFlashInferDecodeAttState"):
+        super().copy_for_decode_cuda_graph(new_state)
         self.decode_wrapper.plan(
             new_state.q_indptr,
             new_state.kv_starts,
