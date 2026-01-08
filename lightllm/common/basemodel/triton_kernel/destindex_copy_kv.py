@@ -16,12 +16,13 @@ def _fwd_kernel_destindex_copy_kv(
     stride_o_h,
     stride_o_d,
     head_num,
+    head_dim,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_HEAD: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
     offs_h = tl.arange(0, BLOCK_HEAD)
-    offs_d = tl.arange(0, BLOCK_DMODEL)
+    offs_d = (tl.arange(0, BLOCK_DMODEL)) % head_dim
 
     dest_index = tl.load(Dest_loc + cur_index).to(tl.int64)
 
@@ -54,7 +55,8 @@ def destindex_copy_kv(K, DestLoc, Out):
         Out.stride(1),
         Out.stride(2),
         head_num,
-        BLOCK_DMODEL=head_dim,
+        head_dim,
+        BLOCK_DMODEL=triton.next_power_of_2(head_dim),
         BLOCK_HEAD=BLOCK_HEAD,
         num_warps=num_warps,
         num_stages=1,
