@@ -272,57 +272,37 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _decompress_kv(
         self,
-        kv,
         infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek2TransformerLayerWeight,
-        is_fp8,
-        total_token_num,
-        b_seq_len,
-        max_seq_len,
-        b_kv_start_loc,
-        skip_sample=False,
     ):
-        if not skip_sample:
-            if is_fp8:
-                kv = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, :-2].view(torch.float8_e4m3fn)
-                kv_scale = infer_state.mem_manager.kv_buffer[self.layer_num_][:, :, -2:].view(torch.bfloat16)
-                k_scale = self.alloc_tensor([total_token_num, 1], dtype=kv_scale.dtype)
-            else:
-                kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-                kv_scale = None
-                k_scale = None
+        compressed_kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
 
-            compressed_kv = self.alloc_tensor([total_token_num, 1, layer_weight.kv_lora_rank], dtype=kv.dtype)
-            k_rope = self.alloc_tensor([total_token_num, 1, self.qk_rope_head_dim], dtype=kv.dtype)
-            sample_kv(
-                kv,
-                compressed_kv,
-                k_rope,
-                infer_state.b_req_idx,
-                max_seq_len,
-                b_seq_len,
-                infer_state.req_manager.req_to_token_indexs,
-                b_kv_start_loc,
-                kv_scale,
-                k_scale,
-            )
-            if k_scale is not None:
-                compressed_kv = compressed_kv.to(k_scale.dtype) * k_scale.unsqueeze(-1)
-                k_rope = k_rope.to(k_scale.dtype) * k_scale.unsqueeze(-1)
-        else:
-            compressed_kv, k_rope = torch.split(  # (b*s, 1, kv_lora + qk_r)
-                kv, [layer_weight.kv_lora_rank, layer_weight.qk_rope_head_dim], dim=-1
-            )
-
-        # CC
-        compressed_kv = compressed_kv.view(-1, layer_weight.kv_lora_rank).contiguous()
-        kv_nope = self.alloc_tensor(
-            [compressed_kv.shape[0], self.tp_q_head_num_, (self.qk_nope_head_dim + self.v_head_dim)],
-            dtype=compressed_kv.dtype,
+        total_token_num = infer_state.total_token_num
+        sampled_compressed_kv_nope = self.alloc_tensor(
+            [total_token_num, 1, layer_weight.kv_lora_rank], dtype=compressed_kv.dtype
         )
-        layer_weight.cc_kv_b_proj_.mm(compressed_kv, out=kv_nope.reshape(compressed_kv.shape[0], -1))
-        k_nope, v = torch.split(kv_nope, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        return k_nope, k_rope, v
+        sampled_k_rope = self.alloc_tensor([total_token_num, 1, self.qk_rope_head_dim], dtype=compressed_kv.dtype)
+        sample_kv(
+            all_compressed_kv=compressed_kv,
+            sampled_compressed_kv_nope=sampled_compressed_kv_nope,
+            sampled_k_rope=sampled_k_rope,
+            b_req_idx=infer_state.b_req_idx,
+            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+            b_seq_len=infer_state.b_seq_len,
+            b_kv_start_loc=infer_state.b1_kv_start_loc[:-1],
+            max_kv_seq_len=infer_state.max_kv_seq_len,
+        )
+        # CC
+        sampled_compressed_kv_nope = sampled_compressed_kv_nope.view(
+            total_token_num, layer_weight.kv_lora_rank
+        ).contiguous()
+        sampled_kv_nope = self.alloc_tensor(
+            [total_token_num, self.tp_q_head_num_, (self.qk_nope_head_dim + self.v_head_dim)],
+            dtype=sampled_compressed_kv_nope.dtype,
+        )
+        layer_weight.cc_kv_b_proj_.mm(sampled_compressed_kv_nope, out=sampled_kv_nope.view(total_token_num, -1))
+        sampled_k_nope, sampled_v = torch.split(sampled_kv_nope, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        return sampled_k_nope, sampled_k_rope, sampled_v
 
     # Adapted from:
     # https://github.com/sgl-project/sglang/blob/c998d04b46920f06d945fbef9023884a768723fc/python/sglang/srt/models/deepseek_v2.py#L962
@@ -428,14 +408,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         out=None,
     ) -> torch.Tensor:
         k_nope, k_rope, v = self._decompress_kv(
-            kv,
-            infer_state,
-            layer_weight,
-            False,
-            infer_state.total_token_num,
-            infer_state.b_seq_len,
-            infer_state.max_value_in_b_seq_len,
-            infer_state.b1_kv_start_loc,
+            infer_state=infer_state,
+            layer_weight=layer_weight,
         )
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out

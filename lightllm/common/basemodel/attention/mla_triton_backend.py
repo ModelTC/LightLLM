@@ -23,23 +23,49 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
     def prefill_att(
         self,
         q: torch.Tensor,
-        k: torch.Tensor,
+        k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.use_sliding_window is False and att_control.use_att_sink is False
+        assert (
+            att_control.use_alibi is False
+            and att_control.use_sliding_window is False
+            and att_control.use_att_sink is False
+        )
         return self._mla_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
 
     def _mla_prefill_att(
         self,
         q: torch.Tensor,
-        k: torch.Tensor,
+        k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
-        pass
+        from ..triton_kernel.mla_att.prefill_att import context_attention_fwd_with_v
+
+        qk_rope_head_dim = 64
+        q_nope, q_rope = q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:]
+        o_tensor = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q.device)
+        k_nope, k_rope = k
+        assert att_control.mla_prefill
+        softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
+        context_attention_fwd_with_v(
+            q_nope,
+            q_rope,
+            k_nope,
+            k_rope,
+            v,
+            o_tensor,
+            self.infer_state.b_start_loc,
+            self.infer_state.b1_cu_kv_seq_len,
+            self.infer_state.b_seq_len,
+            self.infer_state.b_ready_cache_len,
+            self.infer_state.max_q_seq_len,
+            softmax_scale,
+        )
+        return o_tensor
 
 
 @dataclasses.dataclass
