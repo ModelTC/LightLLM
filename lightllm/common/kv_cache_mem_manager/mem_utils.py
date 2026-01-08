@@ -34,7 +34,7 @@ def select_mem_manager_class():
         memory_manager_class = PPLINT4KVMemoryManager
     elif get_env_start_args().llm_kv_type == "fp8kv":
         memory_manager_class = ExportCalibrationMemoryManager
-    elif get_env_start_args().llm_kv_type is None:
+    elif get_env_start_args().llm_kv_type == "None":
         memory_manager_class = MemoryManager
 
     logger.info(f"Model kv cache using mem_manager class: {memory_manager_class}")

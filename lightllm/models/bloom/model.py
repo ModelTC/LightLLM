@@ -38,6 +38,6 @@ class BloomTpPartModel(TpPartBaseModel):
         return
 
     def _init_att_backend(self):
-        self.prefill_att_backend = TritonAttBackend()
-        self.decode_att_backend = TritonAttBackend()
+        self.prefill_att_backend = TritonAttBackend(self)
+        self.decode_att_backend = TritonAttBackend(self)
         return
