@@ -32,7 +32,6 @@ class InferStateInfo:
         self.batch_size: int = None
         self.total_token_num: int = None
         self.b_req_idx: torch.Tensor = None
-        self.b_start_loc: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
 
         self.b_shared_seq_len: torch.Tensor = None  # only for diverse mode used in decode phase.
@@ -77,6 +76,11 @@ class InferStateInfo:
         self.max_q_seq_len: int = None
         self.max_kv_seq_len: int = None
 
+        # prefill 用
+        self.b_q_start_loc: torch.Tensor = None
+        # decode 用
+        self.b_kv_start_loc: torch.Tensor = None
+
         # 一些特殊模型，特殊模式使用的输入变量，本身这些变量不适合放在
         # inferstate的基类中，但是为了代码的简洁和方便，都放在基类中
         # 进行管理。注意这些成员变量只会在特定的模型和模式下才会生效。
@@ -111,7 +115,7 @@ class InferStateInfo:
                 b_ready_cache_len=self.b_ready_cache_len,
                 b_seq_len=self.b_seq_len,
             )
-            self.b_start_loc = self.b1_cu_q_seq_len[0:-1]
+            self.b_q_start_loc = self.b1_cu_q_seq_len[0:-1]
         else:
             (
                 self.b_q_seq_len,
@@ -122,7 +126,7 @@ class InferStateInfo:
             ) = gen_decode_params(self.b_seq_len)
             # TODO: check the correctness
             self.max_kv_seq_len = self.max_len_in_batch
-            self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
+            self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def init_att_state(self):
         if self.is_prefill:

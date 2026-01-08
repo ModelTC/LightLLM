@@ -149,7 +149,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             self.infer_state.req_manager.req_to_token_indexs,
             self.infer_state.b_req_idx,
             self.infer_state.b_seq_len,
-            self.infer_state.b_start_loc,
+            self.infer_state.b_kv_start_loc,
             self.infer_state.max_kv_seq_len,
             self.kv_indices,
         )

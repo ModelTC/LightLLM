@@ -122,7 +122,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
 
         self.kv_starts = self.infer_state.b1_cu_kv_seq_len
 
-        self.q_indptr = torch.arange(batch_size + 1, dtype=torch.int32).to(device)
+        self.q_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device="cuda")
         if batch_size <= model.graph_max_batch_size and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch:
             self.kv_indices = self.backend.kv_indices_buffer[self.infer_state.microbatch_index][
                 : batch_size * self.backend.max_seq_length
@@ -138,7 +138,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             self.infer_state.req_manager.req_to_token_indexs,
             self.infer_state.b_req_idx,
             self.infer_state.b_seq_len,
-            self.infer_state.b_start_loc,
+            self.infer_state.b_kv_start_loc,
             self.infer_state.max_kv_seq_len,
             self.kv_indices,
         )

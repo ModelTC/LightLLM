@@ -103,7 +103,7 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
             k=k_dequant,
             v=v_dequant,
             o=o_tensor,
-            b_start_loc=self.infer_state.b_start_loc,
+            b_start_loc=self.infer_state.b_q_start_loc,
             b_kv_start_loc=self.b_kv_start_loc,
             b_seq_len=self.infer_state.b_seq_len,
             max_q_input_len=self.infer_state.max_q_seq_len,

@@ -55,7 +55,7 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
             k_rope,
             v,
             o_tensor,
-            self.infer_state.b_start_loc,
+            self.infer_state.b_q_start_loc,
             self.infer_state.b1_cu_kv_seq_len,
             self.infer_state.b_seq_len,
             self.infer_state.b_ready_cache_len,
