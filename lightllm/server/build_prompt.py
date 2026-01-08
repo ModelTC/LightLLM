@@ -17,7 +17,11 @@ async def build_prompt(request, tools) -> str:
     global tokenizer
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
-    kwargs = {"conversation": messages}
+    kwargs = {
+        "conversation": messages,
+        # 假设 request 对象里有这个字段，或者你想传空
+        "system_instruction": getattr(request, "system_instruction", ""),
+    }
     if request.character_settings:
         kwargs["character_settings"] = request.character_settings
     if request.role_settings:
