@@ -857,7 +857,6 @@ class TpPartBaseModel:
             model_input = ModelInput(
                 batch_size=1,
                 total_token_num=total_token_num,
-                max_len_in_batch=self.batch_max_tokens,
                 max_q_seq_len=self.batch_max_tokens,
                 max_kv_seq_len=self.batch_max_tokens,
                 max_cache_len=0,
@@ -934,7 +933,6 @@ class TpPartBaseModel:
                 model_input = ModelInput(
                     batch_size=1,
                     total_token_num=total_token_num,
-                    max_len_in_batch=input_len,
                     max_q_seq_len=input_len,
                     max_kv_seq_len=input_len,
                     max_cache_len=0,
@@ -997,7 +995,6 @@ class TpPartBaseModel:
         model_input = ModelInput(
             batch_size=batch_size,
             total_token_num=total_token_num,
-            max_len_in_batch=prefill_input_len,
             max_q_seq_len=prefill_input_len,
             max_kv_seq_len=prefill_input_len,
             max_cache_len=0,

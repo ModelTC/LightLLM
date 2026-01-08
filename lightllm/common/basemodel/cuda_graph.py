@@ -196,7 +196,6 @@ class CudaGraph:
             model_input = ModelInput(
                 batch_size=batch_size,
                 total_token_num=total_token_num,
-                max_len_in_batch=max_len_in_batch,
                 max_q_seq_len=self.mtp_step + 1,
                 max_kv_seq_len=max_len_in_batch,
                 input_ids=input_ids,
@@ -256,7 +255,6 @@ class CudaGraph:
                     is_prefill=False,
                     batch_size=batch_size,
                     total_token_num=total_token_num,
-                    max_len_in_batch=max_len_in_batch,
                     max_q_seq_len=self.mtp_step + 1,
                     max_kv_seq_len=max_len_in_batch,
                     input_ids=input_ids,

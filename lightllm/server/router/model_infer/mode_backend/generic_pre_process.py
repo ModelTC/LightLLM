@@ -50,7 +50,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
 
     max_kv_seq_len = max(b_seq_len)
     max_cache_len = max(b_ready_cache_len)
-    max_len_in_batch = max(b_q_seq_len)
     max_q_seq_len = max(b_q_seq_len)
 
     input_ids = np.concatenate(input_ids, dtype=np.int64)
@@ -72,7 +71,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         max_cache_len=max_cache_len,
@@ -147,7 +145,6 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         input_ids=None,

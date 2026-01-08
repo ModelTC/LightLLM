@@ -73,7 +73,6 @@ def padded_prepare_prefill_inputs(
     max_kv_seq_len = max(b_seq_len)
     max_cache_len = max(b_ready_cache_len)
     max_q_seq_len = max(b_q_seq_len)
-    max_len_in_batch = max(b_q_seq_len)
 
     input_ids = np.concatenate(input_ids, dtype=np.int64)
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
@@ -102,7 +101,6 @@ def padded_prepare_prefill_inputs(
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         max_cache_len=max_cache_len,
@@ -185,7 +183,6 @@ def padded_prepare_decode_inputs(
 
     max_kv_seq_len = max(b_seq_len)
     max_q_seq_len = max(b_q_seq_len)
-    max_len_in_batch = max(b_seq_len)
 
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
@@ -210,7 +207,6 @@ def padded_prepare_decode_inputs(
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         input_ids=None,
