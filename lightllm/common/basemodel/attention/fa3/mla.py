@@ -47,9 +47,6 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
         self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
         self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
 
-    def copy_for_prefill_cuda_graph(self, new_state: "MlaFa3PrefillAttState"):
-        pass
-
     def prefill_att(
         self,
         q: torch.Tensor,

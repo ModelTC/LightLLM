@@ -29,9 +29,6 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
             - self.infer_state.b_seq_len
         )
 
-    def copy_for_prefill_cuda_graph(self, new_state: "Int4kvTritonPrefillAttState"):
-        pass
-
     def prefill_att(
         self,
         q: torch.Tensor,

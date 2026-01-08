@@ -67,9 +67,6 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             )
         )
 
-    def copy_for_prefill_cuda_graph(self, new_state: "Fp8Fa3PrefillAttState"):
-        pass
-
     def prefill_att(
         self,
         q: torch.Tensor,

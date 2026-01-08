@@ -78,10 +78,6 @@ class BasePrefillAttState(ABC):
         pass
 
     @abstractmethod
-    def copy_for_prefill_cuda_graph(self, new_state: "BasePrefillAttState"):
-        pass
-
-    @abstractmethod
     def prefill_att(
         self,
         q: torch.Tensor,

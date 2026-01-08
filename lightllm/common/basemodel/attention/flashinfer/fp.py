@@ -84,9 +84,6 @@ class FlashInferPrefillAttState(BasePrefillAttState):
             kv_data_type=self.backend.kv_data_type,
         )
 
-    def copy_for_prefill_cuda_graph(self, new_state: "FlashInferPrefillAttState"):
-        pass
-
     def prefill_att(
         self,
         q: torch.Tensor,

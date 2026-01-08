@@ -17,9 +17,6 @@ class TritonPrefillAttState(BasePrefillAttState):
     def init_state(self):
         pass
 
-    def copy_for_prefill_cuda_graph(self, new_state: "TritonPrefillAttState"):
-        pass
-
     def prefill_att(
         self,
         q: torch.Tensor,

@@ -74,9 +74,6 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
         )
         return
 
-    def copy_for_prefill_cuda_graph(self, new_state: "MlaFlashInferPrefillAttState"):
-        pass
-
     def prefill_att(
         self,
         q: torch.Tensor,
