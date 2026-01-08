@@ -189,7 +189,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
 
     def decode_att(
         self,
-        q: torch.Tensor,
+        q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
         att_control: AttControl = AttControl(),
@@ -200,6 +200,9 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             and att_control.use_sliding_window is False
             and att_control.use_att_sink is False
         )
+
+        assert v is None
+
         return self._mla_decode_att(
             q=q,
             k=k,
@@ -210,17 +213,15 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
 
     def _mla_decode_att(
         self,
-        q: torch.Tensor,
+        q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
         qk_rope_head_dim = 64
-
-        q_nope, q_rope = q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:]
-
-        o_tensor = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q.device)
+        q_nope, q_rope = q
+        o_tensor = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
         assert att_control.mla_decode
 
         self.decode_wrapper.run(

@@ -90,20 +90,20 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
             and att_control.use_alibi is False
         )
         assert v is None
-        q_nope, q_rope = q
+
         return self._mla_decode_att(
-            q_nope=q_nope,
-            q_rope=q_rope,
-            kv=k,
+            q=q,
+            k=k,
+            v=v,
             att_control=att_control,
             alloc_func=alloc_func,
         )
 
     def _mla_decode_att(
         self,
-        q_nope: torch.Tensor,
-        q_rope: torch.Tensor,
-        kv: torch.Tensor,
+        q: Tuple[torch.Tensor, torch.Tensor],
+        k: torch.Tensor,
+        v: torch.Tensor,
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
@@ -113,6 +113,8 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         from ..triton_kernel.mla_att.decode_att import gqa_token_decode_attention_flash_decoding
 
         qk_rope_head_dim = 64
+        q_nope, q_rope = q
+        kv = k
 
         out = gqa_token_decode_attention_flash_decoding(
             q_nope=q_nope,

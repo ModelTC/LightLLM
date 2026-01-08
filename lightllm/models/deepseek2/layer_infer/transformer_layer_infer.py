@@ -374,31 +374,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             o_tensor = tmp_output
         return o_tensor
 
-    def _context_attention_flashinfer_kernel_with_CC(
-        self,
-        q: torch.Tensor,
-        kv,
-        infer_state: Deepseek2FlashInferStateInfo,
-        layer_weight: Deepseek2TransformerLayerWeight,
-        out=None,
-    ) -> torch.Tensor:
-        k_nope, k_rope, v = self._decompress_kv(
-            kv,
-            infer_state,
-            layer_weight,
-            False,
-            infer_state.total_token_num,
-            infer_state.b_seq_len,
-            infer_state.max_value_in_b_seq_len,
-            infer_state.b1_kv_start_loc,
-        )
-        o_tensor = (
-            self.alloc_tensor((q.shape[0], q.shape[1], self.qk_nope_head_dim), dtype=q.dtype) if out is None else out
-        )
-        k = torch.cat([k_nope, torch.repeat_interleave(k_rope, self.tp_q_head_num_, dim=-2)], dim=-1)
-        infer_state.prefill_wrapper.run(q, k, v, out=o_tensor)
-        return o_tensor
-
     def _context_attention_kernel_with_CC(
         self,
         q: torch.Tensor,
@@ -450,25 +425,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         return o_tensor
 
-    def _token_gqa_decode_attention_flashinfer(
-        self, q, infer_state: Deepseek2FlashInferStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
-    ):
-        q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
-        q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
-
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype)
-
-        infer_state.decode_wrapper.run(
-            q_nope,
-            q_rope,
-            kv[:, :, : -self.qk_rope_head_dim],
-            kv[:, :, -self.qk_rope_head_dim :],
-            out=o_tensor,
-            return_lse=False,
-        )
-        return o_tensor
-
     def _token_gqa_decode_attention_flashdecoding(
         self, q, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight, out=None
     ):
@@ -485,27 +441,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
 
         return out
-
-    def _copy_kv_to_mem_cache_normal(self, buffer, mem_index, mem_manager):
-        destindex_copy_kv(
-            buffer[:, :, : self.kv_lora_rank],
-            buffer[:, :, self.kv_lora_rank :],
-            mem_index,
-            mem_manager.kv_buffer[self.layer_num_][:, :, : self.kv_lora_rank],
-            mem_manager.kv_buffer[self.layer_num_][:, :, self.kv_lora_rank :],
-        )
-        return
-
-    def _copy_kv_to_mem_cache_fp8(self, buffer, mem_index, mem_manager):
-        destindex_copy_kv_fp8(
-            buffer[:, :, : self.kv_lora_rank],
-            buffer[:, :, self.kv_lora_rank :],
-            mem_index,
-            mem_manager.kv_buffer[self.layer_num_][:, :, : self.kv_lora_rank].view(torch.float8_e4m3fn),
-            mem_manager.kv_buffer[self.layer_num_][:, :, self.kv_lora_rank : -2].view(torch.float8_e4m3fn),
-            mem_manager.kv_buffer[self.layer_num_][:, :, -2:].view(buffer.dtype),
-        )
-        return
 
     def _moe_ffn(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
