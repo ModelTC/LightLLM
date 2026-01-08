@@ -28,7 +28,7 @@ class MemoryManager:
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         self.size = size
         self.head_num = head_num
-        self.head_dim = head_dim * 2  # neo kv 是[k, k_h, k_w]拼在一起的
+        self.head_dim = head_dim
         self.layer_num = layer_num
         self.always_copy = always_copy
         self.dtype = dtype

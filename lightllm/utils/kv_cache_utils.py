@@ -21,6 +21,7 @@ from lightllm.common.kv_cache_mem_manager import (
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
     Deepseek2FP8KVMemoryManager,
+    NeoMemoryManager,
 )
 
 from typing import List, Tuple, Optional
@@ -83,17 +84,6 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
         )
-    elif mem_manager_class is MemoryManager:
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
-            num_heads=get_num_key_value_heads(args.model_dir) * 2,
-            head_dim=get_head_dim(args.model_dir),
-            data_type=get_llm_data_type(),
-            scale_head_dim=0,
-            scale_data_type=get_llm_data_type(),
-        )
     elif mem_manager_class is PPLINT8KVMemoryManager:
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
@@ -103,6 +93,28 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             head_dim=get_head_dim(args.model_dir),
             data_type=torch.int8,
             scale_head_dim=get_head_dim(args.model_dir) // 8,
+            scale_data_type=get_llm_data_type(),
+        )
+    elif mem_manager_class is PPLINT8KVMemoryManager:
+        cpu_cache_meta = CpuKVCacheMeta(
+            page_num=0,
+            token_page_size=args.cpu_cache_token_page_size,
+            layer_num=get_layer_num(args.model_dir),
+            num_heads=get_num_key_value_heads(args.model_dir) * 2,
+            head_dim=get_head_dim(args.model_dir) * 2,
+            data_type=get_llm_data_type(),
+            scale_head_dim=0,
+            scale_data_type=get_llm_data_type(),
+        )
+    elif mem_manager_class is MemoryManager:
+        cpu_cache_meta = CpuKVCacheMeta(
+            page_num=0,
+            token_page_size=args.cpu_cache_token_page_size,
+            layer_num=get_layer_num(args.model_dir),
+            num_heads=get_num_key_value_heads(args.model_dir) * 2,
+            head_dim=get_head_dim(args.model_dir),
+            data_type=get_llm_data_type(),
+            scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
         )
     else:
