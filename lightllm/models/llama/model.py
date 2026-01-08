@@ -70,9 +70,6 @@ class LlamaTpPartModel(TpPartBaseModel):
         )
         return
 
-    def _init_inferstate_cls(self):
-        pass
-
     def _init_custom(self):
         """
         模型特殊的一些初始化

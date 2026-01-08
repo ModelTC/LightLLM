@@ -42,9 +42,6 @@ class MistralTpPartModel(TpPartBaseModel):
         self._init_to_get_rotary()
         return
 
-    def _init_inferstate_cls(self):
-        pass
-
     def _init_mem_manager(self):
         # Dealing with head_dim_!=n_embed // num_attention_heads scenarios, such as mistral 13B
         head_dim = self.config["hidden_size"] // self.config["num_attention_heads"]

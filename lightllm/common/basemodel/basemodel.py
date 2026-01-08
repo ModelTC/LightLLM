@@ -118,7 +118,6 @@ class TpPartBaseModel:
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
-        self._init_inferstate_cls()
         # wait必须在init cudagraph 之前，避免错误捕获
         self._wait_other_modules_ready()
 
@@ -155,9 +154,6 @@ class TpPartBaseModel:
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
-
-    def _init_inferstate_cls(self):
-        pass
 
     @final
     def _verify_must(self):
