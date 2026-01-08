@@ -339,22 +339,24 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm_prefill_att_backend",
         type=str,
-        choices=[None, "triton", "fa3", "flashinfer"],
-        default=None,
+        nargs="+",
+        choices=["None", "triton", "fa3", "flashinfer"],
+        default=["None"],
         help="""prefill attention kernel used in llm""",
     )
     parser.add_argument(
         "--llm_decode_att_backend",
         type=str,
-        choices=[None, "triton", "fa3", "flashinfer"],
-        default=None,
+        nargs="+",
+        choices=["None", "triton", "fa3", "flashinfer"],
+        default=["None"],
         help="""decode attention kernel used in llm""",
     )
     parser.add_argument(
         "--llm_kv_type",
         type=str,
-        choices=[None, "int8kv", "int4kv", "fp8kv"],
-        default=None,
+        choices=["None", "int8kv", "int4kv", "fp8kv"],
+        default="None",
         help="""kv type used in llm, None for dtype that llm used in config.json""",
     )
     parser.add_argument(

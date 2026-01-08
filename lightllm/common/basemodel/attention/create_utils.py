@@ -1,15 +1,18 @@
 from lightllm.utils.envs_utils import get_env_start_args
 from .base_att import BaseAttBackend
-from .triton_backend import TritonAttBackend
-from .int4kv_triton_backend import Int4kvTritonAttBackend
-from .int8kv_triton_backend import Int8kvTritonAttBackend
-from .fa3_backend import Fa3AttBackend
-from .fp8_fa3_backend import Fp8Fa3AttBackend
-from .flashinfer_backend import FlashInferAttBackend
-from .fp8_flashinfer_backend import Fp8FlashInferAttBackend
+from .triton.fp import TritonAttBackend
+from .triton.int4kv import Int4kvTritonAttBackend
+from .triton.int8kv import Int8kvTritonAttBackend
+from .triton.mla import MlaTritonAttBackend
+from .fa3.fp import Fa3AttBackend
+from .fa3.fp8 import Fp8Fa3AttBackend
+from .fa3.mla import MlaFa3AttBackend
+from .flashinfer.fp8 import Fp8FlashInferAttBackend
+from .flashinfer.fp import FlashInferAttBackend
+from .flashinfer.mla import MlaFlashInferAttBackend
 
-backend_dict = {
-    None: {
+data_type_to_backend = {
+    "None": {
         "triton": TritonAttBackend,
         "fa3": Fa3AttBackend,
         "flashinfer": FlashInferAttBackend,
@@ -26,36 +29,52 @@ backend_dict = {
     },
 }
 
+mla_data_type_to_backend = {
+    "None": {
+        "triton": MlaTritonAttBackend,
+        "fa3": MlaFa3AttBackend,
+        "flashinfer": MlaFlashInferAttBackend,
+    },
+}
 
-def get_prefill_att_backend_class() -> BaseAttBackend:
+
+def get_prefill_att_backend_class(index=0) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
-    if args.llm_prefill_att_backend is not None:
-        return backend_dict[llm_dtype][args.llm_prefill_att_backend]
+    backend_str = args.llm_prefill_att_backend[index]
+    if backend_str != "None":
+        return data_type_to_backend[llm_dtype][backend_str]
     else:
         # 根据环境自动选择最好的
         raise NotImplementedError(f"error")
 
 
-def get_decode_att_backend_class() -> BaseAttBackend:
+def get_decode_att_backend_class(index=0) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
-    if args.llm_decode_att_backend is not None:
-        return backend_dict[llm_dtype][args.llm_decode_att_backend]
+    backend_str = args.llm_decode_att_backend[index]
+    if backend_str != "None":
+        return data_type_to_backend[llm_dtype][backend_str]
     else:
         # 根据环境自动选择最好的
         raise NotImplementedError(f"error")
 
 
-def get_mla_prefill_att_backend_class() -> BaseAttBackend:
-    # args = get_env_start_args()
-    # llm_dtype = args.llm_kv_type
-    # 根据环境自动选择最好的
-    raise NotImplementedError(f"error")
+def get_mla_prefill_att_backend_class(index=0) -> BaseAttBackend:
+    args = get_env_start_args()
+    llm_dtype = args.llm_kv_type
+    backend_str = args.llm_prefill_att_backend[index]
+    if backend_str != "None":
+        return mla_data_type_to_backend[llm_dtype][backend_str]
+    else:
+        raise NotImplementedError(f"error")
 
 
-def get_mla_decode_att_backend_class() -> BaseAttBackend:
-    # args = get_env_start_args()
-    # llm_dtype = args.llm_kv_type
-    # 根据环境自动选择最好的
-    raise NotImplementedError(f"error")
+def get_mla_decode_att_backend_class(index=0) -> BaseAttBackend:
+    args = get_env_start_args()
+    llm_dtype = args.llm_kv_type
+    backend_str = args.llm_decode_att_backend[index]
+    if backend_str != "None":
+        return mla_data_type_to_backend[llm_dtype][backend_str]
+    else:
+        raise NotImplementedError(f"error")
