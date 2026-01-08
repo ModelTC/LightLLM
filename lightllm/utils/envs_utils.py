@@ -26,10 +26,16 @@ def get_unique_server_name():
 def set_cuda_arch(args):
     if not torch.cuda.is_available():
         return
-    if args.enable_flashinfer_prefill or args.enable_flashinfer_decode:
+
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    args: StartArgs = args
+
+    if "flashinfer" in args.llm_prefill_att_backend or "flashinfer" in args.llm_decode_att_backend:
         capability = torch.cuda.get_device_capability()
         arch = f"{capability[0]}.{capability[1]}"
         os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"
+    return
 
 
 def set_env_start_args(args):

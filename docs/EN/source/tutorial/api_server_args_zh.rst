@@ -325,18 +325,6 @@ Performance Optimization Parameters
 .. option:: --enable_decode_microbatch_overlap
 
     The inference backend will use microbatch overlap mode for decoding
-    
-.. option:: --enable_flashinfer_prefill
-
-    The inference backend will use flashinfer's attention kernel for prefill
-    
-.. option:: --enable_flashinfer_decode
-
-    The inference backend will use flashinfer's attention kernel for decoding
-    
-.. option:: --enable_fa3
-
-    The inference backend will use fa3 attention kernel for prefill and decoding
 
 .. option:: --disable_cudagraph
 

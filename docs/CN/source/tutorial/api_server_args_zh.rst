@@ -327,17 +327,9 @@ attention类型选择参数
 
     推理后端将为解码使用微批次重叠模式
     
-.. option:: --enable_flashinfer_prefill
+.. option:: --llm_kv_type
 
-    推理后端将为预填充使用 flashinfer 的注意力 kernel
-    
-.. option:: --enable_flashinfer_decode
-
-    推理后端将为解码使用 flashinfer 的注意力 kernel
-    
-.. option:: --enable_fa3
-
-    推理后端将为预填充和解码使用 fa3 注意力 kernel
+    推理后端使用什么类型的数据存储kv cache, 可选值为 "None", "int8kv", "int4kv", "fp8kv"
 
 .. option:: --disable_cudagraph
 

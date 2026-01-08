@@ -116,8 +116,6 @@ class StartArgs:
     quant_cfg: Optional[str] = field(default=None)
     vit_quant_type: Optional[str] = field(default=None)
     vit_quant_cfg: Optional[str] = field(default=None)
-    enable_flashinfer_prefill: bool = field(default=False)
-    enable_flashinfer_decode: bool = field(default=False)
     llm_prefill_att_backend: List[str] = field(
         default=("None",), metadata={"choices": ["None", "triton", "fa3", "flashinfer"]}
     )
@@ -161,6 +159,3 @@ class StartArgs:
     # multi_modal
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
-
-    # kernel setting
-    enable_fa3: bool = field(default=False)

@@ -33,9 +33,6 @@ class LlamaTpPartModel(TpPartBaseModel):
     infer_state_class = LlamaInferStateInfo
 
     def __init__(self, kvargs):
-        self.enable_flashinfer = (
-            get_env_start_args().enable_flashinfer_prefill or get_env_start_args().enable_flashinfer_decode
-        )
         super().__init__(kvargs)
         return
 
