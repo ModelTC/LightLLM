@@ -119,10 +119,10 @@ class StartArgs:
     enable_flashinfer_prefill: bool = field(default=False)
     enable_flashinfer_decode: bool = field(default=False)
     llm_prefill_att_backend: List[str] = field(
-        default=["None"], metadata={"choices": ["None", "triton", "fa3", "flashinfer"]}
+        default=("None",), metadata={"choices": ["None", "triton", "fa3", "flashinfer"]}
     )
     llm_decode_att_backend: List[str] = field(
-        default=["None"], metadata={"choices": ["None", "triton", "fa3", "flashinfer"]}
+        default=("None",), metadata={"choices": ["None", "triton", "fa3", "flashinfer"]}
     )
     llm_kv_type: str = field(default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv"]})
     llm_kv_quant_group_size: int = field(default=8)
