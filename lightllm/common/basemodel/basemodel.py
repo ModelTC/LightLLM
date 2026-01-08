@@ -60,7 +60,6 @@ class TpPartBaseModel:
         self.max_total_token_num = kvargs["max_total_token_num"]
         self.batch_max_tokens = kvargs.get("batch_max_tokens", None)
         self.load_way = kvargs.get("load_way", "HF")
-        self.mode = kvargs.get("mode", [])
         self.weight_dict = kvargs.get("weight_dict", None)
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
@@ -170,15 +169,12 @@ class TpPartBaseModel:
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_weights(self, start_layer_index=0):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
-        )
+        self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 i,
                 self.data_type,
                 network_config=self.config,
-                mode=self.mode,
                 quant_cfg=self.quant_cfg,
             )
             for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
@@ -228,10 +224,10 @@ class TpPartBaseModel:
         return
 
     def _init_infer_layer(self, start_layer_index=0):
-        self.pre_infer = self.pre_layer_infer_class(network_config=self.config, mode=self.mode)
-        self.post_infer = self.post_layer_infer_class(network_config=self.config, mode=self.mode)
+        self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
+        self.post_infer = self.post_layer_infer_class(network_config=self.config)
         self.layers_infer = [
-            self.transformer_layer_infer_class(i, network_config=self.config, mode=self.mode)
+            self.transformer_layer_infer_class(i, network_config=self.config)
             for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
         ]
         return

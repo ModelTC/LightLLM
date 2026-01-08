@@ -63,7 +63,6 @@ class StartArgs:
     nccl_host: str = field(default="127.0.0.1")
     nccl_port: int = field(default=28765)
     use_config_server_to_init_nccl: bool = field(default=False)
-    mode: List[str] = field(default_factory=list)
     trust_remote_code: bool = field(default=False)
     disable_log_stats: bool = field(default=False)
     log_stats_interval: int = field(default=10)
