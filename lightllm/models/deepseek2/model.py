@@ -4,8 +4,6 @@ from lightllm.models.registry import ModelRegistry
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-from lightllm.models.deepseek2.flashinfer_struct import Deepseek2FlashInferStateInfo
-from lightllm.models.deepseek2.flashattention_infer_struct import Deepseek2FlashAttentionStateInfo
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.log_utils import init_logger
