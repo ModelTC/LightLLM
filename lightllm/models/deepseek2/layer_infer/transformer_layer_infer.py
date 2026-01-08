@@ -135,7 +135,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             b_req_idx=infer_state.b_req_idx,
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
             b_seq_len=infer_state.b_seq_len,
-            b_kv_start_loc=infer_state.b1_kv_start_loc[:-1],
+            b_kv_start_loc=infer_state.b1_cu_kv_seq_len[:-1],
             max_kv_seq_len=infer_state.max_kv_seq_len,
         )
         # CC
