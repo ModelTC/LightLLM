@@ -228,6 +228,7 @@ class ChatCompletionRequest(BaseModel):
     ignore_eos: Optional[bool] = False
     role_settings: Optional[Dict[str, str]] = Field(default=None, alias="role_setting")
     character_settings: Optional[List[Dict[str, str]]] = None
+    system_instruction: Optional[str] = None
 
     # Class variables to store loaded default values
     _loaded_defaults: ClassVar[Dict[str, Any]] = {}
