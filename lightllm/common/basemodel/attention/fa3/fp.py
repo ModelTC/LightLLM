@@ -136,9 +136,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
                 device=self.infer_state.b_seq_len.device,
             )
             b_kv_seq_len = self.infer_state.b_seq_len[mtp_size - 1 :: mtp_size]
-            b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(
-                b_q_seq_len, b_kv_seq_len[mtp_size - 1 :: mtp_size]
-            )
+            b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
             self.cu_seqlens_q = b1_cu_q_seq_len.int()
             self.cu_seqlens_k = b1_cu_kv_seq_len.int()
         else:
