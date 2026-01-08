@@ -924,7 +924,7 @@ class HttpServerManager:
             await self.abort_request(AbortReq(abort_all=True))
 
         if request.flush_cache:
-            await self.flush_cache()
+            await self.flush_cache(FlushCacheReq())
 
         return await self.http_to_model_special_request(
             GeneralHttpToModelRpcReq(func_name="update_weights_from_distributed", func_args=request)
@@ -935,7 +935,7 @@ class HttpServerManager:
             await self.abort_request(AbortReq(abort_all=True))
 
         if request.flush_cache:
-            await self.flush_cache()
+            await self.flush_cache(FlushCacheReq())
 
         return await self.http_to_model_special_request(
             GeneralHttpToModelRpcReq(func_name="update_weights_from_tensor", func_args=request)

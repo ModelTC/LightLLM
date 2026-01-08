@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -83,7 +84,13 @@ def setup_signal_handlers(http_server_process, process_manager):
     return
 
 
-def normal_or_p_d_start(args: StartArgs):
+def _set_envs_and_config(args: StartArgs):
+    mp.set_start_method("spawn", force=True)
+
+
+def _launch_subprocesses(args: StartArgs):
+
+    _set_envs_and_config(args)
     set_unique_server_name(args)
 
     if not args.disable_shm_warning:
@@ -349,6 +356,13 @@ def normal_or_p_d_start(args: StartArgs):
             (args,),
         ],
     )
+
+    return process_manager
+
+
+def normal_or_p_d_start(args: StartArgs):
+
+    process_manager = _launch_subprocesses(args)
 
     # 启动 gunicorn
     command = [

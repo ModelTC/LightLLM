@@ -335,6 +335,7 @@ async def handle_request_common(request_obj, handler):
         else:
             return create_error_response(HTTPStatus.BAD_REQUEST, ret.msg)
     except Exception as e:
+        logger.error("handle_request_common (%s) error occurred: %s", str(request_obj), str(e), exc_info=True)
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
 
 

@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 
 class MemoryTag(Enum):
     KV_CACHE = "kv_cache"
-    WEIGHT = "weight"
+    WEIGHT = "weights"
     GRAPH = "graph"
 
     def is_kv_cache(self):
