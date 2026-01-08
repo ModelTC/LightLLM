@@ -5,8 +5,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, CO
 
 
 class Qwen2RewardPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
         del self.lm_head_weight_
         self.score_up_weight_ = ROWMMWeight(
             weight_names="score.0.weight",

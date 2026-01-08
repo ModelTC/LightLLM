@@ -16,8 +16,8 @@ logger = init_logger(__name__)
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     """ """
 
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
         self.tp_q_head_num_ = network_config["num_attention_heads"] // self.tp_world_size_
         self.tp_k_head_num_ = max(network_config["num_key_value_heads"] // self.tp_world_size_, 1)

@@ -10,8 +10,8 @@ logger = init_logger(__name__)
 
 
 class MistralMTPTransformerLayerInfer(MistralTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         return
 
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):

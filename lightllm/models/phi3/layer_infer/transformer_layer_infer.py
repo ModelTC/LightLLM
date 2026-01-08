@@ -7,8 +7,8 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 class Phi3TransformerLayerInfer(LlamaTransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         return
 
     def _get_qkv(self, input_emb, infer_state: LlamaInferStateInfo, layer_weight: Phi3TransformerLayerWeight):

@@ -13,8 +13,8 @@ logger = init_logger(__name__)
 
 
 class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
         return
 

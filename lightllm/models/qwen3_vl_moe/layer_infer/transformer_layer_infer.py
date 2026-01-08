@@ -11,8 +11,8 @@ from lightllm.models.qwen3_vl.triton_kernel.deepstack_multimodal_emb import appl
 
 
 class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.mrope_section = torch.tensor(
             network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"
         )

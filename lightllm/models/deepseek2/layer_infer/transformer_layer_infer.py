@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 
 
 class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
+    def __init__(self, layer_num, network_config):
         self.tp_k_head_num_ = 1
         self.tp_v_head_num_ = 1
         self.qk_nope_head_dim = network_config["qk_nope_head_dim"]
@@ -51,7 +51,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                 mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
         self.enable_cc_method = not os.getenv("DISABLE_CC_METHOD", "False").upper() in ["ON", "TRUE", "1"]
-        super().__init__(layer_num, network_config, mode)
+        super().__init__(layer_num, network_config)
         self.num_heads = network_config["num_attention_heads"]
         self.num_kv_heads = network_config["num_key_value_heads"]
         return

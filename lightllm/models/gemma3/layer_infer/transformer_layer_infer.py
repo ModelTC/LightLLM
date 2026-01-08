@@ -12,8 +12,8 @@ from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.tp_k_head_num_ = network_config["num_key_value_heads"]
         self.tp_v_head_num_ = network_config["num_key_value_heads"]
         self.eps_ = 1e-6

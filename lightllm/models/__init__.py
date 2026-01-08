@@ -1,4 +1,3 @@
-from lightllm.models.cohere.model import CohereTpPartModel
 from lightllm.models.mixtral.model import MixtralTpPartModel
 from lightllm.models.bloom.model import BloomTpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel

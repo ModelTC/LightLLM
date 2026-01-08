@@ -13,7 +13,7 @@ from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_m
 class ViTTransformerLayerInfer:
     """ """
 
-    def __init__(self, layer_num, network_config, mode=[]):
+    def __init__(self, layer_num, network_config):
         self.tp_rank_ = get_current_rank_in_dp()
         self.tp_world_size_ = get_dp_world_size()
         self.eps_ = network_config["layer_norm_eps"]
@@ -25,7 +25,6 @@ class ViTTransformerLayerInfer:
         self.tp_padding_embed_dim_ = self.tp_padding_head_num * self.head_dim_
 
         self.network_config_ = network_config
-        self.mode = mode
         self.layer_num_ = layer_num
         return
 

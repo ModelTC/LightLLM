@@ -9,8 +9,8 @@ from lightllm.common.basemodel.attention.base_att import AttControl
 class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     """ """
 
-    def __init__(self, layer_num, network_config, mode):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.eps_ = network_config["layer_norm_epsilon"]
         self.tp_q_head_num_ = network_config["num_attention_heads"] // self.tp_world_size_
         self.tp_k_head_num_ = self.tp_q_head_num_

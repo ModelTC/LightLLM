@@ -8,8 +8,8 @@ logger = init_logger(__name__)
 
 
 class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.hidden_size = self.network_config_["hidden_size"]
         self.alpha = 1.702
         self.limit = 7.0

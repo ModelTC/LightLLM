@@ -11,10 +11,9 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
         layer_num,
         data_type,
         network_config,
-        mode=[],
         quant_cfg=None,
     ):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
     def _init_weight(self):

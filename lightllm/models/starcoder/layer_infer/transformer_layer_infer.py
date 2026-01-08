@@ -6,8 +6,8 @@ from functools import partial
 class StarcoderTransformerLayerInfer(BloomTransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.tp_k_head_num_ = 1
         self.tp_v_head_num_ = 1
         self._bind_func()
