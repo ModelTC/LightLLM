@@ -1,6 +1,6 @@
 import dataclasses
 import torch
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Tuple
 
 
@@ -43,7 +43,7 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
-        from ..triton_kernel.mla_att.prefill_att import context_attention_fwd_with_v
+        from ...triton_kernel.mla_att.prefill_att import context_attention_fwd_with_v
 
         qk_rope_head_dim = 64
         q_nope, q_rope = q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:]
@@ -110,7 +110,7 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         assert att_control.mla_decode
         softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
 
-        from ..triton_kernel.mla_att.decode_att import gqa_token_decode_attention_flash_decoding
+        from ...triton_kernel.mla_att.decode_att import gqa_token_decode_attention_flash_decoding
 
         qk_rope_head_dim = 64
         q_nope, q_rope = q

@@ -1,7 +1,7 @@
 import dataclasses
 import torch
 from lightllm.utils.envs_utils import get_env_start_args
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, Tuple
 from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 
@@ -83,7 +83,7 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
 
         max_kv_seq_len = self.infer_state.max_kv_seq_len
 
-        from ..triton_kernel.kv_copy.ppl_int8kv_copy_kv import dequantize_int8kv
+        from ...triton_kernel.kv_copy.ppl_int8kv_copy_kv import dequantize_int8kv
 
         dequantize_int8kv(
             k=k,
@@ -100,7 +100,7 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
             quant_group_size=self.backend.quant_group_size,
         )
 
-        from ..triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
 
         context_attention_fwd_contiguous_kv(
             q=q,
@@ -161,7 +161,7 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
 
-        from ..triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse import (
+        from ...triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse import (
             token_decode_attention_flash_decoding,
         )
 
@@ -184,7 +184,7 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         v_scale: torch.Tensor,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        from ..triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding import (
+        from ...triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding import (
             token_decode_attention_flash_decoding,
         )
 

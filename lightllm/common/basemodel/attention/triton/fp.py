@@ -1,6 +1,6 @@
 import dataclasses
 import torch
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
 
 
@@ -45,7 +45,7 @@ class TritonPrefillAttState(BasePrefillAttState):
     ):
         out = alloc_func(q.shape, q.dtype)
 
-        from ..triton_kernel.alibi_att.context_flashattention_nopad import context_attention_fwd
+        from ...triton_kernel.alibi_att.context_flashattention_nopad import context_attention_fwd
 
         context_attention_fwd(
             q,
@@ -63,7 +63,7 @@ class TritonPrefillAttState(BasePrefillAttState):
         return out
 
     def _nomarl_prefill_att(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty):
-        from ..triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd
+        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd
 
         out = alloc_func(q.shape, q.dtype)
         context_attention_fwd(
@@ -119,7 +119,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
-        from ..triton_kernel.alibi_att.token_flashattention_nopad import token_attention_fwd
+        from ...triton_kernel.alibi_att.token_flashattention_nopad import token_attention_fwd
 
         out = alloc_func(q.shape, q.dtype)
         token_attention_fwd(
@@ -145,7 +145,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         v: torch.Tensor,
         alloc_func=torch.empty,
     ):
-        from ..triton_kernel.att.decode_att.mha.flash_decoding.flash_decoding import (
+        from ...triton_kernel.att.decode_att.mha.flash_decoding.flash_decoding import (
             token_decode_attention_flash_decoding,
         )
 
@@ -168,7 +168,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         v: torch.Tensor,
         alloc_func=torch.empty,
     ):
-        from ..triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding import (
+        from ...triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding import (
             gqa_token_decode_attention_flash_decoding,
         )
 
@@ -193,7 +193,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         # TODO USE , 在特定场景下比 _normal_decode_gqa_flash_decoding_att 省显存
-        from ..triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_vsm import (
+        from ...triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_vsm import (
             gqa_token_decode_attention_flash_decoding_vsm,
         )
 
@@ -218,7 +218,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         # TODO USE , 在特定场景下比 _normal_decode_gqa_flash_decoding_att 省显存
-        from ..triton_kernel.att.decode_att.gqa.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
+        from ...triton_kernel.att.decode_att.gqa.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
 
         out = alloc_func(q.shape, q.dtype)
 
@@ -248,7 +248,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         calcu_shape1 = (batch_size, q_head_num, head_dim)
         att_m_tensor = alloc_func((q_head_num, total_token_num), torch.float32)
 
-        from ..triton_kernel.att.decode_att.mha.stage3_decode_att.token_attention_nopad_att1 import token_att_fwd
+        from ...triton_kernel.att.decode_att.mha.stage3_decode_att.token_attention_nopad_att1 import token_att_fwd
 
         token_att_fwd(
             q.view(calcu_shape1),
@@ -262,7 +262,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         )
 
         o_tensor = alloc_func(q.shape, q.dtype)
-        from ..triton_kernel.att.decode_att.mha.stage3_decode_att.token_attention_softmax_and_reducev import (
+        from ...triton_kernel.att.decode_att.mha.stage3_decode_att.token_attention_softmax_and_reducev import (
             token_softmax_reducev_fwd,
         )
 

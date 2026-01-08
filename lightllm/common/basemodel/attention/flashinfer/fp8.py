@@ -1,7 +1,7 @@
 import dataclasses
 import torch
-from .base_att import AttControl
-from .flashinfer_backend import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
+from ..base_att import AttControl
+from .fp import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
 
 
 class Fp8FlashInferAttBackend(FlashInferAttBackend):

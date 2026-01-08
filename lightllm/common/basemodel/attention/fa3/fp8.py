@@ -1,6 +1,6 @@
 import dataclasses
 import torch
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
@@ -10,7 +10,7 @@ from lightllm.common.basemodel.triton_kernel.q_per_head_fp8_quant import q_per_h
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
 from typing import Union
-from .fa3_backend import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
+from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
 if HAS_VLLM:
     scaled_fp8_quant = vllm_ops.scaled_fp8_quant

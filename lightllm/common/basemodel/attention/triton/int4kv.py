@@ -1,7 +1,7 @@
 import dataclasses
 import torch
 from lightllm.utils.envs_utils import get_env_start_args
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, Tuple
 
 
@@ -82,7 +82,7 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
 
         max_kv_seq_len = self.infer_state.max_kv_seq_len
 
-        from ..triton_kernel.kv_copy.ppl_int4kv_copy_kv import dequantize_int4kv
+        from ...triton_kernel.kv_copy.ppl_int4kv_copy_kv import dequantize_int4kv
 
         dequantize_int4kv(
             k=k,
@@ -99,7 +99,7 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
             quant_group_size=self.backend.quant_group_size,
         )
 
-        from ..triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
 
         context_attention_fwd_contiguous_kv(
             q=q,
@@ -157,7 +157,7 @@ class Int4kvTritonDecodeAttState(BaseDecodeAttState):
         v_scale: torch.Tensor,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        from ..triton_kernel.att.decode_att.int4kv.ppl_int4kv_flash_decoding import (
+        from ...triton_kernel.att.decode_att.int4kv.ppl_int4kv_flash_decoding import (
             token_decode_attention_flash_decoding,
         )
 

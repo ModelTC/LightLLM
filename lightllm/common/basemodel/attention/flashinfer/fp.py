@@ -1,8 +1,8 @@
 import dataclasses
 import torch
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
-from ..triton_kernel.repack_kv_index import repack_kv_index
+from ...triton_kernel.repack_kv_index import repack_kv_index
 
 
 class FlashInferAttBackend(BaseAttBackend):

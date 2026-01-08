@@ -1,6 +1,6 @@
 import dataclasses
 import torch
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING, Tuple
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
