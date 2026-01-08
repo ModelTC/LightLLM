@@ -269,12 +269,13 @@ def flash_decode_stage1(
     gqa_group_size = q.shape[1] // k.shape[1]
     assert triton.next_power_of_2(Lk) == Lk
     KV_QUANT_GROUP_SIZE = v.shape[-1] // v_scale.shape[-1]
-    assert KV_QUANT_GROUP_SIZE == 8
+    assert triton.next_power_of_2(KV_QUANT_GROUP_SIZE) == KV_QUANT_GROUP_SIZE
     BLOCK_HEAD = triton.next_power_of_2(gqa_group_size)
     BLOCK_BATCH = triton.next_power_of_2(max_batch_group_size)
     if BLOCK_HEAD * BLOCK_BATCH < 16:
         BLOCK_BATCH = 16 // BLOCK_HEAD
 
+    assert k.stride() == v.stride()
     _fwd_kernel_flash_decode_diverse_stage1[grid](
         Q=q,
         stride_qbs=q.stride(0),

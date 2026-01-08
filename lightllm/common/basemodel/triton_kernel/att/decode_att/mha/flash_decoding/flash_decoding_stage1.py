@@ -117,7 +117,7 @@ def flash_decode_stage1(
     batch, head_num = B_req_idx.shape[0], q.shape[1]
     grid = (batch, head_num, triton.cdiv(max_len_in_batch, BLOCK_SEQ))
     gqa_group_size = q.shape[1] // k.shape[1]
-
+    assert k.stride() == v.stride()
     _fwd_kernel_flash_decode_stage1[grid](
         q,
         k,

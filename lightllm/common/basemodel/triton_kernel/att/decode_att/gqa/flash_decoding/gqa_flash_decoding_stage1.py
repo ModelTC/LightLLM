@@ -123,8 +123,18 @@ def _fwd_kernel_flash_decode_stage1(
 
 @torch.no_grad()
 def flash_decode_stage1(
-    q, k, v, Req_to_tokens, B_req_idx, B_Seqlen, max_len_in_batch, mid_out, mid_out_logsumexp, block_seq
+    q,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    Req_to_tokens,
+    B_req_idx,
+    B_Seqlen,
+    max_len_in_batch,
+    mid_out,
+    mid_out_logsumexp,
+    block_seq,
 ):
+    assert k.stride() == v.stride()
     BLOCK_SEQ = block_seq
     BLOCK_N = 16
     assert BLOCK_SEQ % BLOCK_N == 0
