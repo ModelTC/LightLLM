@@ -11,8 +11,8 @@ from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 class TransformerLayerInferTpl(TransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, network_config, mode):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         # need to set by subclass
         self.eps_ = 1e-5
         self.tp_q_head_num_ = -1

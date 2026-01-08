@@ -9,12 +9,11 @@ logger = init_logger(__name__)
 
 
 class TransformerLayerWeight(BaseLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode, quant_cfg):
+    def __init__(self, layer_num, data_type, network_config, quant_cfg):
         super().__init__()
         self.layer_num_ = layer_num
         self.data_type_ = data_type
         self.network_config_ = network_config
-        self.mode = mode
         self.quant_cfg = quant_cfg
         self._parse_config()
         self._init_weight_names()
