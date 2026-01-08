@@ -1,14 +1,9 @@
 from functools import partial
 from typing import Tuple
-
 import torch
 import torch.distributed as dist
-
 from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_template import TransformerLayerInferTpl
-from lightllm.utils.infer_utils import mark_cost_time
-
 from ...infer_struct import InferStateInfo
-from ..transformer_layer_infer import TransformerLayerInfer
 from lightllm.distributed.communication_op import all_reduce
 
 
@@ -29,11 +24,6 @@ class TransformerLayerCohereInferTpl(TransformerLayerInferTpl):
 
     def _k_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
-
-    def _bind_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
-        self._att_norm = partial(TransformerLayerCohereInferTpl._q_norm, self)
-        self._q_norm = partial(TransformerLayerCohereInferTpl._k_norm, self)
-        self._k_norm = partial(TransformerLayerCohereInferTpl._att_norm, self)
 
     def _rotary_emb_fwd(self, q, kv, position_cos, position_sin):
         raise Exception("need to impl")

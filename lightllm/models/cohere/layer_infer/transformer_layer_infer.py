@@ -30,6 +30,15 @@ class CohereTransformerLayerInfer(TransformerLayerCohereInferTpl):
         self._bind_norm()
         self._bind_attn()
 
+    def _bind_norm(self):
+        self._att_norm = partial(CohereTransformerLayerInfer._att_norm, self)
+        self._q_norm = partial(CohereTransformerLayerInfer._q_norm, self)
+        self._k_norm = partial(CohereTransformerLayerInfer._k_norm, self)
+
+    def _bind_attn(self):
+        self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
+        self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_attention_kernel, self)
+
     def _rotary_emb_fwd(self, q, kv, position_cos, position_sin):
         return rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
@@ -51,15 +60,6 @@ class CohereTransformerLayerInfer(TransformerLayerCohereInferTpl):
 
     def _k_norm(self, input, infer_state, layer_weight: CohereTransformerLayerWeight):
         return layernorm_forward(input, layer_weight.k_norm_weight_.weight, self.eps_)
-
-    def _bind_norm(self):
-        self._att_norm = partial(CohereTransformerLayerInfer._att_norm, self)
-        self._q_norm = partial(CohereTransformerLayerInfer._q_norm, self)
-        self._k_norm = partial(CohereTransformerLayerInfer._k_norm, self)
-
-    def _bind_attn(self):
-        # no need to re-impl
-        LlamaTransformerLayerInfer._bind_attention(self)
 
     def _get_o(
         self, input, infer_state: CohereInferStateInfo, layer_weight: CohereTransformerLayerWeight

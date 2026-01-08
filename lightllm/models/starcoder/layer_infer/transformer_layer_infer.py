@@ -1,5 +1,6 @@
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+from functools import partial
 
 
 class StarcoderTransformerLayerInfer(BloomTransformerLayerInfer):
@@ -13,5 +14,6 @@ class StarcoderTransformerLayerInfer(BloomTransformerLayerInfer):
         return
 
     def _bind_func(self):
-        LlamaTransformerLayerInfer._bind_attention(self)
+        self._context_attention_kernel = partial(LlamaTransformerLayerInfer._context_attention_kernel, self)
+        self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_attention_kernel, self)
         return
