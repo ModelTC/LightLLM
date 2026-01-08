@@ -24,6 +24,10 @@ class InferStateInfo:
         self.prefill_att_state: BasePrefillAttState = None
         self.decode_att_state: BaseDecodeAttState = None
 
+        # 保留的扩展, 支持线性att与标准att混合使用时使用
+        self.prefill_att_state1: BasePrefillAttState = None
+        self.decode_att_state1: BaseDecodeAttState = None
+
         self.input_ids: torch.Tensor = None
         self.batch_size: int = None
         self.total_token_num: int = None
@@ -123,8 +127,12 @@ class InferStateInfo:
     def init_att_state(self):
         if self.is_prefill:
             self.prefill_att_state.init_state()
+            if self.prefill_att_state1 is not None:
+                self.prefill_att_state1.init_state()
         else:
             self.decode_att_state.init_state()
+            if self.decode_att_state1 is not None:
+                self.decode_att_state1.init_state()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():
@@ -132,6 +140,10 @@ class InferStateInfo:
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
+
+        self.decode_att_state.copy_for_decode_cuda_graph()
+        if self.decode_att_state1 is not None:
+            self.decode_att_state1.copy_for_decode_cuda_graph()
         return
 
     def prefill_dp_balance(self, input_ids: torch.Tensor):

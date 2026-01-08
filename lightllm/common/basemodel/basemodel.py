@@ -123,9 +123,13 @@ class TpPartBaseModel:
         self._wait_other_modules_ready()
 
         self._init_att_backend()
+        self._init_att_backend1()
 
         logger.info(f"use prefill att backend: {self.prefill_att_backend.__class__.__name__}")
         logger.info(f"use decode att backend: {self.decode_att_backend.__class__.__name__}")
+        if self.prefill_att_backend1 is not None:
+            logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
+            logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
         self._autotune_warmup()
         self._init_padded_req()
@@ -247,8 +251,14 @@ class TpPartBaseModel:
         return
 
     def _init_att_backend(self):
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class()(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class()(model=self)
+        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
+        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
+        return
+
+    def _init_att_backend1(self):
+        # self.prefill_att_backend1 是给后续有模型支持不同层用不同的att模块时，保留的扩展。
+        self.prefill_att_backend1: BaseAttBackend = None
+        self.decode_att_backend1: BaseAttBackend = None
         return
 
     def _init_cudagraph(self):
@@ -326,8 +336,16 @@ class TpPartBaseModel:
 
         if infer_state.is_prefill:
             infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
+            if self.prefill_att_backend1 is not None:
+                infer_state.prefill_att_state1 = self.prefill_att_backend1.create_att_prefill_state(
+                    infer_state=infer_state
+                )
         else:
             infer_state.decode_att_state = self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
+            if self.decode_att_backend1 is not None:
+                infer_state.decode_att_state1 = self.decode_att_backend1.create_att_decode_state(
+                    infer_state=infer_state
+                )
 
         return infer_state
 
