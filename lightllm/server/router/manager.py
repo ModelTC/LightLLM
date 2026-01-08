@@ -58,7 +58,6 @@ class RouterManager:
         # 判断是否是保守调度，保守调度不会发生暂停 req 的情况，但是有些场景可能影响吞吐
         self.is_safe_schedule = args.router_token_ratio == 0.0
         self.load_way = args.load_way
-        self.mode = args.mode
         self.max_total_token_num = args.max_total_token_num
         self.shm_req_manager = ShmReqManager()
         # 用共享内存进行共享，router 模块读取进行精确的调度估计
@@ -155,7 +154,6 @@ class RouterManager:
             "weight_dir": self.model_weightdir,
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
-            "mode": self.mode,
             "max_req_num": self.args.running_max_req_size + 8,
             "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
             "nccl_host": self.args.nccl_host,
