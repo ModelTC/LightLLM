@@ -411,21 +411,13 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state=infer_state,
             layer_weight=layer_weight,
         )
-        q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
-        o_tensor = self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype) if out is None else out
-        context_attention_fwd_with_v(
-            q_nope,
-            q_rope,
-            k_nope,
-            k_rope,
-            v,
-            o_tensor.view(-1, self.tp_q_head_num_, q_nope.shape[-1]),
-            infer_state.b_start_loc,
-            infer_state.b1_kv_start_loc,
-            infer_state.b_seq_len,
-            infer_state.b_ready_cache_len,
-            infer_state.max_len_in_batch,
-            self.softmax_scale,
+
+        o_tensor = infer_state.prefill_att_state.prefill_att(
+            q=q,
+            k=(k_nope, k_rope),
+            v=v,
+            att_control=AttControl(mla_prefill=True, mla_prefill_dict={"softmax_scale": self.softmax_scale}),
+            alloc_func=self.alloc_tensor,
         )
         return o_tensor
 
