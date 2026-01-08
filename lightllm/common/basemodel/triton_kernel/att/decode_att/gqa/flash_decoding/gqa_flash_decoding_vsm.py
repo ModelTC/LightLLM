@@ -421,7 +421,7 @@ def gqa_token_decode_attention_flash_decoding_vsm(
 
     if not run_config:
         if torch.cuda.is_current_stream_capturing():
-            avg_seq_len_in_batch = infer_state.max_len_in_batch
+            avg_seq_len_in_batch = infer_state.max_kv_seq_len
         else:
             avg_seq_len_in_batch = infer_state.total_token_num // batch_size
 

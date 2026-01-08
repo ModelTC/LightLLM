@@ -15,7 +15,7 @@ def gqa_token_decode_attention_flash_decoding(
     q_nope, q_rope, kv_nope, kv_rope, infer_state, softmax_scale, out=None, alloc_tensor_func=torch.empty, **run_config
 ):
     batch_size = infer_state.batch_size
-    max_len_in_batch = infer_state.max_len_in_batch
+    max_kv_seq_len = infer_state.max_kv_seq_len
 
     q_head_num, kv_lora_rank = q_nope.shape[1], q_nope.shape[2]
     q_rope_dim = q_rope.shape[2]
@@ -26,7 +26,7 @@ def gqa_token_decode_attention_flash_decoding(
 
     if not run_config:
         if torch.cuda.is_current_stream_capturing():
-            avg_seq_len_in_batch = max_len_in_batch
+            avg_seq_len_in_batch = max_kv_seq_len
         else:
             avg_seq_len_in_batch = infer_state.total_token_num // batch_size
 

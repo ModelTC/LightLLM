@@ -296,7 +296,6 @@ class TpPartBaseModel:
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
-        infer_state.max_len_in_batch = model_input.max_len_in_batch
         infer_state.max_q_seq_len = model_input.max_q_seq_len
         infer_state.max_kv_seq_len = model_input.max_kv_seq_len
         infer_state.max_cache_len = model_input.max_cache_len
@@ -394,7 +393,6 @@ class TpPartBaseModel:
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = model_input.batch_size + 1
         new_model_input.total_token_num += padded_token_num
-        new_model_input.max_len_in_batch = max(padded_token_num, model_input.max_len_in_batch)
         new_model_input.max_q_seq_len = max(padded_token_num, model_input.max_q_seq_len)
         new_model_input.max_kv_seq_len = max(padded_token_num, model_input.max_kv_seq_len)
         new_model_input.max_cache_len = max(0, model_input.max_cache_len)
@@ -513,7 +511,7 @@ class TpPartBaseModel:
                 model_input.b_mtp_index,
             )
 
-        if self.graph is not None and self.graph.can_run(model_input.batch_size, model_input.max_len_in_batch):
+        if self.graph is not None and self.graph.can_run(model_input.batch_size, model_input.max_kv_seq_len):
             find_graph_batch_size = self.graph.find_closest_graph_batch_size(model_input.batch_size)
             padded_model_input = self._create_padded_decode_model_input(model_input, find_graph_batch_size)
             infer_state = self._create_inferstate(padded_model_input)
@@ -705,7 +703,7 @@ class TpPartBaseModel:
         assert model_input1.mem_indexes.is_cuda
 
         origin_batch_size = model_input0.batch_size
-        max_len_in_batch = max(model_input0.max_len_in_batch, model_input1.max_len_in_batch)
+        max_len_in_batch = max(model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
 
         if self.graph is not None and self.graph.can_run(origin_batch_size, max_len_in_batch):
             find_graph_batch_size = self.graph.find_closest_graph_batch_size(origin_batch_size)

@@ -38,10 +38,6 @@ class InferStateInfo:
         self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
 
         self.b_seq_len: torch.Tensor = None
-        # max_len_in_batch prefill 和 decode 阶段含义不同
-        # prefill 阶段指每个req 输入token的长度（不包括已经cache的部分）最大值
-        # decode 阶段指的是每个req的总长 最大值
-        self.max_len_in_batch: int = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
         # prefix_total_token_num 用于 prefill 阶段标识当前请求中所有已经ready的kv的长度
@@ -124,8 +120,6 @@ class InferStateInfo:
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
             ) = gen_decode_params(self.b_seq_len)
-            # TODO: check the correctness
-            self.max_kv_seq_len = self.max_len_in_batch
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def init_att_state(self):

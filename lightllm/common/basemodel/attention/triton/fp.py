@@ -54,7 +54,7 @@ class TritonPrefillAttState(BasePrefillAttState):
             self.infer_state.b_q_start_loc,
             self.infer_state.b_seq_len,
             self.infer_state.b_ready_cache_len,
-            self.infer_state.max_len_in_batch,
+            self.infer_state.max_q_seq_len,
             self.infer_state.req_manager.req_to_token_indexs,
         )
         return out
@@ -72,7 +72,7 @@ class TritonPrefillAttState(BasePrefillAttState):
             self.infer_state.b_q_start_loc,
             self.infer_state.b_seq_len,
             self.infer_state.b_ready_cache_len,
-            self.infer_state.max_len_in_batch,
+            self.infer_state.max_q_seq_len,
             self.infer_state.req_manager.req_to_token_indexs,
         )
         return out
@@ -129,7 +129,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             self.infer_state.b_req_idx,
             self.infer_state.b_kv_start_loc,
             self.infer_state.b_seq_len,
-            self.infer_state.max_len_in_batch,
+            self.infer_state.max_kv_seq_len,
             self.infer_state.total_token_num,
             alloc_tensor_func=alloc_func,
         )
@@ -255,7 +255,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             B_req_idx=self.infer_state.b_req_idx,
             B_Start_Loc=self.infer_state.b_kv_start_loc,
             B_Seqlen=self.infer_state.b_seq_len,
-            max_len_in_batch=self.infer_state.max_len_in_batch,
+            max_len_in_batch=self.infer_state.max_kv_seq_len,
         )
 
         o_tensor = alloc_func(q.shape, q.dtype)

@@ -93,7 +93,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
 def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[InferReq]]:
     run_reqs: List[InferReq] = []
     total_token_num = 0
-    max_len_in_batch = 0
     b_req_idx = []
     b_mtp_index = []
     b_seq_len = []
@@ -107,7 +106,6 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_seq_len.append(seq_len)
         b_q_seq_len.append(1)
         total_token_num += seq_len
-        max_len_in_batch = max(max_len_in_batch, seq_len)
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
@@ -117,7 +115,6 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
             seq_len += 1
             b_seq_len.append(seq_len)
             total_token_num += seq_len
-            max_len_in_batch = max(max_len_in_batch, seq_len)
             b_mtp_index.append(step + 1)
             multimodal_params.append(req.multimodal_params)
             b_q_seq_len.append(1)

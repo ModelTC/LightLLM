@@ -31,16 +31,16 @@ def token_decode_attention_flash_decoding(
 
     BLOCK_SEQ = 256
     batch_size = infer_state.batch_size
-    max_len_in_batch = infer_state.max_len_in_batch
+    max_kv_seq_len = infer_state.max_kv_seq_len
     calcu_shape1 = (batch_size, q_head_num, head_dim)
 
     o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
 
     mid_o = alloc_tensor_func(
-        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 2, head_dim], dtype=q.dtype, device="cuda"
+        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2, head_dim], dtype=q.dtype, device="cuda"
     )
     mid_o_logexpsum = alloc_tensor_func(
-        [batch_size, q_head_num, max_len_in_batch // BLOCK_SEQ + 2], dtype=q.dtype, device="cuda"
+        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2], dtype=q.dtype, device="cuda"
     )
 
     current_stream = torch.cuda.current_stream()
@@ -57,7 +57,7 @@ def token_decode_attention_flash_decoding(
             B_req_idx=infer_state.b_req_idx,
             b_shared_seq_len=infer_state.b_shared_seq_len,
             b_mark_shared_group=infer_state.b_mark_shared_group,
-            max_len_in_batch=infer_state.max_len_in_batch,
+            max_len_in_batch=infer_state.max_kv_seq_len,
             mid_out=mid_o,
             mid_out_logsumexp=mid_o_logexpsum,
             block_seq=BLOCK_SEQ,
@@ -79,7 +79,7 @@ def token_decode_attention_flash_decoding(
             infer_state.b_req_idx,
             infer_state.b_seq_len,
             infer_state.b_shared_seq_len,
-            infer_state.max_len_in_batch,
+            infer_state.max_kv_seq_len,
         )
 
     current_stream.wait_stream(stream1)
