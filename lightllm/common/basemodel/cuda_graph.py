@@ -67,7 +67,7 @@ class CudaGraph:
         graph_obj = torch.cuda.CUDAGraph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
-        infer_state.max_len_in_batch = self.graph_max_len_in_batch
+        infer_state.max_kv_seq_len = self.graph_max_len_in_batch
         infer_state.total_token_num = self.graph_max_len_in_batch * batch_size
         # warmup
         # 因为有些推理过程的代码，会通过判断infer_state中是否存在某些属性来在一层上
@@ -100,9 +100,9 @@ class CudaGraph:
         graph_obj = torch.cuda.CUDAGraph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
-        infer_state.max_len_in_batch = self.graph_max_len_in_batch
+        infer_state.max_kv_seq_len = self.graph_max_len_in_batch
         infer_state.total_token_num = self.graph_max_len_in_batch * batch_size
-        infer_state1.max_len_in_batch = self.graph_max_len_in_batch
+        infer_state1.max_kv_seq_len = self.graph_max_len_in_batch
         infer_state1.total_token_num = self.graph_max_len_in_batch * batch_size
         # warmup
         for _ in range(1):
@@ -196,7 +196,7 @@ class CudaGraph:
             model_input = ModelInput(
                 batch_size=batch_size,
                 total_token_num=total_token_num,
-                max_q_seq_len=self.mtp_step + 1,
+                max_q_seq_len=1,
                 max_kv_seq_len=max_len_in_batch,
                 input_ids=input_ids,
                 mem_indexes=mem_indexes,
@@ -255,7 +255,7 @@ class CudaGraph:
                     is_prefill=False,
                     batch_size=batch_size,
                     total_token_num=total_token_num,
-                    max_q_seq_len=self.mtp_step + 1,
+                    max_q_seq_len=1,
                     max_kv_seq_len=max_len_in_batch,
                     input_ids=input_ids,
                     b_mtp_index=b_mtp_index,
