@@ -318,23 +318,28 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="+",
         choices=["None", "triton", "fa3", "flashinfer"],
-        default=["None"],
-        help="""prefill attention kernel used in llm""",
+        default=["triton"],
+        help="""prefill attention kernel used in llm.
+                None: automatically select backend based on current GPU device,
+                not supported yet, will support in future""",
     )
     parser.add_argument(
         "--llm_decode_att_backend",
         type=str,
         nargs="+",
         choices=["None", "triton", "fa3", "flashinfer"],
-        default=["None"],
-        help="""decode attention kernel used in llm""",
+        default=["triton"],
+        help="""decode attention kernel used in llm.
+                None: automatically select backend based on current GPU device,
+                not supported yet, will support in future""",
     )
     parser.add_argument(
         "--llm_kv_type",
         type=str,
-        choices=["None", "int8kv", "int4kv", "fp8kv"],
+        choices=["None", "int8kv", "int4kv"],
         default="None",
-        help="""kv type used in llm, None for dtype that llm used in config.json""",
+        help="""kv type used in llm, None for dtype that llm used in config.json.
+                fp8kv: not fully supported yet, will support in future""",
     )
     parser.add_argument(
         "--llm_kv_quant_group_size",
