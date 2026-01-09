@@ -24,6 +24,7 @@ from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
     def __init__(self, layer_num, network_config, mode=[]):
         super().__init__(layer_num, network_config, mode)
+        self.head_dim_ = network_config["head_dim"]
         self.mrope_section = torch.tensor(
             network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"
         )

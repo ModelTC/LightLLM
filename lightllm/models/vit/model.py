@@ -185,7 +185,7 @@ class VisionTransformer:
             else:
                 raise Exception("Unsupport input types: {} for {}".format(type(img), img))
 
-            cur_num = img_tensors[-1].shape[0]
+            cur_num = img.token_num
             valid_ids.append([valid_id, valid_id + cur_num])
             valid_id += cur_num
 
@@ -195,7 +195,7 @@ class VisionTransformer:
         imgs = torch.cat(img_tensors, dim=0)
         pixel_values = imgs.cuda().to(dtype=self.data_type)
         all_img_embeds = self.forward(pixel_values)
-        return all_img_embeds, uuids, valid_ids
+        return all_img_embeds.view(-1, all_img_embeds.shape[-1]), uuids, valid_ids
 
     def cuda(self):
         return self
