@@ -105,7 +105,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
-        kv = infer_state.mem_manager.get_att_input_params()
+        kv = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
 
         out = infer_state.decode_att_state.decode_att(
             q=(q_nope, q_rope),
