@@ -60,17 +60,19 @@ def _fwd_kernel_destindex_copy_quantize_int4_kv(
             q_src_data_0 = (src_data_0 / data_scale[:, None]).to(tl.int8)
             q_src_data_0 = tl.where(q_src_data_0 > 7, 7, q_src_data_0)
             q_src_data_0 = tl.where(q_src_data_0 < -7, -7, q_src_data_0)
+            q_src_data_0 += 7
             q_src_data_0 = q_src_data_0.to(tl.uint8, bitcast=True)
 
             q_src_data_1 = (src_data_1 / data_scale[:, None]).to(tl.int8)
             q_src_data_1 = tl.where(q_src_data_1 > 7, 7, q_src_data_1)
             q_src_data_1 = tl.where(q_src_data_1 < -7, -7, q_src_data_1)
+            q_src_data_1 += 7
             q_src_data_1 = q_src_data_1.to(tl.uint8, bitcast=True)
 
-            low_4 = ((q_src_data_0 & 0x80) >> 4) | (q_src_data_0 & 0xF)
-            high_4 = (((q_src_data_1 & 0x80) >> 4) | (q_src_data_1 & 0xF)) << 4
+            low_4 = q_src_data_0 & 0xF
+            high_4 = (q_src_data_1 & 0xF) << 4
 
-            out_data = (low_4 | high_4).to(tl.int8, bitcast=True)
+            out_data = (low_4 | high_4).to(Out.dtype.element_ty, bitcast=True)
 
             o_ptrs = (
                 Out + dest_index * stride_o_bs + cur_head * stride_o_h + offs_g[:, None] * stride_o_g + offs_d[None, :]
@@ -134,6 +136,24 @@ def destindex_copy_int4kv(
         num_stages=1,
     )
     return
+
+
+@triton.jit
+def int4_to_float(k_int8, offs_d):
+    k_int8 = k_int8.to(tl.uint8, bitcast=True)
+    k_high = (k_int8 & 0xF0) >> 4
+    k_low = k_int8 & 0x0F
+    k_high = k_high.to(tl.int8, bitcast=True)
+    k_low = k_low.to(tl.int8, bitcast=True)
+    k_high -= 7
+    k_low -= 7
+
+    k_int4 = tl.where(
+        offs_d[None, None, :] % 2 == 0,
+        k_low,
+        k_high,
+    )
+    return k_int4
 
 
 @triton.jit
@@ -206,16 +226,7 @@ def _fwd_dequantize_int4kv(
             + group_offs[None, :, None] * k_sg
             + offs_d[None, None, :] // 2
         )
-        k_high = ((k_int8.to(tl.uint8, bitcast=True) & 0xF0) >> 4).to(tl.int8, bitcast=True)
-        k_low = k_int8 & 0x0F
-        k_high = tl.where(k_high >= 8, k_high - 16, k_high)
-        k_low = tl.where(k_low >= 8, k_low - 16, k_low)
-
-        k_int4 = tl.where(
-            offs_d[None, None, :] % 2 == 0,
-            k_low,
-            k_high,
-        )
+        k_int4 = int4_to_float(k_int8, offs_d)
 
         k_scale_data = tl.load(
             k_scale
@@ -242,16 +253,7 @@ def _fwd_dequantize_int4kv(
             + group_offs[None, :, None] * v_sg
             + offs_d[None, None, :] // 2
         )
-        v_high = ((v_int8.to(tl.uint8, bitcast=True) & 0xF0) >> 4).to(tl.int8, bitcast=True)
-        v_low = v_int8 & 0x0F
-        v_high = tl.where(v_high >= 8, v_high - 16, v_high)
-        v_low = tl.where(v_low >= 8, v_low - 16, v_low)
-
-        v_int4 = tl.where(
-            offs_d[None, None, :] % 2 == 0,
-            v_low,
-            v_high,
-        )
+        v_int4 = int4_to_float(v_int8, offs_d)
         v_scale_data = tl.load(
             v_scale
             + kv_loc[:, None, None] * v_scale_ss

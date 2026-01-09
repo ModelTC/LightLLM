@@ -5,10 +5,13 @@ import triton.language as tl
 
 @triton.jit
 def int4_to_float(k_int8, k_scale, offs_d):
-    k_high = ((k_int8.to(tl.uint8, bitcast=True) & 0xF0) >> 4).to(tl.int8, bitcast=True)
+    k_int8 = k_int8.to(tl.uint8, bitcast=True)
+    k_high = (k_int8 & 0xF0) >> 4
     k_low = k_int8 & 0x0F
-    k_high = tl.where(k_high >= 8, k_high - 16, k_high)
-    k_low = tl.where(k_low >= 8, k_low - 16, k_low)
+    k_high = k_high.to(tl.int8, bitcast=True)
+    k_low = k_low.to(tl.int8, bitcast=True)
+    k_high -= 7
+    k_low -= 7
     k_int4 = tl.where(
         offs_d[None, :] % 2 == 0,
         k_low,
@@ -155,6 +158,7 @@ def int4kv_flash_decode_stage1(
     quant_group_size = Lk // k_scale.shape[-1]
     assert triton.next_power_of_2(quant_group_size) == quant_group_size
     assert k.stride() == v.stride()
+    # TODO 优化为gqa使用tensor core的实现，速度更快。
     _fwd_kernel_flash_decode_stage1[grid](
         q,
         k,
@@ -190,7 +194,7 @@ def int4kv_flash_decode_stage1(
         BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=Lk,
         BLOCK_N=BLOCK_N,
-        num_warps=1,
+        num_warps=4,
         num_stages=2,
     )
     return
