@@ -105,7 +105,7 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         assert att_control.mla_decode
-        softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
+        softmax_scale = att_control.mla_decode_dict["softmax_scale"]
 
         from ...triton_kernel.mla_att.decode_att import gqa_token_decode_attention_flash_decoding
 
