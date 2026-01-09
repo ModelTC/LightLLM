@@ -42,7 +42,6 @@ def _sample_kv_kernel(
 
     kv_loc = tl.load(
         req_to_token_indexs + stride_req_to_tokens_b * cur_batch_req_idx + offs_m,
-        other=0,
     ).to(tl.int64)
     off_kv_nope = kv_loc[:, None] * stride_all_s + offs_nope_d[None, :]
     off_kv_rope = kv_loc[:, None] * stride_all_s + (offs_rope_d + BLOCK_NOPE_DIM)[None, :]
