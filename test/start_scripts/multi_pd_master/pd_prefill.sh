@@ -13,7 +13,7 @@ MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
 --tp 8 \
 --dp 8 \
 --nccl_port 2732 \
---enable_fa3 \
+--llm_prefill_att_backend fa3 --llm_decode_att_backend fa3 \
 --disable_cudagraph \
 --config_server_host $config_server_host \
 --config_server_port 60088

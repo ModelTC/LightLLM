@@ -14,8 +14,6 @@ def setup_env():
             running_max_req_size=10,
             disable_chunked_prefill=True,
             token_healing_mode=False,
-            enable_flashinfer_prefill=False,
-            enable_flashinfer_decode=False,
         )
     )
     # clear the lru_cache if used

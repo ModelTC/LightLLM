@@ -7,8 +7,8 @@ from lightllm.utils.dist_utils import get_current_device_id
 
 
 class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
         self.embed_dim = self.network_config_["hidden_size"]
         self.image_size = self.network_config_["image_size"]
         self.patch_size = self.network_config_["patch_size"]

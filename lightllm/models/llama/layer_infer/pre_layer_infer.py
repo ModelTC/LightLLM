@@ -10,8 +10,8 @@ from lightllm.utils.envs_utils import get_env_start_args
 class LlamaPreLayerInfer(PreLayerInferTpl):
     """ """
 
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         return
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):

@@ -183,22 +183,6 @@ PD 分离模式参数
     设置为 True 时，--nccl_host 必须等于 config_server_host，--nccl_port 对于 config_server 必须是唯一的，
     不要为不同的推理节点使用相同的 nccl_port，这将是严重错误
 
-attention类型选择参数
----------------------
-
-.. option:: --mode
-
-    模型推理模式，可以指定多个值：
-    
-    * ``triton_int8kv``: 使用 int8 存储 kv cache，可增加 token 容量，使用 triton kernel
-    * ``ppl_int8kv``: 使用 int8 存储 kv cache，使用 ppl 快速 kernel
-    * ``ppl_fp16``: 使用 ppl 快速 fp16 解码注意力 kernel
-    * ``triton_flashdecoding``: 用于长上下文的 flashdecoding 模式，当前支持 llama llama2 qwen
-    * ``triton_gqa_attention``: 使用 GQA 的模型的快速 kernel
-    * ``triton_gqa_flashdecoding``: 使用 GQA 的模型的快速 flashdecoding kernel
-    * ``triton_fp8kv``: 使用 float8 存储 kv cache，目前仅用于 deepseek2
-    
-    需要阅读源代码以确认所有模型支持的具体模式
 
 调度参数
 --------
@@ -327,17 +311,9 @@ attention类型选择参数
 
     推理后端将为解码使用微批次重叠模式
     
-.. option:: --enable_flashinfer_prefill
+.. option:: --llm_kv_type
 
-    推理后端将为预填充使用 flashinfer 的注意力 kernel
-    
-.. option:: --enable_flashinfer_decode
-
-    推理后端将为解码使用 flashinfer 的注意力 kernel
-    
-.. option:: --enable_fa3
-
-    推理后端将为预填充和解码使用 fa3 注意力 kernel
+    推理后端使用什么类型的数据存储kv cache, 可选值为 "None", "int8kv", "int4kv", "fp8kv"
 
 .. option:: --disable_cudagraph
 

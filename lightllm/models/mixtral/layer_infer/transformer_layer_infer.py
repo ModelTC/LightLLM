@@ -3,14 +3,13 @@ import torch
 import torch.nn.functional as F
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.mistral.layer_infer.transformer_layer_infer import MistralTransformerLayerInfer
 from lightllm.models.mixtral.layer_infer._custom_ops import fused_topk
 from lightllm.models.mixtral.layer_weights.transformer_layer_weight import MixtralTransformerLayerWeight
 
 
 class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.num_local_experts = network_config["num_local_experts"]
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
         self.renormalize = True

@@ -4,8 +4,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import NoTpNormWeight
 
 
 class Qwen3MOEMTPTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
     def _init_weight(self):

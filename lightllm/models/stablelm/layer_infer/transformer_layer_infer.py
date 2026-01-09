@@ -8,8 +8,8 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 
 
 class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.partial_rotary_factor = self.network_config_.get("partial_rotary_factor", 1)
         return
 

@@ -6,8 +6,8 @@ from typing import Tuple
 class PostLayerInferTpl(PostLayerInfer):
     """ """
 
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         self.eps_ = 1e-5
         self.vocab_size_ = network_config["vocab_size"]
         self.embed_dim_ = network_config["n_embed"]

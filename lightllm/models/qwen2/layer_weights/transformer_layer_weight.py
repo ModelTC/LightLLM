@@ -2,8 +2,8 @@ from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTr
 
 
 class Qwen2TransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
 
     def _init_weight_names(self):
         super()._init_weight_names()

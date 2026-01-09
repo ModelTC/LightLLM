@@ -3,8 +3,6 @@ import torch
 import torch.distributed as dist
 from ..transformer_layer_infer import TransformerLayerInfer
 from ...infer_struct import InferStateInfo
-from lightllm.utils.infer_utils import mark_cost_time
-from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.distributed import all_reduce
 from typing import Tuple
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
@@ -13,8 +11,8 @@ from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 class TransformerLayerInferTpl(TransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, network_config, mode):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         # need to set by subclass
         self.eps_ = 1e-5
         self.tp_q_head_num_ = -1
@@ -39,11 +37,11 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
     def _post_cache_kv(self, cache_kv, infer_state: InferStateInfo, layer_weight):
         mem_manager = infer_state.mem_manager
-        self._copy_kv_to_mem_cache(cache_kv, infer_state.mem_index, mem_manager)
-        return
-
-    def _copy_kv_to_mem_cache(self, buffer, mem_index, mem_manager):
-        destindex_copy_kv(buffer, mem_index, mem_manager.kv_buffer[self.layer_num_])
+        mem_manager.copy_kv_to_mem_manager(
+            layer_index=self.layer_num_,
+            mem_index=infer_state.mem_index,
+            kv=cache_kv,
+        )
         return
 
     def _context_attention_kernel(self, q, kv, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:

@@ -591,7 +591,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             # update the meta info of the inference
             draft_model_input.b_seq_len += 1
-            draft_model_input.max_len_in_batch += 1
+            draft_model_input.max_kv_seq_len += 1
             eagle_mem_indexes_i = eagle_mem_indexes[_step * real_req_num : (_step + 1) * real_req_num]
             eagle_mem_indexes_i = F.pad(
                 input=eagle_mem_indexes_i,
@@ -955,7 +955,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
 
             draft_model_input0.b_seq_len += 1
-            draft_model_input0.max_len_in_batch += 1
+            draft_model_input0.max_kv_seq_len += 1
             eagle_mem_indexes_i = eagle_mem_indexes0[_step * real_req_num0 : (_step + 1) * real_req_num0]
             eagle_mem_indexes_i = F.pad(
                 input=eagle_mem_indexes_i,
@@ -969,7 +969,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             ).view(-1)
 
             draft_model_input1.b_seq_len += 1
-            draft_model_input1.max_len_in_batch += 1
+            draft_model_input1.max_kv_seq_len += 1
             eagle_mem_indexes_i = eagle_mem_indexes1[_step * real_req_num1 : (_step + 1) * real_req_num1]
             eagle_mem_indexes_i = F.pad(
                 input=eagle_mem_indexes_i,

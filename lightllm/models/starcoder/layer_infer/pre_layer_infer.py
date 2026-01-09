@@ -9,8 +9,8 @@ from lightllm.distributed.communication_op import all_reduce
 class StarcoderPreLayerInfer(PreLayerInfer):
     """ """
 
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         self.layer_norm_eps_ = network_config["layer_norm_epsilon"]
 
     def context_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: StarcoderPreAndPostLayerWeight):

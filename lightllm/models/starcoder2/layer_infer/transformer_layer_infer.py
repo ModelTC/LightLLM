@@ -5,8 +5,8 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 
 
 class Starcoder2TransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
 
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Starcoder2TransformerLayerWeight

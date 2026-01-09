@@ -5,8 +5,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight
 
 
 class BloomPreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
         self.pre_norm_weight_ = NoTpNormWeight(
             weight_name="word_embeddings_layernorm.weight",
             data_type=self.data_type_,

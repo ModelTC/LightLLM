@@ -1,5 +1,3 @@
-import json
-import numpy as np
 import unicodedata
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.server.core.objs import SamplingParams

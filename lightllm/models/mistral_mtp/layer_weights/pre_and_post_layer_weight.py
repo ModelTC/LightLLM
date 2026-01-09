@@ -8,8 +8,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
 
 
 class MistralMTPPreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
 
         self.eh_proj_weight_ = ROWMMWeight(
             weight_names="mtp.eh_proj.weight",

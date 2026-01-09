@@ -3,7 +3,7 @@ import os
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from typing import List, Union
+from typing import List, Union, Tuple, Any
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
@@ -20,6 +20,7 @@ from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.shm_utils import create_or_link_shm
 from multiprocessing.reduction import ForkingPickler
 from filelock import FileLock
+
 
 logger = init_logger(__name__)
 
@@ -64,6 +65,20 @@ class MemoryManager:
             layer_num,
         )
         self.HOLD_TOKEN_MEMINDEX = self.size
+
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        """
+        将每一层生成的kv拷贝到mem manager对应mem_index 位置中
+        """
+        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
+
+        destindex_copy_kv(kv, mem_index, self.kv_buffer[layer_index])
+        return
+
+    def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
+        k = self.kv_buffer[layer_index][:, : self.head_num, :]
+        v = self.kv_buffer[layer_index][:, self.head_num :, :]
+        return k, v
 
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)

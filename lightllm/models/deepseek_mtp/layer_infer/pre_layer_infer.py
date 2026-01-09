@@ -8,8 +8,8 @@ from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 class Deepseek3MTPPreLayerInfer(LlamaPreLayerInfer):
     """ """
 
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         self.eps_ = network_config["rms_norm_eps"]
         self.hidden_size = network_config["hidden_size"]
         return

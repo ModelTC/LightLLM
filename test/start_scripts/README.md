@@ -108,7 +108,6 @@ sh multi_pd_master/pd_decode.sh <host> <config_server_host>
 - `--model_dir`: Model file path
 - `--tp`: Tensor parallelism degree
 - `--dp`: Data parallelism degree
-- `--enable_fa3`: Enable Flash Attention 3.0
 - `--nnodes`: Total number of nodes
 - `--node_rank`: Current node rank
 - `--nccl_host`: NCCL communication host address

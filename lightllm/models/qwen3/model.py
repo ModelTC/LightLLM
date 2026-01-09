@@ -1,5 +1,3 @@
-import torch
-from typing import final
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3.layer_infer.transformer_layer_infer import Qwen3TransformerLayerInfer
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight

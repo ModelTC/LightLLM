@@ -5,8 +5,8 @@ from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalP
 
 
 class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         self.embed_scale = torch.tensor(network_config["hidden_size"] ** 0.5, dtype=torch.float32)
         self.boi_token_index: int = 255_999
         self.eoi_token_index: int = 256_000

@@ -73,7 +73,6 @@ def overlap_prefill(
 ):
     _0_batch_size = batch_size // 2
     _0_total_token_num = total_token_num // 2
-    _0_max_len_in_batch = max_len_in_batch
     _0_input_ids = input_ids[: total_token_num // 2]
     _0_mem_indexes = mem_indexes[: total_token_num // 2]
     _0_b_req_idx = b_req_idx[: batch_size // 2]
@@ -83,7 +82,6 @@ def overlap_prefill(
     micro_batch1 = ModelInput(
         batch_size=_0_batch_size,
         total_token_num=_0_total_token_num,
-        max_len_in_batch=_0_max_len_in_batch,
         input_ids=_0_input_ids,
         b_req_idx=_0_b_req_idx,
         b_mtp_index=_0_b_mtp_index,
@@ -96,7 +94,6 @@ def overlap_prefill(
 
     _1_batch_size = batch_size - batch_size // 2
     _1_total_token_num = total_token_num - total_token_num // 2
-    _1_max_len_in_batch = max_len_in_batch
     _1_input_ids = input_ids[total_token_num // 2 :]
     _1_mem_indexes = mem_indexes[total_token_num // 2 :]
     _1_b_req_idx = b_req_idx[batch_size // 2 :]
@@ -107,7 +104,6 @@ def overlap_prefill(
     micro_batch2 = ModelInput(
         batch_size=_1_batch_size,
         total_token_num=_1_total_token_num,
-        max_len_in_batch=_1_max_len_in_batch,
         input_ids=_1_input_ids,
         b_req_idx=_1_b_req_idx,
         b_mtp_index=_1_b_mtp_index,
@@ -129,7 +125,6 @@ def overlap_decode(
 ):
     _0_batch_size = batch_size // 2
     _0_total_token_num = total_token_num // 2
-    _0_max_len_in_batch = max_len_in_batch
     _0_input_ids = input_ids[: batch_size // 2]
     _0_mem_indexes = mem_indexes[: batch_size // 2]
     _0_b_req_idx = b_req_idx[: batch_size // 2]
@@ -138,7 +133,6 @@ def overlap_decode(
     micro_batch1 = ModelInput(
         batch_size=_0_batch_size,
         total_token_num=_0_total_token_num,
-        max_len_in_batch=_0_max_len_in_batch,
         input_ids=_0_input_ids,
         b_req_idx=_0_b_req_idx,
         b_mtp_index=_0_b_mtp_index,
@@ -149,7 +143,6 @@ def overlap_decode(
 
     _1_batch_size = batch_size - batch_size // 2
     _1_total_token_num = total_token_num - total_token_num // 2
-    _1_max_len_in_batch = max_len_in_batch
     _1_input_ids = input_ids[batch_size // 2 :]
     _1_mem_indexes = mem_indexes[batch_size // 2 :]
     _1_b_req_idx = b_req_idx[batch_size // 2 :]
@@ -159,7 +152,6 @@ def overlap_decode(
     micro_batch2 = ModelInput(
         batch_size=_1_batch_size,
         total_token_num=_1_total_token_num,
-        max_len_in_batch=_1_max_len_in_batch,
         input_ids=_1_input_ids,
         b_req_idx=_1_b_req_idx,
         b_mtp_index=_1_b_mtp_index,
@@ -191,7 +183,6 @@ def prefill(
     model_input = ModelInput(
         batch_size=batch_size,
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_len_in_batch,
         max_kv_seq_len=max_len_in_batch,
         max_cache_len=0,
@@ -217,7 +208,6 @@ def decode(
     model_input = ModelInput(
         batch_size=batch_size,
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=1,
         max_kv_seq_len=max_len_in_batch,
         input_ids=input_ids,

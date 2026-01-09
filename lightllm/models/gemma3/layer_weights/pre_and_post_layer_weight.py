@@ -3,8 +3,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight
 
 
 class Gemma3PreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
 
         self.wte_weight_ = EmbeddingWeight(
             weight_name="language_model.model.embed_tokens.weight",

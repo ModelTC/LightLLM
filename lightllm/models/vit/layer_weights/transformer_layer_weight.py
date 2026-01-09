@@ -14,8 +14,8 @@ from lightllm.utils.dist_utils import get_current_device_id
 
 
 class ViTTransformerLayerWeight(TransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
     def _cuda(self, cpu_tensor):

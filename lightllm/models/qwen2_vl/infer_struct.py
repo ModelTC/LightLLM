@@ -4,13 +4,10 @@ import numpy as np
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen2_vl.triton_kernel.get_mrope_position_ids import get_mrope_position_triton
-from lightllm.models.llama.flashattention_infer_struct import FlashAttentionStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 
 
 class Qwen2VLInferStateInfo(LlamaInferStateInfo):
-    init_flash_attention_state_func = FlashAttentionStateInfo._init_flash_attention_state
-
     def __init__(self):
         super().__init__()
         self.position_cos = None
@@ -35,10 +32,6 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         self.position_ids = self.position_ids.contiguous()
         self.position_cos = model._cos_cached[self.position_ids]
         self.position_sin = model._sin_cached[self.position_ids]
-        if get_env_start_args().enable_fa3:
-            self.max_seq_len = self.max_kv_seq_len
-            self.q_max_seq_len = self.max_q_seq_len
-            self.init_flash_attention_state_func(model)
         return
 
     def get_mrope_position(self, multimodal_params: List[dict]) -> torch.Tensor:
@@ -85,6 +78,6 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
             position_ids=position_ids,
             b_ready_cache_len=self.b_ready_cache_len,
             b_q_seq_len=self.b_q_seq_len,
-            b_start_loc=self.b_start_loc,
+            b_start_loc=self.b_q_start_loc,
         )
         return position_ids

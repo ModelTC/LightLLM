@@ -168,7 +168,6 @@ class PrefillCudaGraph:
             model_input = ModelInput(
                 batch_size=1,
                 total_token_num=total_token_num,
-                max_len_in_batch=total_token_num,
                 max_q_seq_len=total_token_num,
                 max_kv_seq_len=total_token_num,
                 max_cache_len=0,
@@ -229,7 +228,6 @@ class PrefillCudaGraph:
                 micro_batch = ModelInput(
                     batch_size=1,
                     total_token_num=total_token_num,
-                    max_len_in_batch=total_token_num,
                     max_q_seq_len=total_token_num,
                     max_kv_seq_len=total_token_num,
                     max_cache_len=0,

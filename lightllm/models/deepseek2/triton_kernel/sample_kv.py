@@ -8,111 +8,101 @@ from lightllm.utils.device_utils import is_tesla
 
 @triton.jit
 def _sample_kv_kernel(
-    KV_input,
-    KV_scale,
-    KV_nope,
-    KV_rope,
-    K_scale,
-    B_start_loc,
-    B_Seqlen,
-    Req_to_tokens,
-    B_req_idx,
-    stride_input_dim,
-    stride_scale_dim,
-    stride_nope_dim,
-    stride_rope_dim,
+    all_compressed_kv,
+    stride_all_s,
+    stride_all_d,
+    sampled_compressed_kv_nope,
+    stride_nope_s,
+    stride_nope_d,
+    sampled_k_rope,
+    stride_rope_s,
+    stride_rope_d,
+    b_kv_start_loc,
+    b_seq_len,
+    req_to_token_indexs,
     stride_req_to_tokens_b,
-    HAS_SCALE: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,
-    BLOCK_ROPE_DMODEL: tl.constexpr,
+    b_req_idx,
+    BLOCK_SEQ: tl.constexpr,
+    BLOCK_NOPE_DIM: tl.constexpr,
+    BLOCK_ROPE_DIM: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     start_m = tl.program_id(1)
 
-    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
-    cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
-    cur_batch_start_loc = tl.load(B_start_loc + cur_batch)
+    cur_batch_seq_len = tl.load(b_seq_len + cur_batch)
+    cur_batch_req_idx = tl.load(b_req_idx + cur_batch)
+    cur_batch_start_loc = tl.load(b_kv_start_loc + cur_batch)
 
-    offs_nope_d = tl.arange(0, BLOCK_DMODEL)
-    offs_rope_d = tl.arange(0, BLOCK_ROPE_DMODEL)
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_nope_d = tl.arange(0, BLOCK_NOPE_DIM)
+    offs_rope_d = tl.arange(0, BLOCK_ROPE_DIM)
+    offs_m = (start_m * BLOCK_SEQ + tl.arange(0, BLOCK_SEQ)) % cur_batch_seq_len
 
-    block_end_loc = tl.minimum((start_m + 1) * BLOCK_M, cur_batch_seq_len)
+    if start_m * BLOCK_SEQ > cur_batch_seq_len:
+        return
 
     kv_loc = tl.load(
-        Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_m,
-        mask=offs_m < block_end_loc,
-        other=0,
+        req_to_token_indexs + stride_req_to_tokens_b * cur_batch_req_idx + offs_m,
     ).to(tl.int64)
-    off_kv_nope = kv_loc[:, None] * stride_input_dim + offs_nope_d[None, :]
-    off_kv_rope = kv_loc[:, None] * stride_input_dim + (offs_rope_d + BLOCK_DMODEL)[None, :]
-    kv_nope = tl.load(KV_input + off_kv_nope, mask=offs_m[:, None] < block_end_loc, other=0.0)
-    kv_rope = tl.load(KV_input + off_kv_rope, mask=offs_m[:, None] < block_end_loc, other=0.0)
-    off_nope = (offs_m + cur_batch_start_loc)[:, None] * stride_nope_dim + offs_nope_d[None, :]
-    off_rope = (offs_m + cur_batch_start_loc)[:, None] * stride_rope_dim + offs_rope_d[None, :]
-    nope_ptrs = KV_nope + off_nope
-    rope_ptrs = KV_rope + off_rope
-    tl.store(nope_ptrs, kv_nope, mask=offs_m[:, None] < block_end_loc)
-    tl.store(rope_ptrs, kv_rope, mask=offs_m[:, None] < block_end_loc)
-    if HAS_SCALE:
-        kv_scale = tl.load(KV_scale + kv_loc * stride_scale_dim, mask=offs_m < block_end_loc)
-        off_k_scale = cur_batch_start_loc + offs_m
-        k_scale_ptrs = K_scale + off_k_scale
-        tl.store(k_scale_ptrs, kv_scale, mask=offs_m < block_end_loc)
+    off_kv_nope = kv_loc[:, None] * stride_all_s + offs_nope_d[None, :]
+    off_kv_rope = kv_loc[:, None] * stride_all_s + (offs_rope_d + BLOCK_NOPE_DIM)[None, :]
+    kv_nope = tl.load(all_compressed_kv + off_kv_nope)
+    kv_rope = tl.load(all_compressed_kv + off_kv_rope)
+    off_nope = (offs_m + cur_batch_start_loc)[:, None] * stride_nope_s + offs_nope_d[None, :]
+    off_rope = (offs_m + cur_batch_start_loc)[:, None] * stride_rope_s + offs_rope_d[None, :]
+    nope_ptrs = sampled_compressed_kv_nope + off_nope
+    rope_ptrs = sampled_k_rope + off_rope
+    tl.store(nope_ptrs, kv_nope)
+    tl.store(rope_ptrs, kv_rope)
     return
 
 
 @torch.no_grad()
 def sample_kv(
-    kv_input,
-    kv_nope,
-    kv_rope,
-    b_req_idx,
-    max_value_in_b_seq_len,
-    b_seq_len,
-    req_to_token_indexs,
-    b_kv_start_loc,
-    kv_scale=None,
-    k_scale=None,
+    all_compressed_kv: torch.Tensor,
+    sampled_compressed_kv_nope: torch.Tensor,
+    sampled_k_rope: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    req_to_token_indexs: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    b_kv_start_loc: torch.Tensor,
+    max_kv_seq_len: int,
 ):
-    BLOCK = 128 if not is_tesla() else 64
-
-    nope_dim = kv_nope.shape[-1]
-    rope_dim = kv_rope.shape[-1]
-    if nope_dim >= 512:
-        BLOCK = 64 if not is_tesla() else 32
-    else:
-        BLOCK = 128 if not is_tesla() else 64
-
+    nope_dim = sampled_compressed_kv_nope.shape[-1]
+    rope_dim = sampled_k_rope.shape[-1]
+    assert rope_dim == 64
     batch = b_seq_len.shape[0]
 
-    max_input_len = max_value_in_b_seq_len
+    BLOCK = 64 if not is_tesla() else 32
+    num_warps = 8
     grid = (
         batch,
-        triton.cdiv(max_input_len, BLOCK),
+        triton.cdiv(max_kv_seq_len, BLOCK),
     )
-    num_warps = 4 if nope_dim <= 64 else 8
+
+    all_compressed_kv = all_compressed_kv.view(all_compressed_kv.shape[0], all_compressed_kv.shape[2])
+    sampled_compressed_kv_nope = sampled_compressed_kv_nope.view(sampled_compressed_kv_nope.shape[0], nope_dim)
+    sampled_k_rope = sampled_k_rope.view(sampled_k_rope.shape[0], rope_dim)
+    assert triton.next_power_of_2(nope_dim) == nope_dim
+    assert triton.next_power_of_2(rope_dim) == rope_dim
 
     _sample_kv_kernel[grid](
-        kv_input,
-        kv_scale,
-        kv_nope,
-        kv_rope,
-        k_scale,
-        b_kv_start_loc,
-        b_seq_len,
-        req_to_token_indexs,
-        b_req_idx,
-        kv_input.stride(0),
-        kv_scale.stride(0) if kv_scale is not None else 0,
-        kv_nope.stride(0),
-        kv_rope.stride(0),
-        req_to_token_indexs.stride(0),
-        HAS_SCALE=kv_scale is not None,
-        BLOCK_M=BLOCK,
-        BLOCK_DMODEL=nope_dim,
-        BLOCK_ROPE_DMODEL=rope_dim,
+        all_compressed_kv=all_compressed_kv,
+        stride_all_s=all_compressed_kv.stride(0),
+        stride_all_d=all_compressed_kv.stride(1),
+        sampled_compressed_kv_nope=sampled_compressed_kv_nope,
+        stride_nope_s=sampled_compressed_kv_nope.stride(0),
+        stride_nope_d=sampled_compressed_kv_nope.stride(1),
+        sampled_k_rope=sampled_k_rope,
+        stride_rope_s=sampled_k_rope.stride(0),
+        stride_rope_d=sampled_k_rope.stride(1),
+        b_kv_start_loc=b_kv_start_loc,
+        b_seq_len=b_seq_len,
+        req_to_token_indexs=req_to_token_indexs,
+        stride_req_to_tokens_b=req_to_token_indexs.stride(0),
+        b_req_idx=b_req_idx,
+        BLOCK_SEQ=BLOCK,
+        BLOCK_NOPE_DIM=nope_dim,
+        BLOCK_ROPE_DIM=rope_dim,
         num_warps=num_warps,
         num_stages=1,
     )

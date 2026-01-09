@@ -32,6 +32,8 @@ from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
+from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
+from .attention import BaseAttBackend
 
 logger = init_logger(__name__)
 
@@ -58,7 +60,6 @@ class TpPartBaseModel:
         self.max_total_token_num = kvargs["max_total_token_num"]
         self.batch_max_tokens = kvargs.get("batch_max_tokens", None)
         self.load_way = kvargs.get("load_way", "HF")
-        self.mode = kvargs.get("mode", [])
         self.weight_dict = kvargs.get("weight_dict", None)
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
@@ -116,9 +117,18 @@ class TpPartBaseModel:
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
-        self._init_inferstate_cls()
         # wait必须在init cudagraph 之前，避免错误捕获
         self._wait_other_modules_ready()
+
+        self._init_att_backend()
+        self._init_att_backend1()
+
+        logger.info(f"use prefill att backend: {self.prefill_att_backend.__class__.__name__}")
+        logger.info(f"use decode att backend: {self.decode_att_backend.__class__.__name__}")
+        if self.prefill_att_backend1 is not None:
+            logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
+            logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
+
         self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
@@ -144,9 +154,6 @@ class TpPartBaseModel:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
 
-    def _init_inferstate_cls(self):
-        pass
-
     @final
     def _verify_must(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
@@ -162,15 +169,12 @@ class TpPartBaseModel:
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_weights(self, start_layer_index=0):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
-        )
+        self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 i,
                 self.data_type,
                 network_config=self.config,
-                mode=self.mode,
                 quant_cfg=self.quant_cfg,
             )
             for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
@@ -220,10 +224,10 @@ class TpPartBaseModel:
         return
 
     def _init_infer_layer(self, start_layer_index=0):
-        self.pre_infer = self.pre_layer_infer_class(network_config=self.config, mode=self.mode)
-        self.post_infer = self.post_layer_infer_class(network_config=self.config, mode=self.mode)
+        self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
+        self.post_infer = self.post_layer_infer_class(network_config=self.config)
         self.layers_infer = [
-            self.transformer_layer_infer_class(i, network_config=self.config, mode=self.mode)
+            self.transformer_layer_infer_class(i, network_config=self.config)
             for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
         ]
         return
@@ -236,6 +240,17 @@ class TpPartBaseModel:
         self.tp_v_head_num_ = self.tp_k_head_num_
         self.layers_num = self.config["n_layer"]
         self.vocab_size = self.config["vocab_size"]
+        return
+
+    def _init_att_backend(self):
+        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
+        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
+        return
+
+    def _init_att_backend1(self):
+        # self.prefill_att_backend1 是给后续有模型支持不同层用不同的att模块时，保留的扩展。
+        self.prefill_att_backend1: BaseAttBackend = None
+        self.decode_att_backend1: BaseAttBackend = None
         return
 
     def _init_cudagraph(self):
@@ -281,7 +296,6 @@ class TpPartBaseModel:
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
-        infer_state.max_len_in_batch = model_input.max_len_in_batch
         infer_state.max_q_seq_len = model_input.max_q_seq_len
         infer_state.max_kv_seq_len = model_input.max_kv_seq_len
         infer_state.max_cache_len = model_input.max_cache_len
@@ -311,6 +325,19 @@ class TpPartBaseModel:
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
+        if infer_state.is_prefill:
+            infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
+            if self.prefill_att_backend1 is not None:
+                infer_state.prefill_att_state1 = self.prefill_att_backend1.create_att_prefill_state(
+                    infer_state=infer_state
+                )
+        else:
+            infer_state.decode_att_state = self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
+            if self.decode_att_backend1 is not None:
+                infer_state.decode_att_state1 = self.decode_att_backend1.create_att_decode_state(
+                    infer_state=infer_state
+                )
+
         return infer_state
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
@@ -323,6 +350,7 @@ class TpPartBaseModel:
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = new_batch_size
         new_model_input.total_token_num += padded_batch_size * 2
+        new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
         new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), mode="constant", value=1)
         new_model_input.b_req_idx = F.pad(
             new_model_input.b_req_idx, (0, padded_batch_size), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
@@ -366,7 +394,6 @@ class TpPartBaseModel:
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = model_input.batch_size + 1
         new_model_input.total_token_num += padded_token_num
-        new_model_input.max_len_in_batch = max(padded_token_num, model_input.max_len_in_batch)
         new_model_input.max_q_seq_len = max(padded_token_num, model_input.max_q_seq_len)
         new_model_input.max_kv_seq_len = max(padded_token_num, model_input.max_kv_seq_len)
         new_model_input.max_cache_len = max(0, model_input.max_cache_len)
@@ -464,6 +491,7 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event.record()
 
         infer_state.init_some_extra_state(self)
+        infer_state.init_att_state()
         model_output = self._context_forward(infer_state)
         if is_padded_model_input:
             model_output = self._create_unpad_prefill_model_output(
@@ -484,7 +512,7 @@ class TpPartBaseModel:
                 model_input.b_mtp_index,
             )
 
-        if self.graph is not None and self.graph.can_run(model_input.batch_size, model_input.max_len_in_batch):
+        if self.graph is not None and self.graph.can_run(model_input.batch_size, model_input.max_kv_seq_len):
             find_graph_batch_size = self.graph.find_closest_graph_batch_size(model_input.batch_size)
             padded_model_input = self._create_padded_decode_model_input(model_input, find_graph_batch_size)
             infer_state = self._create_inferstate(padded_model_input)
@@ -495,6 +523,7 @@ class TpPartBaseModel:
                 infer_state.mem_index,
             )
             infer_state.init_some_extra_state(self)
+            infer_state.init_att_state()
 
             if self.graph.need_capture(find_graph_batch_size):
                 infer_state.is_cuda_graph = True
@@ -514,6 +543,7 @@ class TpPartBaseModel:
                 infer_state.mem_index,
             )
             infer_state.init_some_extra_state(self)
+            infer_state.init_att_state()
             model_output = self._token_forward(infer_state)
 
         return model_output
@@ -622,6 +652,7 @@ class TpPartBaseModel:
             max_q_seq_len=infer_state0.max_q_seq_len,
         )
         infer_state0.init_some_extra_state(self)
+        infer_state0.init_att_state()
 
         infer_state1 = self._create_inferstate(model_input1, 1)
         init_req_to_token_indexes(
@@ -634,6 +665,7 @@ class TpPartBaseModel:
             max_q_seq_len=infer_state1.max_q_seq_len,
         )
         infer_state1.init_some_extra_state(self)
+        infer_state1.init_att_state()
 
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
@@ -672,7 +704,7 @@ class TpPartBaseModel:
         assert model_input1.mem_indexes.is_cuda
 
         origin_batch_size = model_input0.batch_size
-        max_len_in_batch = max(model_input0.max_len_in_batch, model_input1.max_len_in_batch)
+        max_len_in_batch = max(model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
 
         if self.graph is not None and self.graph.can_run(origin_batch_size, max_len_in_batch):
             find_graph_batch_size = self.graph.find_closest_graph_batch_size(origin_batch_size)
@@ -688,6 +720,8 @@ class TpPartBaseModel:
                 infer_state0.mem_index,
             )
             infer_state0.init_some_extra_state(self)
+            infer_state0.init_att_state()
+
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -696,6 +730,7 @@ class TpPartBaseModel:
                 infer_state1.mem_index,
             )
             infer_state1.init_some_extra_state(self)
+            infer_state1.init_att_state()
 
             if self.graph.need_capture(find_graph_batch_size):
                 infer_state0.is_cuda_graph = True
@@ -724,6 +759,8 @@ class TpPartBaseModel:
                 infer_state0.mem_index,
             )
             infer_state0.init_some_extra_state(self)
+            infer_state0.init_att_state()
+
             infer_state1 = self._create_inferstate(model_input1, 1)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -732,6 +769,7 @@ class TpPartBaseModel:
                 infer_state1.mem_index,
             )
             infer_state1.init_some_extra_state(self)
+            infer_state1.init_att_state()
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
         return model_output0, model_output1
@@ -818,7 +856,6 @@ class TpPartBaseModel:
             model_input = ModelInput(
                 batch_size=1,
                 total_token_num=total_token_num,
-                max_len_in_batch=self.batch_max_tokens,
                 max_q_seq_len=self.batch_max_tokens,
                 max_kv_seq_len=self.batch_max_tokens,
                 max_cache_len=0,
@@ -895,7 +932,6 @@ class TpPartBaseModel:
                 model_input = ModelInput(
                     batch_size=1,
                     total_token_num=total_token_num,
-                    max_len_in_batch=input_len,
                     max_q_seq_len=input_len,
                     max_kv_seq_len=input_len,
                     max_cache_len=0,
@@ -958,7 +994,6 @@ class TpPartBaseModel:
         model_input = ModelInput(
             batch_size=batch_size,
             total_token_num=total_token_num,
-            max_len_in_batch=prefill_input_len,
             max_q_seq_len=prefill_input_len,
             max_kv_seq_len=prefill_input_len,
             max_cache_len=0,

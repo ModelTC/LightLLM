@@ -5,8 +5,8 @@ from ..pre_layer_infer import PreLayerInfer
 class PreLayerInferTpl(PreLayerInfer):
     """ """
 
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         self.eps_ = 1e-5
         return
 

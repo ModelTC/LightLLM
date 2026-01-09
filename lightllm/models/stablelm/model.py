@@ -1,6 +1,3 @@
-import os
-import json
-import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.stablelm.layer_infer.transformer_layer_infer import StablelmTransformerLayerInfer
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
