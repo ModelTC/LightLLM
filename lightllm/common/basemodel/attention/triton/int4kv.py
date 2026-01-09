@@ -73,8 +73,9 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
         assert k_scale.untyped_storage().data_ptr() == v_scale.untyped_storage().data_ptr()
 
         total_token_num = self.infer_state.total_token_num
-        k_dequant = alloc_func((total_token_num, k.shape[1], k.shape[2]), dtype=q.dtype, device=q.device)
-        v_dequant = alloc_func((total_token_num, v.shape[1], v.shape[2]), dtype=q.dtype, device=q.device)
+        head_dim = k.shape[2] * 2  # 2个4bit存储为一个int8, 所以维度需要翻倍，才是解量化后的精度
+        k_dequant = alloc_func((total_token_num, k.shape[1], head_dim), dtype=q.dtype, device=q.device)
+        v_dequant = alloc_func((total_token_num, v.shape[1], head_dim), dtype=q.dtype, device=q.device)
         o_tensor = alloc_func(q.shape, dtype=q.dtype, device=q.device)
 
         max_kv_seq_len = self.infer_state.max_kv_seq_len
