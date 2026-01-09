@@ -37,7 +37,7 @@ def _sample_kv_kernel(
     offs_rope_d = tl.arange(0, BLOCK_ROPE_DIM)
     offs_m = (start_m * BLOCK_SEQ + tl.arange(0, BLOCK_SEQ)) % cur_batch_seq_len
 
-    if (start_m + 1) * BLOCK_SEQ > cur_batch_seq_len:
+    if start_m * BLOCK_SEQ > cur_batch_seq_len:
         return
 
     kv_loc = tl.load(
