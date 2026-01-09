@@ -1,5 +1,4 @@
 import torch
-from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 
 
 def token_decode_attention_flash_decoding(
@@ -30,20 +29,21 @@ def token_decode_attention_flash_decoding(
         [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 1], dtype=torch.float16, device="cuda"
     )
 
-    light_ops.group8_int4kv_flashdecoding_stage1(
-        BLOCK_SEQ,
-        mid_o,
-        mid_o_logexpsum,
-        1.0 / (head_dim ** 0.5),
-        q.view(calcu_shape1),
-        cache_k,
-        cache_k_scale,
-        cache_v,
-        cache_v_scale,
-        infer_state.req_manager.req_to_token_indexs,
-        infer_state.b_req_idx,
-        infer_state.b_seq_len,
-        infer_state.max_kv_seq_len,
+    from .int4kv_flash_decoding_stage1 import int4kv_flash_decode_stage1
+
+    int4kv_flash_decode_stage1(
+        q=q.view(calcu_shape1),
+        k=cache_k,
+        k_scale=cache_k_scale,
+        v=cache_v,
+        v_scale=cache_v_scale,
+        Req_to_tokens=infer_state.req_manager.req_to_token_indexs,
+        B_req_idx=infer_state.b_req_idx,
+        B_Seqlen=infer_state.b_seq_len,
+        max_len_in_batch=infer_state.max_kv_seq_len,
+        mid_out=mid_o,
+        mid_out_logsumexp=mid_o_logexpsum,
+        block_seq=BLOCK_SEQ,
     )
 
     flash_decode_stage2(mid_o, mid_o_logexpsum, infer_state.b_seq_len, o_tensor.view(calcu_shape1), BLOCK_SEQ)
