@@ -81,8 +81,8 @@ class BasePrefillAttState(ABC):
     def prefill_att(
         self,
         q: torch.Tensor,
-        k: torch.tensor,
-        v: torch.tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
