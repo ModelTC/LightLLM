@@ -84,7 +84,7 @@ class CudaGraph:
             torch.cuda.synchronize()
             decode_func(copy.copy(infer_state))
             torch.cuda.synchronize()
-            for param_name in vars(infer_state).keys():
+            for param_name in set(vars(infer_state).keys()):
                 if param_name not in pure_para_set:
                     delattr(infer_state, param_name)
 
@@ -118,10 +118,10 @@ class CudaGraph:
             torch.cuda.synchronize()
             decode_func(copy.copy(infer_state), copy.copy(infer_state1))
             torch.cuda.synchronize()
-            for para_name in vars(infer_state).keys():
+            for para_name in set(vars(infer_state).keys()):
                 if para_name not in pure_para_set:
                     delattr(infer_state, para_name)
-            for para_name in vars(infer_state1).keys():
+            for para_name in set(vars(infer_state1).keys()):
                 if para_name not in pure_para_set1:
                     delattr(infer_state1, para_name)
 
