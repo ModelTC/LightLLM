@@ -116,7 +116,7 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         out = gqa_token_decode_attention_flash_decoding(
             q_nope=q_nope,
             q_rope=q_rope,
-            kv_nope=kv[:, :, :qk_rope_head_dim],
+            kv_nope=kv[:, :, :-qk_rope_head_dim],
             kv_rope=kv[:, :, -qk_rope_head_dim:],
             infer_state=self.infer_state,
             softmax_scale=softmax_scale,
