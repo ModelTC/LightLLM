@@ -73,7 +73,7 @@ def sample_kv(
     batch = b_seq_len.shape[0]
 
     BLOCK = 64 if not is_tesla() else 32
-    num_warps = 4
+    num_warps = 8
     grid = (
         batch,
         triton.cdiv(max_kv_seq_len, BLOCK),
