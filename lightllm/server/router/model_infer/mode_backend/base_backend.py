@@ -88,7 +88,6 @@ class ModeBackend:
         # dp_size_in_node 计算兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, self.dp_size // self.nnodes)
         self.load_way = kvargs["load_way"]
-        self.mode = kvargs["mode"]
         self.disable_chunked_prefill = self.args.disable_chunked_prefill
         self.chunked_prefill_size = self.args.chunked_prefill_size
         self.return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
@@ -148,7 +147,6 @@ class ModeBackend:
             "weight_dir": self.weight_dir,
             "max_total_token_num": max_total_token_num,
             "load_way": self.load_way,
-            "mode": self.mode,
             "max_req_num": kvargs.get("max_req_num", 1000),
             "max_seq_length": kvargs.get("max_seq_length", 1024 * 5),
             "is_token_healing": kvargs.get("is_token_healing", False),
@@ -302,7 +300,6 @@ class ModeBackend:
                 "weight_dir": self.args.mtp_draft_model_dir[i],
                 "max_total_token_num": self.model.mem_manager.size,
                 "load_way": main_kvargs["load_way"],
-                "mode": main_kvargs["mode"],
                 "max_req_num": main_kvargs.get("max_req_num", 1000),
                 "max_seq_length": main_kvargs.get("max_seq_length", 1024 * 5),
                 "is_token_healing": False,

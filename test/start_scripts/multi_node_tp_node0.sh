@@ -5,7 +5,7 @@ export nccl_host=$1
 LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
 --model_dir /path/DeepSeek-R1 \
 --tp 16 \
---enable_fa3 \
+--llm_prefill_att_backend fa3 --llm_decode_att_backend fa3 \
 --nnodes 2 \
 --node_rank 0 \
 --nccl_host $nccl_host \

@@ -9,11 +9,10 @@ from lightllm.models.vit.triton_kernel.gelu_vit import gelu_fwd
 class ViTPostLayerInfer:
     """ """
 
-    def __init__(self, network_config, mode):
+    def __init__(self, network_config):
         self.tp_rank_ = get_current_rank_in_dp()
         self.tp_world_size_ = get_dp_world_size()
         self.network_config_ = network_config
-        self.mode = mode
         self.llm_hidden_size = network_config["llm_hidden_size"]
         self.downsample_ratio = network_config["downsample_ratio"]
         return

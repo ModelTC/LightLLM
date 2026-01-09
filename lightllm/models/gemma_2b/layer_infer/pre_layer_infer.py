@@ -11,8 +11,8 @@ from lightllm.distributed.communication_op import all_reduce
 class Gemma_2bPreLayerInfer(PreLayerInferTpl):
     """ """
 
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         tp_vob_ids = np.linspace(0, network_config["vocab_size"], self.tp_world_size_ + 1, dtype=np.int64)
         self.vob_start_id_, self.vob_end_id_ = int(tp_vob_ids[self.tp_rank_]), int(tp_vob_ids[self.tp_rank_ + 1])
         self.normfactor = network_config["hidden_size"] ** 0.5

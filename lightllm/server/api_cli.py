@@ -219,29 +219,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         the --nccl_host must equal to the config_server_host, and the --nccl_port must be unique for a config_server,
         dont use same nccl_port for different inference node, it will be critical error""",
     )
-
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default=[],
-        nargs="+",
-        help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_int8kv_flashdecoding | ppl_int8kv_flashdecoding_diverse
-                        | ppl_fp16 | triton_flashdecoding
-                        | triton_gqa_attention | triton_gqa_flashdecoding | triton_fp8kv | offline_calibration_fp8kv
-                        | export_fp8kv_calibration
-                        triton_flashdecoding mode is for long context, current support llama llama2 qwen;
-                        triton_gqa_attention and triton_gqa_flashdecoding is fast kernel for model which use GQA;
-                        triton_int8kv mode use int8 to store kv cache, can increase token capacity, use triton kernel;
-                        triton_fp8kv mode use float8 to store kv cache, currently only for deepseek2;
-                        offline_calibration_fp8kv mode use float8 to store kv cache, need fa3 or flashinfer backend,
-                        currently only for llama and qwen model;
-                        export_fp8kv_calibration record and export kv cache quant calibration results to a json file.
-                        It can be used for llama and qwen model.
-                        Calibration need to disable cudagraph and use fa3 or flashinfer backend.
-                        ppl_int8kv mode use int8 to store kv cache, and use ppl fast kernel;
-                        ppl_fp16 mode use ppl fast fp16 decode attention kernel;
-                        you need to read source code to make sure the supported detail mode for all models""",
-    )
     parser.add_argument(
         "--trust_remote_code",
         action="store_true",
@@ -337,21 +314,40 @@ def make_argument_parser() -> argparse.ArgumentParser:
         only deepseekv3 model supported now.""",
     )
     parser.add_argument(
-        "--enable_flashinfer_prefill",
-        action="store_true",
-        help="""inference backend will use the attention kernel of flashinfer for prefill,
-        only deepseekv3 model supported now.""",
+        "--llm_prefill_att_backend",
+        type=str,
+        nargs="+",
+        choices=["None", "triton", "fa3", "flashinfer"],
+        default=["triton"],
+        help="""prefill attention kernel used in llm.
+                None: automatically select backend based on current GPU device,
+                not supported yet, will support in future""",
     )
     parser.add_argument(
-        "--enable_flashinfer_decode",
-        action="store_true",
-        help="""inference backend will use the attention kernel of flashinfer for decode,
-        only deepseekv3 model supported now.""",
+        "--llm_decode_att_backend",
+        type=str,
+        nargs="+",
+        choices=["None", "triton", "fa3", "flashinfer"],
+        default=["triton"],
+        help="""decode attention kernel used in llm.
+                None: automatically select backend based on current GPU device,
+                not supported yet, will support in future""",
     )
     parser.add_argument(
-        "--enable_fa3",
-        action="store_true",
-        help="""inference backend will use the fa3 attention kernel for prefill and decode""",
+        "--llm_kv_type",
+        type=str,
+        choices=["None", "int8kv", "int4kv"],
+        default="None",
+        help="""kv type used in llm, None for dtype that llm used in config.json.
+                fp8kv: not fully supported yet, will support in future""",
+    )
+    parser.add_argument(
+        "--llm_kv_quant_group_size",
+        type=int,
+        default=8,
+        help="""kv quant group size used in llm kv, when llm_kv_type is quanted type,such as int8kv,
+        this params will be effective.
+        """,
     )
     parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"

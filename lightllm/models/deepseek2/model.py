@@ -4,49 +4,14 @@ from lightllm.models.registry import ModelRegistry
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-from lightllm.models.deepseek2.flashinfer_struct import Deepseek2FlashInferStateInfo
-from lightllm.models.deepseek2.flashattention_infer_struct import Deepseek2FlashAttentionStateInfo
-from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
-
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
-
+from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class, get_mla_prefill_att_backend_class
 
 logger = init_logger(__name__)
-
-
-class DeepSeek2FlashInferStateExtraInfo:
-    def __init__(self, model):
-        num_heads = model.config["num_attention_heads"]
-        self.tp_q_head_num = num_heads // get_dp_world_size()
-        self.qk_nope_head_dim = model.qk_nope_head_dim
-        self.qk_rope_head_dim = model.qk_rope_head_dim
-        self.kv_lora_rank = model.kv_lora_rank
-        self.q_data_type = model.data_type
-        self.kv_data_type = model.data_type
-        self.workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=get_current_device_id())
-        self.max_seq_length = model.max_seq_length
-        self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
-        self.kv_indices_buffer = [
-            torch.empty(
-                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
-            torch.empty(
-                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
-        ]
-        if model.config["rope_scaling"] is not None:
-            rope_scaling = model.config["rope_scaling"]
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
-            scaling_factor = rope_scaling["factor"]
-            if mscale_all_dim:
-                mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
-                self.softmax_scale = self.softmax_scale * mscale * mscale
 
 
 @ModelRegistry(["deepseek_v2", "deepseek_v3"])
@@ -61,18 +26,13 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     infer_state_class = Deepseek2InferStateInfo
 
     def __init__(self, kvargs):
-        self.enable_flashinfer = (
-            get_env_start_args().enable_flashinfer_prefill or get_env_start_args().enable_flashinfer_decode
-        )
         super().__init__(kvargs)
         return
 
-    def _init_inferstate_cls(self):
-        if get_env_start_args().enable_fa3:
-            self.infer_state_class = Deepseek2FlashAttentionStateInfo
-        elif self.enable_flashinfer:
-            self.infer_state_class = Deepseek2FlashInferStateInfo
-            self.flashinfer_extra_state = DeepSeek2FlashInferStateExtraInfo(self)
+    def _init_att_backend(self):
+        self.prefill_att_backend = get_mla_prefill_att_backend_class(index=0)(model=self)
+        self.decode_att_backend = get_mla_decode_att_backend_class(index=0)(model=self)
+        return
 
     def _init_some_value(self):
         super()._init_some_value()

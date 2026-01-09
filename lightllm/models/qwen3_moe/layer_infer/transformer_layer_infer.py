@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 
 
 class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
+    def __init__(self, layer_num, network_config):
         self.n_routed_experts = network_config["num_experts"]
         self.is_moe = (
             network_config["num_experts"] > 0
@@ -28,7 +28,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
         self.norm_topk_prob = network_config["norm_topk_prob"]
-        super().__init__(layer_num, network_config, mode)
+        super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
         self.tp_k_head_num_ = max(self.tp_k_head_num_, 1)
         self.tp_v_head_num_ = max(self.tp_v_head_num_, 1)

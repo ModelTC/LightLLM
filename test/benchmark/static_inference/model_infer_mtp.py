@@ -129,7 +129,6 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
     model_input = ModelInput(
         batch_size=batch_size,
         total_token_num=total_token_num,
-        max_len_in_batch=input_len,
         input_ids=test_data,
         mem_indexes=mem_indexes,
         b_req_idx=b_req_idx,
@@ -197,7 +196,6 @@ def run_forward_once(args, input_len, output_len, batch_size, main_model, draft_
     model_input = ModelInput(
         batch_size=batch_size * (len(draft_models) + 1),
         total_token_num=nopad_total_token_num,
-        max_len_in_batch=nopad_max_len_in_batch,
         input_ids=decode_input_ids,
         mem_indexes=mem_indexes,
         b_req_idx=nopad_b_seq_idx,

@@ -7,8 +7,8 @@ from lightllm.models.mistral_mtp.layer_weights.pre_and_post_layer_weight import 
 class MistralMTPPreLayerInfer(LlamaPreLayerInfer):
     """ """
 
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         return
 
     def _mtp_context_forward(

@@ -1,4 +1,4 @@
-LOADWORKER=18 python -m lightllm.server.api_server --model_dir /mtc/models/DeepSeek-R1 --tp 8 --port 8089 --enable_fa3
+LOADWORKER=18 python -m lightllm.server.api_server --batch_max_tokens 6000 --model_dir /mtc/models/DeepSeek-R1 --tp 8 --port 8089 --llm_prefill_att_backend fa3 --llm_decode_att_backend fa3
 
 
 
