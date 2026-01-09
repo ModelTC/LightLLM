@@ -26,6 +26,7 @@ class Deepseek2MemoryManager(MemoryManager):
 
         rope_dim = 64
         kv_lora_rank = kv.shape[2] - rope_dim
+        assert kv_lora_rank + rope_dim == self.kv_buffer.shape[-1]
 
         destindex_copy_kv(
             kv[:, :, :kv_lora_rank],

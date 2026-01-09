@@ -36,11 +36,11 @@ def _fwd_kernel_destindex_copy_kv(
 
     dest_index = tl.load(Dest_loc + cur_index).to(tl.int64)
 
-    kv_nope_ptrs = KV_nope + cur_index * stride_kv_nope_bs + stride_kv_nope_d * offs_d_nope[None, :]
-    kv_rope_ptrs = KV_rope + cur_index * stride_kv_rope_bs + stride_kv_rope_d * offs_d_rope[None, :]
+    kv_nope_ptrs = KV_nope + cur_index * stride_kv_nope_bs + stride_kv_nope_d * offs_d_nope
+    kv_rope_ptrs = KV_rope + cur_index * stride_kv_rope_bs + stride_kv_rope_d * offs_d_rope
 
-    o_nope_ptrs = O_nope + dest_index * stride_o_nope_bs + stride_o_nope_d * offs_d_nope[None, :]
-    o_rope_ptrs = O_rope + dest_index * stride_o_rope_bs + stride_o_rope_d * offs_d_rope[None, :]
+    o_nope_ptrs = O_nope + dest_index * stride_o_nope_bs + stride_o_nope_d * offs_d_nope
+    o_rope_ptrs = O_rope + dest_index * stride_o_rope_bs + stride_o_rope_d * offs_d_rope
 
     kv_nope = tl.load(kv_nope_ptrs)
     kv_rope = tl.load(kv_rope_ptrs)
@@ -60,6 +60,9 @@ def destindex_copy_kv(KV_nope, KV_rope, DestLoc, O_nope, O_rope):
     assert KV_nope.shape[2] == O_nope.shape[2]
     assert KV_rope.shape[1] == O_rope.shape[1]
     assert KV_rope.shape[2] == O_rope.shape[2]
+    assert triton.next_power_of_2(kv_nope_head_dim) == kv_nope_head_dim
+    assert triton.next_power_of_2(kv_rope_head_dim) == kv_rope_head_dim
+
     grid = (seq_len,)
     num_warps = 1
 

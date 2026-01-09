@@ -69,7 +69,7 @@ def sample_kv(
 ):
     nope_dim = sampled_compressed_kv_nope.shape[-1]
     rope_dim = sampled_k_rope.shape[-1]
-
+    assert rope_dim == 64
     batch = b_seq_len.shape[0]
 
     BLOCK = 64 if not is_tesla() else 32
