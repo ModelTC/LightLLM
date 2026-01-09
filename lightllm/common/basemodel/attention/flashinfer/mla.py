@@ -99,7 +99,7 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
     ) -> torch.Tensor:
         self.backend: MlaFlashInferAttBackend = self.backend  # for typing
         k_nope, k_rope = k
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
+        o_tensor = alloc_func((q.shape[0], q.shape[1], k_nope.shape[1]), q.dtype, device="cuda")
         q_head_num = q.shape[1]
         k = torch.cat([k_nope, torch.repeat_interleave(k_rope, q_head_num, dim=-2)], dim=-1)
         self.prefill_wrapper.run(q, k, v, out=o_tensor)
