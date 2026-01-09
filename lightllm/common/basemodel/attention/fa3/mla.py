@@ -217,7 +217,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
             cache_seqlens=self.b_att_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
             cu_seqlens_k_new=self.cu_seqlens_k,
-            max_seqlen_q=self.infer_state.max_q_seq_len,
+            max_seqlen_q=self.decode_max_q_seq_len,
             softmax_scale=softmax_scale,
             causal=True,
             window_size=(-1, -1),
