@@ -1,4 +1,7 @@
 import pytest
+
+pytest.skip(reason="need install lightllmkernel", allow_module_level=True)
+
 import torch
 from lightllm.utils.light_utils import light_ops
 

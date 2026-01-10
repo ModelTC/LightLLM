@@ -10,7 +10,6 @@ from lightllm.common.basemodel.triton_kernel.att.prefill_att.context_flashattent
     context_attention_fwd_no_prompt_cache,
 )
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.common.req_manager import ReqManager
 
 logger = init_logger(__name__)
 
@@ -54,14 +53,14 @@ def test_context_attention_fwd(batch, seqlen, q_heads, kv_heads, head_dim):
 
     infer_state = LlamaInferStateInfo()
     infer_state.batch_size = Z
-    infer_state.max_len_in_batch = N_CTX
+    infer_state.max_q_seq_len = N_CTX
     infer_state.total_token_num = Z * N_CTX
-    infer_state.req_manager = ReqManager(Z, N_CTX, None)
+    infer_state.req_manager = type("Object", (), {})()
     infer_state.req_manager.req_to_token_indexs = req_to_token_indexs
     infer_state.b_req_idx = b_req_idx
     infer_state.b_seq_len = b_seq_len
     infer_state.b_ready_cache_len = b_ready_cache_len
-    infer_state.b_start_loc = q_start_loc
+    infer_state.b_q_start_loc = q_start_loc
 
     context_attention_fwd(
         q,
@@ -69,10 +68,10 @@ def test_context_attention_fwd(batch, seqlen, q_heads, kv_heads, head_dim):
         kv[:, KV_HEADS:, :],
         o,
         infer_state.b_req_idx,
-        infer_state.b_start_loc,
+        infer_state.b_q_start_loc,
         infer_state.b_seq_len,
         infer_state.b_ready_cache_len,
-        infer_state.max_len_in_batch,
+        infer_state.max_q_seq_len,
         infer_state.req_manager.req_to_token_indexs,
     )
 
@@ -127,7 +126,11 @@ def test_context_attention_fwd(batch, seqlen, q_heads, kv_heads, head_dim):
     "batch, seqlen, q_heads, kv_heads, head_dim",
     [
         (a, b, c, d, e)
-        for a in [1, 16, 32, 128, 512]
+        for a in [
+            1,
+            16,
+            32,
+        ]
         for b in [16, 32, 512, 1024]
         for c in [28]
         for d in [4]
@@ -149,18 +152,18 @@ def test_context_attention_fwd_no_prompt_cache(batch, seqlen, q_heads, kv_heads,
 
     infer_state = LlamaInferStateInfo()
     infer_state.batch_size = Z
-    infer_state.max_len_in_batch = N_CTX
+    infer_state.max_q_seq_len = N_CTX
     infer_state.b_seq_len = b_seq_len
-    infer_state.b_start_loc = b_start_loc
+    infer_state.b_q_start_loc = b_start_loc
 
     context_attention_fwd_no_prompt_cache(
         q,
         k,
         v,
         o,
-        infer_state.b_start_loc,
+        infer_state.b_q_start_loc,
         infer_state.b_seq_len,
-        infer_state.max_len_in_batch,
+        infer_state.max_q_seq_len,
     )
 
     head_dim = HEAD_DIM

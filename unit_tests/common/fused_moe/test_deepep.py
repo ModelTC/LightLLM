@@ -1,6 +1,6 @@
 import pytest
 
-pytest.skip(reason="need special env", allow_module_level=True)
+pytest.skip(reason="need special env, install deep_ep and deep_gemm", allow_module_level=True)
 
 import os
 import torch
