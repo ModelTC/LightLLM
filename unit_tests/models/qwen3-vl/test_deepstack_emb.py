@@ -50,7 +50,7 @@ def test_deepstack_same_image_twice():
         deepstack_embs=deepstack_embs,
         img_token_lens=img_token_lens,
         img_start_token_ids=img_start_token_ids,
-        img_start_locs=img_start_locs,
+        img_start_locs_in_cache=img_start_locs,
     )
 
     # 7. 看看相同图片两段上的增量

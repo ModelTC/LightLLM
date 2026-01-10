@@ -1,4 +1,7 @@
 import pytest
+
+pytest.skip(reason="need install lightllmKernel", allow_module_level=True)
+
 import torch
 from lightllm.utils.light_utils import light_ops
 
@@ -21,7 +24,7 @@ class MockInferState:
     def __init__(
         self,
         batch_size,
-        max_len_in_batch,
+        max_kv_seq_len,
         req_to_tokens,
         b_req_idx,
         b_seq_len,
@@ -29,7 +32,7 @@ class MockInferState:
         b_mark_shared_group=None,
     ):
         self.batch_size = batch_size
-        self.max_len_in_batch = max_len_in_batch
+        self.max_kv_seq_len = max_kv_seq_len
         self.req_manager = MockReqManager(req_to_tokens)
         self.b_req_idx = b_req_idx
         self.b_seq_len = b_seq_len
@@ -44,10 +47,11 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
     测试 ppl_int8kv_flash_decoding_diverse 的 token_decode_attention_flash_decoding
     与 ppl_int8kv_flash_decoding (baseline) 的对比。
     """
-    from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding_diverse import (
+
+    from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse import (
         token_decode_attention_flash_decoding as diverse_attention,
     )
-    from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding import (
+    from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding import (
         token_decode_attention_flash_decoding as baseline_attention,
     )
 
@@ -87,7 +91,7 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
     # 创建 baseline 的 infer_state (不需要 b_shared_seq_len)
     baseline_infer_state = MockInferState(
         batch_size=batch_size,
-        max_len_in_batch=seq_len,
+        max_kv_seq_len=seq_len,
         req_to_tokens=req_to_tokens,
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
@@ -96,7 +100,7 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
     # 创建 diverse 的 infer_state
     diverse_infer_state = MockInferState(
         batch_size=batch_size,
-        max_len_in_batch=seq_len,
+        max_kv_seq_len=seq_len,
         req_to_tokens=req_to_tokens,
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
@@ -108,8 +112,6 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
     baseline_out = baseline_attention(
         q=q.clone(),
         infer_state=baseline_infer_state,
-        q_head_num=num_heads,
-        head_dim=head_dim,
         cache_k=cache_k,
         cache_k_scale=cache_k_scale,
         cache_v=cache_v,
@@ -120,8 +122,6 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
     diverse_out = diverse_attention(
         q=q.clone(),
         infer_state=diverse_infer_state,
-        q_head_num=num_heads,
-        head_dim=head_dim,
         cache_k=cache_k,
         cache_k_scale=cache_k_scale,
         cache_v=cache_v,

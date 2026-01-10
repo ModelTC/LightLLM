@@ -1,6 +1,8 @@
 import pytest
 import torch
-from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding_diverse_stage3 import flash_diverse_decode_stage3
+from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse_stage3 import (
+    flash_diverse_decode_stage3,
+)
 
 
 @pytest.mark.parametrize(
@@ -23,7 +25,10 @@ def test_flash_diverse_decode_stage3(batch, head_num, seq_len, shared_seq_len, b
     flash_diverse_decode_stage3(mid_out, mid_out_logexpsum, B_Seqlen, b_shared_seq_len, out, block_seq)
 
     true_out = torch.zeros_like(out)
-    from lightllm.models.llama.triton_kernel.flash_decoding_stage2 import flash_decode_stage2
+
+    from lightllm.common.basemodel.triton_kernel.att.decode_att.mha.flash_decoding.flash_decoding_stage2 import (
+        flash_decode_stage2,
+    )
 
     flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, true_out, block_seq)
 

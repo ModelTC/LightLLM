@@ -1,4 +1,7 @@
 import pytest
+
+pytest.skip(reason="need install lightllmkernel", allow_module_level=True)
+
 import torch
 from lightllm.utils.light_utils import light_ops
 
@@ -94,7 +97,7 @@ def test_flash_decode_stage2_execution(shared_seq_len):
     b_seq_len = setup_tensors["b_seq_len"] - setup_tensors["b_shared_seq_len"]
     req_to_tokens = setup_tensors["Req_to_tokens"][:, setup_tensors["b_shared_seq_len"][0].item() :]
 
-    from lightllm.models.llama.triton_kernel.gqa_flash_decoding_stage1 import (
+    from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_stage1 import (
         flash_decode_stage1 as gqa_flash_decode_stage1,
     )
 

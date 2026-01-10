@@ -25,6 +25,7 @@ def test_token_id_counter():
     for _ in range(100):
         token_id_counter(prompt_ids=test_prompt_ids, out_token_id_counter=test_token_id_counter)
     end_event.record()
+    end_event.synchronize()
     logger.info(f"test_token_id_count cost time: {start_event.elapsed_time(end_event)} ms")
 
 

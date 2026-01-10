@@ -1,7 +1,7 @@
 import torch
 import pytest
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.deepseek2.triton_kernel.repack_kv_index import repack_kv_index
+from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
 
 logger = init_logger(__name__)
 

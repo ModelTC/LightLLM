@@ -9,7 +9,10 @@ logger = init_logger(__name__)
 
 
 def benchmark(M, N, K, renorm, runs):
-    import sgl_kernel as sgl_ops
+    try:
+        import sgl_kernel as sgl_ops
+    except Exception as e:
+        pytest.skip(f"no sgl_kernel error: {str(e)}", allow_module_level=True)
 
     gating = torch.randn(M, N, device="cuda", dtype=torch.float32)
     torch.cuda.synchronize()
