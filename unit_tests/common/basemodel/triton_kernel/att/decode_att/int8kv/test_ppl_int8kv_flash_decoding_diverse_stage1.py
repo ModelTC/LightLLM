@@ -1,6 +1,8 @@
 import pytest
 import torch
-from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding_diverse_stage1 import flash_decode_stage1
+from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse_stage1 import (
+    flash_decode_stage1,
+)
 
 
 @pytest.fixture

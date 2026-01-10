@@ -1,6 +1,6 @@
 import torch
 import pytest
-from lightllm.models.deepseek2.triton_kernel.destindex_copy_kv import destindex_copy_kv
+from lightllm.common.basemodel.triton_kernel.kv_copy.mla_copy_kv import destindex_copy_kv
 from lightllm.utils.log_utils import init_logger
 import torch.nn.functional as F
 

@@ -5,7 +5,9 @@ import numpy as np
 import torch.nn.functional as F
 import flashinfer
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
+from lightllm.common.basemodel.triton_kernel.mla_att.decode_att.gqa_flash_decoding import (
+    gqa_token_decode_attention_flash_decoding,
+)
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.common.req_manager import ReqManager
 
