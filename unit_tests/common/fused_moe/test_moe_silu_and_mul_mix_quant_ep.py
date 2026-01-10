@@ -1,6 +1,18 @@
 import torch
-import time
 import pytest
+
+
+def is_fp8_native_supported():
+    """检查是否为 H100/B200 等原生支持 FP8 的硬件 (SM90+)"""
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability()
+    return major >= 9
+
+
+if not is_fp8_native_supported():
+    pytest.skip(reason="not support fp8 test in this gpu card", allow_module_level=True)
+
 import random
 from lightllm.common.fused_moe.moe_silu_and_mul_mix_quant_ep import silu_and_mul_masked_post_quant_fwd
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd

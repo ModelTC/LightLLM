@@ -1,12 +1,13 @@
+import pytest
+
+pytest.skip(reason="need special env, install deep_ep and deep_gemm", allow_module_level=True)
+
 import os
 import torch
 import torch.distributed as dist
-import pytest
 import deep_ep
 import random
 import numpy as np
-from deep_ep import Buffer, EventOverlap
-from deep_gemm import ceil_div, get_col_major_tma_aligned_tensor
 from lightllm.common.fused_moe.grouped_fused_moe_ep import fused_experts_impl
 from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from typing import Tuple
@@ -25,6 +26,8 @@ if torch.cuda.is_available():
 def per_block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
+    from deep_gemm import ceil_div
+
     x_padded = torch.zeros((ceil_div(m, 128) * 128, ceil_div(n, 128) * 128), dtype=x.dtype, device=x.device)
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)

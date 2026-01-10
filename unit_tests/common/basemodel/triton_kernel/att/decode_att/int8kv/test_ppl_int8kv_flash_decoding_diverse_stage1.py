@@ -1,6 +1,8 @@
 import pytest
 import torch
-from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding_diverse_stage1 import flash_decode_stage1
+from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse_stage1 import (
+    flash_decode_stage1,
+)
 
 
 @pytest.fixture
@@ -81,7 +83,7 @@ def test_flash_decode_stage1_execution(setup_tensors):
     new_k = k.to(q.dtype)
     new_v = v.to(q.dtype)
 
-    from lightllm.models.llama.triton_kernel.gqa_flash_decoding_stage1 import (
+    from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_stage1 import (
         flash_decode_stage1 as gqa_flash_decode_stage1,
     )
 

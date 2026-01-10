@@ -1,6 +1,22 @@
 import pytest
-
+import easydict
 from lightllm.server.core.objs.req import Req, TokenHealingReq, ChunkedPrefillReq, SamplingParams
+from lightllm.utils.envs_utils import set_env_start_args
+
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_module_env():
+    set_env_start_args(
+        easydict.EasyDict(
+            {
+                "mtp_step": 0,
+                "llm_prefill_att_backend": ["None"],
+                "llm_decode_att_backend": ["None"],
+                "cpu_cache_token_page_size": 256,
+                "enable_cpu_cache": False,
+            }
+        )
+    )
 
 
 @pytest.fixture
