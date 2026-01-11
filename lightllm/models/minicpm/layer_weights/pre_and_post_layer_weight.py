@@ -3,8 +3,8 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 
 
 class MiniCPMPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
         hidden_size = self.network_config_["hidden_size"]
         dim_model_base = self.network_config_.get("dim_model_base", hidden_size)
         self.lm_head_scale = hidden_size / dim_model_base

@@ -14,7 +14,6 @@ class LlamaInferStateInfo(InferStateInfo):
         super().init_some_extra_state(model)
         if self.is_prefill:
             self.max_seq_len = self.max_kv_seq_len
-            self.q_max_seq_len = self.max_q_seq_len
             position_ids = self.position_ids
             self.position_cos = torch.index_select(model._cos_cached, 0, position_ids).view(position_ids.shape[0], -1)
             self.position_sin = torch.index_select(model._sin_cached, 0, position_ids).view(position_ids.shape[0], -1)

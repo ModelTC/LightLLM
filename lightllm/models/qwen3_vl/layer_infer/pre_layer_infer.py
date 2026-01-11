@@ -8,8 +8,8 @@ from ..layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeig
 
 
 class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         return
 
     def context_forward(

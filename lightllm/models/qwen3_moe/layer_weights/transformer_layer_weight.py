@@ -4,14 +4,14 @@ from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, Fu
 
 
 class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
         self.n_routed_experts = network_config["num_experts"]
         self.is_moe = (
             network_config["num_experts"] > 0
             and layer_num not in network_config["mlp_only_layers"]
             and (layer_num + 1) % network_config["decoder_sparse_step"] == 0
         )
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
     def _init_weight_names(self):

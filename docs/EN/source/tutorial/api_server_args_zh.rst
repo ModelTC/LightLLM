@@ -183,23 +183,6 @@ Different Parallel Mode Setting Parameters
     When set to True, --nccl_host must equal config_server_host, --nccl_port must be unique for config_server,
     do not use the same nccl_port for different inference nodes, this will be a serious error
 
-Attention Type Selection Parameters
-------------------------------------
-
-.. option:: --mode
-
-    Model inference mode, can specify multiple values:
-    
-    * ``triton_int8kv``: Use int8 to store kv cache, can increase token capacity, uses triton kernel
-    * ``ppl_int8kv``: Use int8 to store kv cache, uses ppl fast kernel
-    * ``ppl_fp16``: Use ppl fast fp16 decode attention kernel
-    * ``triton_flashdecoding``: Flashdecoding mode for long context, currently supports llama llama2 qwen
-    * ``triton_gqa_attention``: Fast kernel for models using GQA
-    * ``triton_gqa_flashdecoding``: Fast flashdecoding kernel for models using GQA
-    * ``triton_fp8kv``: Use float8 to store kv cache, currently only used for deepseek2
-    
-    Need to read source code to confirm specific modes supported by all models 
-
 Scheduling Parameters
 ---------------------
 
@@ -325,18 +308,6 @@ Performance Optimization Parameters
 .. option:: --enable_decode_microbatch_overlap
 
     The inference backend will use microbatch overlap mode for decoding
-    
-.. option:: --enable_flashinfer_prefill
-
-    The inference backend will use flashinfer's attention kernel for prefill
-    
-.. option:: --enable_flashinfer_decode
-
-    The inference backend will use flashinfer's attention kernel for decoding
-    
-.. option:: --enable_fa3
-
-    The inference backend will use fa3 attention kernel for prefill and decoding
 
 .. option:: --disable_cudagraph
 

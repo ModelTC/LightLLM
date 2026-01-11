@@ -32,7 +32,8 @@ DeepSeek-R1
         --model_dir /path/to/DeepSeek-R1 \
         --reasoning_parser deepseek-r1 \
         --tp 8 \
-        --enable_fa3
+        --llm_prefill_att_backend fa3 \
+        --llm_decode_att_backend fa3
 
 DeepSeek-V3
 ~~~~~~~~~~~

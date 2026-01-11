@@ -25,9 +25,6 @@ class Qwen3VLMOETpPartModel(Qwen3MOEModel):
         super().__init__(kvargs)
         return
 
-    def _init_inferstate_cls(self):
-        pass
-
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
             all_config = json.load(json_file)

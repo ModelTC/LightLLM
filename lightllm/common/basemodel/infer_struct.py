@@ -11,6 +11,7 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank
+from .attention import BasePrefillAttState, BaseDecodeAttState
 
 
 class InferStateInfo:
@@ -19,21 +20,24 @@ class InferStateInfo:
     """
 
     def __init__(self):
+        # prefill 和 decode 使用的 att 状态对象
+        self.prefill_att_state: BasePrefillAttState = None
+        self.decode_att_state: BaseDecodeAttState = None
+
+        # 保留的扩展, 支持线性att与标准att混合使用时使用
+        self.prefill_att_state1: BasePrefillAttState = None
+        self.decode_att_state1: BaseDecodeAttState = None
+
         self.input_ids: torch.Tensor = None
         self.batch_size: int = None
         self.total_token_num: int = None
         self.b_req_idx: torch.Tensor = None
-        self.b_start_loc: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
 
         self.b_shared_seq_len: torch.Tensor = None  # only for diverse mode used in decode phase.
         self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
 
         self.b_seq_len: torch.Tensor = None
-        # max_len_in_batch prefill 和 decode 阶段含义不同
-        # prefill 阶段指每个req 输入token的长度（不包括已经cache的部分）最大值
-        # decode 阶段指的是每个req的总长 最大值
-        self.max_len_in_batch: int = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
         # prefix_total_token_num 用于 prefill 阶段标识当前请求中所有已经ready的kv的长度
@@ -68,6 +72,11 @@ class InferStateInfo:
         self.max_q_seq_len: int = None
         self.max_kv_seq_len: int = None
 
+        # prefill 用
+        self.b_q_start_loc: torch.Tensor = None
+        # decode 用
+        self.b_kv_start_loc: torch.Tensor = None
+
         # 一些特殊模型，特殊模式使用的输入变量，本身这些变量不适合放在
         # inferstate的基类中，但是为了代码的简洁和方便，都放在基类中
         # 进行管理。注意这些成员变量只会在特定的模型和模式下才会生效。
@@ -90,7 +99,6 @@ class InferStateInfo:
         self.dp_input_split_sizes: List[List[int]] = None
 
     def init_some_extra_state(self, model):
-
         if self.is_prefill:
             (
                 self.b_q_seq_len,
@@ -103,7 +111,7 @@ class InferStateInfo:
                 b_ready_cache_len=self.b_ready_cache_len,
                 b_seq_len=self.b_seq_len,
             )
-            self.b_start_loc = self.b1_cu_q_seq_len[0:-1]
+            self.b_q_start_loc = self.b1_cu_q_seq_len[0:-1]
         else:
             (
                 self.b_q_seq_len,
@@ -112,9 +120,17 @@ class InferStateInfo:
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
             ) = gen_decode_params(self.b_seq_len)
-            # TODO: check the correctness
-            self.max_kv_seq_len = self.max_len_in_batch
-            self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
+            self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
+
+    def init_att_state(self):
+        if self.is_prefill:
+            self.prefill_att_state.init_state()
+            if self.prefill_att_state1 is not None:
+                self.prefill_att_state1.init_state()
+        else:
+            self.decode_att_state.init_state()
+            if self.decode_att_state1 is not None:
+                self.decode_att_state1.init_state()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():
@@ -122,6 +138,10 @@ class InferStateInfo:
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
+
+        self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
+        if self.decode_att_state1 is not None:
+            self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return
 
     def prefill_dp_balance(self, input_ids: torch.Tensor):

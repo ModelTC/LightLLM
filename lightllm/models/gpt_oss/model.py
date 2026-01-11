@@ -19,4 +19,9 @@ class GptOssTpPartModel(LlamaTpPartModel):
 
     def __init__(self, kvargs):
         super().__init__(kvargs)
-        assert get_env_start_args().enable_fa3, "For now GPT-OSS type model only support flashattention-3"
+        assert (
+            get_env_start_args().llm_prefill_att_backend[0] == "fa3"
+        ), "For now GPT-OSS type model only support flashattention-3"
+        assert (
+            get_env_start_args().llm_decode_att_backend[0] == "fa3"
+        ), "For now GPT-OSS type model only support flashattention-3"

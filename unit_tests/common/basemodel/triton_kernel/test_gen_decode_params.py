@@ -1,21 +1,9 @@
 import torch
 import pytest
-import easydict
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
-from lightllm.utils.envs_utils import set_env_start_args
 
 
 def test_gen_decode_params_basic():
-    set_env_start_args(
-        easydict.EasyDict(
-            {
-                "mtp_step": 0,
-                "enable_flashinfer_prefill": False,
-                "enable_flashinfer_decode": False,
-            }
-        )
-    )
-
     b_seq_len = torch.ones((9,), dtype=torch.int64, device="cuda") * 8192
     (
         b_q_seq_len,

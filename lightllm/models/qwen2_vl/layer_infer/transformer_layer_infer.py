@@ -5,8 +5,8 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 
 
 class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         mrope_section = network_config["rope_scaling"]["mrope_section"]
         self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")
 

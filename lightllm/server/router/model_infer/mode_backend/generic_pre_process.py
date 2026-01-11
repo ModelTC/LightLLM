@@ -50,7 +50,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
 
     max_kv_seq_len = max(b_seq_len)
     max_cache_len = max(b_ready_cache_len)
-    max_len_in_batch = max(b_q_seq_len)
     max_q_seq_len = max(b_q_seq_len)
 
     input_ids = np.concatenate(input_ids, dtype=np.int64)
@@ -72,7 +71,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         max_cache_len=max_cache_len,
@@ -95,7 +93,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
 def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[InferReq]]:
     run_reqs: List[InferReq] = []
     total_token_num = 0
-    max_len_in_batch = 0
     b_req_idx = []
     b_mtp_index = []
     b_seq_len = []
@@ -107,8 +104,8 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         seq_len = req.get_cur_total_len()
         assert req.cur_kv_len == seq_len - 1, f"{req.cur_kv_len} {seq_len}"
         b_seq_len.append(seq_len)
+        b_q_seq_len.append(1)
         total_token_num += seq_len
-        max_len_in_batch = max(max_len_in_batch, seq_len)
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
@@ -118,10 +115,9 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
             seq_len += 1
             b_seq_len.append(seq_len)
             total_token_num += seq_len
-            max_len_in_batch = max(max_len_in_batch, seq_len)
             b_mtp_index.append(step + 1)
             multimodal_params.append(req.multimodal_params)
-        b_q_seq_len.append(req.mtp_step + 1)
+            b_q_seq_len.append(1)
 
     max_kv_seq_len = max(b_seq_len)
     max_q_seq_len = max(b_q_seq_len)
@@ -146,7 +142,6 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         input_ids=None,

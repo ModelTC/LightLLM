@@ -63,7 +63,6 @@ class StartArgs:
     nccl_host: str = field(default="127.0.0.1")
     nccl_port: int = field(default=28765)
     use_config_server_to_init_nccl: bool = field(default=False)
-    mode: List[str] = field(default_factory=list)
     trust_remote_code: bool = field(default=False)
     disable_log_stats: bool = field(default=False)
     log_stats_interval: int = field(default=10)
@@ -116,8 +115,14 @@ class StartArgs:
     quant_cfg: Optional[str] = field(default=None)
     vit_quant_type: Optional[str] = field(default=None)
     vit_quant_cfg: Optional[str] = field(default=None)
-    enable_flashinfer_prefill: bool = field(default=False)
-    enable_flashinfer_decode: bool = field(default=False)
+    llm_prefill_att_backend: List[str] = field(
+        default=("None",), metadata={"choices": ["None", "triton", "fa3", "flashinfer"]}
+    )
+    llm_decode_att_backend: List[str] = field(
+        default=("None",), metadata={"choices": ["None", "triton", "fa3", "flashinfer"]}
+    )
+    llm_kv_type: str = field(default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv"]})
+    llm_kv_quant_group_size: int = field(default=8)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
     penalty_counter_mode: str = field(
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
@@ -153,6 +158,3 @@ class StartArgs:
     # multi_modal
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
-
-    # kernel setting
-    enable_fa3: bool = field(default=False)

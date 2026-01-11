@@ -11,10 +11,7 @@ class ModelInput:
     # 通用变量
     batch_size: int
     total_token_num: int
-    max_len_in_batch: int
-    # 在 decode 阶段， 常规模式下， max_q_seq_len 必定是 1，
-    # 在 mtp 模式下，max_q_seq_len 统计的是一个请求考虑了 mtp 步数的
-    # 最大长度，实际值是 max([(1 + req.mtp_step) for req in reqs])
+    # 在 decode 阶段， max_q_seq_len 必定是 1，
     max_q_seq_len: int
     max_kv_seq_len: int
     max_cache_len: int = None

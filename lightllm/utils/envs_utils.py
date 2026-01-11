@@ -26,10 +26,16 @@ def get_unique_server_name():
 def set_cuda_arch(args):
     if not torch.cuda.is_available():
         return
-    if args.enable_flashinfer_prefill or args.enable_flashinfer_decode:
+
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    args: StartArgs = args
+
+    if "flashinfer" in args.llm_prefill_att_backend or "flashinfer" in args.llm_decode_att_backend:
         capability = torch.cuda.get_device_capability()
         arch = f"{capability[0]}.{capability[1]}"
         os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"
+    return
 
 
 def set_env_start_args(args):
@@ -209,7 +215,7 @@ def get_diverse_max_batch_shared_group_size() -> int:
 
 @lru_cache(maxsize=None)
 def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
-    return get_env_start_args().diverse_mode and "ppl_int8kv_flashdecoding_diverse" in get_env_start_args().mode
+    return get_env_start_args().diverse_mode and "int8kv" == get_env_start_args().llm_kv_type
 
 
 @lru_cache(maxsize=None)

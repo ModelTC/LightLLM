@@ -19,7 +19,7 @@ class RequestThread(threading.Thread):
             print("Error:", response.status_code, response.text)
 
 
-url = "http://localhost:8000/generate"
+url = "http://localhost:8089/generate"
 headers = {"Content-Type": "application/json"}
 
 for i in range(1):

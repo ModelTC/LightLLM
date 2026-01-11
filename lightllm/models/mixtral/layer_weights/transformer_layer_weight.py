@@ -8,12 +8,11 @@ logger = init_logger(__name__)
 
 
 class MixtralTransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
         super().__init__(
             layer_num,
             data_type,
             network_config,
-            mode,
             quant_cfg=quant_cfg,
         )
         return
