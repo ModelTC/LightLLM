@@ -608,4 +608,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
+    parser.add_argument(
+        "--hardware_platform",
+        type=str,
+        default="cuda",
+        choices=["cuda", "musa"],
+        help="""Hardware platform: cuda | musa""",
+    )
+    parser.add_argument(
+        "--enable_torch_naive",
+        action="store_true",
+        help="""Use torch naive implementation for the op.""",
+    )
     return parser
