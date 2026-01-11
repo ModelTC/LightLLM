@@ -3,6 +3,8 @@ import time
 import torch
 import shutil
 import subprocess
+from enum import Enum
+from typing import Optional
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
 
@@ -284,3 +286,42 @@ def is_5090_gpu() -> bool:
             return False
     except:
         return False
+
+
+class Platform(Enum):
+    """hardware platform enum"""
+
+    CUDA = "cuda"
+    ASCEND = "ascend"  # ascend
+    CAMBRICON = "cambricon"  # cambricon
+    MUSA = "musa"  # musa
+    ROCM = "rocm"  # rocm
+    CPU = "cpu"  # cpu
+
+
+# 目前仅支持cuda 和 musa
+def get_platform(platform_name: Optional[str] = None) -> Platform:
+    """
+    get hardware platform.
+
+    Args:
+        platform_name: platform name (cuda, ascend, cambricon, musa, rocm, cpu)
+
+    Returns:
+        Platform: platform enum value
+    """
+    assert platform_name in ["cuda", "musa"], f"Only support cuda and musa now, but got {platform_name}"
+    platform_name = platform_name.lower()
+    platform_map = {
+        "cuda": Platform.CUDA,
+        "ascend": Platform.ASCEND,
+        "cambricon": Platform.CAMBRICON,
+        "musa": Platform.MUSA,
+        "rocm": Platform.ROCM,
+        "cpu": Platform.CPU,
+    }
+
+    platform = platform_map.get(platform_name)
+    if platform is None:
+        raise ValueError(f"Unknown platform name: {platform_name}")
+    return platform
