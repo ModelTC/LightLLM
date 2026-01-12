@@ -2,7 +2,7 @@ import torch
 import math
 import numpy as np
 from lightllm.common.basemodel import TransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight, NoTpNormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight, RMSNormWeight
 
 
 class LlamaTransformerLayerWeight(TransformerLayerWeight):
@@ -115,9 +115,16 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_norm(self):
-        self.att_norm_weight_ = NoTpNormWeight(
-            self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
+        hidden_size = self.network_config_["hidden_size"]
+        self.att_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
+            weight_name=self._att_norm_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._att_norm_bias_name,
         )
-        self.ffn_norm_weight_ = NoTpNormWeight(
-            self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
+        self.ffn_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
+            weight_name=self._ffn_norm_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._ffn_norm_bias_name,
         )
