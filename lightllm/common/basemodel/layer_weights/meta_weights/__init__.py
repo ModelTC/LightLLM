@@ -2,8 +2,8 @@ from .base_weight import BaseWeight
 from .mm_weight import (
     MMWeightTpl,
     ROWMMWeight,
+    KVROWNMMWeight,
     COLMMWeight,
-    ROWBMMWeight,
 )
 from .norm_weight import TpRMSNormWeight, RMSNormWeight, LayerNormWeight
 from .embedding_weight import EmbeddingWeight, LMHeadWeight, NoTpPosEmbeddingWeight
