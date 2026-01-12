@@ -20,9 +20,7 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.weight: torch.Tensor = torch.nn.Parameter(
-            torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
-        )
+        self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name in weights:
@@ -67,12 +65,8 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.weight: torch.Tensor = torch.nn.Parameter(
-            torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
-        )
-        self.bias: torch.Tensor = torch.nn.Parameter(
-            torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
-        )
+        self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.bias: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name in weights:
@@ -146,3 +140,15 @@ class TpRMSNormWeight(RMSNormWeight):
             self.weight[:, end - start].copy_(t_weight[start:end].to(self.data_type_))
             # the padding part is zero
             self.weight[:, end:].zero_()
+
+
+class NoTpGEMMANormWeight(RMSNormWeight):
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
+        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type, bias_name=bias_name)
+        self.tp_world_size_ = 1
+        self.tp_rank_ = 0
+
+    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        if self.weight_name in weights:
+            self.weight.copy_(weights[self.weight_name])
+        self.weight += 1

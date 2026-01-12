@@ -9,7 +9,6 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     COLMMWeight,
     RMSNormWeight,
     FusedMoeWeightEP,
-    ROWBMMWeight,
     create_tp_moe_wegiht_obj,
 )
 from functools import partial
@@ -176,20 +175,20 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 layer_num=self.layer_num_,
                 name="q_b_proj",
             )
-        self.k_b_proj_ = ROWBMMWeight(
-            weight_names=f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
-            data_type=self.data_type_,
-            quant_cfg=None,
-            layer_num=self.layer_num_,
-            name="k_b_proj",
-        )
-        self.v_b_proj_ = ROWBMMWeight(
-            weight_names=f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
-            data_type=self.data_type_,
-            quant_cfg=None,
-            layer_num=self.layer_num_,
-            name="v_b_proj",
-        )
+        # self.k_b_proj_ = ROWBMMWeight(
+        #     weight_names=f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
+        #     data_type=self.data_type_,
+        #     quant_cfg=None,
+        #     layer_num=self.layer_num_,
+        #     name="k_b_proj",
+        # )
+        # self.v_b_proj_ = ROWBMMWeight(
+        #     weight_names=f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
+        #     data_type=self.data_type_,
+        #     quant_cfg=None,
+        #     layer_num=self.layer_num_,
+        #     name="v_b_proj",
+        # )
         if self.enable_cc_method:
             self.cc_kv_b_proj_ = ROWMMWeight(
                 weight_names=f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight",

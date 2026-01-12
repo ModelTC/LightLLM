@@ -93,19 +93,17 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_ffn(self):
-        in_dim = self.n_embed
-        out_dim = self.n_inter // self.tp_world_size_
         self.gate_up_proj = ROWMMWeight(
-            in_dim=in_dim,
-            out_dims=[out_dim, out_dim],
+            in_dim=self.n_embed,
+            out_dims=[self.n_inter, self.n_inter],
             weight_names=[self._gate_weight_name, self._up_weight_name],
             data_type=self.data_type_,
             bias_names=[self._gate_bias_name, self._up_bias_name],
             quant_method=self.get_quant_method("gate_up_proj"),
         )
         self.down_proj = COLMMWeight(
-            in_dim=out_dim,
-            out_dims=[in_dim],
+            in_dim=self.n_inter,
+            out_dims=[self.n_embed],
             weight_names=self._down_weight_name,
             data_type=self.data_type_,
             bias_names=self._down_bias_name,

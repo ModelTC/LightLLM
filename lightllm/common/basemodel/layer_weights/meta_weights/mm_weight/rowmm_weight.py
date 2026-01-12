@@ -53,8 +53,8 @@ class KVROWNMMWeight(MMWeightTpl):
         tp_rank: int = None,
         tp_world_size: int = None,
     ) -> None:
-        self.tp_rank = tp_rank if tp_rank is not None else get_current_rank_in_dp()
-        self.tp_world_size = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
         self.repeat_times = 1
         assert kv_head_num % self.tp_world_size_ == 0 or self.tp_world_size_ % kv_head_num == 0, (
             f"kv_head_num must be divisible by tp_world_size_ or "
@@ -70,13 +70,13 @@ class KVROWNMMWeight(MMWeightTpl):
             data_type=data_type,
             bias_names=bias_names,
             quant_method=quant_method,
-            tp_rank=self.tp_rank,
-            tp_world_size=self.tp_world_size,
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
         )
         self.param_slicer = get_row_slice_mixin(
             self.quant_method.method_name,
-            tp_rank=self.tp_rank,
-            tp_world_size=self.tp_world_size,
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
             repeat_times=self.repeat_times,
         )
 

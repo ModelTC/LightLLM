@@ -5,7 +5,7 @@ from .mm_weight import (
     KVROWNMMWeight,
     COLMMWeight,
 )
-from .norm_weight import TpRMSNormWeight, RMSNormWeight, LayerNormWeight
+from .norm_weight import TpRMSNormWeight, RMSNormWeight, LayerNormWeight, NoTpGEMMANormWeight
 from .embedding_weight import EmbeddingWeight, LMHeadWeight, NoTpPosEmbeddingWeight
 from .att_sink_weight import TpAttSinkWeight
 from .fused_moe.fused_moe_weight_tp import create_tp_moe_wegiht_obj
