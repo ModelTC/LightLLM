@@ -78,7 +78,14 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
 
 
 class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
-    def __init__(self, dim: int, vocab_size: int, weight_name: str, data_type: torch.dtype):
+    def __init__(
+        self,
+        dim: int,
+        vocab_size: int,
+        weight_name: str,
+        data_type: torch.dtype,
+        shared_weight: Optional[EmbeddingWeight] = None,
+    ):
         super().__init__()
         self.dim = dim
         self.vocab_size = vocab_size
@@ -90,13 +97,24 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
         self.tp_vocab_end_id = int(split_indexes[self.tp_rank_ + 1])
         self.weight_name: str = weight_name
         self.data_type_ = data_type
-        self._create_weight()
+        self._shared_weight = shared_weight
+        if shared_weight is None:
+            self._create_weight()
+
+    @property
+    def weight(self) -> torch.Tensor:
+        if self._shared_weight is not None:
+            return self._shared_weight.weight
+        return self._weight
 
     def _create_weight(self):
         tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
-        self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
+        self._weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        # When using shared weight, no need to load - EmbeddingWeight already loaded it
+        if self._shared_weight is not None:
+            return
         if self.weight_name not in weights:
             return
         t_weight = weights[self.weight_name]
@@ -105,7 +123,7 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
             loaded_vocab_size == self.vocab_size
         ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
         logger.info(f"loaded weight vocab_size: {self.vocab_size}")
-        self.weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
+        self._weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
 
     def _native_forward(
         self, input: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty
