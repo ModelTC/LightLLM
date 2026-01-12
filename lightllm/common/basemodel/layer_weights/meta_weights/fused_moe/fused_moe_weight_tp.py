@@ -247,14 +247,6 @@ class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
             num_expert_group=num_expert_group,
         )
 
-    def _cuda(self, cpu_tensor):
-        if self.quantized_weight:
-            return cpu_tensor.cuda(self.device_id_)
-        return cpu_tensor.cuda(self.device_id_)
-
-    def verify_load(self):
-        return True
-
     def load_hf_weights(self, weights):
         # Load bias
         if self.e_score_correction_bias_name in weights:
