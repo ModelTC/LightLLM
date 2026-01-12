@@ -3,6 +3,7 @@ import torch
 from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .ppl_int8kv_flash_decoding_diverse_stage1 import flash_decode_stage1
+from .ppl_int8kv_flash_decoding_diverse_stage2 import flash_decode_stage2
 from .ppl_int8kv_flash_decoding_diverse_stage3 import flash_diverse_decode_stage3
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
@@ -65,21 +66,20 @@ def token_decode_attention_flash_decoding(
         )
     stream2.wait_stream(current_stream)
     with torch.cuda.stream(stream2):
-        light_ops.group8_int8kv_flashdecoding_diverse_stage2(
-            BLOCK_SEQ,
-            mid_o,
-            mid_o_logexpsum,
-            1.0 / (head_dim ** 0.5),
-            q.view(calcu_shape1),
-            cache_k,
-            cache_k_scale,
-            cache_v,
-            cache_v_scale,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_seq_len,
-            infer_state.b_shared_seq_len,
-            infer_state.max_kv_seq_len,
+        flash_decode_stage2(
+            q=q.view(calcu_shape1),
+            k=cache_k,
+            k_scale=cache_k_scale,
+            v=cache_v,
+            v_scale=cache_v_scale,
+            Req_to_tokens=infer_state.req_manager.req_to_token_indexs,
+            B_req_idx=infer_state.b_req_idx,
+            B_Seqlen=infer_state.b_seq_len,
+            b_shared_seq_len=infer_state.b_shared_seq_len,
+            max_len_in_batch=infer_state.max_kv_seq_len,
+            mid_out=mid_o,
+            mid_out_logsumexp=mid_o_logexpsum,
+            block_seq=BLOCK_SEQ,
         )
 
     current_stream.wait_stream(stream1)

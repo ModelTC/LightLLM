@@ -2,14 +2,16 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
+
 from lightllm.common.kernel_config import KernelConfigs
 from frozendict import frozendict
 from functools import lru_cache
 from typing import Dict
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner
 
 
-class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
-    kernel_name: str = "_fwd_kernel_flash_decode_diverse_stage1:v2"
+class GQADiverseDecodeStage2KernelConfig(KernelConfigs):
+    kernel_name: str = "_fwd_kernel_flash_decode_diverse_stage2:v1"
 
     @classmethod
     @lru_cache(maxsize=200)
@@ -18,14 +20,12 @@ class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
         batch_size: int,
         avg_seq_len_in_batch: int,
         gqa_group_size: int,
-        max_batch_group_size: int,
         q_head_dim: int,
         block_seq: int,
         out_dtype: str,
     ) -> dict:
         key_params = {
             "gqa_group_size": gqa_group_size,
-            "max_batch_group_size": max_batch_group_size,
             "q_head_dim": q_head_dim,
             "block_seq": block_seq,
             "out_dtype": str(out_dtype),
@@ -56,7 +56,6 @@ class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
     def save_config(
         cls,
         gqa_group_size: int,
-        max_batch_group_size: int,
         q_head_dim: int,
         block_seq: int,
         out_dtype: str,
@@ -64,7 +63,6 @@ class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
     ):
         key_params = {
             "gqa_group_size": gqa_group_size,
-            "max_batch_group_size": max_batch_group_size,
             "q_head_dim": q_head_dim,
             "block_seq": block_seq,
             "out_dtype": str(out_dtype),
@@ -75,7 +73,7 @@ class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
 
 
 @triton.jit
-def _fwd_kernel_flash_decode_diverse_stage1(
+def _fwd_kernel_flash_decode_diverse_stage2(
     Q,
     stride_qbs,
     stride_qh,
@@ -95,8 +93,8 @@ def _fwd_kernel_flash_decode_diverse_stage1(
     stride_req_to_tokens_b,
     stride_req_to_tokens_s,
     B_req_idx,
+    B_Seqlen,
     b_shared_seq_len,
-    b_mark_shared_group,
     Mid_O,  # [batch, head, seq_block_num, head_dim]
     stride_mid_ob,
     stride_mid_oh,
@@ -106,39 +104,29 @@ def _fwd_kernel_flash_decode_diverse_stage1(
     stride_mid_o_eb,
     stride_mid_o_eh,
     stride_mid_o_es,
-    gqa_group_size,
-    BLOCK_HEAD: tl.constexpr,
+    gqa_group_size: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_BATCH: tl.constexpr,
     KV_QUANT_GROUP_SIZE: tl.constexpr,
     NUM_GROUPS: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
-    shared_batch_group_size = tl.load(b_mark_shared_group + cur_batch)
-    if shared_batch_group_size == 0:
-        return
-    cur_batch_end = cur_batch + 1
-    cur_batch = cur_batch - (shared_batch_group_size - 1)
     cur_kv_head = tl.program_id(1)
     seq_start_block = tl.program_id(2)
 
-    cur_q_head_range = cur_kv_head * gqa_group_size + tl.arange(0, BLOCK_HEAD)
-    q_head_end_index = (cur_kv_head + 1) * gqa_group_size
-    cur_q_head_range = tl.where(cur_q_head_range < q_head_end_index, cur_q_head_range, cur_kv_head * gqa_group_size)
+    cur_q_head_range = cur_kv_head * gqa_group_size + tl.arange(0, gqa_group_size)
 
     offs_d = tl.arange(0, BLOCK_HEADDIM)
     offs_d_scale = tl.arange(0, NUM_GROUPS)
-    cur_batch_seq_len = tl.load(b_shared_seq_len + cur_batch)
+    cur_batch_shared_len = tl.load(b_shared_seq_len + cur_batch)
+    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
-    cur_batch_start_index = seq_start_block * BLOCK_SEQ
+    cur_batch_start_index = seq_start_block * BLOCK_SEQ + cur_batch_shared_len
     cur_batch_end_index = tl.minimum(cur_batch_seq_len, cur_batch_start_index + BLOCK_SEQ)
+    store_seq_block = seq_start_block + tl.cdiv(cur_batch_shared_len, BLOCK_SEQ)
 
-    offs_batch = cur_batch + tl.arange(0, BLOCK_BATCH)
-    offs_batch = tl.where(offs_batch < cur_batch_end, offs_batch, cur_batch)
-
-    off_q = offs_batch[:, None, None] * stride_qbs + cur_q_head_range[None, :, None] * stride_qh + offs_d[None, None, :]
+    off_q = cur_batch * stride_qbs + cur_q_head_range[:, None] * stride_qh + offs_d[None, :]
 
     block_n_size = tl.cdiv(
         tl.where(cur_batch_end_index - cur_batch_start_index <= 0, 0, cur_batch_end_index - cur_batch_start_index),
@@ -149,12 +137,11 @@ def _fwd_kernel_flash_decode_diverse_stage1(
         return
 
     offs_n = cur_batch_start_index + tl.arange(0, BLOCK_N)
-    Q_BATCH_HEAD_NUM: tl.constexpr = BLOCK_BATCH * BLOCK_HEAD
-    q = tl.load(Q + off_q).reshape(Q_BATCH_HEAD_NUM, BLOCK_HEADDIM)
+    q = tl.load(Q + off_q)
 
-    sum_exp = tl.zeros([Q_BATCH_HEAD_NUM], dtype=tl.float32)
-    max_logic = tl.zeros([Q_BATCH_HEAD_NUM], dtype=tl.float32) - float("inf")
-    acc = tl.zeros([Q_BATCH_HEAD_NUM, BLOCK_HEADDIM], dtype=tl.float32)
+    sum_exp = tl.zeros([gqa_group_size], dtype=tl.float32)
+    max_logic = tl.zeros([gqa_group_size], dtype=tl.float32) - float("inf")
+    acc = tl.zeros([gqa_group_size, BLOCK_HEADDIM], dtype=tl.float32)
 
     for start_n in range(0, block_n_size, 1):
         offs_n_new = start_n * BLOCK_N + offs_n
@@ -176,6 +163,7 @@ def _fwd_kernel_flash_decode_diverse_stage1(
         k_scale = tl.reshape(k_scale, (NUM_GROUPS, 1, BLOCK_N))
         k = k * k_scale
         k = tl.reshape(k, (BLOCK_HEADDIM, BLOCK_N))
+        # q (4, 128) k (128, BLOCK_N)
         att_value = tl.dot(q, k.to(q.dtype))
         att_value *= sm_scale
         att_value = tl.where(n_mask[None, :], att_value, float("-inf"))
@@ -208,27 +196,79 @@ def _fwd_kernel_flash_decode_diverse_stage1(
         max_logic = new_max_logic
 
     off_mid_o = (
-        offs_batch[:, None, None] * stride_mid_ob
-        + cur_q_head_range[None, :, None] * stride_mid_oh
-        + seq_start_block * stride_mid_os
-        + offs_d[None, None, :]
+        cur_batch * stride_mid_ob
+        + cur_q_head_range[:, None] * stride_mid_oh
+        + store_seq_block * stride_mid_os
+        + offs_d[None, :]
     )
-    off_mid_o_logexpsum = (
-        offs_batch[:, None] * stride_mid_o_eb + cur_q_head_range[None, :] * stride_mid_o_eh + seq_start_block
-    )
+    off_mid_o_logexpsum = cur_batch * stride_mid_o_eb + cur_q_head_range * stride_mid_o_eh + store_seq_block
     tl.store(
         Mid_O + off_mid_o,
-        (acc / sum_exp[:, None]).reshape(BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM),
+        (acc / sum_exp[:, None]),
     )
     tl.store(
         Mid_O_LogExpSum + off_mid_o_logexpsum,
-        (max_logic + tl.log(sum_exp)).reshape(BLOCK_BATCH, BLOCK_HEAD),
+        (max_logic + tl.log(sum_exp)),
     )
     return
 
 
-@torch.no_grad()
-def flash_decode_stage1(
+def get_test_configs():
+    test_configs = []
+
+    for block_n in [8, 16, 32, 64]:
+        for num_warps in [
+            2,
+            4,
+            8,
+            16,
+        ]:
+            # for stage1_num_warps in [2, 4, 8, 16]:
+            for num_stages in [
+                1,
+                2,
+                3,
+                4,
+                5,
+                7,
+                9,
+                10,
+                11,
+            ]:
+                config = {
+                    "BLOCK_N": block_n,
+                    "num_warps": num_warps,
+                    "num_stages": num_stages,
+                }
+                test_configs.append(config)
+
+    return test_configs
+
+
+def _get_static_key(q, k, block_seq):
+    q_head_dim = q.shape[-1]
+    gqa_group_size = q.shape[1] // k.shape[1]
+    out_dtype = q.dtype
+    return {
+        "gqa_group_size": gqa_group_size,
+        "q_head_dim": q_head_dim,
+        "block_seq": block_seq,
+        "out_dtype": str(out_dtype),
+    }
+
+
+def run_key_func(q, max_len_in_batch):
+    return f"{q.shape[0]}_{max_len_in_batch}"
+
+
+@autotune(
+    kernel_name="_fwd_kernel_flash_decode_diverse_stage2:v1",
+    configs_gen_func=get_test_configs,
+    static_key_func=_get_static_key,
+    run_key_func=run_key_func,
+    mutates_args=["mid_out", "mid_out_logsumexp"],
+)
+def flash_decode_stage2(
     q: torch.Tensor,
     k: torch.Tensor,
     k_scale: torch.Tensor,
@@ -236,31 +276,19 @@ def flash_decode_stage1(
     v_scale: torch.Tensor,
     Req_to_tokens: torch.Tensor,
     B_req_idx: torch.Tensor,
+    B_Seqlen: torch.Tensor,
     b_shared_seq_len: torch.Tensor,
-    b_mark_shared_group: torch.Tensor,
     max_len_in_batch: int,
     mid_out: torch.Tensor,
     mid_out_logsumexp: torch.Tensor,
     block_seq: int,
-    max_batch_group_size: int,
     run_config: Optional[dict] = None,
 ):
-    """
-    该kernel是为多样性生成定制的gqa算子,其中 b_mark_shared_group 是一个shape 为 (batch_size,)的tensor,
-    其内容标记那些请求是共享前缀的请求组。举列说明:
-    b_shared_seq_len : [10, 10, 10, 11, 11, 11, 11]
-    b_mark_shared_group: [0, 0, 3, 0, 0, 0, 4]
-    b_mark_shared_group 中每一个不为0的位置都代表其与前面多少个请求形成一个共享前缀组。属于
-    同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。
-    """
     if not run_config:
-        avg_seq_len_in_batch = max_len_in_batch
-
-        run_config = GQADiverseDecodeStage1KernelConfig.try_to_get_best_config(
+        run_config = GQADiverseDecodeStage2KernelConfig.try_to_get_best_config(
             batch_size=int(q.shape[0]),
-            avg_seq_len_in_batch=avg_seq_len_in_batch,
+            avg_seq_len_in_batch=max_len_in_batch,
             gqa_group_size=int(q.shape[1] // k.shape[1]),
-            max_batch_group_size=max_batch_group_size,
             q_head_dim=int(q.shape[2]),
             block_seq=block_seq,
             out_dtype=q.dtype,
@@ -283,16 +311,11 @@ def flash_decode_stage1(
     gqa_group_size = q.shape[1] // k.shape[1]
     assert triton.next_power_of_2(Lk) == Lk
     KV_QUANT_GROUP_SIZE = v.shape[-1] // v_scale.shape[-1]
-    assert triton.next_power_of_2(KV_QUANT_GROUP_SIZE) == KV_QUANT_GROUP_SIZE
-    BLOCK_HEAD = triton.next_power_of_2(gqa_group_size)
-    BLOCK_BATCH = triton.next_power_of_2(max_batch_group_size)
-    if BLOCK_HEAD * BLOCK_BATCH < 16:
-        BLOCK_BATCH = 16 // BLOCK_HEAD
-    assert k.stride() == v.stride()
+    assert KV_QUANT_GROUP_SIZE == 8
     NUM_GROUPS = Lk // KV_QUANT_GROUP_SIZE
     assert triton.next_power_of_2(NUM_GROUPS) == NUM_GROUPS
 
-    _fwd_kernel_flash_decode_diverse_stage1[grid](
+    _fwd_kernel_flash_decode_diverse_stage2[grid](
         Q=q,
         stride_qbs=q.stride(0),
         stride_qh=q.stride(1),
@@ -312,8 +335,8 @@ def flash_decode_stage1(
         stride_req_to_tokens_b=Req_to_tokens.stride(0),
         stride_req_to_tokens_s=Req_to_tokens.stride(1),
         B_req_idx=B_req_idx,
+        B_Seqlen=B_Seqlen,
         b_shared_seq_len=b_shared_seq_len,
-        b_mark_shared_group=b_mark_shared_group,
         Mid_O=mid_out,
         stride_mid_ob=mid_out.stride(0),
         stride_mid_oh=mid_out.stride(1),
@@ -324,11 +347,9 @@ def flash_decode_stage1(
         stride_mid_o_eh=mid_out_logsumexp.stride(1),
         stride_mid_o_es=mid_out_logsumexp.stride(2),
         gqa_group_size=gqa_group_size,
-        BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_SEQ=block_seq,
         BLOCK_HEADDIM=Lk,
         BLOCK_N=BLOCK_N,
-        BLOCK_BATCH=BLOCK_BATCH,
         KV_QUANT_GROUP_SIZE=KV_QUANT_GROUP_SIZE,
         NUM_GROUPS=NUM_GROUPS,
         num_warps=num_warps,
@@ -338,12 +359,14 @@ def flash_decode_stage1(
 
 
 def create_tensors(batch_size, seq_len):
+    shared_seq_len = 0
     num_heads = 32
     kv_head_num = 8
     head_dim = 128
+    # 修复：max_len_in_batch 在实际上是 graph_max_len_in_batch，默认8192
+    # 否则 kernel 会尝试用 max_len_in_batch 索引 Req_to_tokens 和 KV cache，导致越界访问
     max_len_in_batch = 8192
     block_seq = 256
-    max_batch_group_size = 8
     quant_group_size = 8
 
     test_dtype = torch.bfloat16
@@ -358,7 +381,8 @@ def create_tensors(batch_size, seq_len):
     v_scale = torch.ones(size=kv_scale_shape, dtype=test_dtype, device="cuda")
     Req_to_tokens = torch.arange(0, seq_len * batch_size, dtype=torch.int32, device="cuda").view(batch_size, seq_len)
     B_req_idx = torch.arange(batch_size, dtype=torch.int32, device="cuda")
-    b_shared_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
+    b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
+    b_shared_seq_len = torch.full((batch_size,), shared_seq_len, dtype=torch.int32, device="cuda")
     b_mark_shared_group = torch.ones(batch_size, dtype=torch.int32, device="cuda")
     mid_out = torch.zeros(
         size=(batch_size, num_heads, (max_len_in_batch // block_seq) + 2, head_dim), dtype=q.dtype, device="cuda"
@@ -374,19 +398,51 @@ def create_tensors(batch_size, seq_len):
         "v_scale": v_scale,
         "Req_to_tokens": Req_to_tokens,
         "B_req_idx": B_req_idx,
+        "b_seq_len": b_seq_len,
         "b_shared_seq_len": b_shared_seq_len,
         "b_mark_shared_group": b_mark_shared_group,
         "max_len_in_batch": max_len_in_batch,
         "mid_out": mid_out,
         "mid_out_logsumexp": mid_out_logsumexp,
         "block_seq": block_seq,
-        "max_batch_group_size": max_batch_group_size,
+        "head_dim": head_dim,
     }
 
 
-def autotune_and_benchmark():
+if __name__ == "__main__":
     batch_sizes = [8, 16, 32, 64]
-    seq_lens = [1024, 2048, 4096]
+    seq_lens = [32, 64, 128, 256]
+    from lightllm.utils.light_utils import light_ops
+
+    # autotune
+    Autotuner.start_autotune_warmup()
+    for batch in batch_sizes:
+        for seq in seq_lens:
+            print(f"\n[batch={batch}, seq={seq}] Running autotune...")
+            setup_tensors = create_tensors(batch, seq)
+            flash_decode_stage2(
+                q=setup_tensors["q"],
+                k=setup_tensors["k"],
+                k_scale=setup_tensors["k_scale"],
+                v=setup_tensors["v"],
+                v_scale=setup_tensors["v_scale"],
+                Req_to_tokens=setup_tensors["Req_to_tokens"],
+                B_req_idx=setup_tensors["B_req_idx"],
+                B_Seqlen=setup_tensors["b_seq_len"],
+                b_shared_seq_len=setup_tensors["b_shared_seq_len"],
+                max_len_in_batch=setup_tensors["max_len_in_batch"],
+                mid_out=setup_tensors["mid_out"],
+                mid_out_logsumexp=setup_tensors["mid_out_logsumexp"],
+                block_seq=setup_tensors["block_seq"],
+            )
+            print(f"Autotune completed for batch {batch} and seq {seq}")
+            del setup_tensors
+            torch.cuda.empty_cache()
+
+    Autotuner.end_autotune_warmup()
+    print("\n" + "=" * 80)
+    print("All autotune completed! Now starting benchmarks...")
+    print("=" * 80)
 
     results = []
     for batch in batch_sizes:
@@ -397,24 +453,109 @@ def autotune_and_benchmark():
 
             setup_tensors = create_tensors(batch, seq)
 
-            def fn_triton(st=setup_tensors):
-                return flash_decode_stage1(
-                    q=st["q"],
-                    k=st["k"],
-                    k_scale=st["k_scale"],
-                    v=st["v"],
-                    v_scale=st["v_scale"],
-                    Req_to_tokens=st["Req_to_tokens"],
-                    B_req_idx=st["B_req_idx"],
-                    b_shared_seq_len=st["b_shared_seq_len"],
-                    b_mark_shared_group=st["b_mark_shared_group"],
-                    max_len_in_batch=st["max_len_in_batch"],
-                    mid_out=st["mid_out"],
-                    mid_out_logsumexp=st["mid_out_logsumexp"],
-                    block_seq=st["block_seq"],
-                    max_batch_group_size=st["max_batch_group_size"],
-                )
+            # 准备 CUDA 实现的输出 tensor
+            mid_out_cuda = setup_tensors["mid_out"].clone()
+            mid_out_logsumexp_cuda = setup_tensors["mid_out_logsumexp"].clone()
 
+            # 准备 Triton 实现的输出 tensor
+            mid_out_triton = setup_tensors["mid_out"].clone()
+            mid_out_logsumexp_triton = setup_tensors["mid_out_logsumexp"].clone()
+
+            # 先运行一次 CUDA 获取结果
+            light_ops.group8_int8kv_flashdecoding_diverse_stage2(
+                setup_tensors["block_seq"],
+                mid_out_cuda,
+                mid_out_logsumexp_cuda,
+                1.0 / (setup_tensors["head_dim"] ** 0.5),
+                setup_tensors["q"],
+                setup_tensors["k"],
+                setup_tensors["k_scale"],
+                setup_tensors["v"],
+                setup_tensors["v_scale"],
+                setup_tensors["Req_to_tokens"],
+                setup_tensors["B_req_idx"],
+                setup_tensors["b_seq_len"],
+                setup_tensors["b_shared_seq_len"],
+                setup_tensors["max_len_in_batch"],
+            )
+
+            # 再运行一次 Triton 获取结果
+            flash_decode_stage2(
+                q=setup_tensors["q"],
+                k=setup_tensors["k"],
+                k_scale=setup_tensors["k_scale"],
+                v=setup_tensors["v"],
+                v_scale=setup_tensors["v_scale"],
+                Req_to_tokens=setup_tensors["Req_to_tokens"],
+                B_req_idx=setup_tensors["B_req_idx"],
+                B_Seqlen=setup_tensors["b_seq_len"],
+                b_shared_seq_len=setup_tensors["b_shared_seq_len"],
+                max_len_in_batch=setup_tensors["max_len_in_batch"],
+                mid_out=mid_out_triton,
+                mid_out_logsumexp=mid_out_logsumexp_triton,
+                block_seq=setup_tensors["block_seq"],
+            )
+
+            # 比较结果一致性
+            diff_mid_out = torch.abs(mid_out_cuda - mid_out_triton)
+            diff_logsumexp = torch.abs(mid_out_logsumexp_cuda - mid_out_logsumexp_triton)
+            max_diff_out = diff_mid_out.max().item()
+            max_diff_logsumexp = diff_logsumexp.max().item()
+            mean_diff_out = diff_mid_out.mean().item()
+            mean_diff_logsumexp = diff_logsumexp.mean().item()
+
+            # 计算余弦相似度
+            cos_sim_out = torch.nn.functional.cosine_similarity(
+                mid_out_cuda.flatten(), mid_out_triton.flatten(), dim=0
+            ).item()
+            cos_sim_logsumexp = torch.nn.functional.cosine_similarity(
+                mid_out_logsumexp_cuda.flatten(), mid_out_logsumexp_triton.flatten(), dim=0
+            ).item()
+
+            print(f"\n[batch={batch}, seq={seq}] 一致性检查:")
+            print("  mid_out:")
+            print(f"    max_diff: {max_diff_out:.6f}, mean_diff: {mean_diff_out:.6f}, cosine_sim: {cos_sim_out:.8f}")
+            print("  logsumexp:")
+            print(
+                f"    max_diff: {max_diff_logsumexp:.6f}, "
+                f"mean_diff: {mean_diff_logsumexp:.6f}, "
+                f"cosine_sim: {cos_sim_logsumexp:.8f}"
+            )
+
+            # 性能测试
+            fn_cuda = lambda: light_ops.group8_int8kv_flashdecoding_diverse_stage2(
+                setup_tensors["block_seq"],
+                setup_tensors["mid_out"],
+                setup_tensors["mid_out_logsumexp"],
+                1.0 / (setup_tensors["head_dim"] ** 0.5),
+                setup_tensors["q"],
+                setup_tensors["k"],
+                setup_tensors["k_scale"],
+                setup_tensors["v"],
+                setup_tensors["v_scale"],
+                setup_tensors["Req_to_tokens"],
+                setup_tensors["B_req_idx"],
+                setup_tensors["b_seq_len"],
+                setup_tensors["b_shared_seq_len"],
+                setup_tensors["max_len_in_batch"],
+            )
+            ms_cuda = triton.testing.do_bench_cudagraph(fn_cuda, rep=100)
+
+            fn_triton = lambda: flash_decode_stage2(
+                q=setup_tensors["q"],
+                k=setup_tensors["k"],
+                k_scale=setup_tensors["k_scale"],
+                v=setup_tensors["v"],
+                v_scale=setup_tensors["v_scale"],
+                Req_to_tokens=setup_tensors["Req_to_tokens"],
+                B_req_idx=setup_tensors["B_req_idx"],
+                B_Seqlen=setup_tensors["b_seq_len"],
+                b_shared_seq_len=setup_tensors["b_shared_seq_len"],
+                max_len_in_batch=setup_tensors["max_len_in_batch"],
+                mid_out=setup_tensors["mid_out"],
+                mid_out_logsumexp=setup_tensors["mid_out_logsumexp"],
+                block_seq=setup_tensors["block_seq"],
+            )
             ms_triton = triton.testing.do_bench_cudagraph(fn_triton, rep=100)
 
             results.append(
@@ -422,6 +563,7 @@ def autotune_and_benchmark():
                     "batch_size": batch,
                     "seq_len": seq,
                     "triton_ms": ms_triton,
+                    "cuda_ms": ms_cuda,
                 }
             )
             print(results[-1])
@@ -433,12 +575,13 @@ def autotune_and_benchmark():
     print(f"\n{'='*80}")
     print("SUMMARY - Performance Comparison")
     print(f"{'='*80}")
-    print(f"{'batch_size':<8} {'seq_len':<12} {'triton_ms':<12}")
+    print(f"{'batch_size':<8} {'seq_len':<12} {'triton_ms':<12} {'cuda_ms':<12} {'vs cuda':<10}")
     print(f"{'-'*80}")
     for r in results:
-        print(f"{r['batch_size']:<8} {r['seq_len']:<12} {r['triton_ms']:<12.3f}")
+        vs_cuda = f"{r['cuda_ms']/r['triton_ms']:.2f}x"
+        emoji = "🎉" if r["triton_ms"] < r["cuda_ms"] else ""
+        print(
+            f"{r['batch_size']:<8} {r['seq_len']:<12} {r['triton_ms']:<12.3f} {r['cuda_ms']:<12.3f}"
+            f"{vs_cuda:<10} {emoji}"
+        )
     print(f"{'='*80}")
-
-
-if __name__ == "__main__":
-    autotune_and_benchmark()

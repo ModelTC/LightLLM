@@ -1,9 +1,8 @@
 import pytest
-
-pytest.skip(reason="need install lightllmkernel", allow_module_level=True)
-
 import torch
-from lightllm.utils.light_utils import light_ops
+from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse_stage2 import (
+    flash_decode_stage2,
+)
 
 
 def create_tensors(shared_seq_len):
@@ -63,21 +62,20 @@ def create_tensors(shared_seq_len):
 def test_flash_decode_stage2_execution(shared_seq_len):
     setup_tensors = create_tensors(shared_seq_len)
 
-    light_ops.group8_int8kv_flashdecoding_diverse_stage2(
-        setup_tensors["block_seq"],
-        setup_tensors["mid_out"],
-        setup_tensors["mid_out_logsumexp"],
-        1.0 / (setup_tensors["head_dim"] ** 0.5),
-        setup_tensors["q"],
-        setup_tensors["k"],
-        setup_tensors["k_scale"],
-        setup_tensors["v"],
-        setup_tensors["v_scale"],
-        setup_tensors["Req_to_tokens"],
-        setup_tensors["B_req_idx"],
-        setup_tensors["b_seq_len"],
-        setup_tensors["b_shared_seq_len"],
-        setup_tensors["max_len_in_batch"],
+    flash_decode_stage2(
+        q=setup_tensors["q"],
+        k=setup_tensors["k"],
+        k_scale=setup_tensors["k_scale"],
+        v=setup_tensors["v"],
+        v_scale=setup_tensors["v_scale"],
+        Req_to_tokens=setup_tensors["Req_to_tokens"],
+        B_req_idx=setup_tensors["B_req_idx"],
+        B_Seqlen=setup_tensors["b_seq_len"],
+        b_shared_seq_len=setup_tensors["b_shared_seq_len"],
+        max_len_in_batch=setup_tensors["max_len_in_batch"],
+        mid_out=setup_tensors["mid_out"],
+        mid_out_logsumexp=setup_tensors["mid_out_logsumexp"],
+        block_seq=setup_tensors["block_seq"],
     )
     seq_block_idx = (setup_tensors["b_shared_seq_len"][0].item() + setup_tensors["block_seq"] - 1) // setup_tensors[
         "block_seq"
