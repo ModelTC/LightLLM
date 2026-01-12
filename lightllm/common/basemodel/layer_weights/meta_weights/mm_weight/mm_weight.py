@@ -57,15 +57,6 @@ class MMWeightTpl(BaseWeightTpl):
         self._create_weight()
         self.gen_weight_quant_param_names(quant_method=quant_method)
 
-    def _create_weight(self):
-        self.bias = None
-        if self.bias_names is not None:
-            self.bias = torch.empty(self.cusum_out_dims[-1], dtype=self.data_type_).cuda(get_current_device_id())
-        self.mm_param: WeightPack = self.quant_method.create_weight(
-            in_dim=self.in_dim, out_dim=sum(self.out_dims), dtype=self.data_type_, device_id=get_current_device_id()
-        )
-        return
-
     def mm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
     ) -> torch.Tensor:
@@ -133,6 +124,15 @@ class MMWeightTpl(BaseWeightTpl):
     def verify_load(self) -> bool:
         return True
 
+    def _create_weight(self):
+        self.bias = None
+        if self.bias_names is not None:
+            self.bias = torch.empty(self.cusum_out_dims[-1], dtype=self.data_type_).cuda(get_current_device_id())
+        self.mm_param: WeightPack = self.quant_method.create_weight(
+            in_dim=self.in_dim, out_dim=sum(self.out_dims), dtype=self.data_type_, device_id=get_current_device_id()
+        )
+        return
+
     # 执行顺序
     def _load_weight(
         self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
@@ -174,26 +174,8 @@ class MMWeightTpl(BaseWeightTpl):
             self.quant_method.load_weight_zero_point(weight_zero_point, self.mm_param, start_idx)
         return
 
-
-class BMMWeightTpl(MMWeightTpl):
-    def mm(
-        self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
-    ) -> torch.Tensor:
-        raise RuntimeError("use bmm not mm")
-
-    def bmm(
-        self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
-    ) -> torch.Tensor:
-        # 目前 bmm 不支持量化运算操作
-        fpweight = self.mm_param.weight
-        if out is None:
-            shape = (input_tensor.shape[0], input_tensor.shape[1], fpweight.shape[2])
-            dtype = input_tensor.dtype
-            device = input_tensor.device
-            if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(shape, dtype, device=device)
-            else:
-                out = torch.empty(shape, dtype=dtype, device=device)
-        if self.bias is None:
-            return torch.bmm(input_tensor, fpweight, out=out)
-        return torch.addbmm(self.bias, input_tensor, fpweight, out=out)
+    def _get_tp_dim(self, dim: int) -> int:
+        assert (
+            dim % self.tp_world_size_ == 0
+        ), f"dim must be divisible by tp_world_size_, but found: {dim} % {self.tp_world_size_}"
+        return dim // self.tp_world_size_
