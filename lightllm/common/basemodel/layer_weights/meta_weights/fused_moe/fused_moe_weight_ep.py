@@ -44,7 +44,7 @@ class FusedMoeWeightEP(BaseWeightTpl, PlatformAwareOp):
         quant_cfg=None,
         hidden_size: Optional[int] = None,
     ) -> None:
-        BaseWeightTpl.__init__(self, data_type=data_type)
+        super().__init__()
 
         self.layer_num = layer_num
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
@@ -111,8 +111,6 @@ class FusedMoeWeightEP(BaseWeightTpl, PlatformAwareOp):
         # Pre-allocate memory if hidden_size is provided
         if self.hidden_size is not None:
             self._create_weight()
-
-        PlatformAwareOp.__init__(self)
 
     def _create_weight(self):
         """Pre-allocate GPU memory for fused MoE weights"""

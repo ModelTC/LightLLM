@@ -73,7 +73,7 @@ class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
         layer_num: int,
         quant_cfg: Quantcfg = None,
     ) -> None:
-        BaseWeightTpl.__init__(self, data_type=data_type)
+        super().__init__()
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
         self.quantized_weight = quant_cfg.quantized_weight
         if self.quant_method.method_name != "none":
@@ -100,7 +100,6 @@ class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
             self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
         )
         self._create_weight()
-        PlatformAwareOp.__init__(self)
 
     def _create_weight(self):
         total_expert_num = self.n_routed_experts
