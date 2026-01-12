@@ -1,9 +1,7 @@
-import os
 import torch
-import threading
-from typing import Tuple, List, Dict, Any, Union, Callable
-from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeight
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id, get_dp_world_size
+from typing import Dict, Any, Union
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
+from lightllm.common.basemodel.layer_weights.meta_weights.platform_op import PlatformAwareOp
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
@@ -59,7 +57,7 @@ def create_tp_moe_wegiht_obj(
         )
 
 
-class FusedMoeWeightTP(BaseWeight):
+class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
     def __init__(
         self,
         gate_proj_name: str,
@@ -75,7 +73,7 @@ class FusedMoeWeightTP(BaseWeight):
         layer_num: int,
         quant_cfg: Quantcfg = None,
     ) -> None:
-        super().__init__()
+        BaseWeightTpl.__init__(self, data_type=data_type)
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
         self.quantized_weight = quant_cfg.quantized_weight
         if self.quant_method.method_name != "none":
@@ -92,48 +90,49 @@ class FusedMoeWeightTP(BaseWeight):
         self.num_fused_shared_experts = num_fused_shared_experts
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.split_inter_size = split_inter_size
-        self.data_type_ = data_type
         self.hidden_size = network_config.get("hidden_size")
-        self.tp_rank_ = get_current_rank_in_dp()
         self.e_score_correction_bias = None
         self.scoring_func = network_config.get("scoring_func", "softmax")
         self.row_slicer = get_row_slice_mixin(
-            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=get_dp_world_size()
+            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
         )
         self.col_slicer = get_col_slice_mixin(
-            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=get_dp_world_size()
+            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
         )
         self._create_weight()
+        PlatformAwareOp.__init__(self)
 
     def _create_weight(self):
         total_expert_num = self.n_routed_experts
         intermediate_size = self.split_inter_size
-        device_id = get_current_device_id()
 
         # Create e_score_correction_bias
         if self.e_score_correction_bias is not None:
             self.e_score_correction_bias = torch.empty(
                 (total_expert_num,),
                 dtype=self.data_type_,
-                device=f"cuda:{device_id}",
+                device=f"cuda:{self.device_id_}",
             )
 
         self.w13: WeightPack = self.quant_method.create_weight(
             out_dim=intermediate_size * 2,
             in_dim=self.hidden_size,
             dtype=self.data_type_,
-            device_id=device_id,
+            device_id=self.device_id_,
             num_experts=total_expert_num,
         )
         self.w2: WeightPack = self.quant_method.create_weight(
             out_dim=self.hidden_size,
             in_dim=intermediate_size,
             dtype=self.data_type_,
-            device_id=device_id,
+            device_id=self.device_id_,
             num_experts=total_expert_num,
         )
 
-    def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
+    def _select_experts(
+        self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+    ):
+        """Select experts and return topk weights and ids."""
         from lightllm.common.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(
@@ -169,6 +168,53 @@ class FusedMoeWeightTP(BaseWeight):
 
             topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
             topk_weights = torch.cat([topk_weights, pad_topk_weights], dim=1)
+        return topk_weights, topk_ids
+
+    def _native_forward(
+        self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+    ):
+        topk_weights, topk_ids = self._select_experts(
+            input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+        )
+
+        w13, _ = self.w13.weight, self.w13.weight_scale
+        w2, _ = self.w2.weight, self.w2.weight_scale
+
+        batch_size, hidden_size = input_tensor.shape
+        intermediate_size = w13.shape[1] // 2
+
+        output = torch.zeros_like(input_tensor)
+
+        for i in range(batch_size):
+            expert_output = torch.zeros(hidden_size, dtype=input_tensor.dtype, device=input_tensor.device)
+            for j in range(top_k):
+                expert_idx = topk_ids[i, j].item()
+                weight = topk_weights[i, j]
+
+                w1 = w13[expert_idx, :intermediate_size, :]  # gate
+                w3 = w13[expert_idx, intermediate_size:, :]  # up
+                w2_expert = w2[expert_idx]
+
+                # Compute: SiLU(x @ w1.T) * (x @ w3.T) @ w2.T
+                x = input_tensor[i : i + 1]
+                gate = torch.nn.functional.silu(torch.mm(x, w1.T))
+                up = torch.mm(x, w3.T)
+                hidden = gate * up
+                expert_out = torch.mm(hidden, w2_expert.T)
+                expert_output += weight * expert_out.squeeze(0)
+
+            output[i] = expert_output
+
+        input_tensor.copy_(output)
+        return
+
+    def _cuda_forward(
+        self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+    ):
+        """CUDA optimized implementation of MoE forward pass."""
+        topk_weights, topk_ids = self._select_experts(
+            input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+        )
 
         w13, w13_scale = self.w13.weight, self.w13.weight_scale
         w2, w2_scale = self.w2.weight, self.w2.weight_scale
@@ -189,11 +235,22 @@ class FusedMoeWeightTP(BaseWeight):
         )
         return
 
+    def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
+        """Backward compatible method that routes to platform-specific implementation."""
+        return self._forward(
+            input_tensor=input_tensor,
+            router_logits=router_logits,
+            top_k=top_k,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+        )
+
     def _cuda(self, cpu_tensor):
-        device_id = get_current_device_id()
         if self.quantized_weight:
-            return cpu_tensor.cuda(device_id)
-        return cpu_tensor.cuda(device_id)
+            return cpu_tensor.cuda(self.device_id_)
+        return cpu_tensor.cuda(self.device_id_)
 
     def verify_load(self):
         return True
@@ -259,42 +316,19 @@ class FusedAWQMARLINMoeWeightTP(FusedMoeWeightTP):
 
         self.workspace = marlin_make_workspace_new(self.w13.weight.device, 4)
 
-    def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
-        from lightllm.common.fused_moe.topk_select import select_experts
+    def _native_forward(
+        self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+    ):
+        """AWQ Marlin quantization requires CUDA, native forward not supported."""
+        raise NotImplementedError("AWQ Marlin MoE requires CUDA platform, native forward not supported.")
 
-        topk_weights, topk_ids = select_experts(
-            hidden_states=input_tensor,
-            router_logits=router_logits,
-            correction_bias=self.e_score_correction_bias,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            scoring_func=self.scoring_func,
+    def _cuda_forward(
+        self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+    ):
+        """CUDA optimized implementation using AWQ Marlin kernels."""
+        topk_weights, topk_ids = self._select_experts(
+            input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
         )
-        topk_weights.mul_(self.routed_scaling_factor)
-        if self.num_fused_shared_experts > 0:
-            pad_topk_ids = (
-                torch.arange(
-                    start=self.n_routed_experts - self.num_fused_shared_experts,
-                    end=self.n_routed_experts,
-                    step=1,
-                    dtype=topk_ids.dtype,
-                    device="cuda",
-                )
-                .view(1, self.num_fused_shared_experts)
-                .repeat(topk_ids.shape[0], 1)
-            )
-            pad_topk_weights = torch.full(
-                (topk_weights.shape[0], self.num_fused_shared_experts),
-                fill_value=1.0,
-                device="cuda",
-                dtype=topk_weights.dtype,
-            )
-
-            topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
-            topk_weights = torch.cat([topk_weights, pad_topk_weights], dim=1)
 
         w1, w1_scale, w1_zero_point = self.w13.weight, self.w13.weight_scale, self.w13.weight_zero_point
         w2, w2_scale, w2_zero_point = self.w2.weight, self.w2.weight_scale, self.w2.weight_zero_point

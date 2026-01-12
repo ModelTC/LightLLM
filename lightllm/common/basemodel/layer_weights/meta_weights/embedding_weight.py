@@ -12,7 +12,7 @@ logger = init_logger(__name__)
 
 class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
     def __init__(self, dim: int, vocab_size: int, weight_name: str, data_type: torch.dtype):
-        super().__init__()
+        BaseWeightTpl.__init__(self, data_type=data_type)
         self.dim = dim
         self.vocab_size = vocab_size
         self.tp_world_size_ = get_dp_world_size()
@@ -24,6 +24,7 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         self.weight_name: str = weight_name
         self.data_type_ = data_type
         self._create_weight()
+        PlatformAwareOp.__init__(self)
 
     def _create_weight(self):
         tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
@@ -86,7 +87,7 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
         data_type: torch.dtype,
         shared_weight: Optional[EmbeddingWeight] = None,
     ):
-        super().__init__()
+        BaseWeightTpl.__init__(self, data_type=data_type)
         self.dim = dim
         self.vocab_size = vocab_size
         self.tp_world_size_ = get_dp_world_size()
@@ -100,6 +101,7 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
         self._shared_weight = shared_weight
         if shared_weight is None:
             self._create_weight()
+        PlatformAwareOp.__init__(self)
 
     @property
     def weight(self) -> torch.Tensor:
@@ -154,7 +156,7 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
 
 class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
     def __init__(self, dim: int, max_position_embeddings: int, weight_name: str, data_type: torch.dtype):
-        super().__init__()
+        BaseWeightTpl.__init__(self, data_type=data_type)
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.weight_name: str = weight_name
@@ -162,6 +164,7 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         self.tp_world_size_ = 1
         self.tp_rank_ = 0
         self._create_weight()
+        PlatformAwareOp.__init__(self)
 
     def _create_weight(self):
         self.weight: torch.Tensor = torch.empty(

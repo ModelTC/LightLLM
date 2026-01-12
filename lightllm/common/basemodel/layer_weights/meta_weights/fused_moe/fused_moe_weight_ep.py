@@ -1,9 +1,9 @@
-import os
 import torch
 import threading
 from typing import Optional, Tuple, List, Dict, Any
-from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_device_id
-from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeight
+from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
+from lightllm.common.basemodel.layer_weights.meta_weights.platform_op import PlatformAwareOp
 from lightllm.common.fused_moe.grouped_fused_moe_ep import (
     fused_experts_impl,
     masked_group_gemm,
@@ -29,7 +29,7 @@ from lightllm.common.quantization.quantize_method import WeightPack
 logger = init_logger(__name__)
 
 
-class FusedMoeWeightEP(BaseWeight):
+class FusedMoeWeightEP(BaseWeightTpl, PlatformAwareOp):
     def __init__(
         self,
         gate_proj_name: str,
@@ -44,7 +44,7 @@ class FusedMoeWeightEP(BaseWeight):
         quant_cfg=None,
         hidden_size: Optional[int] = None,
     ) -> None:
-        super().__init__()
+        BaseWeightTpl.__init__(self, data_type=data_type)
 
         self.layer_num = layer_num
         self.quant_method = quant_cfg.get_quant_method(layer_num, "fused_moe")
@@ -63,7 +63,6 @@ class FusedMoeWeightEP(BaseWeight):
         self.w3_weight_name = up_proj_name
         self.e_score_correction_bias_name = e_score_correction_bias_name
         self.n_routed_experts = n_routed_experts
-        self.data_type_ = data_type
         self.hidden_size = hidden_size
 
         global_world_size = get_global_world_size()
@@ -113,6 +112,8 @@ class FusedMoeWeightEP(BaseWeight):
         if self.hidden_size is not None:
             self._create_weight()
 
+        PlatformAwareOp.__init__(self)
+
     def _create_weight(self):
         """Pre-allocate GPU memory for fused MoE weights"""
         if self.hidden_size is None:
@@ -126,18 +127,22 @@ class FusedMoeWeightEP(BaseWeight):
             # Default fallback - this will be corrected during load
             intermediate_size = self.hidden_size * 4
 
-        device_id = get_current_device_id()
-
         if not self.quantized_weight and self.quant_method is not None:
             # Quantized weights
             w1_pack = self.quant_method.create_weight(
-                total_expert_num * intermediate_size * 2, self.hidden_size, dtype=self.data_type_, device_id=device_id
+                total_expert_num * intermediate_size * 2,
+                self.hidden_size,
+                dtype=self.data_type_,
+                device_id=self.device_id_,
             )
             self.w1[0] = w1_pack.weight.view(total_expert_num, intermediate_size * 2, self.hidden_size)
             self.w1[1] = w1_pack.weight_scale.view(total_expert_num, intermediate_size * 2, self.hidden_size)
 
             w2_pack = self.quant_method.create_weight(
-                total_expert_num * self.hidden_size, intermediate_size, dtype=self.data_type_, device_id=device_id
+                total_expert_num * self.hidden_size,
+                intermediate_size,
+                dtype=self.data_type_,
+                device_id=self.device_id_,
             )
             self.w2[0] = w2_pack.weight.view(total_expert_num, self.hidden_size, intermediate_size)
             self.w2[1] = w2_pack.weight_scale.view(total_expert_num, self.hidden_size, intermediate_size)
@@ -146,25 +151,18 @@ class FusedMoeWeightEP(BaseWeight):
             self.w1[0] = torch.empty(
                 (total_expert_num, intermediate_size * 2, self.hidden_size),
                 dtype=self.data_type_,
-                device=f"cuda:{device_id}",
+                device=f"cuda:{self.device_id_}",
             )
             self.w2[0] = torch.empty(
                 (total_expert_num, self.hidden_size, intermediate_size),
                 dtype=self.data_type_,
-                device=f"cuda:{device_id}",
+                device=f"cuda:{self.device_id_}",
             )
 
-    def experts(
-        self,
-        input_tensor,
-        router_logits,
-        top_k,
-        renormalize,
-        use_grouped_topk,
-        topk_group,
-        num_expert_group,
-        is_prefill,
+    def _select_experts(
+        self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
     ):
+        """Select experts and return topk weights and ids."""
         topk_weights, topk_ids = select_experts(
             hidden_states=input_tensor,
             router_logits=router_logits,
@@ -187,6 +185,74 @@ class FusedMoeWeightEP(BaseWeight):
                 expert_counter=self.routed_expert_counter_tensor,
                 enable_counter=self.auto_update_redundancy_expert,
             )
+        return topk_weights, topk_ids
+
+    def _native_forward(
+        self,
+        input_tensor,
+        router_logits,
+        top_k,
+        renormalize,
+        use_grouped_topk,
+        topk_group,
+        num_expert_group,
+        is_prefill,
+    ):
+        """PyTorch native implementation for EP MoE forward pass."""
+        topk_weights, topk_ids = self._select_experts(
+            input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+        )
+
+        w1, w1_scale = self.w1
+        w2, w2_scale = self.w2
+
+        # Native PyTorch implementation (less optimized but works on all platforms)
+        batch_size, hidden_size = input_tensor.shape
+        intermediate_size = w1.shape[1] // 2
+
+        output = torch.zeros_like(input_tensor)
+
+        for i in range(batch_size):
+            expert_output = torch.zeros(hidden_size, dtype=input_tensor.dtype, device=input_tensor.device)
+            for j in range(top_k):
+                expert_idx = topk_ids[i, j].item()
+                weight = topk_weights[i, j]
+
+                # Get local expert index (EP mode uses local expert indices)
+                local_expert_idx = expert_idx % self.ep_load_expert_num
+
+                # Get expert weights
+                w1_expert = w1[local_expert_idx, :intermediate_size, :]  # gate
+                w3_expert = w1[local_expert_idx, intermediate_size:, :]  # up
+                w2_expert = w2[local_expert_idx]
+
+                # Compute: SiLU(x @ w1.T) * (x @ w3.T) @ w2.T
+                x = input_tensor[i : i + 1]
+                gate = torch.nn.functional.silu(torch.mm(x, w1_expert.T))
+                up = torch.mm(x, w3_expert.T)
+                hidden = gate * up
+                expert_out = torch.mm(hidden, w2_expert.T)
+                expert_output += weight * expert_out.squeeze(0)
+
+            output[i] = expert_output
+
+        return output
+
+    def _cuda_forward(
+        self,
+        input_tensor,
+        router_logits,
+        top_k,
+        renormalize,
+        use_grouped_topk,
+        topk_group,
+        num_expert_group,
+        is_prefill,
+    ):
+        """CUDA optimized implementation for EP MoE forward pass."""
+        topk_weights, topk_ids = self._select_experts(
+            input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+        )
 
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2
@@ -205,6 +271,29 @@ class FusedMoeWeightEP(BaseWeight):
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             previous_event=None,  # for overlap
+        )
+
+    def experts(
+        self,
+        input_tensor,
+        router_logits,
+        top_k,
+        renormalize,
+        use_grouped_topk,
+        topk_group,
+        num_expert_group,
+        is_prefill,
+    ):
+        """Backward compatible method that routes to platform-specific implementation."""
+        return self._forward(
+            input_tensor=input_tensor,
+            router_logits=router_logits,
+            top_k=top_k,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            is_prefill=is_prefill,
         )
 
     def low_latency_dispatch(
@@ -651,10 +740,9 @@ class FusedMoeWeightEP(BaseWeight):
             self.w2[1][target_idx].copy_(w2_scale_tensor)
 
     def _cuda(self, cpu_tensor):
-        device_id = get_current_device_id()
         if self.quantized_weight:
-            return cpu_tensor.contiguous().cuda(device_id)
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(device_id)
+            return cpu_tensor.contiguous().cuda(self.device_id_)
+        return cpu_tensor.contiguous().to(self.data_type_).cuda(self.device_id_)
 
     def verify_load(self):
         return self.w1 is not None and self.w2 is not None

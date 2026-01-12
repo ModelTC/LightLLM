@@ -1,10 +1,7 @@
-import os
 import torch
-import threading
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Dict, Any
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight_tp import FusedMoeWeightTP
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.log_utils import init_logger
 
@@ -121,7 +118,56 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeightTP):
         router_top_value = torch.nn.functional.softmax(router_top_value, dim=1, dtype=router_top_value.dtype)
         return router_top_value, router_indices
 
-    def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
+    def _native_forward(
+        self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+    ):
+        """PyTorch native implementation for GPT-OSS MoE forward pass."""
+        topk_weights, topk_ids = self.router(router_logits, top_k)
+
+        w1, w1_scale = self.w1
+        w2, w2_scale = self.w2
+
+        batch_size, hidden_size = input_tensor.shape
+
+        output = torch.zeros_like(input_tensor)
+        input_bf16 = input_tensor.to(torch.bfloat16)
+
+        for i in range(batch_size):
+            expert_output = torch.zeros(hidden_size, dtype=torch.bfloat16, device=input_tensor.device)
+            for j in range(top_k):
+                expert_idx = topk_ids[i, j].item()
+                weight = topk_weights[i, j]
+
+                w1_expert = w1[expert_idx]
+                w2_expert = w2[expert_idx]
+
+                x = input_bf16[i : i + 1]
+                hidden = torch.mm(x, w1_expert.T)  # [1, intermediate_size * 2]
+                if self.w1_bias is not None:
+                    hidden = hidden + self.w1_bias[expert_idx : expert_idx + 1]
+
+                gate = hidden[:, 0::2]
+                up = hidden[:, 1::2]
+
+                gate = torch.clamp(gate * self.alpha, -self.limit, self.limit)
+                gate = torch.nn.functional.sigmoid(gate)
+                hidden = gate * up
+
+                expert_out = torch.mm(hidden, w2_expert.T)
+                if self.w2_bias is not None:
+                    expert_out = expert_out + self.w2_bias[expert_idx : expert_idx + 1] / self.tp_world_size_
+
+                expert_output += weight * expert_out.squeeze(0)
+
+            output[i] = expert_output
+
+        input_tensor.copy_(output.to(input_tensor.dtype))
+        return output
+
+    def _cuda_forward(
+        self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
+    ):
+        """CUDA optimized implementation for GPT-OSS MoE forward pass."""
         topk_weights, topk_ids = self.router(router_logits, top_k)
 
         w1, w1_scale = self.w1
@@ -147,6 +193,18 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeightTP):
             limit=self.limit,
         )
         return output_tensor
+
+    def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
+        """Backward compatible method that routes to platform-specific implementation."""
+        return self._forward(
+            input_tensor=input_tensor,
+            router_logits=router_logits,
+            top_k=top_k,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+        )
 
     def _convert_moe_packed_tensors(
         self,
