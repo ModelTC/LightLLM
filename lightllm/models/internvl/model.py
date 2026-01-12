@@ -149,6 +149,9 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
                     raise ValueError("image token error")
             except ValueError:
                 break
+        if multimodal_params:
+            image_cnt = len(multimodal_params.images)
+            assert image_cnt == image_id, "invalid image tag num: {} vs {}!".format(image_cnt, image_id)
         input_ids.extend(origin_ids[start_idx:])
 
         # audio
@@ -174,6 +177,9 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
                     raise ValueError("audio token error")
             except ValueError:
                 break
+        if multimodal_params:
+            audio_cnt = len(multimodal_params.audios)
+            assert audio_cnt == audio_id, "invalid audio tag num: {} vs {}!".format(audio_cnt, audio_id)
         input_ids.extend(origin_ids[start_idx:])
         return input_ids
 
