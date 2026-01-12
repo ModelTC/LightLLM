@@ -7,18 +7,20 @@ class LlamaPreAndPostLayerWeight(PreAndPostLayerWeight):
         super().__init__(data_type, network_config)
 
         hidden_size = network_config["hidden_size"]
+        vocab_size = network_config["vocab_size"]
         self.wte_weight_ = EmbeddingWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
             weight_name="model.embed_tokens.weight",
             data_type=self.data_type_,
         )
         tie_word_embeddings = self.network_config_.get("tie_word_embeddings", False)
-        if tie_word_embeddings:
-            self.lm_head_weight_: LMHeadWeight = self.wte_weight_
-        else:
-            self.lm_head_weight_ = LMHeadWeight(
-                weight_name="lm_head.weight",
-                data_type=self.data_type_,
-            )
+        self.lm_head_weight_ = LMHeadWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
+            weight_name="model.embed_tokens.weight" if tie_word_embeddings else "lm_head.weight",
+            data_type=self.data_type_,
+        )
 
         self.final_norm_weight_ = RMSNormWeight(
             dim=hidden_size,

@@ -19,7 +19,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         return
 
     def _norm(self, input, infer_state, layer_weight: LlamaPreAndPostLayerWeight) -> torch.Tensor:
-        return layer_weight.final_norm_weight_.rmsnorm_forward(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
+        return layer_weight.final_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     def _slice_get_last_input(self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo):
         embed_dim_ = input_embdings.shape[1]
@@ -66,7 +66,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         input_embdings = None
         last_input = self._norm(last_input, infer_state, layer_weight)
         last_input = last_input.permute(1, 0).view(-1, token_num)
-        logic_batch = layer_weight.lm_head_weight_.lm_head(input=last_input, alloc_func=self.alloc_tensor)
+        logic_batch = layer_weight.lm_head_weight_(input=last_input, alloc_func=self.alloc_tensor)
         last_input = None
         vocab_size = layer_weight.lm_head_weight_.vocab_size
         if self.tp_world_size_ == 1:
