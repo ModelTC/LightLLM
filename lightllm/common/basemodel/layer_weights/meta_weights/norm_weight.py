@@ -12,12 +12,13 @@ logger = init_logger(__name__)
 
 class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
-        super().__init__()
+        BaseWeightTpl.__init__(self, data_type=data_type)
         self.dim = dim
         self.weight_name = weight_name
         self.data_type_ = data_type
         assert bias_name is None, "RMSNormWeight does not have bias"
         self._create_weight()
+        PlatformAwareOp.__init__(self)
 
     def _create_weight(self):
         self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
@@ -57,12 +58,13 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
 
 class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
-        super().__init__()
+        BaseWeightTpl.__init__(self, data_type=data_type)
         self.dim = dim
         self.weight_name = weight_name
         self.bias_name = bias_name
         self.data_type_ = data_type
         self._create_weight()
+        PlatformAwareOp.__init__(self)
 
     def _create_weight(self):
         self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
