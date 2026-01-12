@@ -80,7 +80,8 @@ class Tarsier2Tokenizer(BaseMultiModalTokenizer):
                 break
         if multimodal_params:
             image_cnt = len(multimodal_params.images)
-            assert image_cnt == image_id, "invalid image tag num: {} vs {}!".format(image_cnt, image_id)
+            if image_cnt != image_id:
+                raise ValueError(image_cnt == image_id, f"invalid image tag num: {image_cnt} vs {image_id}!")
         input_ids.extend(origin_ids[start_idx:])
         return input_ids
 
