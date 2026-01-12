@@ -13,11 +13,17 @@ class StarcoderPreAndPostLayerWeight(PreAndPostLayerWeight):
 
     def _create_weight(self):
         hidden_size = self.network_config["hidden_size"]
+        vocab_size = self.network_config["vocab_size"]
+        max_position_embeddings = self.network_config["max_position_embeddings"]
         self.wte_weight_ = EmbeddingWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
             weight_name="transformer.wte.weight",
             data_type=self.data_type_,
         )
         self.wpe_weight_ = NoTpPosEmbeddingWeight(
+            dim=hidden_size,
+            max_position_embeddings=max_position_embeddings,
             weight_name="transformer.wpe.weight",
             data_type=self.data_type_,
         )
@@ -29,6 +35,8 @@ class StarcoderPreAndPostLayerWeight(PreAndPostLayerWeight):
             data_type=self.data_type_,
         )
         self.lm_head_weight_ = LMHeadWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
             weight_name="lm_head.weight",
             data_type=self.data_type_,
         )

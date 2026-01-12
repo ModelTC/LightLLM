@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from typing import Dict, Optional
 from .base_weight import BaseWeightTpl
-from lightllm.utils.dist_utils import get_current_device_id
+from .platform_op import PlatformAwareOp
 from lightllm.common.basemodel.triton_kernel.embedding import embedding as embedding_kernel
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from lightllm.utils.log_utils import init_logger
@@ -10,7 +10,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-class EmbeddingWeight(BaseWeightTpl):
+class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
     def __init__(self, dim: int, vocab_size: int, weight_name: str, data_type: torch.dtype):
         super().__init__()
         self.dim = dim
@@ -23,14 +23,14 @@ class EmbeddingWeight(BaseWeightTpl):
         self.tp_vocab_end_id = int(split_indexes[self.tp_rank_ + 1])
         self.weight_name: str = weight_name
         self.data_type_ = data_type
-        self.weight: torch.Tensor = None
+        self._create_weight()
 
     def _create_weight(self):
         tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
         self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
-        if self.weight_name not in weights or self.weight is not None:
+        if self.weight_name not in weights:
             return
         t_weight = weights[self.weight_name]
         # init some params
@@ -39,16 +39,29 @@ class EmbeddingWeight(BaseWeightTpl):
             loaded_vocab_size == self.vocab_size
         ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
         logger.info(f"loaded weight vocab_size: {self.vocab_size}")
-        self.weight.copy_(
-            t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_).cuda(get_current_device_id())
-        )
+        self.weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
 
-    def embedding(self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty):
+    def _native_forward(
+        self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty
+    ) -> torch.Tensor:
+        # Adjust input_ids for tp split
+        adjusted_ids = input_ids - self.tp_vocab_start_id
+        # Clamp to valid range for this partition
+        adjusted_ids = torch.clamp(adjusted_ids, 0, self.weight.shape[0] - 1)
+        # Use PyTorch native embedding
+        result = torch.nn.functional.embedding(adjusted_ids, self.weight)
+        if out is not None:
+            out.copy_(result)
+            return out
+        return result
+
+    def _cuda_forward(
+        self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
         if out is None:
             out = alloc_func(
                 (input_ids.shape[0], self.weight.shape[1]), dtype=self.weight.dtype, device=self.weight.device
             )
-
         embedding_kernel(
             input_ids=input_ids,
             weight=self.weight,
@@ -56,10 +69,57 @@ class EmbeddingWeight(BaseWeightTpl):
             vob_end_id=self.tp_vocab_end_id,
             out=out,
         )
-
         return out
 
-    def lm_head(self, input: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty):
+    def __call__(
+        self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        return self._forward(input_ids=input_ids, out=out, alloc_func=alloc_func)
+
+
+class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
+    def __init__(self, dim: int, vocab_size: int, weight_name: str, data_type: torch.dtype):
+        super().__init__()
+        self.dim = dim
+        self.vocab_size = vocab_size
+        self.tp_world_size_ = get_dp_world_size()
+        self.tp_rank_ = get_current_rank_in_dp()
+        # 计算 split_indexes
+        split_indexes = np.linspace(0, self.vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
+        self.tp_vocab_start_id = int(split_indexes[self.tp_rank_])
+        self.tp_vocab_end_id = int(split_indexes[self.tp_rank_ + 1])
+        self.weight_name: str = weight_name
+        self.data_type_ = data_type
+        self._create_weight()
+
+    def _create_weight(self):
+        tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
+        self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
+
+    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        if self.weight_name not in weights:
+            return
+        t_weight = weights[self.weight_name]
+        loaded_vocab_size = len(t_weight)
+        assert (
+            loaded_vocab_size == self.vocab_size
+        ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
+        logger.info(f"loaded weight vocab_size: {self.vocab_size}")
+        self.weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
+
+    def _native_forward(
+        self, input: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty
+    ) -> torch.Tensor:
+        assert input.ndim == 2
+        result = torch.mm(self.weight, input)
+        if out is not None:
+            out.copy_(result)
+            return out
+        return result
+
+    def _cuda_forward(
+        self, input: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
         assert input.ndim == 2
         if out is None:
             out = alloc_func(
@@ -67,49 +127,67 @@ class EmbeddingWeight(BaseWeightTpl):
                 dtype=input.dtype,
                 device=input.device,
             )
-
         torch.mm(self.weight, input, out=out)
         return out
 
-
-class LMHeadWeight(EmbeddingWeight):
-    def __init__(self, weight_name, data_type):
-        super().__init__(weight_name, data_type)
+    def __call__(self, input: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty) -> torch.Tensor:
+        return self._forward(input=input, out=out, alloc_func=alloc_func)
 
 
-class NoTpPosEmbeddingWeight(BaseWeightTpl):
-    def __init__(self, weight_name, data_type):
+class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
+    def __init__(self, dim: int, max_position_embeddings: int, weight_name: str, data_type: torch.dtype):
         super().__init__()
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
         self.weight_name: str = weight_name
         self.data_type_ = data_type
-        self.weight: torch.Tensor = None
         self.tp_world_size_ = 1
         self.tp_rank_ = 0
+        self._create_weight()
+
+    def _create_weight(self):
+        self.weight: torch.Tensor = torch.empty(
+            self.max_position_embeddings, self.dim, dtype=self.data_type_, device=self.device_id_
+        )
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
-        if self.weight_name not in weights or self.weight is not None:
+        if self.weight_name not in weights:
             return
-
         t_weight = weights[self.weight_name]
-        self.weight = t_weight.to(self.data_type_).cuda(get_current_device_id())
-        self.end_position_id: int = t_weight.shape[0]
-        logger.info(f"loaded weight end_position_id: {self.end_position_id}")
+        loaded_max_position_embeddings = t_weight.shape[0]
+        assert (
+            loaded_max_position_embeddings == self.max_position_embeddings
+        ), f"max_position_embeddings: {loaded_max_position_embeddings} != expected: {self.max_position_embeddings}"
+        logger.info(f"loaded weight max_position_embeddings: {self.max_position_embeddings}")
+        self.weight.copy_(t_weight.to(self.data_type_))
 
-    def verify_load(self):
-        return self.weight is not None
+    def _native_forward(
+        self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty
+    ) -> torch.Tensor:
+        # Use PyTorch native embedding
+        result = torch.nn.functional.embedding(input_ids, self.weight)
+        if out is not None:
+            out.copy_(result)
+            return out
+        return result
 
-    def embedding(self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty):
+    def _cuda_forward(
+        self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
         if out is None:
             out = alloc_func(
                 (input_ids.shape[0], self.weight.shape[1]), dtype=self.weight.dtype, device=self.weight.device
             )
-
         embedding_kernel(
             input_ids=input_ids,
             weight=self.weight,
             vob_start_id=0,
-            vob_end_id=self.end_position_id,
+            vob_end_id=self.max_position_embeddings,
             out=out,
         )
-
         return out
+
+    def __call__(
+        self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        return self._forward(input_ids=input_ids, out=out, alloc_func=alloc_func)

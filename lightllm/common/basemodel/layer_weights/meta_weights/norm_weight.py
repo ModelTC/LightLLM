@@ -51,7 +51,7 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
         return rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out)
 
-    def apply(
+    def __call__(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
@@ -101,7 +101,7 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
         return layernorm_forward(x=input, weight=self.weight, bias=self.bias, eps=eps, out=out)
 
-    def apply(
+    def __call__(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
