@@ -1,7 +1,7 @@
 from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     EmbeddingWeight,
-    NoTpNormWeight,
+    LayerNormWeight,
     NoTpPosEmbeddingWeight,
     LMHeadWeight,
 )
@@ -12,6 +12,7 @@ class StarcoderPreAndPostLayerWeight(PreAndPostLayerWeight):
         super().__init__(data_type, network_config)
 
     def _create_weight(self):
+        hidden_size = self.network_config["hidden_size"]
         self.wte_weight_ = EmbeddingWeight(
             weight_name="transformer.wte.weight",
             data_type=self.data_type_,
@@ -21,7 +22,8 @@ class StarcoderPreAndPostLayerWeight(PreAndPostLayerWeight):
             data_type=self.data_type_,
         )
 
-        self.final_norm_weight_ = NoTpNormWeight(
+        self.final_norm_weight_ = LayerNormWeight(
+            dim=hidden_size,
             weight_name="transformer.ln_f.weight",
             bias_name="transformer.ln_f.bias",
             data_type=self.data_type_,

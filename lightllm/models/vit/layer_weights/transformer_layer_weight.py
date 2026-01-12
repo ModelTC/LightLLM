@@ -1,4 +1,5 @@
 import os
+from turtle import TPen
 import torch
 import math
 import numpy as np
@@ -7,8 +8,9 @@ from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
-    NoTpNormWeight,
-    TpVitPadNormWeight,
+    RMSNormWeight,
+    LayerNormWeight,
+    TpRMSNormWeight,
 )
 from lightllm.utils.dist_utils import get_current_device_id
 
@@ -119,16 +121,34 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_norm(self):
-        self.att_norm_weight_ = NoTpNormWeight(
-            self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
+        norm_weight_cls = RMSNormWeight if self.norm_type == "rms_norm" else LayerNormWeight
+        hidden_size = self.network_config_["hidden_size"]
+        self.att_norm_weight_ = norm_weight_cls(
+            dim=hidden_size,
+            weight_name=self._att_norm_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._att_norm_bias_name,
         )
-        self.ffn_norm_weight_ = NoTpNormWeight(
-            self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
+        self.ffn_norm_weight_ = norm_weight_cls(
+            dim=hidden_size,
+            weight_name=self._ffn_norm_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._ffn_norm_bias_name,
         )
         if self.qk_norm:
             head_num = self.network_config_["num_attention_heads"]
-            self.q_norm_weight_ = TpVitPadNormWeight(self._q_norm_weight_name, self.data_type_, head_num=head_num)
-            self.k_norm_weight_ = TpVitPadNormWeight(self._k_norm_weight_name, self.data_type_, head_num=head_num)
+            self.q_norm_weight_ = TpRMSNormWeight(
+                dim=hidden_size,
+                weight_name=self._q_norm_weight_name,
+                data_type=self.data_type_,
+                head_num=head_num,
+            )
+            self.k_norm_weight_ = TpRMSNormWeight(
+                dim=hidden_size,
+                weight_name=self._k_norm_weight_name,
+                data_type=self.data_type_,
+                head_num=head_num,
+            )
 
     def load_hf_weights(self, weights):
         if f"vision_model.encoder.layers.{self.layer_num_}.attn.qkv.weight" in weights:

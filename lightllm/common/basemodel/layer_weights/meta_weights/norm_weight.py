@@ -16,6 +16,7 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         self.dim = dim
         self.weight_name = weight_name
         self.data_type_ = data_type
+        assert bias_name is None, "RMSNormWeight does not have bias"
         self._create_weight()
 
     def _create_weight(self):

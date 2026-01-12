@@ -1,5 +1,5 @@
 from lightllm.common.basemodel import TransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight, NoTpNormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight, RMSNormWeight
 
 
 class MistralMTPTransformerLayerWeight(TransformerLayerWeight):
@@ -41,6 +41,10 @@ class MistralMTPTransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_norm(self):
-        self.ffn_norm_weight_ = NoTpNormWeight(
-            self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
+        hidden_size = self.network_config_["hidden_size"]
+        self.ffn_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
+            weight_name=self._ffn_norm_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._ffn_norm_bias_name,
         )

@@ -4,37 +4,44 @@ from typing import Dict, Optional
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.basemodel.triton_kernel.embedding import embedding as embedding_kernel
+from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
 class EmbeddingWeight(BaseWeightTpl):
-    def __init__(self, weight_name, data_type):
+    def __init__(self, dim: int, vocab_size: int, weight_name: str, data_type: torch.dtype):
         super().__init__()
+        self.dim = dim
+        self.vocab_size = vocab_size
+        self.tp_world_size_ = get_dp_world_size()
+        self.tp_rank_ = get_current_rank_in_dp()
+        # 计算 split_indexes
+        split_indexes = np.linspace(0, self.vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
+        self.tp_vocab_start_id = int(split_indexes[self.tp_rank_])
+        self.tp_vocab_end_id = int(split_indexes[self.tp_rank_ + 1])
         self.weight_name: str = weight_name
         self.data_type_ = data_type
         self.weight: torch.Tensor = None
 
+    def _create_weight(self):
+        tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
+        self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
+
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name not in weights or self.weight is not None:
             return
-
         t_weight = weights[self.weight_name]
         # init some params
-        self.vocab_size = len(t_weight)
-        split_indexes = np.linspace(0, self.vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
-        self.tp_vocab_start_id = int(split_indexes[self.tp_rank_])
-        self.tp_vocab_end_id = int(split_indexes[self.tp_rank_ + 1])
-
+        loaded_vocab_size = len(t_weight)
+        assert (
+            loaded_vocab_size == self.vocab_size
+        ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
         logger.info(f"loaded weight vocab_size: {self.vocab_size}")
-
-        self.weight = (
+        self.weight.copy_(
             t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_).cuda(get_current_device_id())
         )
-
-    def verify_load(self):
-        return self.weight is not None
 
     def embedding(self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty):
         if out is None:

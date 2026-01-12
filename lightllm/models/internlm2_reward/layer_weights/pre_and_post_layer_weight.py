@@ -1,11 +1,12 @@
 import numpy as np
 from lightllm.common.basemodel import PreAndPostLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, NoTpNormWeight, ROWMMWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, RMSNormWeight, ROWMMWeight
 
 
 class Internlm2RewardPreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)
+        hidden_size = network_config["hidden_size"]
         self.wte_weight_ = EmbeddingWeight(
             weight_name="model.tok_embeddings.weight",
             data_type=self.data_type_,
@@ -17,7 +18,8 @@ class Internlm2RewardPreAndPostLayerWeight(PreAndPostLayerWeight):
             tp_rank=0,
             tp_world_size=1,
         )
-        self.final_norm_weight_ = NoTpNormWeight(
+        self.final_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
             weight_name="model.norm.weight",
             data_type=self.data_type_,
         )

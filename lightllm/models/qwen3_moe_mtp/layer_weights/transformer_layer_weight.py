@@ -1,6 +1,6 @@
 import os
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import NoTpNormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import RMSNormWeight
 
 
 class Qwen3MOEMTPTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
@@ -16,6 +16,10 @@ class Qwen3MOEMTPTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             self._init_ffn()
 
     def _init_norm(self):
-        self.ffn_norm_weight_ = NoTpNormWeight(
-            self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
+        hidden_size = self.network_config_["hidden_size"]
+        self.ffn_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
+            weight_name=self._ffn_norm_weight_name,
+            data_type=self.data_type_,
+            bias_name=self._ffn_norm_bias_name,
         )
