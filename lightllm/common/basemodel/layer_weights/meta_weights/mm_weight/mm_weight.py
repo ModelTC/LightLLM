@@ -29,7 +29,6 @@ class MMWeightTpl(BaseWeightTpl):
         tp_world_size: int = None,
     ) -> None:
         super().__init__(tp_rank, tp_world_size, data_type)
-        self.lock = threading.Lock()
 
         self.in_dim = in_dim
         if isinstance(out_dims, int):
