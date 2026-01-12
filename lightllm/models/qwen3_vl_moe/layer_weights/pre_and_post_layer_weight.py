@@ -1,4 +1,3 @@
-import numpy as np
 from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, RMSNormWeight
 
@@ -7,15 +6,27 @@ class Qwen3VLMOEPreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)
         hidden_size = network_config["hidden_size"]
+        vocab_size = network_config["vocab_size"]
         self.wte_weight_ = EmbeddingWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
             weight_name="model.language_model.embed_tokens.weight",
             data_type=self.data_type_,
         )
         tie_word_embeddings = self.network_config_.get("tie_word_embeddings", False)
         if tie_word_embeddings:
-            self.lm_head_weight_: LMHeadWeight = self.wte_weight_
+            # Share weight with EmbeddingWeight to save memory
+            self.lm_head_weight_ = LMHeadWeight(
+                dim=hidden_size,
+                vocab_size=vocab_size,
+                weight_name="model.language_model.embed_tokens.weight",
+                data_type=self.data_type_,
+                shared_weight=self.wte_weight_,
+            )
         else:
             self.lm_head_weight_ = LMHeadWeight(
+                dim=hidden_size,
+                vocab_size=vocab_size,
                 weight_name="lm_head.weight",
                 data_type=self.data_type_,
             )

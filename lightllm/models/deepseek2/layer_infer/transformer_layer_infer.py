@@ -165,20 +165,14 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
             )
-            q = layer_weight.q_a_layernorm_.rmsnorm_forward(
-                input=q,
-                eps=self.eps_,
-                alloc_func=self.alloc_tensor,
-            )
+            q = layer_weight.q_a_layernorm_(input=q, eps=self.eps_, alloc_func=self.alloc_tensor)
             q = layer_weight.q_b_proj_.mm(q)
             cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
         q = q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim)
         q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-        layer_weight.kv_a_layernorm_.rmsnorm_forward(
-            cache_kv[:, :, : self.kv_lora_rank],
-            eps=self.eps_,
-            out=cache_kv[:, :, : self.kv_lora_rank],
+        layer_weight.kv_a_layernorm_(
+            cache_kv[:, :, : self.kv_lora_rank], eps=self.eps_, out=cache_kv[:, :, : self.kv_lora_rank]
         )
 
         rotary_emb_fwd(
@@ -208,10 +202,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             cache_kv = layer_weight.kv_a_proj_with_mqa_.mm(input).view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
             q = q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim)
             q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            layer_weight.kv_a_layernorm_.rmsnorm_forward(
-                cache_kv[:, :, : self.kv_lora_rank],
-                eps=self.eps_,
-                out=cache_kv[:, :, : self.kv_lora_rank],
+            layer_weight.kv_a_layernorm_(
+                cache_kv[:, :, : self.kv_lora_rank], eps=self.eps_, out=cache_kv[:, :, : self.kv_lora_rank]
             )
             rotary_emb_fwd(
                 q_rope,
@@ -244,19 +236,13 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                 position_sin = infer_state.position_sin
 
             q, cache_kv = qkv.split([self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1)
-            q = layer_weight.q_a_layernorm_.rmsnorm_forward(
-                q,
-                eps=self.eps_,
-                alloc_func=self.alloc_tensor,
-            )
+            q = layer_weight.q_a_layernorm_(input=q, eps=self.eps_, alloc_func=self.alloc_tensor)
             q = layer_weight.q_b_proj_.mm(q)
             cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
             q = q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim)
             q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            layer_weight.kv_a_layernorm_.rmsnorm_forward(
-                cache_kv[:, :, : self.kv_lora_rank],
-                eps=self.eps_,
-                out=cache_kv[:, :, : self.kv_lora_rank],
+            layer_weight.kv_a_layernorm_(
+                cache_kv[:, :, : self.kv_lora_rank], eps=self.eps_, out=cache_kv[:, :, : self.kv_lora_rank]
             )
             rotary_emb_fwd(
                 q_rope,
