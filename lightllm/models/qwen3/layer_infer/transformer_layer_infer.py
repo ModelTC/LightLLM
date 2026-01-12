@@ -4,9 +4,6 @@ from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3Tr
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
-from lightllm.models.qwen3.triton_kernel.qk_norm import qk_rmsnorm_forward
-from functools import partial
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -27,14 +24,12 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input)
-        qk_rmsnorm_forward(
+        layer_weight.q_norm_weight_(
             q,
-            weight=layer_weight.q_norm_weight_.weight,
             eps=self.eps_,
         )
-        qk_rmsnorm_forward(
+        layer_weight.k_norm_weight_(
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
-            weight=layer_weight.k_norm_weight_.weight,
             eps=self.eps_,
         )
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)

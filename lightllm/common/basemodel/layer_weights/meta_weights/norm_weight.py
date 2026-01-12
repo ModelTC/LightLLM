@@ -4,10 +4,8 @@ from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
 from lightllm.common.basemodel.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.layernorm import layernorm_forward
-from lightllm.utils.log_utils import init_logger
+from lightllm.common.basemodel.triton_kernel.qk_norm import qk_rmsnorm_forward
 from .platform_op import PlatformAwareOp
-
-logger = init_logger(__name__)
 
 
 class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
@@ -152,3 +150,44 @@ class NoTpGEMMANormWeight(RMSNormWeight):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
         self.weight += 1
+
+
+class QKRMSNORMWeight(RMSNormWeight):
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
+        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type, bias_name=bias_name)
+        self.tp_world_size_ = 1
+        self.tp_rank_ = 0
+
+    def _native_forward(
+        self,
+        input: torch.Tensor,
+        eps: float,
+    ) -> None:
+        assert input.ndim == 2 and self.weight.ndim == 1
+        assert input.shape[-1] == self.dim, f"Expected hidden_size to be {self.dim}, but found: {input.shape[-1]}"
+        head_dim = self.weight.shape[0]
+        x = input.to(torch.float32)
+        x = x.view(-1, head_dim)
+        x_var = x
+        variance = x_var.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + eps)
+        x = (x * self.weight).to(self.data_type_)
+        x = x.view(-1, input.shape[-1])
+        input.copy_(x)
+        return
+
+    def _cuda_forward(
+        self,
+        input: torch.Tensor,
+        eps: float,
+    ) -> None:
+        assert input.ndim == 2 and self.weight.ndim == 1
+        qk_rmsnorm_forward(x=input, weight=self.weight, eps=eps)
+        return
+
+    def __call__(
+        self,
+        input: torch.Tensor,
+        eps: float,
+    ) -> None:
+        return self._forward(input=input, eps=eps)
