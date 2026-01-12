@@ -19,14 +19,13 @@ class Qwen3TransformerLayerWeight(Qwen2TransformerLayerWeight):
 
     def _init_norm(self):
         super()._init_norm()
-        hidden_size = self.network_config_["hidden_size"]
         self.q_norm_weight_ = RMSNormWeight(
-            dim=hidden_size,
+            dim=self.head_dim,
             weight_name=self._q_norm_name,
             data_type=self.data_type_,
         )
         self.k_norm_weight_ = RMSNormWeight(
-            dim=hidden_size,
+            dim=self.head_dim,
             weight_name=self._k_norm_name,
             data_type=self.data_type_,
         )

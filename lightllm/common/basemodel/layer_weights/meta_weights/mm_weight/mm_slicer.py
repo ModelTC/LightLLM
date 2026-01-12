@@ -24,7 +24,7 @@ class SliceMixinBase(ABC):
 
     def _get_slice_start_end(self, size: int) -> Tuple[int, int]:
         tp_size = size * self.repeat_times_ // self.tp_world_size_
-        start = tp_size * (self.tp_rank_ % self.repeat_times_)
+        start = tp_size * (self.tp_rank_ // self.repeat_times_)
         end = start + tp_size
         return start, end
 

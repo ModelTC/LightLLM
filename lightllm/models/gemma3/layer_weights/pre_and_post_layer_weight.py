@@ -17,6 +17,7 @@ class Gemma3PreAndPostLayerWeight(PreAndPostLayerWeight):
         self.lm_head_weight_ = self.wte_weight_
 
         self.final_norm_weight_ = NoTpGEMMANormWeight(
+            dim=hidden_size,
             weight_name="language_model.model.norm.weight",
             data_type=self.data_type_,
             bias_name=None,
