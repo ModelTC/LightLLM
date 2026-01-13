@@ -1,7 +1,6 @@
 import yaml
 import collections
 from .registry import QUANTMETHODS
-from .torchao_quant import *
 from .w8a8_quant import *
 from .triton_quant.triton_quant import *
 from .deepgemm_quant import *
