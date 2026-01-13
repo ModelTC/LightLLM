@@ -1,12 +1,20 @@
 import yaml
 import collections
 from .registry import QUANTMETHODS
-from .w8a8_quant import *
-from .triton_quant.triton_quant import *
-from .deepgemm_quant import *
-from .awq_quant import *
-from .no_quant import *
+from .backend import QUANT_BACKEND
 from lightllm.utils.log_utils import init_logger
+
+# Import all type classes (they auto-register with QUANTMETHODS)
+from .types import (
+    NoQuantization,
+    FP8Block128Quantization,
+    FP8PerTokenQuantization,
+    W8A8Quantization,
+    AWQQuantization,
+)
+
+# Re-export for backwards compatibility
+from .types.awq import is_awq_marlin_compatible
 
 logger = init_logger(__name__)
 
@@ -37,20 +45,21 @@ class Quantcfg:
         if self.hf_quantization_method == "fp8":
             block_size = self.hf_quantization_config.get("weight_block_size", None)
             if block_size == [128, 128]:
-                from lightllm.common.quantization.deepgemm_quant import HAS_DEEPGEMM
-
-                if HAS_DEEPGEMM:
-                    self.quant_type = "deepgemm-fp8w8a8-b128"
-                else:
-                    self.quant_type = "vllm-fp8w8a8-b128"
-                logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
+                self.quant_type = "fp8-block128"
+                logger.info(
+                    f"Selected quant type: fp8-block128, backend: {QUANT_BACKEND.get_backend('fp8-block128').name}"
+                )
+            else:
+                self.quant_type = "fp8-per-token"
+                logger.info(
+                    f"Selected quant type: fp8-per-token, backend: {QUANT_BACKEND.get_backend('fp8-per-token').name}"
+                )
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
-            if is_awq_marlin_compatible(self.hf_quantization_config):
-                self.quant_type = "awq_marlin"
-            logger.info(f"select awq quant way: {self.quant_type}")
+            logger.info("Selected quant type: awq (marlin auto-selected if compatible)")
         else:
-            # TODO: more quant method
+            # TODO: more quant methods
+            raise NotImplementedError(f"Quant method {self.hf_quantization_method} not implemented yet.")
             pass
 
     def _parse_custom_cfg(self, custom_cfg_path):

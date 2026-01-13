@@ -1,11 +1,14 @@
-from .quantize_method import QuantizationMethod, WeightPack
-from .registry import QUANTMETHODS
 import torch
 from typing import Optional
+
+from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
+from lightllm.common.quantization.registry import QUANTMETHODS
 
 
 @QUANTMETHODS.register("none")
 class NoQuantization(QuantizationMethod):
+    """No quantization - uses full precision weights."""
+
     def apply(
         self,
         input_tensor: torch.Tensor,
