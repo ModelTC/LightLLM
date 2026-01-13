@@ -7,6 +7,10 @@ class MistralMTPTransformerLayerWeight(TransformerLayerWeight):
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
+    def _parse_config(self):
+        self.n_embed = self.network_config_["hidden_size"]
+        self.n_inter = self.network_config_["intermediate_size"]
+
     def _init_weight_names(self):
         self._gate_weight_name = f"mtp.layers.{self.layer_num_}.mlp.gate_proj.weight"
         self._gate_bias_name = None
@@ -24,20 +28,20 @@ class MistralMTPTransformerLayerWeight(TransformerLayerWeight):
 
     def _init_ffn(self):
         self.gate_up_proj = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_inter, self.n_inter],
             weight_names=[self._gate_weight_name, self._up_weight_name],
             data_type=self.data_type_,
             bias_names=[self._gate_bias_name, self._up_bias_name],
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="gate_up_proj",
+            quant_method=self.get_quant_method("gate_up_proj"),
         )
         self.down_proj = COLMMWeight(
+            in_dim=self.n_inter,
+            out_dims=[self.n_embed],
             weight_names=self._down_weight_name,
             data_type=self.data_type_,
             bias_names=self._down_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="down_proj",
+            quant_method=self.get_quant_method("down_proj"),
         )
 
     def _init_norm(self):

@@ -25,39 +25,40 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_ffn(self):
         self.gate_proj = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_inter],
             weight_names=self._gate_weight_name,
             data_type=self.data_type_,
             bias_names=self._gate_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="gate_proj",
+            quant_method=self.get_quant_method("gate_proj"),
         )
         self.up_proj = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_inter],
             weight_names=self._up_weight_name,
             data_type=self.data_type_,
             bias_names=self._up_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="up_proj",
+            quant_method=self.get_quant_method("up_proj"),
         )
         super()._init_ffn()
 
     def _init_qkv(self):
+        kv_out_dim = self.k_head_num_ * self.head_dim
         self.k_proj = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[kv_out_dim],
             weight_names=self._k_weight_name,
             data_type=self.data_type_,
             bias_names=self._k_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="k_proj",
+            quant_method=self.get_quant_method("k_proj"),
         )
         self.v_proj = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[kv_out_dim],
             weight_names=self._v_weight_name,
             data_type=self.data_type_,
             bias_names=self._v_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="v_proj",
+            quant_method=self.get_quant_method("v_proj"),
         )
         super()._init_qkv()
 
