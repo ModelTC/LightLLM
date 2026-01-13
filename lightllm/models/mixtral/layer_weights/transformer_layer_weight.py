@@ -34,12 +34,12 @@ class MixtralTransformerLayerWeight(LlamaTransformerLayerWeight):
         split_inter_size = inter_size // self.tp_world_size_
 
         self.moe_gate = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_routed_experts],
             weight_names=self.moe_gate_weight_name,
             data_type=self.data_type_,
             bias_names=self.moe_gate_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="moe_gate",
+            quant_method=self.get_quant_method("moe_gate"),
             tp_rank=0,
             tp_world_size=1,  # no tensor parallelism
         )

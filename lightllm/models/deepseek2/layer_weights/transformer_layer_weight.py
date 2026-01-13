@@ -43,6 +43,13 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             moe_mode = os.getenv("MOE_MODE", "TP")
             assert moe_mode == "TP"
             self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
+        self.n_embed = self.network_config_["hidden_size"]
+        self.n_inter = self.network_config_["intermediate_size"]
+        self.moe_inter = self.network_config_.get("moe_intermediate_size", self.n_inter)
+        self.q_out_dim = self.num_attention_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        self.kv_a_out_dim = self.kv_lora_rank + self.qk_rope_head_dim
+        self.kv_b_out_dim = self.num_attention_heads * (self.qk_nope_head_dim + self.v_head_dim)
+        self.o_in_dim = self.num_attention_heads * self.v_head_dim
 
     def _init_weight_names(self):
         if self.q_lora_rank is None:
@@ -140,40 +147,40 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
     def _init_qkvo(self):
         if self.q_lora_rank is None:
             self.q_weight_ = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[self.q_out_dim],
                 weight_names=f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="q_weight",
+                quant_method=self.get_quant_method("q_weight"),
             )
             self.kv_a_proj_with_mqa_ = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[self.kv_a_out_dim],
                 weight_names=f"model.layers.{self.layer_num_}.self_attn.kv_a_proj_with_mqa.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="kv_a_proj_with_mqa",
+                quant_method=self.get_quant_method("kv_a_proj_with_mqa"),
                 tp_rank=0,
                 tp_world_size=1,
             )
         else:
             self.qkv_a_proj_with_mqa_ = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[self.q_lora_rank, self.kv_a_out_dim],
                 weight_names=[
                     f"model.layers.{self.layer_num_}.self_attn.q_a_proj.weight",
                     f"model.layers.{self.layer_num_}.self_attn.kv_a_proj_with_mqa.weight",
                 ],
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="qkv_a_proj_with_mqa",
+                quant_method=self.get_quant_method("qkv_a_proj_with_mqa"),
                 tp_rank=0,
                 tp_world_size=1,
             )
             self.q_b_proj_ = ROWMMWeight(
+                in_dim=self.q_lora_rank,
+                out_dims=[self.q_out_dim],
                 weight_names=f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="q_b_proj",
+                quant_method=self.get_quant_method("q_b_proj"),
             )
         # self.k_b_proj_ = ROWBMMWeight(
         #     weight_names=f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
@@ -191,65 +198,66 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         # )
         if self.enable_cc_method:
             self.cc_kv_b_proj_ = ROWMMWeight(
+                in_dim=self.kv_lora_rank,
+                out_dims=[self.kv_b_out_dim],
                 weight_names=f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="cc_kv_b_proj",
+                quant_method=self.get_quant_method("cc_kv_b_proj"),
             )
 
         self.o_weight_ = COLMMWeight(
+            in_dim=self.o_in_dim,
+            out_dims=[self.n_embed],
             weight_names=f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
             data_type=self.data_type_,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="o_weight",
+            quant_method=self.get_quant_method("o_weight"),
         )
 
     def _load_mlp(self, mlp_prefix):
         moe_mode = os.getenv("MOE_MODE", "TP")
         if self.is_moe and moe_mode == "EP":
             self.gate_up_proj = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[self.moe_inter, self.moe_inter],
                 weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="gate_up_proj",
+                quant_method=self.get_quant_method("gate_up_proj"),
                 tp_rank=0,
                 tp_world_size=1,
             )
             self.down_proj = COLMMWeight(
+                in_dim=self.moe_inter,
+                out_dims=[self.n_embed],
                 weight_names=f"{mlp_prefix}.down_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="down_proj",
+                quant_method=self.get_quant_method("down_proj"),
                 tp_rank=0,
                 tp_world_size=1,
             )
         else:
             self.gate_up_proj = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[self.n_inter, self.n_inter],
                 weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="gate_up_proj",
+                quant_method=self.get_quant_method("gate_up_proj"),
             )
             self.down_proj = COLMMWeight(
+                in_dim=self.n_inter,
+                out_dims=[self.n_embed],
                 weight_names=f"{mlp_prefix}.down_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="down_proj",
+                quant_method=self.get_quant_method("down_proj"),
             )
 
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
         self.moe_gate = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_routed_experts],
             weight_names=f"model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
-            layer_num=self.layer_num_,
-            name="moe_gate",
+            quant_method=self.get_quant_method("moe_gate"),
             tp_rank=0,
             tp_world_size=1,
         )
