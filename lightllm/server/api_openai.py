@@ -292,7 +292,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                     parser = FunctionCallParser(tools, tool_parser)
-                    _, call_info_list = parser.parse_non_stream(full_text)
+                    full_normal_text, call_info_list = parser.parse_non_stream(full_text)
                     tool_calls = []
                     history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                     for call_info in call_info_list:
