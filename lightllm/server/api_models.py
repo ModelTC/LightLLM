@@ -24,9 +24,10 @@ class Message(BaseModel):
 class Function(BaseModel):
     """Function descriptions."""
 
-    description: Optional[str] = Field(default=None, examples=[None])
     name: Optional[str] = None
-    parameters: Optional[object] = None
+    description: Optional[str] = Field(default=None, examples=[None])
+    parameters: Optional[dict] = None
+    response: Optional[dict] = None
 
 
 class Tool(BaseModel):
