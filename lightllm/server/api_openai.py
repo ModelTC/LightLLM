@@ -81,7 +81,7 @@ def _process_tool_call_id(
         # SGLang sets call_item.tool_index to the *local* position inside that message.
         # Therefore, the index must be corrected by using
         # `history_tool_calls_cnt + call_item.tool_index` to ensure globally unique and properly ordered.
-        tool_call_id = f"functions.{call_item.name}:{history_tool_calls_cnt+call_item.tool_index}"
+        tool_call_id = f"functions.{call_item.name}:{history_tool_calls_cnt + call_item.tool_index}"
         logger.debug(
             f"Process tool call idx, parser: {tool_call_parser}, \
             tool_call_id: {tool_call_id}, \
@@ -292,7 +292,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                     parser = FunctionCallParser(tools, tool_parser)
-                    full_normal_text, call_info_list = parser.parse_non_stream(full_text)
+                    _, call_info_list = parser.parse_non_stream(full_text)
                     tool_calls = []
                     history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                     for call_info in call_info_list:
