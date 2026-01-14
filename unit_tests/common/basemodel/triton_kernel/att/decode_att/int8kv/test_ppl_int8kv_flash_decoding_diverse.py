@@ -42,11 +42,11 @@ class MockInferState:
 @pytest.mark.parametrize("shared_seq_len", [0, 77, 256, 311, 512, 550])
 def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_len):
     """
-    测试 ppl_int8kv_flash_decoding_diverse 的 token_decode_attention_flash_decoding
+    测试 int8kv_flash_decoding_diverse 的 token_decode_attention_flash_decoding
     与 ppl_int8kv_flash_decoding (baseline) 的对比。
     """
 
-    from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse import (
+    from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse import (
         token_decode_attention_flash_decoding as diverse_attention,
     )
     from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding import (

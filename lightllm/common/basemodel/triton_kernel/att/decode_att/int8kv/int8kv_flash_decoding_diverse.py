@@ -2,9 +2,9 @@
 import torch
 from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from .ppl_int8kv_flash_decoding_diverse_stage1 import flash_decode_stage1
-from .ppl_int8kv_flash_decoding_diverse_stage2 import flash_decode_stage2
-from .ppl_int8kv_flash_decoding_diverse_stage3 import flash_diverse_decode_stage3
+from .int8kv_flash_decoding_diverse_stage1 import flash_decode_stage1
+from .int8kv_flash_decoding_diverse_stage2 import flash_decode_stage2
+from .int8kv_flash_decoding_diverse_stage3 import flash_diverse_decode_stage3
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
 
