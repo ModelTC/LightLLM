@@ -38,10 +38,10 @@ def token_decode_attention_flash_decoding(
     o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
 
     mid_o = alloc_tensor_func(
-        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2, head_dim], dtype=q.dtype, device="cuda"
+        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2, head_dim], dtype=torch.float32, device="cuda"
     )
     mid_o_logexpsum = alloc_tensor_func(
-        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2], dtype=q.dtype, device="cuda"
+        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2], dtype=torch.float32, device="cuda"
     )
 
     current_stream = torch.cuda.current_stream()
