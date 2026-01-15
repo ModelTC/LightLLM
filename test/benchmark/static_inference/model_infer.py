@@ -41,7 +41,10 @@ def test_model_inference(args):
             "run_mode": "normal",
             "max_seq_length": args.max_req_total_len,
             "disable_cudagraph": args.disable_cudagraph,
-            "mode": args.mode,
+            "llm_prefill_att_backend": args.llm_prefill_att_backend,
+            "llm_decode_att_backend": args.llm_decode_att_backend,
+            "llm_kv_type": args.llm_kv_type,
+            "llm_kv_quant_group_size": args.llm_kv_quant_group_size,
         }
         proc = multiprocessing.Process(
             target=tppart_model_infer,
