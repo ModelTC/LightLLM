@@ -187,15 +187,6 @@ def _launch_subprocesses(args: StartArgs):
     else:
         args.visual_gpu_ids = args.visual_gpu_ids[:total_required_gpus]
 
-    # 检查visual_nccl_port数量是否足够
-    # if len(args.visual_nccl_ports) < args.visual_dp:
-    #     raise ValueError(
-    #         f"Not enough visual_nccl_ports specified. You need at least {args.visual_dp}, "
-    #         f"but got ({len(args.visual_nccl_ports)})."
-    #     )
-    # else:
-    #     args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
-
     if args.visual_dp <= 0:
         raise ValueError("visual_dp must be a positive integer.")
 
@@ -240,9 +231,9 @@ def _launch_subprocesses(args: StartArgs):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
+    already_uesd_ports = [args.nccl_port, args.port]
     if args.run_mode == "decode":
-        already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port, args.pd_decode_rpyc_port]
+        already_uesd_ports = [args.nccl_port, args.port, args.pd_decode_rpyc_port]
 
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
@@ -251,7 +242,7 @@ def _launch_subprocesses(args: StartArgs):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=9 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=9 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp, used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -268,11 +259,14 @@ def _launch_subprocesses(args: StartArgs):
     can_use_ports = can_use_ports[9:]
 
     visual_model_tp_ports = []
+    visual_nccl_ports = []
     for _ in range(args.visual_dp):
         tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
-        can_use_ports = can_use_ports[args.visual_tp :]
+        visual_nccl_ports.append(can_use_ports[args.visual_tp])
+        can_use_ports = can_use_ports[args.visual_tp + 1 :]
         visual_model_tp_ports.append(tp_ports_for_dp)
 
+    args.visual_nccl_ports = visual_nccl_ports
     # 将申请好的端口放入args参数中
     args.router_port = router_port
     args.router_rpc_port = router_rpc_port

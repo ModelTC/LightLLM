@@ -85,7 +85,7 @@ class StartArgs:
     visual_gpu_ids: Optional[List[int]] = field(default=None)
     visual_tp: int = field(default=1)
     visual_dp: int = field(default=1)
-    visual_nccl_ports: List[int] = field(default_factory=lambda: [29500])
+    visual_nccl_ports: List[int] = field(default=None)
     enable_monitor_auth: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
     graph_max_batch_size: int = field(default=256)
@@ -150,4 +150,3 @@ class StartArgs:
     enable_weight_cpu_backup: bool = field(default=False)
 
     weight_version: str = "default"
-
