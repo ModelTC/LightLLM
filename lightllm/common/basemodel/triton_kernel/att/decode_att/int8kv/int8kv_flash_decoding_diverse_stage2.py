@@ -213,54 +213,6 @@ def _fwd_kernel_flash_decode_diverse_stage2(
     return
 
 
-def get_test_configs():
-    test_configs = []
-
-    for block_n in [8, 16, 32, 64]:
-        for num_warps in [
-            2,
-            4,
-            8,
-            16,
-        ]:
-            # for stage1_num_warps in [2, 4, 8, 16]:
-            for num_stages in [
-                1,
-                2,
-                3,
-                4,
-                5,
-                7,
-                9,
-                10,
-                11,
-            ]:
-                config = {
-                    "BLOCK_N": block_n,
-                    "num_warps": num_warps,
-                    "num_stages": num_stages,
-                }
-                test_configs.append(config)
-
-    return test_configs
-
-
-def _get_static_key(q, k, block_seq):
-    q_head_dim = q.shape[-1]
-    gqa_group_size = q.shape[1] // k.shape[1]
-    out_dtype = q.dtype
-    return {
-        "gqa_group_size": gqa_group_size,
-        "q_head_dim": q_head_dim,
-        "block_seq": block_seq,
-        "out_dtype": str(out_dtype),
-    }
-
-
-def run_key_func(q, max_len_in_batch):
-    return f"{q.shape[0]}_{max_len_in_batch}"
-
-
 @torch.no_grad()
 def flash_decode_stage2(
     q: torch.Tensor,
