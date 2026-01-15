@@ -65,7 +65,7 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
 
     # 创建测试数据
     kv_shape = (batch_size * max_len_in_batch, kv_head_num, head_dim)
-    kv_scale_shape = (batch_size * seq_len, kv_head_num, head_dim // quant_group_size)
+    kv_scale_shape = (batch_size * max_len_in_batch, kv_head_num, head_dim // quant_group_size)
 
     q = torch.randn(size=(batch_size, num_heads, head_dim), dtype=test_dtype, device="cuda")
 
