@@ -190,6 +190,107 @@ class TpPartBaseModel:
         [weight.verify_load() for weight in self.trans_layers_weight]
         return
 
+    def enable_weight_checksum_verification(self):
+        """
+        Enable checksum verification for all weights in the model.
+        This should be called after weights are loaded.
+        """
+        logger.info("Enabling weight checksum verification")
+        if hasattr(self.pre_post_weight, 'enable_checksum_verification'):
+            self.pre_post_weight.enable_checksum_verification()
+
+        for layer_weight in self.trans_layers_weight:
+            if hasattr(layer_weight, 'enable_checksum_verification'):
+                layer_weight.enable_checksum_verification()
+
+    def compute_weight_checksums(self, force_bfloat16: bool = True):
+        """
+        Compute SHA256 checksums for all weights in the model.
+
+        Args:
+            force_bfloat16: Whether to cast to bfloat16 before hashing for consistency
+
+        Returns:
+            Dictionary mapping layer names to their checksums
+        """
+        from lightllm.server.pd_io_struct import CheckWeightsResult
+
+        logger.info("Computing weight checksums...")
+        all_checksums = {}
+
+        # Compute checksums for pre_post_weight
+        if hasattr(self.pre_post_weight, 'compute_checksums'):
+            pre_post_checksums = self.pre_post_weight.compute_checksums(force_bfloat16)
+            all_checksums['pre_post'] = pre_post_checksums
+
+        # Compute checksums for each transformer layer
+        for i, layer_weight in enumerate(self.trans_layers_weight):
+            if hasattr(layer_weight, 'compute_checksums'):
+                layer_checksums = layer_weight.compute_checksums(force_bfloat16)
+                all_checksums[f'layer_{i}'] = layer_checksums
+
+        logger.info(f"Computed checksums for {len(all_checksums)} layer groups")
+
+        return CheckWeightsResult(
+            success=True,
+            checksums=all_checksums,
+            message=f"Successfully computed checksums for {len(all_checksums)} layer groups"
+        )
+
+    def verify_weight_checksums(self, expected_checksums: dict, force_bfloat16: bool = True):
+        """
+        Verify weight checksums against expected values.
+
+        Args:
+            expected_checksums: Dictionary mapping layer names to expected checksums
+            force_bfloat16: Whether to cast to bfloat16 before hashing
+
+        Returns:
+            CheckWeightsResult with verification status
+        """
+        from lightllm.server.pd_io_struct import CheckWeightsResult
+
+        logger.info("Verifying weight checksums...")
+        failed_params = []
+        all_passed = True
+
+        # Verify pre_post_weight
+        if 'pre_post' in expected_checksums:
+            if hasattr(self.pre_post_weight, 'verify_checksums'):
+                passed = self.pre_post_weight.verify_checksums(
+                    expected_checksums['pre_post'],
+                    force_bfloat16
+                )
+                if not passed:
+                    all_passed = False
+                    failed_params.append('pre_post')
+
+        # Verify each transformer layer
+        for i, layer_weight in enumerate(self.trans_layers_weight):
+            layer_key = f'layer_{i}'
+            if layer_key in expected_checksums:
+                if hasattr(layer_weight, 'verify_checksums'):
+                    passed = layer_weight.verify_checksums(
+                        expected_checksums[layer_key],
+                        force_bfloat16
+                    )
+                    if not passed:
+                        all_passed = False
+                        failed_params.append(layer_key)
+
+        if all_passed:
+            logger.info("All weight checksums verified successfully")
+            message = "All weight checksums verified successfully"
+        else:
+            logger.error(f"Weight verification failed for: {failed_params}")
+            message = f"Weight verification failed for: {failed_params}"
+
+        return CheckWeightsResult(
+            success=all_passed,
+            failed_params=failed_params,
+            message=message
+        )
+
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         self.mem_manager: MemoryManager = select_mem_manager_class()(

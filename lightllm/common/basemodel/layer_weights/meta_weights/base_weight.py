@@ -1,7 +1,8 @@
 import torch
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp, get_current_device_id
+from lightllm.utils.weight_checker import WeightChecker
 
 
 class BaseWeight(ABC):
@@ -23,12 +24,61 @@ class BaseWeightTpl(BaseWeight):
         self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
         self.device_id_ = get_current_device_id()
         self.data_type_ = data_type
+        self._weight_checker: Optional[WeightChecker] = None
+        self._enable_checksum = False
 
     def load_hf_weights(self, weights):
         raise NotImplementedError("load_hf_weights must implement this method")
 
     def verify_load(self) -> bool:
         raise NotImplementedError("verify_load must implement this method")
+
+    def enable_checksum_verification(self):
+        """Enable checksum verification for this weight."""
+        self._enable_checksum = True
+        if self._weight_checker is None:
+            self._weight_checker = WeightChecker(tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_)
+
+    def get_weight_checker(self) -> Optional[WeightChecker]:
+        """Get the weight checker instance."""
+        return self._weight_checker
+
+    def compute_checksums(self, force_bfloat16: bool = True) -> Dict[str, str]:
+        """
+        Compute checksums for all weights in this layer.
+        Subclasses should override this to compute checksums for their specific weights.
+
+        Args:
+            force_bfloat16: Whether to cast to bfloat16 before hashing
+
+        Returns:
+            Dictionary mapping parameter names to checksums
+        """
+        return {}
+
+    def verify_checksums(self, expected_checksums: Dict[str, str], force_bfloat16: bool = True) -> bool:
+        """
+        Verify checksums against expected values.
+
+        Args:
+            expected_checksums: Dictionary mapping parameter names to expected checksums
+            force_bfloat16: Whether to cast to bfloat16 before hashing
+
+        Returns:
+            True if all checksums match, False otherwise
+        """
+        if not self._enable_checksum or self._weight_checker is None:
+            return True
+
+        computed_checksums = self.compute_checksums(force_bfloat16)
+        all_passed = True
+
+        for param_name, expected_checksum in expected_checksums.items():
+            if param_name in computed_checksums:
+                if computed_checksums[param_name] != expected_checksum:
+                    all_passed = False
+
+        return all_passed
 
     def _get_head_tp_split_params(self, weight: torch.Tensor) -> Tuple[int, int]:
         """

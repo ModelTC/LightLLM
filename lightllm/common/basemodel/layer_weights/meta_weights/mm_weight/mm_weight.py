@@ -242,6 +242,60 @@ class MMWeightTpl(BaseWeightTpl):
     def verify_load(self) -> bool:
         return self.mm_param.is_ready()
 
+    def compute_checksums(self, force_bfloat16: bool = True) -> Dict[str, str]:
+        """
+        Compute SHA256 checksums for all weights in this MM weight.
+
+        Args:
+            force_bfloat16: Whether to cast to bfloat16 before hashing for consistency
+
+        Returns:
+            Dictionary mapping parameter names to checksums
+        """
+        checksums = {}
+
+        if not self._enable_checksum or self._weight_checker is None:
+            return checksums
+
+        # Compute checksum for main weight
+        if self.mm_param.weight is not None:
+            for i, weight_name in enumerate(self.weight_names):
+                checksum = self._weight_checker.compute_checksum(
+                    weight_name,
+                    self.mm_param.weight,
+                    force_bfloat16=force_bfloat16
+                )
+                checksums[weight_name] = checksum
+
+        # Compute checksum for bias if present
+        if self.mm_param.bias is not None and self.bias_names is not None:
+            for i, bias_name in enumerate(self.bias_names):
+                checksum = self._weight_checker.compute_checksum(
+                    bias_name,
+                    self.mm_param.bias,
+                    force_bfloat16=force_bfloat16
+                )
+                checksums[bias_name] = checksum
+
+        # Compute checksums for quantization parameters if present
+        if self.mm_param.weight_scale is not None:
+            checksum = self._weight_checker.compute_checksum(
+                f"{self.weight_names[0]}_scale",
+                self.mm_param.weight_scale,
+                force_bfloat16=force_bfloat16
+            )
+            checksums[f"{self.weight_names[0]}_scale"] = checksum
+
+        if self.mm_param.weight_zero_point is not None:
+            checksum = self._weight_checker.compute_checksum(
+                f"{self.weight_names[0]}_zero_point",
+                self.mm_param.weight_zero_point,
+                force_bfloat16=force_bfloat16
+            )
+            checksums[f"{self.weight_names[0]}_zero_point"] = checksum
+
+        return checksums
+
     # 执行顺序
     def _load_weight(
         self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int

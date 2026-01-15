@@ -382,3 +382,25 @@ class NIXLChunckedTransTaskGroup:
 class NIXLAbortReq:
     request_id: int
     device_id: int
+
+
+@dataclass
+class CheckWeightsReqInput:
+    """
+    Request input for weight verification via checksums.
+    Similar to sglang's weight verification feature.
+    """
+    checksums: Optional[Dict[str, str]] = None  # Map of parameter names to expected SHA256 checksums
+    force_bfloat16: bool = True  # Whether to cast to bfloat16 before hashing for consistency
+    verify_only: bool = False  # If True, only verify against provided checksums; if False, compute and return checksums
+
+
+@dataclass
+class CheckWeightsResult:
+    """
+    Result of weight verification.
+    """
+    success: bool
+    checksums: Dict[str, str] = field(default_factory=dict)  # Computed checksums
+    failed_params: List[str] = field(default_factory=list)  # List of parameters that failed verification
+    message: str = ""
