@@ -34,7 +34,7 @@ def _rms_norm_fwd_fused(
     tl.store(X + cols, y.to(X.dtype.element_ty))
 
 
-def qk_rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps):
+def qk_rmsnorm_forward1(x: torch.Tensor, weight: torch.Tensor, eps):
     """
     This function is used to perform in-place RMSNorm on the input tensor,
     and to adapt the head_dim norm for Qwen3 MoE and the splited qk tensor layout.
@@ -63,4 +63,29 @@ def qk_rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps):
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=4,
     )
+    return x
+
+
+@torch.no_grad()
+def qk_rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float):
+    assert torch.is_tensor(x) and torch.is_tensor(weight)
+    # assert weight.ndim == 1, weight.shape
+    # assert x.is_contiguous(), "x.is_contiguous()"
+
+    head_dim = weight.numel()
+    x2d = x.view(-1, x.shape[-1])  # (M2, N)
+    M2, N = x2d.shape
+    assert N % head_dim == 0, (N, head_dim)
+    H = N // head_dim
+
+    x3 = x2d.view(M2, H, head_dim)  # (M2, H, D)
+
+    x_fp32 = x3.to(torch.float32)
+    w = weight.view(1, 1, head_dim)
+
+    var = x_fp32.pow(2).mean(dim=-1, keepdim=True)
+    rstd = torch.rsqrt(var + eps)
+    y = (x_fp32 * rstd).to(torch.bfloat16) * w
+
+    x3.copy_(y.to(dtype=x3.dtype))
     return x
