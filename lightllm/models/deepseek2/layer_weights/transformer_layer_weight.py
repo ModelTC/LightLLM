@@ -11,7 +11,6 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     FusedMoeWeightEP,
     create_tp_moe_wegiht_obj,
 )
-from functools import partial
 from ..triton_kernel.weight_dequant import weight_dequant
 
 

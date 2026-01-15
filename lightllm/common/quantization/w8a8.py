@@ -3,7 +3,7 @@ from typing import Optional
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
-from lightllm.common.quantization.backend import QUANT_BACKEND, BackendType
+from lightllm.common.basemodel.layer_weights.meta_weights.platform_op import PlatformAwareOp
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -24,7 +24,7 @@ except ImportError:
 
 
 @QUANTMETHODS.register(["w8a8", "vllm-w8a8"])
-class W8A8Quantization(QuantizationMethod):
+class W8A8Quantization(QuantizationMethod, PlatformAwareOp):
     def __init__(self):
         super().__init__()
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
@@ -33,25 +33,17 @@ class W8A8Quantization(QuantizationMethod):
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
-        self._backend = QUANT_BACKEND.get_backend("w8a8")
-
-        if self._backend == BackendType.TRITON:
-            if not HAS_VLLM:
-                raise NotImplementedError(
-                    "W8A8 Triton fallback is not yet implemented. "
-                    "Please install vLLM or disable LIGHTLLM_USE_TRITON_QUANT."
-                )
-            self._backend = BackendType.VLLM
-            logger.warning("W8A8 Triton fallback not implemented, falling back to vLLM backend")
-
-        if self._backend == BackendType.VLLM and not HAS_VLLM:
-            raise RuntimeError("vLLM is required for W8A8 quantization but is not installed.")
-
-        logger.info(f"W8A8Quantization using backend: {self._backend.name}")
-
     @property
     def method_name(self):
         return "w8a8"
+
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).cuda(device_id)
+        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
+        return WeightPack(weight=weight, weight_scale=weight_scale)
 
     def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0) -> None:
         weight = weight.float().cuda(self.device_id_)
@@ -71,10 +63,9 @@ class W8A8Quantization(QuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # TODO: Currently only vLLM backend is implemented
-        return self._apply_vllm(input_tensor, weight_pack, out, use_custom_tensor_mananger, bias)
+        return self._forward(input_tensor, weight_pack, out, use_custom_tensor_mananger, bias)
 
-    def _apply_vllm(
+    def _cuda_forward(
         self,
         input_tensor: torch.Tensor,
         weight_pack: WeightPack,
@@ -98,11 +89,3 @@ class W8A8Quantization(QuantizationMethod):
 
         cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
         return out
-
-    def create_weight(
-        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
-    ) -> WeightPack:
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=weight_scale)

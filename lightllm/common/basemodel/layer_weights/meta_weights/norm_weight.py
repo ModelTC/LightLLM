@@ -34,18 +34,24 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + eps)
         x = (x * self.weight).to(self.data_type_)
-        if out is None:
+        if out is not None:
             out.copy_(x)
             return out
         return x
 
-    def _cuda_forward(
+    def _triton_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         assert input.ndim == 2 and self.weight.ndim == 1
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
         return rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out)
+
+    def _cuda_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        # only triton implementation is supported for rmsnorm on cuda platform
+        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
 
     def __call__(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
@@ -80,18 +86,24 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
         x = torch.nn.functional.layer_norm(
             input, normalized_shape=[self.dim], weight=self.weight, bias=self.bias, eps=eps
         )
-        if out is None:
+        if out is not None:
             out.copy_(x.to(self.data_type_))
             return out
         return x.to(self.data_type_)
 
-    def _cuda_forward(
+    def _triton_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         assert input.ndim == 2 and self.weight.ndim == 1
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
         return layernorm_forward(x=input, weight=self.weight, bias=self.bias, eps=eps, out=out)
+
+    def _cuda_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        # only triton implementation is supported for layernorm on cuda platform
+        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
 
     def __call__(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty

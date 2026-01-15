@@ -612,8 +612,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Hardware platform: cuda | musa""",
     )
     parser.add_argument(
-        "--enable_torch_naive",
+        "--enable_torch_fallback",
         action="store_true",
-        help="""Use torch naive implementation for the op.""",
+        help="""Whether to enable torch naive implementation for the op.
+        If the op is not implemented for the platform, it will use torch naive implementation.""",
+    )
+    parser.add_argument(
+        "--enable_triton_fallback",
+        action="store_true",
+        help="""Whether to enable triton implementation for the op.
+        If the op is not implemented for the platform and the hardware support triton,
+        it will use triton implementation.""",
     )
     return parser

@@ -3,6 +3,9 @@ from abc import ABC, abstractmethod
 from typing import Optional, Callable, Any
 from lightllm.utils.device_utils import get_platform, Platform
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class PlatformAwareOp(ABC):
@@ -14,10 +17,12 @@ class PlatformAwareOp(ABC):
     def __init__(self):
         args = get_env_start_args()
         self.platform = get_platform(args.hardware_platform)
-        self.enable_torch_naive = args.enable_torch_naive
+        self.enable_torch_fallback = args.enable_torch_fallback
+        self.enable_triton_fallback = args.enable_triton_fallback
         self._forward = self._route_forward()
 
     def _route_forward(self) -> Callable:
+
         method_name_map = {
             Platform.CUDA: "_cuda_forward",
             Platform.ASCEND: "_ascend_forward",
@@ -33,14 +38,23 @@ class PlatformAwareOp(ABC):
             if callable(method):
                 return method
 
-        if self.enable_torch_naive:
+        if self.enable_triton_fallback:
+            if hasattr(self, "_triton_forward"):
+                return self._triton_forward
+            logger.warning(
+                f"No triton implementation found for {self.__class__.__name__} on {self.platform.name} platform. "
+                f"Please implement {self.__class__.__name__}_{self.platform.name}_triton_forward method, "
+                f"or set --enable_torch_fallback to use default implementation."
+            )
+
+        if self.enable_torch_fallback:
             return self._native_forward
 
-        # 如果都没有，抛出异常
+        # if no implementation found, raise error
         raise NotImplementedError(
-            f"No implementation found for platform {self.platform.name}. "
-            f"Please implement _{self.platform.name}_forward method, "
-            f"or set --enable_torch_naive to use default implementation."
+            f"No implementation found for {self.__class__.__name__} on {self.platform.name} platform. "
+            f"Please implement {self.__class__.__name__}_{self.platform.name}_forward method, "
+            f"or set --enable_torch_fallback to use default implementation."
         )
 
     @abstractmethod
@@ -50,3 +64,8 @@ class PlatformAwareOp(ABC):
     @abstractmethod
     def _cuda_forward(self, *args, **kwargs) -> Any:
         raise NotImplementedError("cuda forward must implement this method")
+
+    # Since Triton may be compatible with all hardware platforms in the future,
+    # so provide triton implementation as a fallback for all hardware platforms
+    def _triton_forward(self, *args, **kwargs) -> Any:
+        raise NotImplementedError("triton forward must implement this method")
