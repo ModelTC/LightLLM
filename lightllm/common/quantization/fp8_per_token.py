@@ -4,7 +4,7 @@ from typing import Optional
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
 from lightllm.common.quantization.backend import QUANT_BACKEND, BackendType
-from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
+from lightllm.common.basemodel.triton_kernel.quantization.scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
