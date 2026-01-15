@@ -191,14 +191,14 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         out = self.alloc_tensor(input.shape, input.dtype)
-        rmsnorm_forward(input, weight=layer_weight.att_norm_weight_.weight, eps=self.eps_, out=out)
+        out = rmsnorm_forward(input, weight=layer_weight.att_norm_weight_.weight, eps=self.eps_, out=out)
         return out
 
     def _ffn_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         out = self.alloc_tensor(input.shape, input.dtype)
-        rmsnorm_forward(input, weight=layer_weight.ffn_norm_weight_.weight, eps=self.eps_, out=out)
+        out = rmsnorm_forward(input, weight=layer_weight.ffn_norm_weight_.weight, eps=self.eps_, out=out)
         return out
 
     def _get_qkv(
