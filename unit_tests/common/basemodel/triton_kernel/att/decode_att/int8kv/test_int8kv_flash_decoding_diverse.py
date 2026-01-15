@@ -56,7 +56,7 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
 
     num_heads = 32
     kv_head_num = 8
-    mark_shared_group_size = 6
+    mark_shared_group_size = 3
     seq_len = 3547
     head_dim = 128
     quant_group_size = 8
