@@ -1,7 +1,7 @@
 import torch
 import pytest
 import torch.nn.functional as F
-from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
+from lightllm.common.basemodel.triton_kernel.quantization.scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
 
 
 def is_fp8_native_supported():
