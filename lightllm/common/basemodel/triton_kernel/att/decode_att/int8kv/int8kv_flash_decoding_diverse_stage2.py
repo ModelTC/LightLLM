@@ -261,6 +261,8 @@ def flash_decode_stage2(
     NUM_GROUPS = Lk // KV_QUANT_GROUP_SIZE
     assert triton.next_power_of_2(NUM_GROUPS) == NUM_GROUPS
 
+    assert k.stride() == v.stride()
+
     _fwd_kernel_flash_decode_diverse_stage2[grid](
         Q=q,
         stride_qbs=q.stride(0),
