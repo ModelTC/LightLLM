@@ -261,13 +261,7 @@ def run_key_func(q, max_len_in_batch):
     return f"{q.shape[0]}_{max_len_in_batch}"
 
 
-@autotune(
-    kernel_name="_fwd_kernel_flash_decode_diverse_stage2:v1",
-    configs_gen_func=get_test_configs,
-    static_key_func=_get_static_key,
-    run_key_func=run_key_func,
-    mutates_args=["mid_out", "mid_out_logsumexp"],
-)
+@torch.no_grad()
 def flash_decode_stage2(
     q: torch.Tensor,
     k: torch.Tensor,
