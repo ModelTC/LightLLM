@@ -33,28 +33,9 @@ class ViTCudaGraphRunner:
 
     Captures the forward pass of ViT layers as CUDA graphs for faster inference.
     Graphs are keyed by (batch_size, seq_len) since ViT uses [B, S, H] tensor shape.
-
-    This optimization reduces kernel launch overhead by capturing the entire
-    encoder forward pass and replaying it, which is especially beneficial
-    for repeated inference with the same input shapes.
-
-    Usage:
-    1. Create the runner with max_batch_size
-    2. Call warmup() to capture graphs for all batch sizes 1 to max_batch_size
-    3. Call run() for inference - will replay captured graphs
-
-    Note: This runner bypasses g_cache_manager during graph capture/replay
-    to ensure stable memory addresses. When cache_env_ok is False, the
-    cache manager falls back to torch.empty which is CUDA graph compatible.
     """
 
     def __init__(self, vit_model: "VisionTransformer", max_batch_size: int) -> None:
-        """Initialize the CUDA graph runner.
-
-        Args:
-            vit_model: The VisionTransformer model to capture graphs for.
-            max_batch_size: Maximum batch size to capture graphs for.
-        """
         self.vit_model = vit_model
         self.max_batch_size = max_batch_size
 
@@ -78,24 +59,13 @@ class ViTCudaGraphRunner:
 
     @property
     def device(self) -> torch.device:
-        """Get the device of the model."""
-        # Use class_embedding tensor which is always loaded
         return self.vit_model.pre_post_weight.class_embedding.device
 
     @property
     def dtype(self) -> torch.dtype:
-        """Get the data type of the model."""
         return self.vit_model.data_type
 
     def _graph_key(self, x: torch.Tensor) -> Tuple[int, int]:
-        """Generate a key for the graph dictionary based on input shape.
-
-        Args:
-            x: Input tensor of shape [B, S, H] or [B, C, H, W] for pixel values.
-
-        Returns:
-            Tuple of (batch_size, seq_len) for indexing graphs.
-        """
         if x.ndim == 4:
             # Pixel values: [B, C, H, W] -> batch_size only matters
             # After patch embedding, seq_len is determined by image size
@@ -110,28 +80,9 @@ class ViTCudaGraphRunner:
             return (x.shape[0], x.shape[1])
 
     def _build_cu_seqlens(self, batch_size: int, seq_len: int, device: torch.device) -> torch.Tensor:
-        """Build cumulative sequence lengths tensor for flash attention.
-
-        Args:
-            batch_size: Number of sequences in the batch.
-            seq_len: Length of each sequence.
-            device: Device to create the tensor on.
-
-        Returns:
-            Tensor of shape [batch_size + 1] with cumulative sequence lengths.
-        """
         return torch.arange(0, (batch_size + 1) * seq_len, step=seq_len, device=device, dtype=torch.int32)
 
     def _forward_layers(self, pixel_values: torch.Tensor, cu_seqlens: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Execute the forward pass through all ViT layers.
-
-        Args:
-            pixel_values: Input pixel values tensor.
-            cu_seqlens: Optional pre-allocated cu_seqlens tensor for CUDA graph.
-
-        Returns:
-            Output embeddings tensor.
-        """
         # Pre-layer inference
         input_embs = self.vit_model.pre_infer.forward(pixel_values, self.vit_model.pre_post_weight)
 
@@ -149,20 +100,6 @@ class ViTCudaGraphRunner:
         return output
 
     def _warmup(self, pixel_values: torch.Tensor, key: Tuple[int, int]) -> torch.Tensor:
-        """Run warmup forward pass to initialize lazy components.
-
-        This warmup pass is essential for:
-        1. Initializing any lazy CUDA kernels (e.g., cuBLAS handles)
-        2. Triggering JIT compilation of Triton kernels
-        3. Ensuring deterministic memory allocation patterns
-
-        Args:
-            pixel_values: Input pixel values tensor.
-            key: Graph key (batch_size, seq_len).
-
-        Returns:
-            Output embeddings from the warmup pass.
-        """
         if key in self._warmed_up:
             return None
 
@@ -177,18 +114,6 @@ class ViTCudaGraphRunner:
         return output
 
     def _capture_graph(self, pixel_values: torch.Tensor, key: Tuple[int, int]) -> None:
-        """Capture a CUDA graph for the given input shape.
-
-        The capture process:
-        1. Creates stable input buffer with fixed memory address
-        2. Creates stable cu_seqlens buffer for flash attention
-        3. Captures all GPU operations into a CUDA graph
-        4. Stores output buffer reference for later retrieval
-
-        Args:
-            pixel_values: Input pixel values tensor.
-            key: Graph key (batch_size, seq_len).
-        """
         batch_size, seq_len = key
         device = pixel_values.device
 
@@ -235,11 +160,7 @@ class ViTCudaGraphRunner:
 
     @torch.no_grad()
     def warmup(self) -> None:
-        """Capture CUDA graphs for all batch sizes from 1 to max_batch_size.
-
-        This should be called during model initialization to avoid
-        capture latency during inference.
-        """
+        """Capture CUDA graphs for all batch sizes from 1 to max_batch_size."""
         logger.info(f"Begin capturing ViT CUDA graphs for batch sizes 1 to {self.max_batch_size}")
 
         image_h = self.vit_model.IMAGE_H
@@ -267,17 +188,6 @@ class ViTCudaGraphRunner:
         )
 
     def run(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """Run inference using CUDA graph replay.
-
-        Args:
-            pixel_values: Input pixel values tensor of shape [B, C, H, W].
-
-        Returns:
-            Output embeddings tensor.
-
-        Raises:
-            RuntimeError: If no graph exists for the input batch size.
-        """
         pixel_values = pixel_values.contiguous()
         key = self._graph_key(pixel_values)
 
@@ -302,11 +212,6 @@ class ViTCudaGraphRunner:
         return self.output_buffers[key]
 
     def get_captured_graphs_info(self) -> list:
-        """Get information about all captured graphs.
-
-        Returns:
-            List of dicts with graph info (batch_size, seq_len, capture_time, replay_count).
-        """
         info = []
         for key in self.graphs:
             batch_size, seq_len = key
@@ -321,7 +226,6 @@ class ViTCudaGraphRunner:
         return sorted(info, key=lambda x: x["batch_size"])
 
     def print_stats(self) -> None:
-        """Print statistics about captured graphs."""
         info = self.get_captured_graphs_info()
         if not info:
             logger.info("No ViT CUDA Graphs captured yet.")
@@ -336,15 +240,6 @@ class ViTCudaGraphRunner:
             )
 
     def has_graph(self, batch_size: int, seq_len: Optional[int] = None) -> bool:
-        """Check if a graph exists for the given shape.
-
-        Args:
-            batch_size: Batch size to check.
-            seq_len: Sequence length (optional, computed from image size if not provided).
-
-        Returns:
-            True if a graph exists for the shape.
-        """
         if seq_len is None:
             patch_size = self.vit_model.config.get("patch_size", 14)
             image_h = self.vit_model.IMAGE_H
@@ -355,15 +250,9 @@ class ViTCudaGraphRunner:
 
     @property
     def num_graphs(self) -> int:
-        """Get the number of captured graphs."""
         return len(self.graphs)
 
     def clear(self) -> None:
-        """Clear all captured graphs and buffers.
-
-        Call this to free GPU memory when graphs are no longer needed,
-        or when input shapes change significantly.
-        """
         num_graphs = len(self.graphs)
         self.graphs.clear()
         self.input_buffers.clear()
