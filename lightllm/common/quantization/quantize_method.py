@@ -15,6 +15,8 @@ class WeightPack:
         assert self.weight.ndim == 3, f"weight must be a 3D tensor, but got {self.weight.ndim}"
         weight = self.weight[expert_idx]
         weight_scale = self.weight_scale[expert_idx] if self.weight_scale is not None else None
+        if weight_scale is not None and weight_scale.ndim == 0:
+            weight_scale = weight_scale.unsqueeze(0)
         weight_zero_point = self.weight_zero_point[expert_idx] if self.weight_zero_point is not None else None
         return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
 
