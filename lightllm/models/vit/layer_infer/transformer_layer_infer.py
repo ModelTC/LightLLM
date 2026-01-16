@@ -1,7 +1,7 @@
 import torch
 import torch.distributed as dist
 
-from typing import Tuple
+from typing import Tuple, Optional
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
@@ -97,13 +97,14 @@ class ViTTransformerLayerInfer:
         q, k, v = qkv.unbind(2)
         return q, k, v
 
-    def _context_attention_kernel(self, q, k, v) -> torch.Tensor:
+    def _context_attention_kernel(self, q, k, v, cu_seqlens: Optional[torch.Tensor] = None) -> torch.Tensor:
         out = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
         batch_size, seq_len, head_num, head_dim = q.shape
         total_len = batch_size * seq_len
         reshape = lambda t: t.view(total_len, head_num, head_dim)
         q, k, v, out = map(reshape, (q, k, v, out))
-        cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device) * seq_len
+        if cu_seqlens is None:
+            cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device) * seq_len
         max_seqlen = seq_len
         flash_attention_fwd(q, k, v, out, cu_seqlens, max_seqlen)
         return out.reshape(batch_size, seq_len, -1)
@@ -129,13 +130,13 @@ class ViTTransformerLayerInfer:
             ffn2_out.mul_(layer_weight.ls2)
         return ffn2_out.reshape(input_shape)
 
-    def _context_attention(self, input_embding, layer_weight):
+    def _context_attention(self, input_embding, layer_weight, cu_seqlens: Optional[torch.Tensor] = None):
         input1 = self._att_norm(input_embding, layer_weight)
         q, k, v = self._get_qkv(input1, layer_weight)
         input1 = None
         if layer_weight.qk_norm:
             q, k = self._qk_norm(q, k, layer_weight)
-        o = self._context_attention_kernel(q, k, v)
+        o = self._context_attention_kernel(q, k, v, cu_seqlens=cu_seqlens)
         q = None
         k = None
         v = None
@@ -154,7 +155,7 @@ class ViTTransformerLayerInfer:
         input_embdings.add_(ffn_out)
         return
 
-    def forward(self, input_embdings, layer_weight):
-        self._context_attention(input_embdings, layer_weight=layer_weight)
+    def forward(self, input_embdings, layer_weight, cu_seqlens: Optional[torch.Tensor] = None):
+        self._context_attention(input_embdings, layer_weight=layer_weight, cu_seqlens=cu_seqlens)
         self._context_ffn(input_embdings, layer_weight)
         return input_embdings

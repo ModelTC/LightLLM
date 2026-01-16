@@ -7,6 +7,7 @@ from lightllm.models.vit.layer_infer.transformer_layer_infer import ViTTransform
 from lightllm.models.vit.layer_weights.pre_and_post_layer_weight import ViTPreAndPostLayerWeight
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
 from lightllm.models.vit.layer_weights.hf_load_utils import load_hf_weights
+from lightllm.models.vit.cuda_graph_runner import ViTCudaGraphRunner
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.log_utils import init_logger
@@ -14,13 +15,12 @@ from lightllm.models.vit import get_load_image_func
 import torchvision.transforms as T
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from PIL import Image
-from typing import List, Union, final
+from typing import List, Union, final, Optional
 from io import BytesIO
 from rpyc.utils.classic import obtain
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-
 
 logger = init_logger(__name__)
 
@@ -46,6 +46,8 @@ class VisionTransformer:
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.load_image_func = get_load_image_func(self.weight_dir_)
         self.max_batch_size = kvargs.get("max_batch_size", 1)
+        self.disable_vit_cudagraph = kvargs.get("disable_vit_cudagraph", False)
+        self.vit_cudagraph_max_size = kvargs.get("vit_cudagraph_max_size", None)
 
         self._init_datatype()
         self._init_config()
@@ -53,6 +55,7 @@ class VisionTransformer:
         self._init_quant()
         self._init_weights()
         self._init_infer_layer()
+        self._init_cuda_graph()
         self._check_max_len_infer()
         return
 
@@ -145,6 +148,36 @@ class VisionTransformer:
         ]
         return
 
+    def _init_cuda_graph(self):
+        self.cuda_graph_runner: Optional[ViTCudaGraphRunner] = None
+
+        if self.disable_vit_cudagraph:
+            logger.info("ViT CUDA Graph is disabled via --disable_vit_cudagraph")
+            return
+
+        # Only enable for single GPU (TP=1) to avoid distributed op complications
+        if self.tp_world_size_ > 1:
+            logger.warning(
+                "ViT CUDA Graph is disabled for tensor parallel > 1. "
+                "Use --disable_vit_cudagraph to suppress this warning."
+            )
+            return
+
+        # Calculate max batch size for graph capture
+        max_path_num = int(self.MAX_PATH_NUM)
+        if self.vit_cudagraph_max_size is not None:
+            cudagraph_max_size = self.vit_cudagraph_max_size
+        else:
+            cudagraph_max_size = self.max_batch_size * max_path_num
+
+        logger.info(
+            f"ViT CUDA Graph enabled. Capturing graphs for batch sizes 1 to {cudagraph_max_size}. "
+            f"Use --disable_vit_cudagraph to disable."
+        )
+
+        self.cuda_graph_runner = ViTCudaGraphRunner(self, max_batch_size=cudagraph_max_size)
+        self.cuda_graph_runner.warmup()
+
     def _init_datatype(self):
         if self.data_type in ["fp16", "float16"]:
             self.data_type = torch.float16
@@ -157,6 +190,11 @@ class VisionTransformer:
 
     @torch.no_grad()
     def forward(self, pixel_values):
+        # Use CUDA graph path if available
+        if self.cuda_graph_runner is not None:
+            return self.cuda_graph_runner.run(pixel_values)
+
+        # Standard eager execution path
         g_cache_manager.cache_env_in()
         input_embs = self.pre_infer.forward(pixel_values, self.pre_post_weight)
         for i in range(self.layers_num + self.select_layer + 1):

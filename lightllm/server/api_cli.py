@@ -426,6 +426,17 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prefll_cudagraph_max_handle_token", type=int, default=512, help="max handle token num for prefill cudagraph"
     )
+    parser.add_argument(
+        "--disable_vit_cudagraph",
+        action="store_true",
+        help="Disable CUDA graph for the ViT vision encoder stage",
+    )
+    parser.add_argument(
+        "--vit_cudagraph_max_size",
+        type=int,
+        default=None,
+        help="Maximum batch size for ViT CUDA graph capture. Default: visual_infer_batch_size * MAX_PATH_NUM",
+    )
 
     parser.add_argument(
         "--graph_max_batch_size",
