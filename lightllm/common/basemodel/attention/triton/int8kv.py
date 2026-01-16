@@ -158,7 +158,7 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
 
-        from ...triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse import (
+        from ...triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding_diverse import (
             token_decode_attention_flash_decoding,
         )
 

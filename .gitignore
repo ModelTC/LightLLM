@@ -7,3 +7,7 @@ dist
 .vscode
 tmp/
 requirements-musa.txt
+
+# agent
+.claude
+CLAUDE.md

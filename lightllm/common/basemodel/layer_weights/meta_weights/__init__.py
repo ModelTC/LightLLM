@@ -7,7 +7,11 @@ from .mm_weight import (
     ROWBMMWeight,
 )
 from .norm_weight import NoTpGEMMANormWeight, TpVitPadNormWeight, NoTpNormWeight, TpHeadNormWeight
+
+# NormWeight is an alias for NoTpNormWeight for backward compatibility
+NormWeight = NoTpNormWeight
 from .fused_moe_weight_tp import create_tp_moe_wegiht_obj
 from .fused_moe_weight_ep import FusedMoeWeightEP
 from .embedding_weight import EmbeddingWeight, LMHeadWeight, NoTpPosEmbeddingWeight
 from .att_sink_weight import TpAttSinkWeight
+from .parameter_weight import ParameterWeight, TpParameterWeight

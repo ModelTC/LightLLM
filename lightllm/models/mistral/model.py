@@ -8,7 +8,6 @@ from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInf
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.mistral.layer_infer.transformer_layer_infer import MistralTransformerLayerInfer
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -49,7 +48,7 @@ class MistralTpPartModel(TpPartBaseModel):
             dtype=self.data_type,
             head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
             head_dim=head_dim,
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
+            layer_num=self.config["num_hidden_layers"],
             mem_fraction=self.mem_fraction,
         )
         return

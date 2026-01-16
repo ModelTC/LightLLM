@@ -278,16 +278,16 @@ if __name__ == "__main__":
 
             del setup_tensors
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("SUMMARY - Performance Comparison")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"{'batch_size':<8} {'seq_len':<12} {'triton_ms':<12} {'cuda_ms':<12} {'vs cuda':<10}")
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
     for r in results:
-        vs_cuda = f"{r['cuda_ms']/r['triton_ms']:.2f}x"
+        vs_cuda = f"{r['cuda_ms'] / r['triton_ms']:.2f}x"
         emoji = "🎉" if r["triton_ms"] < r["cuda_ms"] else ""
         print(
             f"{r['batch_size']:<8} {r['seq_len']:<12} {r['triton_ms']:<12.3f} {r['cuda_ms']:<12.3f}"
             f"{vs_cuda:<10} {emoji}"
         )
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")

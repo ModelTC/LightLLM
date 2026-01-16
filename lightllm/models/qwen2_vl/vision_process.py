@@ -184,8 +184,6 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
             return self._preprocess_bydevice(image, device="cpu")
 
     def _preprocess_bydevice(self, image, device="cuda") -> Tuple[torch.Tensor, torch.Tensor]:
-        if image.mode != "RGB":
-            image = image.convert("RGB")
         image_arr = np.asarray(image, dtype=np.uint8)
         image_data = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous().to(device=device, non_blocking=True)
 

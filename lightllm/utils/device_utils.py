@@ -9,6 +9,10 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+def is_musa():
+    return hasattr(torch.version, "musa") and torch.version.musa is not None
+
+
 @lru_cache(maxsize=None)
 def is_tesla():
     return "Tesla" in torch.cuda.get_device_name(0)
@@ -81,14 +85,11 @@ def calcu_kernel_best_vsm_count(kernel, num_warps):
     return num_sm
 
 
-@lru_cache(maxsize=1)
-def is_musa():
-    return hasattr(torch.version, "musa") and torch.version.musa is not None
-
-
 @lru_cache(maxsize=None)
 def get_current_device_name():
-    if torch.cuda.is_available() or is_musa():
+    import torch
+
+    if torch.cuda.is_available():
         device = torch.cuda.current_device()
         gpu_name = torch.cuda.get_device_name(device)
         # 4090 trans to 4090 D
@@ -106,6 +107,8 @@ def init_p2p(device_index):
     """
     torch 调用跨卡的to操作后，triton编译的算子便能自动操作跨卡tensor。
     """
+    import torch
+
     num_gpus = torch.cuda.device_count()
     tensor = torch.zeros((1,))
     tensor = tensor.to(f"cuda:{device_index}")
@@ -128,26 +131,8 @@ def has_nvlink():
         result = result.decode("utf-8")
         # Check if the output contains 'NVLink'
         return any(f"NV{i}" in result for i in range(1, 8))
-    except FileNotFoundError:
-        # nvidia-smi is not installed, assume no NVLink
-        return False
     except subprocess.CalledProcessError:
-        # If there's an error while executing nvidia-smi, assume no NVLink
-        return False
-
-
-def has_mtlink():
-    try:
-        # Call mthreads-gmi to get the topology matrix
-        result = subprocess.check_output(["mthreads-gmi", "topo", "--matrix"])
-        result = result.decode("utf-8")
-        # Check if the output contains 'MTLink'
-        return any(f"MT{i}" in result for i in range(1, 8))
-    except FileNotFoundError:
-        # mthreads-gmi is not installed, assume no MTLink
-        return False
-    except subprocess.CalledProcessError:
-        # If there's an error while executing mthreads-gmi, assume no MTLink
+        # If there's an error (e.g., nvidia-smi is not installed or another issue), assume no NVLink
         return False
 
 

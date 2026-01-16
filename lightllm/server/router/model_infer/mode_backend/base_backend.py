@@ -9,7 +9,6 @@ from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
@@ -37,6 +36,7 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
+from lightllm.models.qwen3next_mtp.model import Qwen3NextMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
@@ -166,12 +166,16 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
+
+        self.use_buffer_manager = getattr(self.model, "use_buffer_manager", False)
+
+        radix_cache_class = self.model.get_radix_cache_class()
         self.radix_cache = (
-            RadixCache(
+            radix_cache_class(
                 get_unique_server_name(),
                 self.model.mem_manager.size,
                 self.rank_in_node,
-                mem_manager=self.model.mem_manager,
+                kv_cache_mem_manager=self.model.mem_manager,
             )
             if self.use_dynamic_prompt_cache
             else None
@@ -183,12 +187,18 @@ class ModeBackend:
 
         self.logger.info(f"loaded model class {self.model.__class__}")
 
+        # Check if the model uses Mamba (linear attention) layers
+        from lightllm.common.req_manager import ReqManagerForMamba
+
+        use_mamba_model = isinstance(self.model.req_manager, ReqManagerForMamba)
+
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
+            use_mamba_model=use_mamba_model,
         )
 
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
@@ -281,21 +291,33 @@ class ModeBackend:
         raise NotImplementedError()
 
     def init_mtp_draft_model(self, main_kvargs: dict):
-        # 当前只支持 deepseekv3 模式的 mtp
+        # Support deepseekv3 and qwen3_next MTP modes
         self.mtp_step = self.args.mtp_step
-        self.draft_models: List[Deepseek3MTPModel] = []
+        self.draft_models = []
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
-        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
+        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att", "deepseekv3_vanilla", "qwen3next_vanilla"]:
             num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
+        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att", "deepseekv3_eagle", "qwen3next_eagle"]:
             num_mtp_modules = 1
         else:
             assert False, f"error mtp mode {self.args.mtp_mode}"
 
         for i in range(num_mtp_modules):
+            # Get MTP model config first to calculate mem_layer_start
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
+
+            # Calculate mem_layer_start: main model layers + previous MTP model layers
+            # For models with integrated MTP (like qwen3_next), each MTP module has 1 layer
+            # For models with separate MTP configs, use the config's num_hidden_layers
+            model_type = mtp_model_cfg.get("model_type", "")
+            if model_type == "qwen3_next":
+                # Qwen3Next has integrated MTP with 1 layer per module
+                mtp_layers_per_module = 1
+            else:
+                mtp_layers_per_module = mtp_model_cfg["num_hidden_layers"]
+            mem_layer_start = self.model.config["num_hidden_layers"] + i * mtp_layers_per_module
             mtp_model_kvargs = {
                 "weight_dir": self.args.mtp_draft_model_dir[i],
                 "max_total_token_num": self.model.mem_manager.size,
@@ -308,7 +330,7 @@ class ModeBackend:
                 "data_type": main_kvargs.get("data_type", "float16"),
                 "graph_max_batch_size": main_kvargs.get("graph_max_batch_size", 16),
                 "graph_max_len_in_batch": main_kvargs.get("graph_max_len_in_batch", 8196),
-                "disable_cudagraph": main_kvargs.get("disable_cudagraph", False),
+                "disable_cudagraph": True,  # Disable CUDA graphs for MTP draft models
                 "mem_fraction": main_kvargs["mem_fraction"],
                 "batch_max_tokens": main_kvargs.get("batch_max_tokens", None),
                 "quant_type": main_kvargs.get("quant_type", None),
@@ -316,20 +338,24 @@ class ModeBackend:
                 "run_mode": "normal",
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
+                "mem_layer_start": mem_layer_start,
+                "mtp_index": i,
             }
 
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
-            if mtp_model_cfg["model_type"] == "deepseek_v3":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+            # Select MTP model class based on model type
+            model_type = mtp_model_cfg.get("model_type", "")
+            if model_type == "deepseek_v3":
                 self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "qwen3_moe":
+            elif model_type == "qwen3_moe":
                 assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
                 self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "mistral":
+            elif model_type == "mistral":
                 assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
                 self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
+            elif model_type == "qwen3_next":
+                self.draft_models.append(Qwen3NextMTPModel(mtp_model_kvargs))
             else:
-                assert False, f"error mtp mode {mtp_model_cfg['model_type']}"
+                raise ValueError(f"Unsupported MTP model type: {model_type}")
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return

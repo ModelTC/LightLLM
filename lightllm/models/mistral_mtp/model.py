@@ -25,7 +25,8 @@ class MistralMTPModel(MistralTpPartModel):
 
     def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
-        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
+        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models", [])
+        self.mem_layer_start = kvargs.pop("mem_layer_start", 0)
         return
 
     def _init_some_value(self):
@@ -46,18 +47,15 @@ class MistralMTPModel(MistralTpPartModel):
         self.mem_manager = self.main_model.mem_manager
         return
 
-    def _init_weights(self, start_layer_index=None):
-        assert start_layer_index is None
-
+    def _init_weights(self):
         self.config["n_layer"] = 1
-        super()._init_weights(start_layer_index=0)
+        super()._init_weights()
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
         self.pre_post_weight.final_norm_weight_ = self.main_model.pre_post_weight.final_norm_weight_
         return
 
-    def _init_infer_layer(self, start_layer_index=None):
-        assert start_layer_index is None
+    def _init_infer_layer(self):
         self.config["n_layer"] = 1
-        super()._init_infer_layer(start_layer_index=0)
+        super()._init_infer_layer()
         return

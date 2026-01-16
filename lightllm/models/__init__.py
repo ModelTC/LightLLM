@@ -7,6 +7,8 @@ from lightllm.models.qwen.model import QWenTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.models.qwen3.model import Qwen3TpPartModel
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
+from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
+from lightllm.models.qwen3next_mtp.model import Qwen3NextMTPModel
 from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.models.stablelm.model import StablelmTpPartModel
 from lightllm.models.internlm2.model import Internlm2TpPartModel

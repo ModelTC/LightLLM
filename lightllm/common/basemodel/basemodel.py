@@ -53,6 +53,16 @@ class TpPartBaseModel:
     # infer state class
     infer_state_class = InferStateInfo
 
+    @classmethod
+    def get_radix_cache_class(cls):
+        """Return the appropriate RadixCache class for this model type.
+
+        Override in subclasses that need specialized cache (e.g., hybrid models).
+        """
+        from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+
+        return RadixCache
+
     def __init__(self, kvargs):
         self.args = get_env_start_args()
         self.run_mode = kvargs["run_mode"]
@@ -302,6 +312,7 @@ class TpPartBaseModel:
         infer_state.prefix_total_token_num = model_input.prefix_total_token_num
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
+        infer_state.b_mtp_index = model_input.b_mtp_index
         infer_state.b_seq_len = model_input.b_seq_len
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
@@ -1028,6 +1039,7 @@ class TpPartBaseModel:
             "Deepseek3MTPModel" in str(self.__class__)
             or "Qwen3MOEMTPModel" in str(self.__class__)
             or "MistralMTPModel" in str(self.__class__)
+            or "Qwen3NextMTPModel" in str(self.__class__)
         )
         if is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(

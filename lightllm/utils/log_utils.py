@@ -10,7 +10,7 @@ from typing import Optional
 _FORMAT = "%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
-_LOG_LEVEL = os.environ.get("LIGHTLLM_LOG_LEVEL", "debug")
+_LOG_LEVEL = os.environ.get("LIGHTLLM_LOG_LEVEL", "warning")
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL.upper(), 0)
 _LOG_DIR = os.environ.get("LIGHTLLM_LOG_DIR", None)
 
