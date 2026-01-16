@@ -22,7 +22,6 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
-
 logger = init_logger(__name__)
 
 
@@ -150,12 +149,6 @@ class VisionTransformer:
         return
 
     def _init_cuda_graph(self):
-        """Initialize CUDA graph runner if enabled.
-
-        CLI arguments:
-        - --disable_vit_cudagraph: Set to disable CUDA graph for ViT
-        - --vit_cudagraph_max_size: Maximum batch size to capture (default: max_batch_size * MAX_PATH_NUM)
-        """
         self.cuda_graph_runner: Optional[ViTCudaGraphRunner] = None
 
         if self.disable_vit_cudagraph:
