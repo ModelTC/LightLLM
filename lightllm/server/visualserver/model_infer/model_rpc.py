@@ -53,6 +53,8 @@ class VisualModelRpcServer(rpyc.Service):
                 "quant_type": kvargs["quant_type"],
                 "quant_cfg": kvargs["quant_cfg"],
                 "max_batch_size": kvargs["max_batch_size"],
+                "disable_vit_cudagraph": kvargs.get("disable_vit_cudagraph", False),
+                "vit_cudagraph_max_size": kvargs.get("vit_cudagraph_max_size", None),
             }
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":

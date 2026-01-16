@@ -91,6 +91,8 @@ class VisualManager:
                     "quant_type": self.args.vit_quant_type,
                     "quant_cfg": self.args.vit_quant_cfg,
                     "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
+                    "disable_vit_cudagraph": self.args.disable_vit_cudagraph,
+                    "vit_cudagraph_max_size": self.args.vit_cudagraph_max_size,
                 }
                 init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)
