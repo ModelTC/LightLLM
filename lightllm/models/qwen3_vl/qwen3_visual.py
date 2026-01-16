@@ -373,7 +373,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
             if isinstance(img, ImageItem):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
-                image_data = Image.open(BytesIO(image_data)).convert("RGB")
+                image_data = Image.open(BytesIO(image_data))
                 pixel_values, image_grid_thw = self.processor.preprocess(image_data)
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)

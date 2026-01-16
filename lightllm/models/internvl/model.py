@@ -179,7 +179,7 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
             except ValueError:
                 break
         if multimodal_params:
-            audio_cnt = len(multimodal_params.images)
+            audio_cnt = len(multimodal_params.audios)
             if audio_cnt != audio_id:
                 raise ValueError(audio_cnt == audio_id, f"invalid audio tag num: {audio_cnt} vs {audio_id}!")
         input_ids.extend(origin_ids[start_idx:])
