@@ -103,7 +103,6 @@ class ViTTransformerLayerInfer:
         total_len = batch_size * seq_len
         reshape = lambda t: t.view(total_len, head_num, head_dim)
         q, k, v, out = map(reshape, (q, k, v, out))
-        # Use provided cu_seqlens for CUDA graph compatibility, or create dynamically
         if cu_seqlens is None:
             cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device) * seq_len
         max_seqlen = seq_len
