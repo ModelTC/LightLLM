@@ -41,6 +41,14 @@ logger = init_logger(__name__)
 
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 
+try:
+    import flash_attn
+    import flash_attn_3_cuda
+
+except ImportError:
+    flash_attn_3_cuda = None
+    logger.warning("flash_attn is not installed, you can't use the api of it. ")
+
 
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     """ """
@@ -326,25 +334,59 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ].reshape(-1, 1, self.tp_v_head_num_, self.head_dim_)
         q = q.reshape(-1, self.tp_q_head_num_, self.head_dim_)
-        k_descale, v_descale = None, None  # disable quantization
+        # k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)
-        o = flash_attn_with_kvcache(
-            q=q,
-            k_cache=cache_k,
-            v_cache=cache_v,
-            page_table=infer_state.page_table,
-            cache_seqlens=infer_state.b_seq_len,
-            cu_seqlens_q=infer_state.cu_seqlens_q,
-            cu_seqlens_k_new=infer_state.cu_seqlens_k,
-            max_seqlen_q=infer_state.q_max_seq_len,
-            softmax_scale=sm_scale,
-            causal=True,
-            window_size=(-1, -1),
-            softcap=0.0,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            return_softmax_lse=False,
+        # o = flash_attn_with_kvcache(
+        #     q=q,
+        #     k_cache=cache_k,
+        #     v_cache=cache_v,
+        #     page_table=infer_state.page_table,
+        #     cache_seqlens=infer_state.b_seq_len,
+        #     cu_seqlens_q=infer_state.cu_seqlens_q,
+        #     cu_seqlens_k_new=infer_state.cu_seqlens_k,
+        #     max_seqlen_q=infer_state.q_max_seq_len,
+        #     softmax_scale=sm_scale,
+        #     causal=True,
+        #     window_size=(-1, -1),
+        #     softcap=0.0,
+        #     k_descale=k_descale,
+        #     v_descale=v_descale,
+        #     return_softmax_lse=False,
+        # )
+        o, softmax_lse, *rest = flash_attn_3_cuda.fwd(
+            q,
+            cache_k,
+            cache_v,
+            None,
+            None,
+            None,  # qv
+            None,  # out
+            infer_state.cu_seqlens_q,
+            None,
+            infer_state.cu_seqlens_k,
+            None,
+            infer_state.b_seq_len,
+            infer_state.max_q_seq_len,
+            None,
+            infer_state.page_table,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            sm_scale,
+            True,  # causal
+            -1,  # window_size
+            -1,  # window_size_right
+            0.0,
+            True,
+            None,
+            0,
+            None,
+            0,
         )
         return o
 
@@ -839,25 +881,59 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :
         ].reshape(-1, 1, self.tp_v_head_num_, self.head_dim_)
         q = q.reshape(-1, self.tp_q_head_num_, self.head_dim_)
-        k_descale, v_descale = None, None  # disable quantization
+        # k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)
-        o = flash_attn_with_kvcache(
-            q=q,
-            k_cache=cache_k,
-            v_cache=cache_v,
-            page_table=infer_state.page_table,
-            cache_seqlens=infer_state.b_seq_len,
-            cu_seqlens_q=infer_state.cu_seqlens_q,
-            cu_seqlens_k_new=infer_state.cu_seqlens_k,
-            max_seqlen_q=1,
-            softmax_scale=sm_scale,
-            causal=True,
-            window_size=(-1, -1),
-            softcap=0.0,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            return_softmax_lse=False,
+        # o = flash_attn_with_kvcache(
+        #     q=q,
+        #     k_cache=cache_k,
+        #     v_cache=cache_v,
+        #     page_table=infer_state.page_table,
+        #     cache_seqlens=infer_state.b_seq_len,
+        #     cu_seqlens_q=infer_state.cu_seqlens_q,
+        #     cu_seqlens_k_new=infer_state.cu_seqlens_k,
+        #     max_seqlen_q=1,
+        #     softmax_scale=sm_scale,
+        #     causal=True,
+        #     window_size=(-1, -1),
+        #     softcap=0.0,
+        #     k_descale=k_descale,
+        #     v_descale=v_descale,
+        #     return_softmax_lse=False,
+        # )
+        o, softmax_lse, *rest = flash_attn_3_cuda.fwd(
+            q,
+            cache_k,
+            cache_v,
+            None,
+            None,
+            None,  # qv
+            None,  # out
+            infer_state.cu_seqlens_q,
+            None,
+            infer_state.cu_seqlens_k,
+            None,
+            infer_state.b_seq_len,
+            infer_state.max_q_seq_len,
+            None,
+            infer_state.page_table,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            sm_scale,
+            True,  # causal
+            -1,  # window_size
+            -1,  # window_size_right
+            0.0,
+            True,
+            None,
+            0,
+            None,
+            0,
         )
         return o
 
