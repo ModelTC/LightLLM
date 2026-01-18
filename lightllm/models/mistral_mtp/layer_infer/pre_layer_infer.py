@@ -15,39 +15,59 @@ class MistralMTPPreLayerInfer(LlamaPreLayerInfer):
     def _mtp_context_forward(
         self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: MistralMTPPreAndPostLayerWeight
     ):
-        tgt_embdings = infer_state.deepseekv3_mtp_draft_input_hiddens
+        tgt_embdings = infer_state.mtp_draft_input_hiddens
         assert (
             input_embdings.shape[0] == tgt_embdings.shape[0]
         ), f"shape {input_embdings.shape} != shape {tgt_embdings.shape}"
-        rmsnorm_forward(input_embdings, weight=layer_weight.enorm_weight_, eps=self.eps_, out=input_embdings)
 
-        tgt_embdings = rmsnorm_forward(tgt_embdings, weight=layer_weight.final_norm_weight_, eps=self.eps_)
-        rmsnorm_forward(tgt_embdings, weight=layer_weight.hnorm_weight_, eps=self.eps_, out=tgt_embdings)
+        layer_weight.enorm_weight_.rmsnorm_forward(
+            input=input_embdings,
+            eps=self.eps_,
+            out=input_embdings,
+        )
+
+        tgt_embdings = layer_weight.final_norm_weight_.rmsnorm_forward(
+            input=tgt_embdings,
+            eps=self.eps_,
+            alloc_func=self.alloc_tensor,
+        )
+        layer_weight.hnorm_weight_.rmsnorm_forward(
+            input=tgt_embdings,
+            eps=self.eps_,
+            out=tgt_embdings,
+        )
 
         cat_embdings = torch.cat((input_embdings, tgt_embdings), dim=-1)
 
-        ans_logics = self.alloc_tensor(
-            (cat_embdings.shape[0], layer_weight.eh_proj_weight_.shape[1]), dtype=input_embdings.dtype
-        )
-        torch.mm(cat_embdings, layer_weight.eh_proj_weight_, out=ans_logics)
+        ans_logics = layer_weight.eh_proj_weight_.mm(cat_embdings)
         return ans_logics
 
     def _mtp_token_forward(
         self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: MistralMTPPreAndPostLayerWeight
     ):
-        tgt_embdings = infer_state.deepseekv3_mtp_draft_input_hiddens
+        tgt_embdings = infer_state.mtp_draft_input_hiddens
         assert input_embdings.shape[0] == tgt_embdings.shape[0]
-        rmsnorm_forward(input_embdings, weight=layer_weight.enorm_weight_, eps=self.eps_, out=input_embdings)
 
-        tgt_embdings = rmsnorm_forward(tgt_embdings, weight=layer_weight.final_norm_weight_, eps=self.eps_)
-        rmsnorm_forward(tgt_embdings, weight=layer_weight.hnorm_weight_, eps=self.eps_, out=tgt_embdings)
+        layer_weight.enorm_weight_.rmsnorm_forward(
+            input=input_embdings,
+            eps=self.eps_,
+            out=input_embdings,
+        )
+
+        tgt_embdings = layer_weight.final_norm_weight_.rmsnorm_forward(
+            input=tgt_embdings,
+            eps=self.eps_,
+            alloc_func=self.alloc_tensor,
+        )
+        layer_weight.hnorm_weight_.rmsnorm_forward(
+            input=tgt_embdings,
+            eps=self.eps_,
+            out=tgt_embdings,
+        )
 
         cat_embdings = torch.cat((input_embdings, tgt_embdings), dim=-1)
 
-        ans_logics = self.alloc_tensor(
-            (cat_embdings.shape[0], layer_weight.eh_proj_weight_.shape[1]), dtype=input_embdings.dtype
-        )
-        torch.mm(cat_embdings, layer_weight.eh_proj_weight_, out=ans_logics)
+        ans_logics = layer_weight.eh_proj_weight_.mm(cat_embdings)
         return ans_logics
 
     def context_forward(

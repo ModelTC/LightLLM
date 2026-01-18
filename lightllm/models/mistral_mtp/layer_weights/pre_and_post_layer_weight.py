@@ -1,26 +1,36 @@
-from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
+from lightllm.common.basemodel import PreAndPostLayerWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import (
+    EmbeddingWeight,
+    LMHeadWeight,
+    NoTpNormWeight,
+    ROWMMWeight,
+)
 
 
-class MistralMTPPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
+class MistralMTPPreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)
-        self.wte_weight_ = None
-        self.lm_head_weight_ = None
-        self.final_norm_weight_ = None
-        return
 
-    def load_hf_weights(self, weights):
-        if "mtp.eh_proj.weight" in weights:
-            self.eh_proj_weight_ = self._cuda(weights["mtp.eh_proj.weight"]).t()
-        if "mtp.enorm.weight" in weights:
-            self.enorm_weight_ = self._cuda(weights["mtp.enorm.weight"])
-        if "mtp.hnorm.weight" in weights:
-            self.hnorm_weight_ = self._cuda(weights["mtp.hnorm.weight"])
-        return
+        self.eh_proj_weight_ = ROWMMWeight(
+            weight_names="mtp.eh_proj.weight",
+            data_type=self.data_type_,
+            layer_num=0,
+            name="eh_proj",
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self.enorm_weight_ = NoTpNormWeight(
+            weight_name="mtp.enorm.weight",
+            data_type=self.data_type_,
+            bias_name=None,
+        )
+        self.hnorm_weight_ = NoTpNormWeight(
+            weight_name="mtp.hnorm.weight",
+            data_type=self.data_type_,
+            bias_name=None,
+        )
 
-    def verify_load(self):
-        errors = "weights load not ok"
-        weights = [self.eh_proj_weight_, self.enorm_weight_, self.hnorm_weight_]
-        for i in range(len(weights)):
-            assert weights[i] is not None, "index:" + str(i) + " " + errors
+        self.wte_weight_: EmbeddingWeight = None
+        self.lm_head_weight_: LMHeadWeight = None
+        self.final_norm_weight_: NoTpNormWeight = None
         return

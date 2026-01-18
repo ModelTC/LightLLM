@@ -36,7 +36,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     @classmethod
     def get_radix_cache_class(cls):
-        """Return HybridRadixCache for hybrid attention models."""
         from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 
         return HybridRadixCache

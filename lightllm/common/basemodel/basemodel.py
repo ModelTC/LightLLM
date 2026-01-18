@@ -55,10 +55,6 @@ class TpPartBaseModel:
 
     @classmethod
     def get_radix_cache_class(cls):
-        """Return the appropriate RadixCache class for this model type.
-
-        Override in subclasses that need specialized cache (e.g., hybrid models).
-        """
         from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 
         return RadixCache
