@@ -17,7 +17,7 @@ class Starcoder2PreAndPostLayerWeight(PreAndPostLayerWeight):
         self.lm_head_weight_ = LMHeadWeight(
             dim=hidden_size,
             vocab_size=vocab_size,
-            weight_name="model.embed_tokens.weight",
+            weight_name="lm_head.weight",
             data_type=self.data_type_,
             embedding_weight=self.wte_weight_ if tie_word_embeddings else None,
         )
