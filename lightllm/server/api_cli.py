@@ -318,20 +318,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="+",
         choices=["None", "triton", "fa3", "flashinfer"],
-        default=["triton"],
+        default=["None"],
         help="""prefill attention kernel used in llm.
-                None: automatically select backend based on current GPU device,
-                not supported yet, will support in future""",
+                None: automatically select best backend based on GPU and available packages
+                (priority: fa3 > flashinfer > triton)""",
     )
     parser.add_argument(
         "--llm_decode_att_backend",
         type=str,
         nargs="+",
         choices=["None", "triton", "fa3", "flashinfer"],
-        default=["triton"],
+        default=["None"],
         help="""decode attention kernel used in llm.
-                None: automatically select backend based on current GPU device,
-                not supported yet, will support in future""",
+                None: automatically select best backend based on GPU and available packages
+                (priority: fa3 > flashinfer > triton)""",
     )
     parser.add_argument(
         "--llm_kv_type",
