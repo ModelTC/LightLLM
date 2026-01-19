@@ -382,7 +382,7 @@ class HttpServerManager:
                     if self.args.return_input_hidden_states:
                         metadata["hidden_states"] = req_status.group_req_objs.shm_req_objs[
                             0
-                        ].shm_hidden_states.arr.tolist()
+                        ].shm_hidden_states.arr
                 yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
