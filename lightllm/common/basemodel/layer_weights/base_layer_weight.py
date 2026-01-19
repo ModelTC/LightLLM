@@ -26,14 +26,5 @@ class BaseLayerWeight:
         """
         pass
 
-    def verify_load(self):
-        """
-        verify all load is ok
-        """
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, BaseWeight):
-                assert attr.verify_load(), f"Loading {attr_name} of layers {self.layer_num_} fails."
-
     def _cuda(self, cpu_tensor):
         return cpu_tensor.contiguous().to(self.data_type_).cuda(get_current_device_id())

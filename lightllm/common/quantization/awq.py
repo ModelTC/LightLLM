@@ -39,79 +39,15 @@ except ImportError:
     TYPE_MAP = {}
 
 
-def is_awq_marlin_compatible(quantization_config: dict[str, Any]) -> bool:
-    if not HAS_VLLM:
-        return False
-
-    quant_method = quantization_config.get("quant_method", "").lower()
-    num_bits = quantization_config.get("bits")
-    group_size = quantization_config.get("group_size")
-    zero_point = quantization_config.get("zero_point")
-
-    if not torch.cuda.is_available():
-        return False
-
-    if quant_method != "awq":
-        return False
-
-    if num_bits is None or group_size is None or zero_point is None:
-        return False
-
-    if num_bits not in TYPE_MAP:
-        return False
-
-    return check_marlin_supported(quant_type=TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point)
-
-
-@QUANTMETHODS.register(["awq", "awq_marlin"])
-class AWQQuantization(QuantizationMethod):
+class AWQBaseQuantizationMethod(QuantizationMethod):
     def __init__(self):
         super().__init__()
+        assert HAS_VLLM, "vllm are not installed, you can't use quant api of them."
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
-        if not HAS_VLLM:
-            raise RuntimeError("vLLM is required for AWQ quantization but is not installed.")
-
         self.cache_manager = g_cache_manager
-        self.pack_factor = 8
-        self.weight_scale_suffix = "scales"
-        self.weight_zero_point_suffix = "qzeros"
-        self.weight_suffix = "qweight"
-        self.has_weight_scale = True
-        self.has_weight_zero_point = True
 
-        self._use_marlin = False
-        self._marlin_initialized = False
-
-    def _init_marlin(self):
-        if self._marlin_initialized:
-            return
-
-        self.nbits = 4
-        self.g_idx = marlin_make_empty_g_idx(torch.device("cuda"))
-        self.g_idx_sort_indices = marlin_make_empty_g_idx(torch.device("cuda"))
-        self.workspace = marlin_make_workspace_new(torch.device("cuda"))
-        self.vllm_quant_type = TYPE_MAP[self.nbits]
-        self.tile_size = 16
-        self._marlin_initialized = True
-
-    def _check_and_set_marlin(self):
-        if self.hf_quantization_config is None:
-            self._use_marlin = False
-            return
-
-        self._use_marlin = is_awq_marlin_compatible(self.hf_quantization_config)
-        if self._use_marlin:
-            self._init_marlin()
-            logger.info("AWQQuantization using Marlin backend")
-        else:
-            logger.info("AWQQuantization using basic AWQ backend")
-
-    @property
-    def method_name(self):
-        return "awq"
-
-    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0) -> None:
+    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
@@ -123,21 +59,39 @@ class AWQQuantization(QuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if not hasattr(self, "_checked_marlin"):
-            self._check_and_set_marlin()
-            self._checked_marlin = True
+        raise NotImplementedError("AWQ online quantization is not supported yet.")
 
-        if self._use_marlin:
-            return self._apply_marlin(input_tensor, weight_pack, out, bias)
-        else:
-            return self._apply_basic(input_tensor, weight_pack, out, bias)
+    @property
+    def method_name(self):
+        return "awq-base"
 
-    def _apply_basic(
+
+@QUANTMETHODS.register("awq", platform="cuda")
+class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.pack_factor = 8
+        self.weight_scale_suffix = "scales"
+        self.weight_zero_point_suffix = "qzeros"
+        self.weight_suffix = "qweight"
+        self.has_weight_scale = True
+        self.has_weight_zero_point = True
+
+    @property
+    def method_name(self):
+        return "awq"
+
+    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
+        raise NotImplementedError("AWQ online quantization is not supported yet.")
+
+    def apply(
         self,
         input_tensor: torch.Tensor,
         weight_pack: WeightPack,
-        out: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor],
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
@@ -154,12 +108,81 @@ class AWQQuantization(QuantizationMethod):
             out.add_(bias)
         return out
 
-    def _apply_marlin(
+    def create_weight(
+        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> WeightPack:
+        group_size = self.hf_quantization_config["group_size"]
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (in_dim, out_dim // self.pack_factor), dtype=torch.int32).cuda(device_id)
+        weight_scale = torch.empty(expert_prefix + (in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
+        weight_zero_point = torch.empty(
+            expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
+        ).cuda(device_id)
+        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        start_idx = start_idx // self.pack_factor
+        weight_pack.weight[:, start_idx : start_idx + weight.shape[1]].copy_(weight)
+        return
+
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        weight_pack.weight_scale[:, start_idx : start_idx + weight_scale.shape[1]].copy_(weight_scale)
+        return
+
+    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+        start_idx = start_idx // self.pack_factor
+        end_idx = start_idx + weight_zero_point.shape[1]
+        weight_pack.weight_zero_point[:, start_idx:end_idx].copy_(weight_zero_point)
+        return
+
+
+@QUANTMETHODS.register("awq_marlin", platform="cuda")
+class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.pack_factor = 8
+        self.nbits = 4
+        self.weight_scale_suffix = "scales"
+        self.weight_zero_point_suffix = "qzeros"
+        self.weight_suffix = "qweight"
+        self.g_idx = marlin_make_empty_g_idx(torch.device("cuda"))
+        self.g_idx_sort_indices = marlin_make_empty_g_idx(torch.device("cuda"))
+        self.workspace = marlin_make_workspace_new(torch.device("cuda"))
+        self.vllm_quant_type = TYPE_MAP[self.nbits]
+        self.has_weight_scale = True
+        self.has_weight_zero_point = True
+        self.tile_size = 16
+
+    @property
+    def method_name(self):
+        return "awq_marlin"
+
+    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
+        raise NotImplementedError("AWQ online quantization is not supported yet.")
+
+    def params_repack(
+        self, weight: torch.Tensor, weight_scale: torch.Tensor, weight_zero_point: torch.Tensor, dtype_type: torch.dtype
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        一些量化方法在将参数完成量化后，为了加速性能，还需要将参数进行重拍，使算子性能达到最优，如awq方法。
+        """
+        weight = self._process_weight_after_loading(weight.cuda(get_current_device_id()))
+        weight_scale = self._process_weight_scale_after_loading(
+            weight_scale.cuda(get_current_device_id()).to(dtype_type)
+        )
+        weight_zero_point = self._process_weight_zero_point_after_loading(
+            weight_zero_point.cuda(get_current_device_id())
+        )
+        return weight, weight_scale, weight_zero_point
+
+    def apply(
         self,
         input_tensor: torch.Tensor,
         weight_pack: WeightPack,
-        out: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor],
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
@@ -201,30 +224,6 @@ class AWQQuantization(QuantizationMethod):
     def create_weight(
         self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
     ) -> WeightPack:
-        if not hasattr(self, "_checked_marlin"):
-            self._check_and_set_marlin()
-            self._checked_marlin = True
-
-        if self._use_marlin:
-            return self._create_weight_marlin(out_dim, in_dim, dtype, device_id, num_experts)
-        else:
-            return self._create_weight_basic(out_dim, in_dim, dtype, device_id, num_experts)
-
-    def _create_weight_basic(
-        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
-    ) -> WeightPack:
-        group_size = self.hf_quantization_config["group_size"]
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (in_dim, out_dim // self.pack_factor), dtype=torch.int32).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
-        weight_zero_point = torch.empty(
-            expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
-        ).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
-
-    def _create_weight_marlin(
-        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
-    ) -> WeightPack:
         self.n = out_dim
         self.k = in_dim
         group_size = self.hf_quantization_config["group_size"]
@@ -239,20 +238,6 @@ class AWQQuantization(QuantizationMethod):
         return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        if not hasattr(self, "_checked_marlin"):
-            self._check_and_set_marlin()
-            self._checked_marlin = True
-
-        if self._use_marlin:
-            self._load_weight_marlin(weight, weight_pack, start_idx)
-        else:
-            self._load_weight_basic(weight, weight_pack, start_idx)
-
-    def _load_weight_basic(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        start_idx = start_idx // self.pack_factor
-        weight_pack.weight[:, start_idx : start_idx + weight.shape[1]].copy_(weight)
-
-    def _load_weight_marlin(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
         assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
         device_id = get_current_device_id()
         repack_weight = vllm_ops.awq_marlin_repack(
@@ -263,21 +248,9 @@ class AWQQuantization(QuantizationMethod):
         )
         start_idx = start_idx // self.pack_factor * self.tile_size
         weight_pack.weight[:, start_idx : start_idx + repack_weight.shape[1]].copy_(repack_weight)
+        return
 
     def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        if not hasattr(self, "_checked_marlin"):
-            self._check_and_set_marlin()
-            self._checked_marlin = True
-
-        if self._use_marlin:
-            self._load_weight_scale_marlin(weight_scale, weight_pack, start_idx)
-        else:
-            self._load_weight_scale_basic(weight_scale, weight_pack, start_idx)
-
-    def _load_weight_scale_basic(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        weight_pack.weight_scale[:, start_idx : start_idx + weight_scale.shape[1]].copy_(weight_scale)
-
-    def _load_weight_scale_marlin(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
         assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
         group_size = self.hf_quantization_config["group_size"]
         device_id = get_current_device_id()
@@ -288,27 +261,9 @@ class AWQQuantization(QuantizationMethod):
             group_size=self.hf_quantization_config["group_size"],
         )
         weight_pack.weight_scale[:, start_idx : start_idx + repack_weight_scale.shape[1]].copy_(repack_weight_scale)
+        return
 
     def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        if not hasattr(self, "_checked_marlin"):
-            self._check_and_set_marlin()
-            self._checked_marlin = True
-
-        if self._use_marlin:
-            self._load_weight_zero_point_marlin(weight_zero_point, weight_pack, start_idx)
-        else:
-            self._load_weight_zero_point_basic(weight_zero_point, weight_pack, start_idx)
-
-    def _load_weight_zero_point_basic(
-        self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int
-    ) -> None:
-        start_idx = start_idx // self.pack_factor
-        end_idx = start_idx + weight_zero_point.shape[1]
-        weight_pack.weight_zero_point[:, start_idx:end_idx].copy_(weight_zero_point)
-
-    def _load_weight_zero_point_marlin(
-        self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int
-    ) -> None:
         device_id = get_current_device_id()
         repack_weight_zero_point = awq_to_marlin_zero_points(
             weight_zero_point.cuda(device_id),
@@ -320,3 +275,29 @@ class AWQQuantization(QuantizationMethod):
         weight_pack.weight_zero_point[:, start_idx : start_idx + repack_weight_zero_point.shape[1]].copy_(
             repack_weight_zero_point
         )
+        return
+
+
+# adapted from
+# https://github.com/vllm-project/vllm/blob/aef368aa08572505b820db01da82e2fbb3d43a72/vllm/model_executor/layers/quantization/awq_marlin.py#L211-L212
+def is_awq_marlin_compatible(quantization_config: dict[str, Any]):
+    # Extract data from quant config.
+    quant_method = quantization_config.get("quant_method", "").lower()
+    num_bits = quantization_config.get("bits")
+    group_size = quantization_config.get("group_size")
+    zero_point = quantization_config.get("zero_point")
+
+    if not torch.cuda.is_available():
+        return False
+
+    if quant_method != "awq":
+        return False
+
+    # If we cannot find the info needed in the config, cannot convert.
+    if num_bits is None or group_size is None or zero_point is None:
+        return False
+
+    if num_bits not in TYPE_MAP:
+        return False
+
+    return check_marlin_supported(quant_type=TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point)
