@@ -318,7 +318,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="+",
         choices=["None", "triton", "fa3", "flashinfer"],
-        default=["triton"],
+        default=["fa3"],
         help="""prefill attention kernel used in llm.
                 None: automatically select backend based on current GPU device,
                 not supported yet, will support in future""",
@@ -328,7 +328,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="+",
         choices=["None", "triton", "fa3", "flashinfer"],
-        default=["triton"],
+        default=["fa3"],
         help="""decode attention kernel used in llm.
                 None: automatically select backend based on current GPU device,
                 not supported yet, will support in future""",

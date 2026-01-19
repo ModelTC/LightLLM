@@ -2,9 +2,9 @@ import torch
 from typing import Optional, Dict
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
-from lightllm.common.basemodel.triton_kernel.rmsnorm import rmsnorm_forward
-from lightllm.common.basemodel.triton_kernel.layernorm import layernorm_forward
-from lightllm.common.basemodel.triton_kernel.qk_norm import qk_rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward
 from .platform_op import PlatformAwareOp
 
 
@@ -51,6 +51,12 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         # only triton implementation is supported for rmsnorm on cuda platform
+        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+
+    def _musa_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        # triton implementation is supported by musa.
         return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
 
     def __call__(
@@ -103,6 +109,12 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         # only triton implementation is supported for layernorm on cuda platform
+        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+
+    def _musa_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        # triton implementation is supported by musa.
         return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
 
     def __call__(
@@ -188,14 +200,21 @@ class QKRMSNORMWeight(RMSNormWeight):
         input.copy_(x)
         return
 
+    def _triton_forward(self, input: torch.Tensor, eps: float) -> torch.Tensor:
+        assert input.ndim == 2 and self.weight.ndim == 1
+        return qk_rmsnorm_forward(x=input, weight=self.weight, eps=eps)
+
     def _cuda_forward(
         self,
         input: torch.Tensor,
         eps: float,
     ) -> None:
-        assert input.ndim == 2 and self.weight.ndim == 1
-        qk_rmsnorm_forward(x=input, weight=self.weight, eps=eps)
+        self._triton_forward(input=input, eps=eps)
         return
+
+    def _musa_forward(self, input: torch.Tensor, eps: float) -> torch.Tensor:
+        # musa implementation is supported by musa triton on musa platform
+        return self._triton_forward(input=input, eps=eps)
 
     def __call__(
         self,

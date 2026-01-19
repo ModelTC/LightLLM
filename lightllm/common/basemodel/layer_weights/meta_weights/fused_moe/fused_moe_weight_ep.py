@@ -15,7 +15,7 @@ from lightllm.common.fused_moe.topk_select import select_experts
 from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import (
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
     tma_align_input_scale,
 )
@@ -741,6 +741,3 @@ class FusedMoeWeightEP(BaseWeightTpl, PlatformAwareOp):
         if self.quantized_weight:
             return cpu_tensor.contiguous().cuda(self.device_id_)
         return cpu_tensor.contiguous().to(self.data_type_).cuda(self.device_id_)
-
-    def verify_load(self):
-        return self.w1 is not None and self.w2 is not None

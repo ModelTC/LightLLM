@@ -90,6 +90,7 @@ class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
         self.num_fused_shared_experts = num_fused_shared_experts
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.split_inter_size = split_inter_size
+        self.data_type_ = data_type
         self.hidden_size = network_config.get("hidden_size")
         self.e_score_correction_bias = None
         self.scoring_func = network_config.get("scoring_func", "softmax")

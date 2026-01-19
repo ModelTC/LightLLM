@@ -120,9 +120,6 @@ class MMWeightTpl(BaseWeightTpl):
             for sub_child_index, param_name in enumerate(self.weight_zero_point_names):
                 self._load_weight_zero_point(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
 
-    def verify_load(self) -> bool:
-        return True
-
     def _create_weight(self):
         self.bias = None
         if self.bias_names is not None:

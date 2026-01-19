@@ -18,6 +18,3 @@ class TpAttSinkWeight(BaseWeightTpl):
         t_weight = weights[self.weight_name]
         start_head_index, end_head_index = self._get_head_tp_split_params(weight=t_weight)
         self.weight = t_weight[start_head_index:end_head_index].to(self.data_type_).cuda(get_current_device_id())
-
-    def verify_load(self):
-        return self.weight is not None
