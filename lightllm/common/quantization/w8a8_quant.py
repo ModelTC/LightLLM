@@ -127,7 +127,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         return
 
     def quantize_moe(self, weight: torch.Tensor, output: WeightPack, offset: int = 0) -> None:
-        qweight, weight_scale = scaled_fp8_quant(
+        qweight, weight_scale = vllm_ops.scaled_fp8_quant(
             weight.cuda(self.device_id_), scale=None, use_per_token_if_dynamic=False
         )
         output.weight[:, :].copy_(qweight)
