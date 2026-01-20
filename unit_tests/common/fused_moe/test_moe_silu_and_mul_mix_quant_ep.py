@@ -16,7 +16,7 @@ if not is_fp8_native_supported():
 import random
 from lightllm.common.fused_moe.moe_silu_and_mul_mix_quant_ep import silu_and_mul_masked_post_quant_fwd
 from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-from lightllm.common.quantization.triton_quant.fp8.fp8act_quant_kernel import per_token_group_quant_fp8
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
