@@ -171,7 +171,7 @@ def get_kv_quant_calibration_inference_count():
 
 @lru_cache(maxsize=None)
 def get_triton_autotune_level():
-    return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
+    return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 1))
 
 
 g_model_init_done = False
