@@ -1,6 +1,7 @@
 """Backend validation with subprocess isolation and ground truth checks."""
 
 import multiprocessing as mp
+import os
 import torch
 from lightllm.utils.log_utils import init_logger
 
@@ -58,6 +59,10 @@ def _validate_fa3():
 
 def _validate_flashinfer():
     """Validate FlashInfer with ground truth."""
+    capability = torch.cuda.get_device_capability()
+    arch = f"{capability[0]}.{capability[1]}"
+    os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"
+
     import flashinfer
 
     batch, heads, seq, dim = 1, 4, 8, 64

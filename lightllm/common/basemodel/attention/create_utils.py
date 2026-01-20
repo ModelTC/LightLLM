@@ -1,5 +1,7 @@
 """Attention backend selection utilities."""
 
+import os
+import torch
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.backend_validator import validate
@@ -59,6 +61,11 @@ def _auto_select_backend(llm_dtype: str, is_mla: bool = False) -> type:
     for backend_name in _BACKEND_PRIORITY:
         if validate(backend_name):
             logger.info(f"Auto-selected {backend_name} backend (validated)")
+            if backend_name == "flashinfer":
+                # flash infer 添加编译设置。
+                capability = torch.cuda.get_device_capability()
+                arch = f"{capability[0]}.{capability[1]}"
+                os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"
             return backend_map[llm_dtype][backend_name]
 
     # Fallback to triton without validation (should not happen)
