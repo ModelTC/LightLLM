@@ -10,6 +10,7 @@ class TpAttSinkWeight(BaseWeightTpl):
         self.weight_name = weight_name
         self.data_type_ = data_type
         self.weight: torch.Tensor = None
+        # TODO: add create weight function
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name not in weights or self.weight is not None:

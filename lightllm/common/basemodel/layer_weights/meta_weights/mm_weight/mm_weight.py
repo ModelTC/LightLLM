@@ -127,6 +127,7 @@ class MMWeightTpl(BaseWeightTpl):
         self.mm_param: WeightPack = self.quant_method.create_weight(
             in_dim=self.in_dim, out_dim=sum(self.out_dims), dtype=self.data_type_, device_id=get_current_device_id()
         )
+        self.load_cnt = 0
         return
 
     # 执行顺序
@@ -140,6 +141,7 @@ class MMWeightTpl(BaseWeightTpl):
                 self.quant_method.quantize(weight, self.mm_param, offset=start_idx)
             else:
                 self.quant_method.load_weight(weight, self.mm_param, start_idx)
+            self.load_cnt += 1
         return
 
     def _load_bias(
@@ -159,6 +161,7 @@ class MMWeightTpl(BaseWeightTpl):
             weight_scale = self.param_slicer._slice_weight_scale(weights[param_name])
             start_idx = self.cusum_out_dims[sub_child_index]
             self.quant_method.load_weight_scale(weight_scale, self.mm_param, start_idx)
+            self.load_cnt += 1
         return
 
     def _load_weight_zero_point(
@@ -168,10 +171,78 @@ class MMWeightTpl(BaseWeightTpl):
             weight_zero_point = self.param_slicer._slice_weight_zero_point(weights[param_name])
             start_idx = self.cusum_out_dims[sub_child_index]
             self.quant_method.load_weight_zero_point(weight_zero_point, self.mm_param, start_idx)
+            self.load_cnt += 1
         return
+
+    def verify_load(self):
+        if self.quant_method.method_name != "none":
+            return self.load_cnt == len(self.weight_names) * 2
+        else:
+            return self.load_cnt == len(self.weight_names)
 
     def _get_tp_dim(self, dim: int) -> int:
         assert (
             dim % self.tp_world_size_ == 0
         ), f"dim must be divisible by tp_world_size_, but found: {dim} % {self.tp_world_size_}"
         return dim // self.tp_world_size_
+
+
+class BMMWeightTpl(BaseWeightTpl):
+    def __init__(
+        self,
+        dim0: int,
+        dim1: int,
+        dim2: int,
+        weight_names: Union[str, List[str]],
+        data_type: torch.dtype,
+        bias_names: Optional[Union[str, List[str]]] = None,
+        quant_method: QuantizationMethod = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ) -> None:
+        super().__init__(tp_rank, tp_world_size, data_type)
+        if isinstance(weight_names, str):
+            weight_names = [weight_names]
+        self.weight_names = weight_names
+        self.bias_names = bias_names
+        assert bias_names is None, "bmm not support bias"
+        if isinstance(bias_names, list):
+            assert all(bias_name is None for bias_name in bias_names), "bmm not support bias"
+        assert quant_method is None, "bmm not support quantized weight"
+        self.quant_method = quant_method
+        self.dim0 = dim0
+        self.dim1 = dim1
+        self.dim2 = dim2
+        self._create_weight()
+        return
+
+    def _create_weight(self):
+        self.weight = torch.empty(self.dim0, self.dim1, self.dim2, dtype=self.data_type_).cuda(get_current_device_id())
+        self.load_cnt = 0
+        return
+
+    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        for weight_name in self.weight_names:
+            if weight_name in weights:
+                weight = self.param_slicer._slice_weight(weights[weight_name])
+                self.weight.copy_(weight)
+                self.load_cnt += 1
+        return
+
+    def verify_load(self):
+        return self.load_cnt == len(self.weight_names)
+
+    def bmm(
+        self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
+    ) -> torch.Tensor:
+        # 目前 bmm 不支持量化运算操作
+        fpweight = self.weight
+        if out is None:
+            shape = (input_tensor.shape[0], input_tensor.shape[1], fpweight.shape[2])
+            dtype = input_tensor.dtype
+            device = input_tensor.device
+            if use_custom_tensor_mananger:
+                out = g_cache_manager.alloc_tensor(shape, dtype, device=device)
+            else:
+                out = torch.empty(shape, dtype=dtype, device=device)
+        return torch.bmm(input_tensor, fpweight, out=out)

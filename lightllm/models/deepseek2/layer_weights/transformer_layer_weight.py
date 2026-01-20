@@ -6,6 +6,7 @@ from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
+    ROWBMMWeight,
     COLMMWeight,
     RMSNormWeight,
     FusedMoeWeightEP,
@@ -65,31 +66,14 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             self._init_ffn()
         self._init_norm()
 
-    def _load_kb(self, kv_b_proj_):
-        k_b_proj_ = kv_b_proj_.view(self.num_attention_heads, self.qk_nope_head_dim * 2, self.kv_lora_rank)[
-            :, : self.qk_nope_head_dim, :
-        ]
-        return k_b_proj_.contiguous().to(kv_b_proj_.dtype)
-
-    def _load_kb_scale(self, kv_b_proj_, block_size):
-        k_b_proj_scale_ = kv_b_proj_.view(
-            self.num_attention_heads, self.qk_nope_head_dim * 2 // block_size, self.kv_lora_rank // block_size
-        )[:, : self.qk_nope_head_dim // block_size, :]
-        return k_b_proj_scale_.contiguous().to(kv_b_proj_.dtype)
-
-    def _load_vb(self, kv_b_proj_):
-        v_b_proj_ = kv_b_proj_.T.view(self.kv_lora_rank, self.num_attention_heads, self.qk_nope_head_dim * 2,)[
-            :, :, self.qk_nope_head_dim :
-        ].transpose(0, 1)
-        return v_b_proj_.contiguous().to(kv_b_proj_.dtype)
-
-    def _load_vb_scale(self, kv_b_proj_scale_, block_size):
-        v_b_proj_scale_ = kv_b_proj_scale_.T.view(
-            self.kv_lora_rank // block_size,
-            self.num_attention_heads,
-            self.qk_nope_head_dim * 2 // block_size,
-        )[:, :, self.qk_nope_head_dim // block_size :].transpose(0, 1)
-        return v_b_proj_scale_.contiguous().to(kv_b_proj_scale_.dtype)
+    def _split_kv_b_proj(self, kv_b_proj_):
+        kv_b_proj_ = kv_b_proj_.view(self.num_attention_heads, self.qk_nope_head_dim * 2, self.kv_lora_rank)
+        k_b_proj_, v_b_proj_ = torch.split(kv_b_proj_, [self.qk_nope_head_dim, self.v_head_dim], dim=-2)
+        # num_attention_heads x qk_nope_head_dim x kv_lora_rank
+        k_b_proj_ = k_b_proj_.contiguous().to(kv_b_proj_.dtype)
+        # num_attention_heads x kv_lora_rank x v_head_dim
+        v_b_proj_ = v_b_proj_.transpose(1, 2).contiguous().to(kv_b_proj_.dtype)
+        return k_b_proj_, v_b_proj_
 
     def _rename_shared_experts(self, weights, weight_scale_suffix):
         # 将共享专家对应的参数，改造为与路由专家一致的权重名称和映射关系。
@@ -122,21 +106,9 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                     kv_b_proj_.cuda(),
                     weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix].cuda(),
                 ).cpu()
-            weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight"] = self._load_kb(kv_b_proj_)
-            weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight"] = self._load_vb(kv_b_proj_)
-
-        if (
-            self.quant_cfg.quantized_weight
-            and f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix in weights
-        ):
-            kv_b_proj_scale_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix]
-            block_size = 128
-            weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj." + weight_scale_suffix] = self._load_kb_scale(
-                kv_b_proj_scale_, block_size
-            )
-            weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj." + weight_scale_suffix] = self._load_vb_scale(
-                kv_b_proj_scale_, block_size
-            )
+            k_b_proj_, v_b_proj_ = self._split_kv_b_proj(kv_b_proj_)
+            weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight"] = k_b_proj_
+            weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight"] = v_b_proj_
 
         # rename the shared experts weight
         if self.num_fused_shared_experts > 0:
@@ -181,20 +153,22 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 data_type=self.data_type_,
                 quant_method=self.get_quant_method("q_b_proj"),
             )
-        # self.k_b_proj_ = ROWBMMWeight(
-        #     weight_names=f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
-        #     data_type=self.data_type_,
-        #     quant_cfg=None,
-        #     layer_num=self.layer_num_,
-        #     name="k_b_proj",
-        # )
-        # self.v_b_proj_ = ROWBMMWeight(
-        #     weight_names=f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
-        #     data_type=self.data_type_,
-        #     quant_cfg=None,
-        #     layer_num=self.layer_num_,
-        #     name="v_b_proj",
-        # )
+        self.k_b_proj_ = ROWBMMWeight(
+            dim0=self.num_attention_heads,
+            dim1=self.qk_nope_head_dim,
+            dim2=self.kv_lora_rank,
+            weight_names=f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
+            data_type=self.data_type_,
+            quant_method=None,
+        )
+        self.v_b_proj_ = ROWBMMWeight(
+            dim0=self.num_attention_heads,
+            dim1=self.kv_lora_rank,
+            dim2=self.v_head_dim,
+            weight_names=f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
+            data_type=self.data_type_,
+            quant_method=None,
+        )
         if self.enable_cc_method:
             self.cc_kv_b_proj_ = ROWMMWeight(
                 in_dim=self.kv_lora_rank,
@@ -212,12 +186,13 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             quant_method=self.get_quant_method("o_weight"),
         )
 
-    def _load_mlp(self, mlp_prefix):
+    def _load_mlp(self, mlp_prefix, is_shared_experts=False):
         moe_mode = os.getenv("MOE_MODE", "TP")
+        mlp_inter = self.moe_inter if is_shared_experts else self.n_inter
         if self.is_moe and moe_mode == "EP":
             self.gate_up_proj = ROWMMWeight(
                 in_dim=self.n_embed,
-                out_dims=[self.moe_inter, self.moe_inter],
+                out_dims=[mlp_inter, mlp_inter],
                 weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
                 data_type=self.data_type_,
                 quant_method=self.get_quant_method("gate_up_proj"),
@@ -225,7 +200,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 tp_world_size=1,
             )
             self.down_proj = COLMMWeight(
-                in_dim=self.moe_inter,
+                in_dim=mlp_inter,
                 out_dims=[self.n_embed],
                 weight_names=f"{mlp_prefix}.down_proj.weight",
                 data_type=self.data_type_,
@@ -236,13 +211,13 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         else:
             self.gate_up_proj = ROWMMWeight(
                 in_dim=self.n_embed,
-                out_dims=[self.n_inter, self.n_inter],
+                out_dims=[mlp_inter, mlp_inter],
                 weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
                 data_type=self.data_type_,
                 quant_method=self.get_quant_method("gate_up_proj"),
             )
             self.down_proj = COLMMWeight(
-                in_dim=self.n_inter,
+                in_dim=mlp_inter,
                 out_dims=[self.n_embed],
                 weight_names=f"{mlp_prefix}.down_proj.weight",
                 data_type=self.data_type_,
@@ -256,7 +231,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             out_dims=[self.n_routed_experts],
             weight_names=f"model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
-            quant_method=self.get_quant_method("moe_gate"),
+            quant_method=None,
             tp_rank=0,
             tp_world_size=1,
         )
@@ -267,7 +242,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         # 专家对应的 gate_up_proj 等weight 参数。当 num_fused_shared_experts
         # == 0 时，说明不存在融合共享专家，共享专家单独加载和进行推理。
         if self.num_fused_shared_experts == 0:
-            self._load_mlp(f"model.layers.{self.layer_num_}.mlp.shared_experts")
+            self._load_mlp(f"model.layers.{self.layer_num_}.mlp.shared_experts", is_shared_experts=True)
         moe_mode = os.getenv("MOE_MODE", "TP")
         assert moe_mode in ["EP", "TP"]
         if moe_mode == "TP":
@@ -318,7 +293,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             data_type=self.data_type_,
         )
         self.kv_a_layernorm_ = RMSNormWeight(
-            dim=self.kv_lora_rank + self.qk_rope_head_dim,
+            dim=self.kv_lora_rank,
             weight_name=f"model.layers.{self.layer_num_}.self_attn.kv_a_layernorm.weight",
             data_type=self.data_type_,
         )

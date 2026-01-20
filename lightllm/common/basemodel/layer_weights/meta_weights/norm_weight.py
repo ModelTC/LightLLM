@@ -19,10 +19,15 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
 
     def _create_weight(self):
         self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.load_cnt = 0
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
+            self.load_cnt += 1
+
+    def verify_load(self):
+        return self.load_cnt == 1
 
     def _native_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
@@ -42,7 +47,9 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
     def _triton_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
-        assert input.ndim == 2 and self.weight.ndim == 1
+        assert (
+            input.ndim in [2, 3] and self.weight.ndim == 1
+        ), f"input.ndim: {input.ndim} != 2 or weight.ndim: {self.weight.ndim} != 1"
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
         return rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out)
@@ -77,12 +84,18 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
     def _create_weight(self):
         self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
         self.bias: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.load_cnt = 0
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
+            self.load_cnt += 1
         if self.bias_name in weights:
             self.bias.copy_(weights[self.bias_name])
+            self.load_cnt += 1
+
+    def verify_load(self):
+        return self.load_cnt == 2
 
     def _native_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
@@ -162,6 +175,7 @@ class TpRMSNormWeight(RMSNormWeight):
             self.weight[:, end - start].copy_(t_weight[start:end].to(self.data_type_))
             # the padding part is zero
             self.weight[:, end:].zero_()
+            self.load_cnt += 1
 
 
 class NoTpGEMMANormWeight(RMSNormWeight):
@@ -173,7 +187,8 @@ class NoTpGEMMANormWeight(RMSNormWeight):
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
-        self.weight += 1
+            self.weight += 1
+            self.load_cnt += 1
 
 
 class QKRMSNORMWeight(RMSNormWeight):

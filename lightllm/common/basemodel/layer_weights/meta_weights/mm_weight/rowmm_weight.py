@@ -1,7 +1,5 @@
 import torch
-from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import (
-    MMWeightTpl,
-)
+from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightTpl, BMMWeightTpl
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.quantization.quantize_method import QuantizationMethod
@@ -92,3 +90,38 @@ class KVROWNMMWeight(MMWeightTpl):
                 f"tp_world_size_ must be divisible by head_num, "
                 f"but found: {head_num} % {self.tp_world_size_}"
             )
+
+
+class ROWBMMWeight(BMMWeightTpl):
+    def __init__(
+        self,
+        dim0: int,
+        dim1: int,
+        dim2: int,
+        weight_names: Union[str, List[str]],
+        data_type: torch.dtype,
+        bias_names: Optional[Union[str, List[str]]] = None,
+        quant_method: QuantizationMethod = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ) -> None:
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        assert (
+            dim0 % self.tp_world_size_ == 0
+        ), f"dim0 of bmm must be divisible by tp_world_size_, but found: {dim0} % {self.tp_world_size_}"
+        dim0 = dim0 // self.tp_world_size_
+        super().__init__(
+            dim0=dim0,
+            dim1=dim1,
+            dim2=dim2,
+            weight_names=weight_names,
+            bias_names=bias_names,
+            data_type=data_type,
+            quant_method=quant_method,
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
+        )
+        self.param_slicer = get_row_slice_mixin(
+            quant_method_name="none", tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
+        )

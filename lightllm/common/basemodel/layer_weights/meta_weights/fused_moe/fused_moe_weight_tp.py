@@ -8,6 +8,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
     get_row_slice_mixin,
     get_col_slice_mixin,
 )
+import threading
 
 
 def create_tp_moe_wegiht_obj(
@@ -100,6 +101,7 @@ class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
         self.col_slicer = get_col_slice_mixin(
             self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
         )
+        self.lock = threading.Lock()
         self._create_weight()
 
     def _create_weight(self):
@@ -107,7 +109,7 @@ class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
         intermediate_size = self.split_inter_size
 
         # Create e_score_correction_bias
-        if self.e_score_correction_bias is not None:
+        if self.e_score_correction_bias_name is not None:
             self.e_score_correction_bias = torch.empty(
                 (total_expert_num,),
                 dtype=self.data_type_,
@@ -128,6 +130,7 @@ class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
             device_id=self.device_id_,
             num_experts=total_expert_num,
         )
+        self.load_cnt = 0
 
     def _select_experts(
         self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
@@ -254,13 +257,18 @@ class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
 
         # Load each expert with TP slicing
         for i_experts in range(self.n_routed_experts):
-            self._load_expert(i_experts, weights, type="weight", suffix=self.quant_method.weight_suffix)
+            with self.lock:
+                self._load_expert(i_experts, weights, type="weight", suffix=self.quant_method.weight_suffix)
             if self.w13.weight_scale is not None:
-                self._load_expert(i_experts, weights, type="weight_scale", suffix=self.quant_method.weight_scale_suffix)
+                with self.lock:
+                    self._load_expert(
+                        i_experts, weights, type="weight_scale", suffix=self.quant_method.weight_scale_suffix
+                    )
             if self.w13.weight_zero_point is not None:
-                self._load_expert(
-                    i_experts, weights, type="weight_zero_point", suffix=self.quant_method.weight_zero_point_suffix
-                )
+                with self.lock:
+                    self._load_expert(
+                        i_experts, weights, type="weight_zero_point", suffix=self.quant_method.weight_zero_point_suffix
+                    )
 
     def _load_weight_func(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int = 0):
         if self.quant_method.weight_need_quanted(weight):
@@ -276,12 +284,17 @@ class FusedMoeWeightTP(BaseWeightTpl, PlatformAwareOp):
         load_func, slice_func = self._get_load_and_slice_func(type, is_row=True)
         if w1_weight in weights:
             load_func(slice_func(weights[w1_weight]), self.w13.get_expert(expert_idx), start_idx=0)
+            self.load_cnt += 1
         if w3_weight in weights:
             load_func(slice_func(weights[w3_weight]), self.w13.get_expert(expert_idx), start_idx=intermediate_size)
-
+            self.load_cnt += 1
         load_func, slice_func = self._get_load_and_slice_func(type, is_row=False)
         if w2_weight in weights:
             load_func(slice_func(weights[w2_weight]), self.w2.get_expert(expert_idx), start_idx=0)
+            self.load_cnt += 1
+
+    def verify_load(self):
+        return self.load_cnt == self.n_routed_experts * 3 * 2
 
     def _get_load_and_slice_func(self, type: str, is_row: bool = True):
         if is_row:
