@@ -4,7 +4,7 @@ import os
 import torch.multiprocessing as mp
 from typing import List
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.llama.triton_kernel.ppl_int8kv_flash_decoding_diverse_stage1 import (
+from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse_stage2 import (
     flash_decode_stage1,
     GQADiverseDecodeStage1KernelConfig,
 )

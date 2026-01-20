@@ -9,7 +9,7 @@ from typing import Dict
 
 
 class GQADiverseDecodeStage1KernelConfig(KernelConfigs):
-    kernel_name: str = "_fwd_kernel_flash_decode_diverse_stage1:v1"
+    kernel_name: str = "_fwd_kernel_flash_decode_diverse_stage1:v2"
 
     @classmethod
     @lru_cache(maxsize=200)
@@ -113,6 +113,7 @@ def _fwd_kernel_flash_decode_diverse_stage1(
     BLOCK_N: tl.constexpr,
     BLOCK_BATCH: tl.constexpr,
     KV_QUANT_GROUP_SIZE: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     shared_batch_group_size = tl.load(b_mark_shared_group + cur_batch)
@@ -128,6 +129,7 @@ def _fwd_kernel_flash_decode_diverse_stage1(
     cur_q_head_range = tl.where(cur_q_head_range < q_head_end_index, cur_q_head_range, cur_kv_head * gqa_group_size)
 
     offs_d = tl.arange(0, BLOCK_HEADDIM)
+    offs_d_scale = tl.arange(0, NUM_GROUPS)
     cur_batch_seq_len = tl.load(b_shared_seq_len + cur_batch)
     cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
     cur_batch_start_index = seq_start_block * BLOCK_SEQ
@@ -162,25 +164,37 @@ def _fwd_kernel_flash_decode_diverse_stage1(
             mask=n_mask,
             other=0,
         ).to(tl.int64)
-        off_k = k_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None]
-        off_k_scale = off_k // KV_QUANT_GROUP_SIZE
+        off_k_base = k_loc * stride_kbs + cur_kv_head * stride_kh
+        # (128, 16)
+        off_k = off_k_base[None, :] + offs_d[:, None]
+        # off_k_scale = off_k // KV_QUANT_GROUP_SIZE
+        # (16, 16)
+        off_k_scale = off_k_base[None, :] // KV_QUANT_GROUP_SIZE + offs_d_scale[:, None]
         k = tl.load(K + off_k, mask=n_mask[None, :], other=0)
+        k = tl.reshape(k, (NUM_GROUPS, KV_QUANT_GROUP_SIZE, BLOCK_N))
         k_scale = tl.load(K_scale + off_k_scale, mask=n_mask[None, :], other=0.0)
+        k_scale = tl.reshape(k_scale, (NUM_GROUPS, 1, BLOCK_N))
         k = k * k_scale
+        k = tl.reshape(k, (BLOCK_HEADDIM, BLOCK_N))
         att_value = tl.dot(q, k.to(q.dtype))
         att_value *= sm_scale
         att_value = tl.where(n_mask[None, :], att_value, float("-inf"))
+        off_v = k_loc[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :]
         v = tl.load(
-            V + off_k.T,
+            V + off_v,
             mask=n_mask[:, None],
             other=0,
         )
+        v = tl.reshape(v, (BLOCK_N, NUM_GROUPS, KV_QUANT_GROUP_SIZE))
         v_scale = tl.load(
-            V_scale + off_k_scale.T,
-            mask=n_mask[:, None],
+            V_scale + off_k_scale,
+            mask=n_mask[None, :],
             other=0.0,
         )
+        v_scale = tl.trans(v_scale)
+        v_scale = tl.reshape(v_scale, (BLOCK_N, NUM_GROUPS, 1))
         v = v * v_scale
+        v = tl.reshape(v, (BLOCK_N, BLOCK_HEADDIM))
 
         cur_max_logic = tl.max(att_value, axis=1)
         new_max_logic = tl.maximum(cur_max_logic, max_logic)
@@ -274,6 +288,9 @@ def flash_decode_stage1(
     BLOCK_BATCH = triton.next_power_of_2(max_batch_group_size)
     if BLOCK_HEAD * BLOCK_BATCH < 16:
         BLOCK_BATCH = 16 // BLOCK_HEAD
+    assert k.stride() == v.stride()
+    NUM_GROUPS = Lk // KV_QUANT_GROUP_SIZE
+    assert triton.next_power_of_2(NUM_GROUPS) == NUM_GROUPS
 
     assert k.stride() == v.stride()
     _fwd_kernel_flash_decode_diverse_stage1[grid](
@@ -314,6 +331,7 @@ def flash_decode_stage1(
         BLOCK_N=BLOCK_N,
         BLOCK_BATCH=BLOCK_BATCH,
         KV_QUANT_GROUP_SIZE=KV_QUANT_GROUP_SIZE,
+        NUM_GROUPS=NUM_GROUPS,
         num_warps=num_warps,
         num_stages=num_stages,
     )
