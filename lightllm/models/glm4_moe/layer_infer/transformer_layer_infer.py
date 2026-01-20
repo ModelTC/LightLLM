@@ -15,41 +15,24 @@ from lightllm.utils.dist_utils import get_global_world_size
 
 
 class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
-    """
-    GLM-4.7 MoE Transformer Layer Inference.
-
-    Key features:
-    - QK normalization (RMSNorm on Q and K projections)
-    - Partial rotary embeddings (0.5 factor)
-    - MoE FFN with 160 routed + 1 shared expert, top-8 routing
-    - Sigmoid gating with e_score_correction_bias
-    - routed_scaling_factor = 2.5 applied to expert outputs
-    - First 3 layers use dense FFN (first_k_dense_replace=3)
-    """
-
     def __init__(self, layer_num, network_config):
-        # Parse MoE config before calling super().__init__
         self.n_routed_experts = network_config.get("n_routed_experts", 160)
         self.n_shared_experts = network_config.get("n_shared_experts", 1)
         first_k_dense_replace = network_config.get("first_k_dense_replace", 3)
 
         self.is_moe = self.n_routed_experts is not None and layer_num >= first_k_dense_replace
 
-        # MoE routing parameters
         self.num_experts_per_tok = network_config.get("num_experts_per_tok", 8)
         self.norm_topk_prob = network_config.get("norm_topk_prob", True)
-        self.n_group = network_config.get("n_group", None)  # GLM-4.7 may not use grouped routing
+        self.n_group = network_config.get("n_group", None)
         self.topk_group = network_config.get("topk_group", None)
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 2.5)
 
-        # Partial rotary factor
         self.partial_rotary_factor = network_config.get("partial_rotary_factor", 0.5)
 
         super().__init__(layer_num, network_config)
 
-        # Override head_dim for GLM-4.7
         self.head_dim_ = network_config.get("head_dim", 128)
-        # Ensure at least 1 KV head per TP rank for GQA
         self.tp_k_head_num_ = max(self.tp_k_head_num_, 1)
         self.tp_v_head_num_ = max(self.tp_v_head_num_, 1)
         return
@@ -60,7 +43,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _bind_ffn(self):
-        """Bind FFN function based on layer type (MoE vs dense) and parallelism mode."""
         if self.is_moe:
             moe_mode = os.environ.get("MOE_MODE", "TP")
             if moe_mode == "EP":
@@ -80,20 +62,11 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: LlamaInferStateInfo,
         layer_weight: Glm4MoeTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute Q, K, V projections with QK normalization and partial RoPE.
-
-        GLM-4.7 specific:
-        - Applies RMSNorm to Q and K projections (QK norm)
-        - Applies partial rotary embeddings (0.5 factor = half of head dim)
-        """
         input = input.view(-1, self.embed_dim_)
 
-        # Compute Q and KV projections
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input)
 
-        # Apply QK normalization (RMSNorm on Q and K)
         qk_rmsnorm_forward(
             q,
             weight=layer_weight.q_norm_weight_.weight,
@@ -105,11 +78,8 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
             eps=self.eps_,
         )
 
-        # Reshape cache_kv for attention
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
-        # Apply partial rotary embeddings (0.5 factor)
-        # GLM-4.7 uses partial_rotary_factor=0.5, applying RoPE to half of head dimensions
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
@@ -126,7 +96,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: LlamaInferStateInfo,
         layer_weight: Glm4MoeTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """TPSP mode QKV computation with all-gather for sequence parallelism."""
         if self.tp_world_size_ > 1:
             sp_token_num, hidden_dim = input.shape
             gather_input = self.alloc_tensor(
@@ -137,11 +106,9 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         input = input.view(-1, self.embed_dim_)
 
-        # Compute Q and KV projections
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input)
 
-        # Apply QK normalization
         qk_rmsnorm_forward(
             q,
             weight=layer_weight.q_norm_weight_.weight,
@@ -155,7 +122,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
-        # Apply partial rotary embeddings (0.5 factor for GLM-4.7)
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
@@ -176,28 +142,14 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: LlamaInferStateInfo,
         layer_weight: Glm4MoeTransformerLayerWeight,
     ) -> torch.Tensor:
-        """
-        MoE FFN forward pass for TP mode.
-
-        GLM-4.7 uses:
-        - Sigmoid gating with e_score_correction_bias
-        - Top-8 routing from 160 experts
-        - routed_scaling_factor = 2.5 applied to routed output
-        - Shared expert output added to routed output
-        """
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
-        # Compute shared expert output if not fused and shared experts exist
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 
-        # Compute router logits
         router_logits = layer_weight.moe_gate.mm(hidden_states)
 
-        # Run MoE experts (handles routing, dispatch, compute, combine internally)
-        # The experts.experts() method modifies hidden_states in-place
-        # Note: routed_scaling_factor is already applied inside experts() to topk_weights
         layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
@@ -208,7 +160,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
             num_expert_group=self.n_group,
         )
 
-        # Add shared expert output if computed separately
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             hidden_states.add_(shared_output)
 
@@ -220,19 +171,14 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: LlamaInferStateInfo,
         layer_weight: Glm4MoeTransformerLayerWeight,
     ) -> torch.Tensor:
-        """MoE FFN forward pass for EP (Expert Parallelism) mode."""
         hidden_states = input
         token_num, hidden_dim = hidden_states.shape
 
-        # Compute shared expert output if exists
         if self.n_shared_experts is not None:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 
-        # Compute router logits
         router_logits = layer_weight.moe_gate.mm(hidden_states)
 
-        # Run MoE experts in EP mode
-        # Note: routed_scaling_factor is already applied inside experts() to topk_weights
         ep_output = layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
@@ -244,7 +190,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
             is_prefill=infer_state.is_prefill,
         )
 
-        # Add shared expert output if exists
         if self.n_shared_experts is not None:
             ep_output.add_(shared_output)
 
@@ -256,7 +201,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: LlamaInferStateInfo,
         layer_weight: Glm4MoeTransformerLayerWeight,
     ):
-        """Placeholder - will be bound to actual implementation."""
         raise Exception("_tpsp_ffn needs to be bound to real implementation")
 
     def _tpsp_ffn_tp(
@@ -265,7 +209,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: LlamaInferStateInfo,
         layer_weight: Glm4MoeTransformerLayerWeight,
     ) -> torch.Tensor:
-        """TPSP FFN for TP mode with all-gather/reduce-scatter for sequence parallelism."""
         input = input.view(-1, self.embed_dim_)
 
         if self.tp_world_size_ > 1:
@@ -296,7 +239,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: LlamaInferStateInfo,
         layer_weight: Glm4MoeTransformerLayerWeight,
     ) -> torch.Tensor:
-        """TPSP FFN for EP mode."""
         input = input.view(-1, self.embed_dim_)
         ffn_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
         return ffn_out
@@ -309,13 +251,11 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: LlamaInferStateInfo,
         layer_weight: Glm4MoeTransformerLayerWeight,
     ):
-        """Overlapped TPSP token forward for decode phase with MoE."""
         if not self.is_moe:
             return super().overlap_tpsp_token_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )
 
-        # 0 attention
         _0_input1 = self._att_norm(input_embdings, infer_state, layer_weight)
         _0_q, _0_cache_kv = self._tpsp_get_qkv(_0_input1, infer_state, layer_weight)
         _0_input1 = None
@@ -328,16 +268,13 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         _0_router_logits = layer_weight.moe_gate.mm(_0_input1)
 
-        # 1 hook
         if getattr(infer_state1, "hook", None) is not None:
             infer_state1.hook()
             infer_state1.hook = None
 
-        # 0 shared expert
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             _0_shared_output = LlamaTransformerLayerInfer._ffn(self, _0_input1, infer_state, layer_weight)
 
-        # 0 dispatch
         (
             _0_recv_x,
             _0_masked_m,
@@ -348,7 +285,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         ) = layer_weight.experts.low_latency_dispatch(_0_input1, _0_router_logits)
         infer_state.hook = _0_hook
 
-        # 1 attention
         _1_input1 = self._att_norm(input_embdings1, infer_state1, layer_weight)
         _1_q, _1_cache_kv = self._tpsp_get_qkv(_1_input1, infer_state1, layer_weight)
         _1_input1 = None
@@ -362,16 +298,13 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         _1_router_logits = layer_weight.moe_gate.mm(_1_input1)
 
-        # 0 hook
         if getattr(infer_state, "hook", None) is not None:
             infer_state.hook()
             infer_state.hook = None
 
-        # 1 shared expert
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             _1_shared_output = LlamaTransformerLayerInfer._ffn(self, _1_input1, infer_state1, layer_weight)
 
-        # 1 dispatch
         (
             _1_recv_x,
             _1_masked_m,
@@ -382,27 +315,22 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         ) = layer_weight.experts.low_latency_dispatch(_1_input1, _1_router_logits)
         infer_state1.hook = _1_hook
 
-        # moe compute
         expected_m = triton.cdiv(
             input_embdings.shape[0] * get_global_world_size() * self.num_experts_per_tok, self.n_routed_experts
         )
         _0_moe_out = layer_weight.experts.masked_group_gemm(_0_recv_x, _0_masked_m, input_embdings.dtype, expected_m)
 
-        # 1 hook
         if getattr(infer_state1, "hook", None) is not None:
             infer_state1.hook()
             infer_state1.hook = None
 
-        # 0 combine
         _0_ffn_out, _0_hook = layer_weight.experts.low_latency_combine(
             _0_moe_out, _0_topk_idx, _0_topk_weight, _0_handle
         )
         infer_state.hook = _0_hook
 
-        # moe compute for batch 1
         _1_moe_out = layer_weight.experts.masked_group_gemm(_1_recv_x, _1_masked_m, input_embdings1.dtype, expected_m)
 
-        # 0 hook
         if getattr(infer_state, "hook", None) is not None:
             infer_state.hook()
             if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
@@ -410,7 +338,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
             input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
             infer_state.hook = None
 
-        # 1 combine
         _1_ffn_out, _1_hook = layer_weight.experts.low_latency_combine(
             _1_moe_out, _1_topk_idx, _1_topk_weight, _1_handle
         )
@@ -435,13 +362,11 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: LlamaInferStateInfo,
         layer_weight: Glm4MoeTransformerLayerWeight,
     ):
-        """Overlapped TPSP context forward for prefill phase with MoE."""
         if not self.is_moe:
             return super().overlap_tpsp_context_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )
 
-        # 0 attention
         _0_input1 = self._att_norm(input_embdings, infer_state, layer_weight)
         _0_q, _0_cache_kv = self._tpsp_get_qkv(_0_input1, infer_state, layer_weight)
         _0_input1 = None
@@ -454,7 +379,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         _0_router_logits = layer_weight.moe_gate.mm(_0_input1)
 
-        # wait last 1 combine
         if getattr(infer_state1, "hook", None) is not None:
             infer_state1.hook()
             infer_state1.hook = None
@@ -466,7 +390,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         _0_overlap_event = Buffer.capture()
 
-        # 1 attention
         _1_input1 = self._att_norm(input_embdings1, infer_state1, layer_weight)
         _1_q, _1_cache_kv = self._tpsp_get_qkv(_1_input1, infer_state1, layer_weight)
         _1_input1 = None
@@ -480,7 +403,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         _1_router_logits = layer_weight.moe_gate.mm(_1_input1)
 
-        # 0 dispatch execute
         (
             _0_recv_x,
             _0_recv_topk_idx,
@@ -491,7 +413,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         ) = layer_weight.experts.dispatch(_0_qinput_tensor, _0_topk_idx, _0_topk_weight, overlap_event=_0_overlap_event)
         infer_state.hook = _0_hook
 
-        # wait 0 dispatch
         if getattr(infer_state, "hook", None) is not None:
             infer_state.hook()
             infer_state.hook = None
@@ -502,20 +423,16 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         _1_overlap_event = Buffer.capture()
 
-        # 0 shared expert
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             _0_shared_output = LlamaTransformerLayerInfer._ffn(self, _0_input1, infer_state, layer_weight)
 
-        # 1 shared expert
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             _1_shared_output = LlamaTransformerLayerInfer._ffn(self, _1_input1, infer_state1, layer_weight)
 
-        # 0 moe compute
         _0_moe_out = layer_weight.experts.prefilled_group_gemm(
             _0_num_recv_tokens_per_expert_list, _0_recv_x, _0_recv_topk_idx, _0_recv_topk_weight
         )
 
-        # 1 dispatch execute
         (
             _1_recv_x,
             _1_recv_topk_idx,
@@ -526,23 +443,19 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
         ) = layer_weight.experts.dispatch(_1_qinput_tensor, _1_topk_idx, _1_topk_weight, overlap_event=_1_overlap_event)
         infer_state1.hook = _1_hook
 
-        # wait 1 dispatch
         if getattr(infer_state1, "hook", None) is not None:
             infer_state1.hook()
             infer_state1.hook = None
 
         _0_combine_event = Buffer.capture()
 
-        # 0 combine execute
         _0_ffn_out, _0_hook = layer_weight.experts.combine(_0_moe_out, _0_handle, _0_combine_event)
         infer_state.hook = _0_hook
 
-        # 1 moe compute
         _1_moe_out = layer_weight.experts.prefilled_group_gemm(
             _1_num_recv_tokens_per_expert_list, _1_recv_x, _1_recv_topk_idx, _1_recv_topk_weight
         )
 
-        # wait 0 combine
         if getattr(infer_state, "hook", None) is not None:
             infer_state.hook()
             infer_state.hook = None
@@ -553,7 +466,6 @@ class Glm4MoeTransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_ffn_out.add_(_0_shared_output)
         input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
 
-        # 1 combine execute
         _1_ffn_out, _1_hook = layer_weight.experts.combine(_1_moe_out, _1_handle, _1_combine_event)
 
         def _1_hook_post():

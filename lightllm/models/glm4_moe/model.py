@@ -8,10 +8,7 @@ from lightllm.distributed.communication_op import dist_group_manager
 
 @ModelRegistry("glm4_moe")
 class Glm4MoeTpPartModel(LlamaTpPartModel):
-    # weight class
     transformer_weight_class = Glm4MoeTransformerLayerWeight
-
-    # infer class
     transformer_layer_infer_class = Glm4MoeTransformerLayerInfer
 
     def __init__(self, kvargs):
@@ -27,16 +24,12 @@ class Glm4MoeTpPartModel(LlamaTpPartModel):
 
     def _init_some_value(self):
         super()._init_some_value()
-        # GLM-4.7 uses partial rotary with factor 0.5
         self.partial_rotary_factor = self.config.get("partial_rotary_factor", 0.5)
-        # Store head_dim explicitly
         self.head_dim_ = self.config.get("head_dim", self.config["hidden_size"] // self.config["num_attention_heads"])
         return
 
     def _init_custom(self):
-        # Initialize partial rotary embeddings
         self._init_to_get_partial_rotary()
-        # Initialize expert parallelism group for 160 routed experts
         n_routed_experts = self.config.get("n_routed_experts", 160)
         dist_group_manager.new_deepep_group(n_routed_experts, self.config["hidden_size"])
         return
@@ -66,12 +59,10 @@ class Glm4MoeTpPartModel(LlamaTpPartModel):
         return
 
     def _verify_params(self):
-        assert self.load_way in ["HF", "DS"], "GLM-4.7 MoE only supports HF and DS format to load"
+        assert self.load_way in ["HF", "DS"]
         assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         return
 
     def autotune_layers(self):
-        # For GLM-4.7, first 3 layers are dense, rest are MoE
-        # Autotune first few dense layers + at least one MoE layer
         return self.config.get("first_k_dense_replace", 3) + 1
