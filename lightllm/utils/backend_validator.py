@@ -9,10 +9,10 @@ logger = init_logger(__name__)
 _VALIDATION_TIMEOUT = 30
 
 
-def _compute_ground_truth(q, k, v):
+def _compute_ground_truth(q, k, v, is_causal=True):
     """Ground truth using PyTorch SDPA."""
     with torch.no_grad():
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
 
 
 def _validate_fa3():
