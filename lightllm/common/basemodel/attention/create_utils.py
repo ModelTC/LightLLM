@@ -2,7 +2,7 @@
 
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.backend_validators import validate_backend, is_backend_available
+from lightllm.utils.backend_validator import validate, is_available
 from .base_att import BaseAttBackend
 from .triton.fp import TritonAttBackend
 from .triton.int4kv import Int4kvTritonAttBackend
@@ -57,10 +57,10 @@ def _auto_select_backend(llm_dtype: str, is_mla: bool = False) -> type:
     backend_map = mla_data_type_to_backend if is_mla else data_type_to_backend
 
     for backend_name in _BACKEND_PRIORITY:
-        if not is_backend_available(backend_name):
+        if not is_available(backend_name):
             continue
 
-        if validate_backend(backend_name):
+        if validate(backend_name):
             logger.info(f"Auto-selected {backend_name} backend (validated)")
             return backend_map[llm_dtype][backend_name]
 
