@@ -17,8 +17,11 @@ def _compute_ground_truth(q, k, v, is_causal=True):
 
 def _validate_fa3():
     """Validate FA3 with ground truth."""
+    from lightllm.utils.device_utils import is_hopper
     from lightllm.utils.sgl_utils import flash_attn_varlen_func
 
+    if not is_hopper():
+        return False, "Not a Hopper GPU"
     if flash_attn_varlen_func is None:
         return False, "flash_attn_varlen_func is None"
 
@@ -29,7 +32,6 @@ def _validate_fa3():
 
     expected = _compute_ground_truth(q, k, v)
 
-    # Reshape for varlen: (total, heads, dim)
     q_flat = q.transpose(1, 2).reshape(batch * seq, heads, dim)
     k_flat = k.transpose(1, 2).reshape(batch * seq, heads, dim)
     v_flat = v.transpose(1, 2).reshape(batch * seq, heads, dim)
@@ -65,7 +67,6 @@ def _validate_flashinfer():
 
     expected = _compute_ground_truth(q, k, v)
 
-    # Reshape: (batch * seq, heads, dim)
     q_flat = q.transpose(1, 2).reshape(batch * seq, heads, dim)
     k_flat = k.transpose(1, 2).reshape(batch * seq, heads, dim)
     v_flat = v.transpose(1, 2).reshape(batch * seq, heads, dim)
@@ -129,30 +130,8 @@ def _run_in_subprocess(backend_name, pipe):
         pipe.send((False, str(e)))
 
 
-def is_available(backend_name: str) -> bool:
-    """Quick check if backend dependencies exist."""
-    try:
-        if backend_name == "fa3":
-            from lightllm.utils.device_utils import is_hopper
-            from lightllm.utils.sgl_utils import flash_attn_varlen_func
-
-            return is_hopper() and flash_attn_varlen_func is not None
-        elif backend_name == "flashinfer":
-            import flashinfer  # noqa: F401
-
-            return True
-        elif backend_name == "triton":
-            return True
-    except Exception:
-        pass
-    return False
-
-
 def validate(backend_name: str) -> bool:
     """Validate backend in subprocess with ground truth check."""
-    if not is_available(backend_name):
-        return False
-
     try:
         ctx = mp.get_context("spawn")
         parent, child = ctx.Pipe(duplex=False)
