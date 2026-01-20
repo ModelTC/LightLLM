@@ -28,6 +28,7 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
     def _create_weight(self):
         tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
         self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.load_cnt = 0
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name not in weights:
@@ -40,6 +41,10 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
         logger.info(f"loaded weight vocab_size: {self.vocab_size}")
         self.weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
+        self.load_cnt += 1
+
+    def verify_load(self):
+        return self.load_cnt == 1
 
     def _native_forward(
         self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty
@@ -109,6 +114,7 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
+        self.load_cnt = 0
         if self._embedding_weight is not None:
             self.weight = self._embedding_weight.weight
             return
@@ -128,6 +134,10 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
         ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
         logger.info(f"loaded weight vocab_size: {self.vocab_size}")
         self.weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
+        self.load_cnt += 1
+
+    def verify_load(self):
+        return self.load_cnt == 1 or self._embedding_weight is not None
 
     def _native_forward(
         self, input: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty
@@ -171,6 +181,7 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         self.weight: torch.Tensor = torch.empty(
             self.max_position_embeddings, self.dim, dtype=self.data_type_, device=self.device_id_
         )
+        self.load_cnt = 0
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name not in weights:
@@ -182,6 +193,10 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         ), f"max_position_embeddings: {loaded_max_position_embeddings} != expected: {self.max_position_embeddings}"
         logger.info(f"loaded weight max_position_embeddings: {self.max_position_embeddings}")
         self.weight.copy_(t_weight.to(self.data_type_))
+        self.load_cnt += 1
+
+    def verify_load(self):
+        return self.load_cnt == 1
 
     def _native_forward(
         self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty

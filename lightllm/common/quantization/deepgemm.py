@@ -48,7 +48,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.block_size = 128
-        self.weight_suffix = None
+        self.weight_suffix = "weight"
         self.weight_zero_point_suffix = None
         self.weight_scale_suffix = "weight_scale_inv"
         self.has_weight_scale = True
@@ -102,9 +102,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     ) -> WeightPack:
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-        weight_scale = torch.empty(
-            expert_prefix + (out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32
-        ).cuda(device_id)
+        scale_out_dim = (out_dim + self.block_size - 1) // self.block_size
+        scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
+        weight_scale = torch.empty(expert_prefix + (scale_out_dim, scale_in_dim), dtype=torch.float32).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale)
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
@@ -112,15 +112,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         return
 
     def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        weight_pack.weight_scale[
-            start_idx // self.block_size : start_idx + weight_scale.shape[0] // self.block_size
-        ].copy_(weight_scale)
-        return
-
-    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        weight_pack.weight_zero_point[
-            start_idx // self.block_size : start_idx + weight_zero_point.shape[0] // self.block_size
-        ].copy_(weight_zero_point)
+        weight_pack.weight_scale[start_idx // self.block_size : start_idx + weight_scale.shape[0]].copy_(weight_scale)
         return
 
 
