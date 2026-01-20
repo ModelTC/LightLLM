@@ -1,0 +1,1 @@
+from .transformer_layer_infer import Glm4MoeMTPTransformerLayerInfer

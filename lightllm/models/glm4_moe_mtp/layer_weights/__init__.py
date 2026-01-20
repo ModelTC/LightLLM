@@ -1,0 +1,2 @@
+from .transformer_layer_weight import Glm4MoeMTPTransformerLayerWeight
+from .pre_and_post_layer_weight import Glm4MoeMTPPreAndPostLayerWeight
