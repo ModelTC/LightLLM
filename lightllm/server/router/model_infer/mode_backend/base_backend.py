@@ -451,7 +451,8 @@ class ModeBackend:
             monkey_patch_torch_reductions()
             if request.load_format == "flattened_bucket":
                 # Handle flattened bucket format
-                return self._update_weights_from_flattened_bucket(flattened_tensor_bucket_dict=request.named_tensors)
+                serialized_named_tensors = MultiprocessingSerializer.deserialize(request.serialized_named_tensors[self.rank_in_dp])
+                return self._update_weights_from_flattened_bucket(flattened_tensor_bucket_dict=serialized_named_tensors)
 
             # We need to get device after patch otherwise the device would be wrong
             self.device_module = torch.get_device_module("cuda")
