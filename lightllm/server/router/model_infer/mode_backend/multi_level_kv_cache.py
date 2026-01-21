@@ -26,16 +26,11 @@ class MultiLevelKvCacheModule(object):
         self.init_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.init_sync_group)
 
-        self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device="cuda")
-        self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
-
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
 
         # 一些算子模式需要同步计算和 cpu cache 的 load 和 offload 操作
-        self.need_sync_compute_stream: bool = (
-            "fa3" in self.args.llm_decode_att_backend or "fa3" in self.args.llm_prefill_att_backend
-        )
+        self.need_sync_compute_stream: bool = True
 
     def wait(self):
         """
@@ -94,18 +89,14 @@ class MultiLevelKvCacheModule(object):
                         cpu_kv_cache_scale = None
                         gpu_kv_cache_scale = None
 
-                    mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
-                    page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
-                        non_blocking=True
-                    )
                     # 将 cpu page 的内容拷贝到 gpu 页面中
                     load_cpu_kv_to_gpu(
-                        gpu_mem_indexes=mem_indexes_cuda,
+                        gpu_mem_indexes=mem_indexes.cuda(non_blocking=True),
                         gpu_kv_cache=mem_manager.kv_buffer,
                         gpu_kv_cache_scale=gpu_kv_cache_scale,
                         cpu_kv_cache=cpu_kv_cache,
                         cpu_kv_cache_scale=cpu_kv_cache_scale,
-                        page_indexes=page_indexes_cuda,
+                        page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
                         tp_index=self.backend.rank_in_dp,
                         tp_world_size=self.backend.dp_world_size,
                         grid_num=grid_num,
@@ -230,12 +221,6 @@ class MultiLevelKvCacheModule(object):
 
             page_indexes = torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
             page_readies = torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
-            assert len(page_indexes) <= self.page_index_buffer.shape[0]
-            cuda_page_indexes = self.page_index_buffer[: len(page_indexes)]
-            cuda_page_readies = self.page_ready_buffer[: len(page_readies)]
-            cuda_page_indexes.copy_(page_indexes, non_blocking=True)
-            cuda_page_readies.copy_(page_readies, non_blocking=True)
-
             move_token_num = item_size * self.args.cpu_cache_token_page_size
             assert req.cur_kv_len >= item_size * self.args.cpu_cache_token_page_size
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
@@ -263,8 +248,8 @@ class MultiLevelKvCacheModule(object):
                 gpu_kv_cache_scale=gpu_kv_cache_scale,
                 cpu_kv_cache=cpu_kv_cache,
                 cpu_kv_cache_scale=cpu_kv_cache_scale,
-                page_indexes=cuda_page_indexes,
-                page_readies=cuda_page_readies,
+                page_indexes=page_indexes,
+                page_readies=page_readies,
                 tp_index=self.backend.rank_in_dp,
                 tp_world_size=self.backend.dp_world_size,
                 grid_num=grid_num,

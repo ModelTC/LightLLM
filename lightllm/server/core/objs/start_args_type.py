@@ -158,3 +158,7 @@ class StartArgs:
     # multi_modal
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
+
+    # hybrid attention model (e.g., qwen3next)
+    mamba_cache_size: int = field(default=2000)
+    mamba_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})

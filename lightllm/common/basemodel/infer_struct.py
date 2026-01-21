@@ -32,6 +32,8 @@ class InferStateInfo:
         self.batch_size: int = None
         self.total_token_num: int = None
         self.b_req_idx: torch.Tensor = None
+        self.b_mtp_index: torch.Tensor = None  # MTP index for each batch item (0: main, 1-mtp_step: candidates)
+        self.b_start_loc: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
 
         self.b_shared_seq_len: torch.Tensor = None  # only for diverse mode used in decode phase.
@@ -98,7 +100,10 @@ class InferStateInfo:
         self.dp_output_split_sizes: List[List[int]] = None
         self.dp_input_split_sizes: List[List[int]] = None
 
-    def init_some_extra_state(self, model):
+        # 专门用于管理混合注意力模型的buffer
+        self.buffer_indexes: torch.Tensor = None
+
+    def init_some_extra_state(self, model, input_ids: torch.Tensor = None):
         if self.is_prefill:
             (
                 self.b_q_seq_len,
@@ -121,6 +126,9 @@ class InferStateInfo:
                 self.position_ids,
             ) = gen_decode_params(self.b_seq_len)
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
+            # max_kv_seq_len is already set in _create_inferstate from model_input.max_kv_seq_len
+            self.max_q_seq_len = self.b_q_seq_len.max().item() if self.b_q_seq_len.numel() > 0 else 1
+            self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def init_att_state(self):
         if self.is_prefill:
@@ -136,7 +144,7 @@ class InferStateInfo:
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)
-                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
+                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr() and attr_.shape == attr_value.shape:
                     attr_.copy_(attr_value, non_blocking=True)
 
         self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
