@@ -462,7 +462,9 @@ class ModeBackend:
             def _unwrap_tensor(tensor, tp_rank, device):
                 if isinstance(tensor, LocalSerializedTensor):
                     tensor = tensor.get(tp_rank)
-                return tensor.to(device)
+                clone = tensor.to(device).clone()
+                del tensor # free the ipc tensor
+                return clone
 
             named_tensors = {
                 name: _unwrap_tensor(tensor, tp_rank=self.rank_in_dp, device=infered_device)
