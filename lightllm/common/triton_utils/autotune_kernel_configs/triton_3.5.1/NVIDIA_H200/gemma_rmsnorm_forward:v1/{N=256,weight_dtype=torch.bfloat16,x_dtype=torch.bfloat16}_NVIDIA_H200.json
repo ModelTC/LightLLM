@@ -1,0 +1,7 @@
+{
+  "256": {
+    "BLOCK_SIZE": 256,
+    "num_stages": 4,
+    "num_warps": 1
+  }
+}
