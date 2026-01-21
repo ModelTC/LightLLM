@@ -77,7 +77,7 @@ def get_prefill_att_backend_class(index=0) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
-    if backend_str != "None":
+    if backend_str != "auto":
         return data_type_to_backend[llm_dtype][backend_str]
     else:
         return _auto_select_backend(llm_dtype, is_mla=False)
@@ -87,7 +87,7 @@ def get_decode_att_backend_class(index=0) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
-    if backend_str != "None":
+    if backend_str != "auto":
         return data_type_to_backend[llm_dtype][backend_str]
     else:
         return _auto_select_backend(llm_dtype, is_mla=False)
@@ -97,7 +97,7 @@ def get_mla_prefill_att_backend_class(index=0) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
-    if backend_str != "None":
+    if backend_str != "auto":
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
         return _auto_select_backend(llm_dtype, is_mla=True)
@@ -107,7 +107,7 @@ def get_mla_decode_att_backend_class(index=0) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
-    if backend_str != "None":
+    if backend_str != "auto":
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
         return _auto_select_backend(llm_dtype, is_mla=True)
