@@ -4,10 +4,12 @@ import multiprocessing as mp
 import os
 import torch
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.dist_utils import get_global_rank
+from functools import lru_cache
 
 logger = init_logger(__name__)
 
-_VALIDATION_TIMEOUT = 30
+_VALIDATION_TIMEOUT = 30 * 60  # 30 minutes
 
 
 def _compute_ground_truth(q, k, v, is_causal=True):
@@ -144,11 +146,24 @@ def _run_in_subprocess(backend_name, pipe):
         devnull.close()
 
 
+@lru_cache(maxsize=None)
 def validate(backend_name: str) -> bool:
+    if get_global_rank() == 0:
+        validate_ok = _validate(backend_name)
+        torch.distributed.broadcast_object_list([validate_ok], src=0)
+    else:
+        validate_ok = [None]
+        torch.distributed.broadcast_object_list(validate_ok, src=0)
+        validate_ok = validate_ok[0]
+    return validate_ok
+
+
+def _validate(backend_name: str) -> bool:
     """Validate backend in subprocess with ground truth check."""
     try:
         ctx = mp.get_context("spawn")
         parent, child = ctx.Pipe(duplex=False)
+        logger.info(f"Validating {backend_name} backend start, please wait ...")
         proc = ctx.Process(target=_run_in_subprocess, args=(backend_name, child))
         proc.start()
         proc.join(timeout=_VALIDATION_TIMEOUT)
@@ -168,7 +183,7 @@ def validate(backend_name: str) -> bool:
             if success:
                 logger.info(f"{backend_name} validated")
                 return True
-            logger.warning(f"{backend_name} validation failed: {err}")
+            logger.warning(f"{backend_name} validation failed: {str(err)[0:88]}")
         return False
 
     except Exception as e:
