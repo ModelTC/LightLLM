@@ -4,10 +4,12 @@ from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, 
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from typing import Tuple
+from .env_utils import set_flashinfer_envs
 
 
 class MlaFlashInferAttBackend(BaseAttBackend):
     def __init__(self, model):
+        set_flashinfer_envs()
         super().__init__(model=model)
         num_heads = model.config["num_attention_heads"]
         self.tp_q_head_num = num_heads // get_dp_world_size()
