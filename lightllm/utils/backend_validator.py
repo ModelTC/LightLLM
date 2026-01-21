@@ -120,7 +120,14 @@ def _validate_triton():
 
 
 def _run_in_subprocess(backend_name, pipe):
-    """Run validation in subprocess."""
+    """Run validation in subprocess with suppressed output."""
+    import sys
+
+    # Redirect stdout/stderr to /dev/null to suppress verbose error messages
+    devnull = open(os.devnull, "w")
+    sys.stdout = devnull
+    sys.stderr = devnull
+
     try:
         if backend_name == "fa3":
             success, err = _validate_fa3()
@@ -133,6 +140,8 @@ def _run_in_subprocess(backend_name, pipe):
         pipe.send((success, err))
     except Exception as e:
         pipe.send((False, str(e)))
+    finally:
+        devnull.close()
 
 
 def validate(backend_name: str) -> bool:
