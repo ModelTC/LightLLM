@@ -31,9 +31,7 @@ DeepSeek-R1
     python -m lightllm.server.api_server \
         --model_dir /path/to/DeepSeek-R1 \
         --reasoning_parser deepseek-r1 \
-        --tp 8 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend fa3
+        --tp 8
 
 DeepSeek-V3
 ~~~~~~~~~~~

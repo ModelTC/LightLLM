@@ -1,4 +1,4 @@
-.. _tutorial/api_server_args_zh:
+.. _tutorial/api_server_args:
 
 APIServer Parameter Details
 ===========================
@@ -303,11 +303,29 @@ Performance Optimization Parameters
 
     The inference backend will use microbatch overlap mode for prefill
     
-    Currently only supports deepseek series models
+    Currently only supports deepseek series.
 
 .. option:: --enable_decode_microbatch_overlap
 
     The inference backend will use microbatch overlap mode for decoding
+
+.. option:: --llm_prefill_att_backend
+
+    Set the attention backend for the prefill phase. Available options:
+
+    * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
+    * ``fa3``: Use Flash-Attention 3 backend
+    * ``flashinfer``: Use FlashInfer backend
+    * ``triton``: Use Triton backend
+
+.. option:: --llm_decode_att_backend
+
+    Set the attention backend for the decode phase. Available options:
+
+    * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
+    * ``fa3``: Use Flash-Attention 3 backend
+    * ``flashinfer``: Use FlashInfer backend
+    * ``triton``: Use Triton backend
 
 .. option:: --disable_cudagraph
 

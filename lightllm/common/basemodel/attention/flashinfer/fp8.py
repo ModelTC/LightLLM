@@ -2,10 +2,12 @@ import dataclasses
 import torch
 from ..base_att import AttControl
 from .fp import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
+from .env_utils import set_flashinfer_envs
 
 
 class Fp8FlashInferAttBackend(FlashInferAttBackend):
     def __init__(self, model):
+        set_flashinfer_envs()
         super().__init__(model=model)
         self.kv_data_type = torch.float8_e4m3fn
 

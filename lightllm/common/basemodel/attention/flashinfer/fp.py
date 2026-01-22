@@ -3,10 +3,12 @@ import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 from ...triton_kernel.repack_kv_index import repack_kv_index
+from .env_utils import set_flashinfer_envs
 
 
 class FlashInferAttBackend(BaseAttBackend):
     def __init__(self, model):
+        set_flashinfer_envs()
         super().__init__(model=model)
         tp_world_size = get_dp_world_size()
         self.tp_q_head_num = model.config["num_attention_heads"] // tp_world_size

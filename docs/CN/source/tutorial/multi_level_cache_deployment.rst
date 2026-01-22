@@ -66,8 +66,6 @@ LightLLM 的多级缓存系统采用分层设计:
         --model_dir /path/to/Qwen3-235B-A22B \
         --tp 8 \
         --graph_max_batch_size 500 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend fa3  \
         --mem_fraction 0.88 \
         --enable_cpu_cache \
         --cpu_cache_storage_size 400 \
@@ -82,7 +80,6 @@ LightLLM 的多级缓存系统采用分层设计:
 - ``--model_dir``: 模型文件路径,支持本地路径或 HuggingFace 模型名称
 - ``--tp 8``: 张量并行度,使用 8 个 GPU 进行模型推理
 - ``--graph_max_batch_size 500``: CUDA Graph 最大批次大小,影响吞吐量和显存占用
-- ``--llm_prefill_att_backend fa3``: 启用 Flash Attention 3.0,提升注意力计算速度，也可以换成flashinfer后端性能更佳
 - ``--mem_fraction 0.88``: GPU 显存使用比例,建议设置为 0.88及以下
 
 CPU 缓存参数
@@ -131,8 +128,6 @@ CPU 缓存参数
         --model_dir /path/to/Qwen3-235B-A22B \
         --tp 8 \
         --graph_max_batch_size 500 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend fa3  \
         --mem_fraction 0.88 \
         --enable_cpu_cache \
         --cpu_cache_storage_size 400 \

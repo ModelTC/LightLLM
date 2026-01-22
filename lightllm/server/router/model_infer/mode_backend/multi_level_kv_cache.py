@@ -2,6 +2,7 @@ import threading
 import torch.distributed as dist
 import torch
 import dataclasses
+from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
@@ -32,11 +33,6 @@ class MultiLevelKvCacheModule(object):
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
 
-        # 一些算子模式需要同步计算和 cpu cache 的 load 和 offload 操作
-        self.need_sync_compute_stream: bool = (
-            "fa3" in self.args.llm_decode_att_backend or "fa3" in self.args.llm_prefill_att_backend
-        )
-
     def wait(self):
         """
         等待 cpu cache 相关页面注册完成
@@ -44,6 +40,26 @@ class MultiLevelKvCacheModule(object):
         attach_shm_handle = self.cpu_cache_client.attach_shm_handle
         if attach_shm_handle is not None:
             attach_shm_handle.wait()
+
+    @lru_cache()
+    def need_sync_compute_stream(self) -> bool:
+        """
+        fa3 在 offload 和 load kv cache 的时候，需要等待计算流完成，否则可能会概率崩溃。
+        """
+
+        model = self.backend.model
+        att_backends = [
+            model.prefill_att_backend,
+            model.decode_att_backend,
+            model.prefill_att_backend1,
+            model.decode_att_backend1,
+        ]
+        for att_backend in att_backends:
+            if att_backend is not None and "fa3" in att_backend.__class__.__name__.lower():
+                logger.info("MultiLevelKvCacheModule: need sync compute stream for fa3 backend.")
+                return True
+        logger.info("MultiLevelKvCacheModule: no need sync compute stream.")
+        return False
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
@@ -72,7 +88,7 @@ class MultiLevelKvCacheModule(object):
 
                     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
-                    if self.need_sync_compute_stream:
+                    if self.need_sync_compute_stream():
                         # TODO fa3 现在必须使用同步模式, 未来需要移除
                         g_infer_context.get_overlap_stream().synchronize()
 
@@ -166,7 +182,7 @@ class MultiLevelKvCacheModule(object):
 
             assert req.cpu_cache_task_status.is_not_started()
 
-            if self.need_sync_compute_stream:
+            if self.need_sync_compute_stream():
                 # TODO fa3 现在必须使用同步模式, 未来需要移除, 必须等待 overlap stream 上的计算任务完成，不然会崩溃
                 g_infer_context.get_overlap_stream().synchronize()
 
@@ -179,7 +195,7 @@ class MultiLevelKvCacheModule(object):
             else:
                 true_finished_reqs.append(req)
 
-        if self.need_sync_compute_stream:
+        if self.need_sync_compute_stream():
             # TODO fa3 现在必须使用同步模式, 未来需要移除
             cpu_stream.synchronize()
 
