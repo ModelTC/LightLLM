@@ -1,4 +1,4 @@
-.. _tutorial/api_server_args_zh:
+.. _tutorial/api_server_args:
 
 APIServer 参数详解
 ==================
@@ -310,6 +310,24 @@ PD 分离模式参数
 .. option:: --enable_decode_microbatch_overlap
 
     推理后端将为解码使用微批次重叠模式
+
+.. option:: --llm_prefill_att_backend
+
+    设置预填充（Prefill）阶段使用的注意力后端。可选值为：
+
+    * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > flashinfer > triton
+    * ``fa3``: 使用 Flash-Attention 3 后端
+    * ``flashinfer``: 使用 FlashInfer 后端
+    * ``triton``: 使用 Triton 后端
+
+.. option:: --llm_decode_att_backend
+
+    设置解码（Decode）阶段使用的注意力后端。可选值为：
+
+    * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > flashinfer > triton
+    * ``fa3``: 使用 Flash-Attention 3 后端
+    * ``flashinfer``: 使用 FlashInfer 后端
+    * ``triton``: 使用 Triton 后端
     
 .. option:: --llm_kv_type
 
