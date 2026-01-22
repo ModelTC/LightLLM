@@ -46,11 +46,10 @@ mla_data_type_to_backend = {
     },
 }
 
-# Backend priority order (highest to lowest)
-_BACKEND_PRIORITY = ["fa3", "flashinfer", "triton"]
 
-
-def _auto_select_backend(llm_dtype: str, is_mla: bool = False) -> type:
+def _auto_select_backend(
+    llm_dtype: str, is_mla: bool = False, priority_list: list = ["fa3", "flashinfer", "triton"]
+) -> type:
     """Auto-select the best available backend with validation.
 
     Priority: FA3 > FlashInfer > Triton
@@ -58,7 +57,7 @@ def _auto_select_backend(llm_dtype: str, is_mla: bool = False) -> type:
     """
     backend_map = mla_data_type_to_backend if is_mla else data_type_to_backend
 
-    for backend_name in _BACKEND_PRIORITY:
+    for backend_name in priority_list:
         if validate(backend_name):
             logger.info(f"Auto-selected {backend_name} backend (validated)")
             return backend_map[llm_dtype][backend_name]
@@ -68,41 +67,41 @@ def _auto_select_backend(llm_dtype: str, is_mla: bool = False) -> type:
     return backend_map[llm_dtype]["triton"]
 
 
-def get_prefill_att_backend_class(index=0) -> BaseAttBackend:
+def get_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
         return data_type_to_backend[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, is_mla=False)
+        return _auto_select_backend(llm_dtype, is_mla=False, priority_list=priority_list)
 
 
-def get_decode_att_backend_class(index=0) -> BaseAttBackend:
+def get_decode_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
         return data_type_to_backend[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, is_mla=False)
+        return _auto_select_backend(llm_dtype, is_mla=False, priority_list=priority_list)
 
 
-def get_mla_prefill_att_backend_class(index=0) -> BaseAttBackend:
+def get_mla_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, is_mla=True)
+        return _auto_select_backend(llm_dtype, is_mla=True, priority_list=priority_list)
 
 
-def get_mla_decode_att_backend_class(index=0) -> BaseAttBackend:
+def get_mla_decode_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, is_mla=True)
+        return _auto_select_backend(llm_dtype, is_mla=True, priority_list=priority_list)
