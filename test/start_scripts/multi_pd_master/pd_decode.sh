@@ -13,7 +13,6 @@ MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
 --nccl_port 12322 \
 --tp 8 \
 --dp 8 \
---llm_prefill_att_backend fa3 --llm_decode_att_backend fa3
 --config_server_host $config_server_host \
 --config_server_port 60088
 # if you want to enable microbatch overlap, you can uncomment the following lines
