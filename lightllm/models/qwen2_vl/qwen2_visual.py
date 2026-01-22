@@ -127,6 +127,7 @@ class VisionFlashAttention(nn.Module):
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
+        self.vit_att_backend = None
 
     def forward(
         self,
@@ -143,7 +144,7 @@ class VisionFlashAttention(nn.Module):
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
 
-        flash_attention_fwd(q, k, v, attn_output, cu_seqlens, max_seqlen)
+        self.vit_att_backend.vit_att(q, k, v, attn_output, cu_seqlens, max_seqlen)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
@@ -232,6 +233,11 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
             self.data_type = torch.float32
         else:
             raise ValueError(f"Unsupport datatype {self.data_type}!")
+        return
+
+    def _init_vit_att(self, vit_att):
+        for blk in self.blocks:
+            blk.attn.vit_att_backend = vit_att
         return
 
     def load_model(self, weight_dir):

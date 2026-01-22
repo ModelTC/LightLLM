@@ -1,6 +1,6 @@
 import dataclasses
 import torch
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl, BaseVitAttState
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
@@ -35,6 +35,14 @@ class Fa3AttBackend(BaseAttBackend):
 
     def create_att_decode_state(self, infer_state) -> "Fa3DecodeAttState":
         return Fa3DecodeAttState(backend=self, infer_state=infer_state)
+
+
+class Fa3ViTAttBackend(BaseAttBackend):
+    def __init__(self, model):
+        super().__init__(model=model)
+
+    def create_vit_att_state(self) -> "Fa3VitAttState":
+        return Fa3VitAttState(backend=self)
 
 
 @dataclasses.dataclass
@@ -240,4 +248,63 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             return_softmax_lse=False,
             sinks=sink_weight,
         )
+        return o
+
+
+@dataclasses.dataclass
+class Fa3VitAttState(BaseVitAttState):
+
+    backend: "Fa3ViTAttBackend"
+
+    def vit_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        o: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> None:
+        self.backend: Fa3ViTAttBackend = self.backend  # for typing
+
+        head_dim = q.shape[-1]
+        softmax_scale = head_dim ** -0.5
+        window_size = (-1, -1)
+        torch.ops.sgl_kernel.fwd.default(
+            q,
+            k,
+            v,
+            None,  # k_new
+            None,  # v_new
+            None,  # qv
+            o,  # out
+            cu_seqlens,
+            cu_seqlens,
+            None,  # cu_seqlens_k_new
+            None,
+            None,
+            max_seqlen,
+            max_seqlen,
+            None,  # page_table,
+            None,  # kv_batch_idx
+            None,  # leftpad_k
+            None,  # rotary cos
+            None,  # rotary sin
+            None,  # seqlens_rotary
+            None,
+            None,
+            None,
+            softmax_scale,
+            False,
+            window_size[0],
+            window_size[1],
+            0.0,
+            is_rotary_interleaved=False,
+            scheduler_metadata=None,
+            num_splits=1,
+            pack_gqa=None,
+            sm_margin=0,
+            sinks=None,
+        )
+
         return o

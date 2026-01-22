@@ -37,6 +37,9 @@ class BaseAttBackend:
     def create_att_decode_state(self) -> "BaseDecodeAttState":
         raise NotImplementedError("not impl")
 
+    def create_vit_att_state(self) -> "BaseVitAttState":
+        raise NotImplementedError("not impl")
+
     def _find_layer_index(
         self, k: torch.Tensor, v: torch.Tensor, att_state: Union["BasePrefillAttState", "BaseDecodeAttState"]
     ) -> int:
@@ -115,3 +118,20 @@ class BaseDecodeAttState(ABC):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         pass
+
+
+class BaseVitAttState(ABC):
+
+    backend: BaseAttBackend = None
+
+    @abstractmethod
+    def vit_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        o: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        raise NotImplementedError("not impl")
