@@ -52,15 +52,16 @@ Suitable for expert parallelism deployment of MoE models like DeepSeek-V2/V3.
 .. code-block:: bash
 
     # H200 Single node DeepSeek-R1 DP + EP Mode
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
+    LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
     --model_dir /path/DeepSeek-R1 \
     --tp 8 \
     --dp 8 \
     --llm_prefill_att_backend fa3 \
-    --llm_decode_att_backend fa3
+    --llm_decode_att_backend fa3 \
+    --enable_ep_moe
 
 **Parameter Description:**
-- `MOE_MODE=EP`: Set expert parallelism mode
+- `--enable_ep_moe`: Set expert parallelism mode
 - `--tp 8`: Tensor parallelism
 - `--dp 8`: Data parallelism, usually set to the same value as tp
 
@@ -128,7 +129,7 @@ Suitable for deploying MoE models across multiple nodes.
     # H200 Multi-node DeepSeek-R1 EP Mode Node 0
     # Usage: sh multi_node_ep_node0.sh <nccl_host>
     export nccl_host=$1
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
+    LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
     --model_dir /path/DeepSeek-R1 \
     --tp 16 \
     --dp 16 \
@@ -137,7 +138,7 @@ Suitable for deploying MoE models across multiple nodes.
     --nnodes 2 \
     --node_rank 0 \
     --nccl_host $nccl_host \
-    --nccl_port 2732
+    --nccl_port 2732 --enable_ep_moe
 
 **Node 1 Launch Command:**
 
@@ -146,7 +147,7 @@ Suitable for deploying MoE models across multiple nodes.
     # H200 Multi-node DeepSeek-R1 EP Mode Node 1
     # Usage: sh multi_node_ep_node1.sh <nccl_host>
     export nccl_host=$1
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
+    LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
     --model_dir /path/DeepSeek-R1 \
     --tp 16 \
     --dp 16 \
@@ -155,7 +156,7 @@ Suitable for deploying MoE models across multiple nodes.
     --nnodes 2 \
     --node_rank 1 \
     --nccl_host $nccl_host \
-    --nccl_port 2732
+    --nccl_port 2732 --enable_ep_moe
 
 **Optional Optimization Parameters:**
 - `--enable_prefill_microbatch_overlap`: Enable prefill microbatch overlap
@@ -192,7 +193,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d 
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+    LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
     --tp 8 \
@@ -203,7 +204,8 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
     --llm_prefill_att_backend fa3 \
     --llm_decode_att_backend fa3 \
     --disable_cudagraph \
-    --pd_master_ip $pd_master_ip 
+    --pd_master_ip $pd_master_ip \
+    --enable_ep_moe
 
 **Step 3: Launch Decode Service**
 
@@ -214,7 +216,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+    LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
     --tp 8 \
@@ -226,7 +228,8 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
     --llm_decode_att_backend fa3 \
     --disable_cudagraph \
     --pd_master_ip $pd_master_ip \
-    --pd_master_port 60011
+    --pd_master_port 60011 \
+    --enable_ep_moe
     # if you want to enable microbatch overlap, you can uncomment the following lines
     #--enable_decode_microbatch_overlap
 
@@ -283,7 +286,7 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
     export host=$1
     export config_server_host=$2
     nvidia-cuda-mps-control -d
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+    LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
     --host $host \
@@ -295,7 +298,8 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
     --llm_decode_att_backend fa3 \
     --disable_cudagraph \
     --config_server_host $config_server_host \
-    --config_server_port 60088
+    --config_server_port 60088 \
+    --enable_ep_moe
     # if you want to enable microbatch overlap, you can uncomment the following lines
     #--enable_prefill_microbatch_overlap
 
@@ -303,7 +307,7 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
     export host=$1
     export config_server_host=$2
     nvidia-cuda-mps-control -d
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+    LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
     --host $host \
@@ -314,7 +318,8 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
     --llm_prefill_att_backend fa3 \
     --llm_decode_att_backend fa3 \
     --config_server_host $config_server_host \
-    --config_server_port 60088
+    --config_server_port 60088 \
+    --enable_ep_moe
     # if you want to enable microbatch overlap, you can uncomment the following lines
     #--enable_decode_microbatch_overlap
 
