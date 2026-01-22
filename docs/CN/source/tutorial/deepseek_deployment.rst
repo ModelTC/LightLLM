@@ -49,13 +49,14 @@ LightLLM 支持以下几种部署模式：
 .. code-block:: bash
 
     # H200 单机 DeepSeek-R1 DP + EP 模式
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
+    LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
     --model_dir /path/DeepSeek-R1 \
     --tp 8 \
-    --dp 8
+    --dp 8 \
+    --enable_ep_moe
 
 **参数说明:**
-- `MOE_MODE=EP`: 设置专家并行模式
+- `--enable_ep_moe`: 设置专家并行模式
 - `--tp 8`: 张量并行度
 - `--dp 8`: 数据并行度，通常设置为与 tp 相同的值
 
@@ -119,14 +120,14 @@ LightLLM 支持以下几种部署模式：
     # H200 多机 DeepSeek-R1 EP 模式 Node 0
     # 使用方法: sh multi_node_ep_node0.sh <nccl_host>
     export nccl_host=$1
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
+    LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
     --model_dir /path/DeepSeek-R1 \
     --tp 16 \
     --dp 16 \
     --nnodes 2 \
     --node_rank 0 \
     --nccl_host $nccl_host \
-    --nccl_port 2732
+    --nccl_port 2732 --enable_ep_moe
 
 **Node 1 启动命令:**
 
@@ -135,14 +136,14 @@ LightLLM 支持以下几种部署模式：
     # H200 多机 DeepSeek-R1 EP 模式 Node 1
     # 使用方法: sh multi_node_ep_node1.sh <nccl_host>
     export nccl_host=$1
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
+    LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
     --model_dir /path/DeepSeek-R1 \
     --tp 16 \
     --dp 16 \
     --nnodes 2 \
     --node_rank 1 \
     --nccl_host $nccl_host \
-    --nccl_port 2732
+    --nccl_port 2732 --enable_ep_moe
 
 **可选优化参数:**
 - `--enable_prefill_microbatch_overlap`: 启用预填充微批次重叠
@@ -179,7 +180,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d 
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+    LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
     --tp 8 \
@@ -189,7 +190,8 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --nccl_port 2732 \
     --disable_cudagraph \
     --pd_master_ip $pd_master_ip \
-    --pd_master_port 60011
+    --pd_master_port 60011 \
+    --enable_ep_moe
     # 如果需要启用微批次重叠，可以取消注释以下行
     #--enable_prefill_microbatch_overlap
 
@@ -202,7 +204,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+    LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
     --tp 8 \
@@ -212,7 +214,8 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --nccl_port 12322 \
     --disable_cudagraph \
     --pd_master_ip $pd_master_ip \
-    --pd_master_port 60011
+    --pd_master_port 60011 \
+    --enable_ep_moe
     # 如果需要启用微批次重叠，可以取消注释以下行
     #--enable_decode_microbatch_overlap
 
@@ -269,7 +272,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     export host=$1
     export config_server_host=$2
     nvidia-cuda-mps-control -d
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+    LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
     --host $host \
@@ -279,7 +282,8 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --nccl_port 2732 \
     --disable_cudagraph \
     --config_server_host $config_server_host \
-    --config_server_port 60088
+    --config_server_port 60088 \
+    --enable_ep_moe
     # 如果需要启用微批次重叠，可以取消注释以下行
     #--enable_prefill_microbatch_overlap
 
@@ -287,7 +291,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     export host=$1
     export config_server_host=$2
     nvidia-cuda-mps-control -d
-    MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+    LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
     --host $host \
@@ -296,7 +300,8 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --tp 8 \
     --dp 8 \
     --config_server_host $config_server_host \
-    --config_server_port 60088
+    --config_server_port 60088 \
+    --enable_ep_moe
     # 如果需要启用微批次重叠，可以取消注释以下行
     #--enable_decode_microbatch_overlap
 

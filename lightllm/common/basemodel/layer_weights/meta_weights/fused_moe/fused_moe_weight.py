@@ -11,6 +11,9 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import 
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class FusedMoeWeight(BaseWeightTpl):
@@ -53,13 +56,17 @@ class FusedMoeWeight(BaseWeightTpl):
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self._init_config(network_config)
+        self._init_redundancy_expert_params()
         self._init_parallel_params()
         self.fuse_moe_impl = select_fuse_moe_impl(self.quant_method, self.enable_ep_moe)(
             n_routed_experts=self.n_routed_experts,
             num_fused_shared_experts=self.num_fused_shared_experts,
-            redundancy_expert_num=self.redundancy_expert_num,
             routed_scaling_factor=self.routed_scaling_factor,
             quant_method=self.quant_method,
+            redundancy_expert_num=self.redundancy_expert_num,
+            redundancy_expert_ids_tensor=self.redundancy_expert_ids_tensor,
+            routed_expert_counter_tensor=self.routed_expert_counter_tensor,
+            auto_update_redundancy_expert=self.auto_update_redundancy_expert,
         )
         self.lock = threading.Lock()
         self._create_weight()
@@ -73,18 +80,40 @@ class FusedMoeWeight(BaseWeightTpl):
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.scoring_func = network_config.get("scoring_func", "softmax")
 
+    def _init_redundancy_expert_params(self):
+        self.redundancy_expert_num = get_redundancy_expert_num()
+        self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
+        self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
+        self.redundancy_expert_ids_tensor = torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cuda")
+        self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
+
     def _init_parallel_params(self):
         self.local_n_routed_experts = self.n_routed_experts + self.num_fused_shared_experts
-        self.start_expert_id = 0
         self.split_inter_size = self.moe_intermediate_size // self.tp_world_size_
-        self.redundancy_expert_num = 0
         if self.enable_ep_moe:
             assert self.num_fused_shared_experts == 0, "num_fused_shared_experts must be 0 when enable_ep_moe"
-            self.redundancy_expert_num = get_redundancy_expert_num()
-            self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
+            logger.info(
+                f"global_rank {self.global_rank_} layerindex {self.layer_num_} "
+                f"redundancy_expertids: {self.redundancy_expert_ids}"
+            )
             self.local_n_routed_experts = self.n_routed_experts // self.global_world_size + self.redundancy_expert_num
-            self.start_expert_id = self.global_rank_ * self.n_routed_experts // self.global_world_size
             self.split_inter_size = self.moe_intermediate_size
+            n_experts_per_rank = self.n_routed_experts // self.global_world_size
+            start_expert_id = self.global_rank_ * n_experts_per_rank
+            self.local_expert_ids = (
+                list(range(start_expert_id, start_expert_id + n_experts_per_rank)) + self.redundancy_expert_ids
+            )
+            self.expert_idx_to_local_idx = {
+                expert_idx: expert_idx - start_expert_id for expert_idx in self.local_expert_ids[:n_experts_per_rank]
+            }
+            self.redundancy_expert_idx_to_local_idx = {
+                redundancy_expert_idx: n_experts_per_rank + i
+                for (i, redundancy_expert_idx) in enumerate(self.redundancy_expert_ids)
+            }
+        else:
+            self.local_expert_ids = list(range(self.n_routed_experts + self.num_fused_shared_experts))
+            self.expert_idx_to_local_idx = {expert_idx: i for (i, expert_idx) in enumerate(self.local_expert_ids)}
+            self.rexpert_idx_to_local_idx = {}
 
     def experts(
         self,
@@ -229,25 +258,12 @@ class FusedMoeWeight(BaseWeightTpl):
         # Load bias
         if self.e_score_correction_bias_name in weights:
             self.e_score_correction_bias.copy_(weights[self.e_score_correction_bias_name])
-
-        # Load each expert with TP slicing
-        for i_experts in range(self.start_expert_id, self.start_expert_id + self.local_n_routed_experts):
-            with self.lock:
-                self._load_expert(i_experts, weights, type="weight", suffix=self.quant_method.weight_suffix)
-            if self.w13.weight_scale is not None:
-                with self.lock:
-                    self._load_expert(
-                        i_experts, weights, type="weight_scale", suffix=self.quant_method.weight_scale_suffix
-                    )
-            if self.w13.weight_zero_point is not None:
-                with self.lock:
-                    self._load_expert(
-                        i_experts, weights, type="weight_zero_point", suffix=self.quant_method.weight_zero_point_suffix
-                    )
+        self._load_weight(self.expert_idx_to_local_idx, weights)
+        if self.redundancy_expert_num > 0:
+            self._load_weight(self.redundancy_expert_idx_to_local_idx, weights)
 
     def verify_load(self):
         return True
-        return self.load_cnt == self.n_routed_experts * 3 * 2
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size
@@ -276,31 +292,61 @@ class FusedMoeWeight(BaseWeightTpl):
         )
         self.load_cnt = 0
 
-    def _load_weight_func(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int = 0):
-        if self.quant_method.weight_need_quanted(weight):
-            self.quant_method.quantize(weight, weight_pack, start_idx)
-        else:
-            self.quant_method.load_weight(weight, weight_pack, start_idx)
+    def _load_weight(self, expert_idx_to_local_idx: Dict[int, int], weights: Dict[str, torch.Tensor]):
 
-    def _load_expert(self, expert_idx, weights, type: str, suffix: str = "weight"):
+        # Load each expert with TP slicing
+        for expert_idx, local_expert_idx in expert_idx_to_local_idx.items():
+            with self.lock:
+                self._load_expert(
+                    expert_idx, local_expert_idx, weights, type="weight", suffix=self.quant_method.weight_suffix
+                )
+            if self.w13.weight_scale is not None:
+                with self.lock:
+                    self._load_expert(
+                        expert_idx,
+                        local_expert_idx,
+                        weights,
+                        type="weight_scale",
+                        suffix=self.quant_method.weight_scale_suffix,
+                    )
+            if self.w13.weight_zero_point is not None:
+                with self.lock:
+                    self._load_expert(
+                        expert_idx,
+                        local_expert_idx,
+                        weights,
+                        type="weight_zero_point",
+                        suffix=self.quant_method.weight_zero_point_suffix,
+                    )
+
+    def _load_expert(
+        self,
+        expert_idx: int,
+        local_expert_idx: int,
+        weights: Dict[str, torch.Tensor],
+        type: str,
+        suffix: str = "weight",
+    ):
         w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{suffix}"
         w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{suffix}"
         w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{suffix}"
         intermediate_size = self.split_inter_size
         load_func, slice_func = self._get_load_and_slice_func(type, is_row=True)
-        local_expert_idx = expert_idx - self.start_expert_id
         if w1_weight in weights:
             load_func(slice_func(weights[w1_weight]), self.w13.get_expert(local_expert_idx), start_idx=0)
-            self.load_cnt += 1
         if w3_weight in weights:
             load_func(
                 slice_func(weights[w3_weight]), self.w13.get_expert(local_expert_idx), start_idx=intermediate_size
             )
-            self.load_cnt += 1
         load_func, slice_func = self._get_load_and_slice_func(type, is_row=False)
         if w2_weight in weights:
             load_func(slice_func(weights[w2_weight]), self.w2.get_expert(local_expert_idx), start_idx=0)
-            self.load_cnt += 1
+
+    def _load_weight_func(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int = 0):
+        if self.quant_method.weight_need_quanted(weight):
+            self.quant_method.quantize(weight, weight_pack, start_idx)
+        else:
+            self.quant_method.load_weight(weight, weight_pack, start_idx)
 
     def _get_load_and_slice_func(self, type: str, is_row: bool = True):
         if is_row:

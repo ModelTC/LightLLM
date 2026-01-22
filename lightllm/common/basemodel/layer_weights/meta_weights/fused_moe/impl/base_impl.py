@@ -16,20 +16,31 @@ class FuseMoeBaseImpl:
         self,
         n_routed_experts: int,
         num_fused_shared_experts: int,
-        redundancy_expert_num: int,
         routed_scaling_factor: float,
         quant_method: QuantizationMethod,
+        redundancy_expert_num: int,
+        redundancy_expert_ids_tensor: torch.Tensor,
+        routed_expert_counter_tensor: torch.Tensor,
+        auto_update_redundancy_expert: bool,
     ):
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
-        self.redundancy_expert_num = redundancy_expert_num
         self.routed_scaling_factor = routed_scaling_factor
         self.quant_method = quant_method
         self.global_rank_ = get_global_rank()
-        self.global_world_size = get_global_world_size()
+        self.global_world_size_ = get_global_world_size()
+        self.ep_n_routed_experts = self.n_routed_experts // self.global_world_size_
         self.total_expert_num_contain_redundancy = (
-            self.n_routed_experts + self.redundancy_expert_num * self.global_world_size
+            self.n_routed_experts + redundancy_expert_num * self.global_world_size_
         )
+
+        # redundancy expert related
+        self.redundancy_expert_num = redundancy_expert_num
+        self.redundancy_expert_ids_tensor = redundancy_expert_ids_tensor
+        self.routed_expert_counter_tensor = routed_expert_counter_tensor
+        self.auto_update_redundancy_expert = auto_update_redundancy_expert
+
+        # workspace for kernel optimization
         self.workspace = self.create_workspace()
 
     @abstractmethod
