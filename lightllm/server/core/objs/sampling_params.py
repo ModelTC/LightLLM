@@ -334,30 +334,36 @@ class SamplingParams(ctypes.Structure):
 
     def init(self, tokenizer, **kwargs):
         super().__init__()
-        self.best_of = kwargs.get("best_of", 1)
-        self.n = kwargs.get("n", self.best_of)
-        self.do_sample = kwargs.get("do_sample", SamplingParams._do_sample)
-        self.presence_penalty = kwargs.get("presence_penalty", SamplingParams._presence_penalty)
-        self.frequency_penalty = kwargs.get("frequency_penalty", SamplingParams._frequency_penalty)
-        self.repetition_penalty = kwargs.get("repetition_penalty", SamplingParams._repetition_penalty)
-        self.temperature = kwargs.get("temperature", SamplingParams._temperature)
-        self.top_p = kwargs.get("top_p", SamplingParams._top_p)
-        self.top_k = kwargs.get("top_k", SamplingParams._top_k)
-        self.ignore_eos = kwargs.get("ignore_eos", False)
-        self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
-        self.max_new_tokens = kwargs.get("max_new_tokens", 16)
-        self.min_new_tokens = kwargs.get("min_new_tokens", 1)
-        self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
-        self.group_request_id = kwargs.get("group_request_id", -1)
-        self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
-        self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
-        self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
-        self.return_routed_experts = kwargs.get("return_routed_experts", False)
+        # Helper to get value with None-fallback to default
+        def get_or_default(key, default):
+            val = kwargs.get(key)
+            return val if val is not None else default
 
-        self.add_special_tokens = kwargs.get("add_special_tokens", True)
-        self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
-        self.print_eos_token = kwargs.get("print_eos_token", False)
+        self.best_of = get_or_default("best_of", 1)
+        self.n = get_or_default("n", self.best_of)
+        self.do_sample = get_or_default("do_sample", SamplingParams._do_sample)
+        self.presence_penalty = get_or_default("presence_penalty", SamplingParams._presence_penalty)
+        self.frequency_penalty = get_or_default("frequency_penalty", SamplingParams._frequency_penalty)
+        self.repetition_penalty = get_or_default("repetition_penalty", SamplingParams._repetition_penalty)
+        self.temperature = get_or_default("temperature", SamplingParams._temperature)
+        self.top_p = get_or_default("top_p", SamplingParams._top_p)
+        self.top_k = get_or_default("top_k", SamplingParams._top_k)
+        self.ignore_eos = get_or_default("ignore_eos", False)
+        self.image_max_patch_num = get_or_default("image_max_patch_num", -1)
+        self.max_new_tokens = get_or_default("max_new_tokens", 16)
+        self.min_new_tokens = get_or_default("min_new_tokens", 1)
+        self.input_penalty = get_or_default("input_penalty", DEFAULT_INPUT_PENALTY)
+        self.group_request_id = get_or_default("group_request_id", -1)
+        self.suggested_dp_index = get_or_default("suggested_dp_index", -1)
+
+        self.skip_special_tokens = get_or_default("skip_special_tokens", SKIP_SPECIAL_TOKENS)
+        self.disable_prompt_cache = get_or_default("disable_prompt_cache", False)
+        self.return_routed_experts = get_or_default("return_routed_experts", False)
+
+        self.add_special_tokens = get_or_default("add_special_tokens", True)
+        self.add_spaces_between_special_tokens = get_or_default("add_spaces_between_special_tokens", True)
+        self.print_eos_token = get_or_default("print_eos_token", False)
 
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
@@ -410,13 +416,19 @@ class SamplingParams(ctypes.Structure):
     def load_generation_cfg(cls, weight_dir):
         try:
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
-            cls._do_sample = generation_cfg.get("do_sample", False)
-            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
-            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
-            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
-            cls._temperature = generation_cfg.get("temperature", 1.0)
-            cls._top_p = generation_cfg.get("top_p", 1.0)
-            cls._top_k = generation_cfg.get("top_k", -1)
+
+            # Helper to get value with None-fallback to default
+            def cfg_get(key, default):
+                val = generation_cfg.get(key)
+                return val if val is not None else default
+
+            cls._do_sample = cfg_get("do_sample", False)
+            cls._presence_penalty = cfg_get("presence_penalty", 0.0)
+            cls._frequency_penalty = cfg_get("frequency_penalty", 0.0)
+            cls._repetition_penalty = cfg_get("repetition_penalty", 1.0)
+            cls._temperature = cfg_get("temperature", 1.0)
+            cls._top_p = cfg_get("top_p", 1.0)
+            cls._top_k = cfg_get("top_k", -1)
         except:
             pass
 
