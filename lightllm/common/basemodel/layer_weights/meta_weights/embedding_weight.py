@@ -5,9 +5,6 @@ from .base_weight import BaseWeightTpl
 from .platform_op import PlatformAwareOp
 from lightllm.common.basemodel.triton_kernel.embedding import embedding as embedding_kernel
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
@@ -28,7 +25,7 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
     def _create_weight(self):
         tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
         self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
-        self.load_cnt = 0
+        self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name not in weights:
@@ -39,12 +36,11 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         assert (
             loaded_vocab_size == self.vocab_size
         ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
-        logger.info(f"loaded weight vocab_size: {self.vocab_size}")
         self.weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
-        self.load_cnt += 1
+        self.weight.load_ok = True
 
     def verify_load(self):
-        return self.load_cnt == 1
+        return self.weight.load_ok
 
     def _native_forward(
         self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty
@@ -114,12 +110,12 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.load_cnt = 0
         if self._embedding_weight is not None:
             self.weight = self._embedding_weight.weight
             return
         tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
         self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         # When set tile_embedding=True, no need to load - EmbeddingWeight already loaded it
@@ -132,12 +128,11 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
         assert (
             loaded_vocab_size == self.vocab_size
         ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
-        logger.info(f"loaded weight vocab_size: {self.vocab_size}")
         self.weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
-        self.load_cnt += 1
+        self.weight.load_ok = True
 
     def verify_load(self):
-        return self.load_cnt == 1 or self._embedding_weight is not None
+        return self.weight.load_ok
 
     def _native_forward(
         self, input: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty
@@ -181,7 +176,7 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         self.weight: torch.Tensor = torch.empty(
             self.max_position_embeddings, self.dim, dtype=self.data_type_, device=self.device_id_
         )
-        self.load_cnt = 0
+        self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name not in weights:
@@ -191,12 +186,11 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         assert (
             loaded_max_position_embeddings == self.max_position_embeddings
         ), f"max_position_embeddings: {loaded_max_position_embeddings} != expected: {self.max_position_embeddings}"
-        logger.info(f"loaded weight max_position_embeddings: {self.max_position_embeddings}")
         self.weight.copy_(t_weight.to(self.data_type_))
-        self.load_cnt += 1
+        self.weight.load_ok = True
 
     def verify_load(self):
-        return self.load_cnt == 1
+        return self.weight.load_ok
 
     def _native_forward(
         self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, _alloc_func=torch.empty

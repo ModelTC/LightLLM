@@ -63,8 +63,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _bind_ffn(self):
         if self.is_moe:
-            moe_mode = os.environ.get("MOE_MODE", "TP")
-            if moe_mode == "EP":
+            enable_ep_moe = get_env_start_args().enable_ep_moe
+            if enable_ep_moe:
                 self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn_edp, self)
                 self._tpsp_ffn = self._tpsp_ffn_ep
             else:

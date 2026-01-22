@@ -4,14 +4,14 @@ from typing import Optional, Tuple, List, Dict, Any
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.basemodel.layer_weights.meta_weights.platform_op import PlatformAwareOp
-from lightllm.common.fused_moe.grouped_fused_moe_ep import (
+from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts_impl,
     masked_group_gemm,
     _deepgemm_grouped_fp8_nt_contiguous,
 )
-from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.distributed import dist_group_manager
-from lightllm.common.fused_moe.topk_select import select_experts
+from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num
 from lightllm.utils.envs_utils import get_env_start_args
@@ -19,7 +19,7 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
     per_token_group_quant_fp8,
     tma_align_input_scale,
 )
-from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
+from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.triton_utils.autotuner import Autotuner
@@ -184,57 +184,6 @@ class FusedMoeWeightEP(BaseWeightTpl, PlatformAwareOp):
                 enable_counter=self.auto_update_redundancy_expert,
             )
         return topk_weights, topk_ids
-
-    def _native_forward(
-        self,
-        input_tensor,
-        router_logits,
-        top_k,
-        renormalize,
-        use_grouped_topk,
-        topk_group,
-        num_expert_group,
-        is_prefill,
-    ):
-        """PyTorch native implementation for EP MoE forward pass."""
-        topk_weights, topk_ids = self._select_experts(
-            input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group
-        )
-
-        w1, w1_scale = self.w1
-        w2, w2_scale = self.w2
-
-        # Native PyTorch implementation (less optimized but works on all platforms)
-        batch_size, hidden_size = input_tensor.shape
-        intermediate_size = w1.shape[1] // 2
-
-        output = torch.zeros_like(input_tensor)
-
-        for i in range(batch_size):
-            expert_output = torch.zeros(hidden_size, dtype=input_tensor.dtype, device=input_tensor.device)
-            for j in range(top_k):
-                expert_idx = topk_ids[i, j].item()
-                weight = topk_weights[i, j]
-
-                # Get local expert index (EP mode uses local expert indices)
-                local_expert_idx = expert_idx % self.ep_load_expert_num
-
-                # Get expert weights
-                w1_expert = w1[local_expert_idx, :intermediate_size, :]  # gate
-                w3_expert = w1[local_expert_idx, intermediate_size:, :]  # up
-                w2_expert = w2[local_expert_idx]
-
-                # Compute: SiLU(x @ w1.T) * (x @ w3.T) @ w2.T
-                x = input_tensor[i : i + 1]
-                gate = torch.nn.functional.silu(torch.mm(x, w1_expert.T))
-                up = torch.mm(x, w3_expert.T)
-                hidden = gate * up
-                expert_out = torch.mm(hidden, w2_expert.T)
-                expert_output += weight * expert_out.squeeze(0)
-
-            output[i] = expert_output
-
-        return output
 
     def _cuda_forward(
         self,

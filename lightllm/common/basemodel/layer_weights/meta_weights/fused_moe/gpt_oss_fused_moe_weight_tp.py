@@ -1,9 +1,9 @@
 import torch
 from typing import Dict, Any
 
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight_tp import FusedMoeWeightTP
-from lightllm.common.quantization import Quantcfg
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.quantization.quantize_method import QuantizationMethod
 
 logger = init_logger(__name__)
 
@@ -27,7 +27,7 @@ FP4_VALUES = [
 ]
 
 
-class GPTOSSFusedMoeWeightTP(FusedMoeWeightTP):
+class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
     def __init__(
         self,
         gate_up_proj_name: str,  # diff with FusedMoeWeightTP
@@ -41,7 +41,7 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeightTP):
         network_config: Dict[str, Any],
         layer_num: int,
         world_size: int = 1,  # diff with FusedMoeWeightTP
-        quant_cfg: Quantcfg = None,
+        quant_method: QuantizationMethod = None,
     ) -> None:
         super().__init__(
             gate_up_proj_name,
@@ -55,7 +55,7 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeightTP):
             data_type,
             network_config,
             layer_num,
-            quant_cfg,
+            quant_method,
         )
         self.hidden_size = network_config["hidden_size"]
 

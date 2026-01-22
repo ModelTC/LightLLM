@@ -18,6 +18,10 @@ class WeightPack:
         weight_zero_point = self.weight_zero_point[expert_idx] if self.weight_zero_point is not None else None
         return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
 
+    def initialize_load_status(self, weight_num: int):
+        initial_loaded_status = [False, self.weight_scale is None, self.weight_zero_point is None]
+        self.load_ok = [initial_loaded_status.copy() for _ in range(weight_num)]
+
 
 class QuantizationMethod(ABC):
     def __init__(self):
