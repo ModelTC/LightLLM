@@ -440,9 +440,14 @@ class ModeBackend:
         # Create bucket and reconstruct tensors
         bucket = FlattenedTensorBucket(flattened_tensor=flattened_tensor, metadata=converted_metadata)
         reconstructed_tensors = bucket.reconstruct_tensors()
+        
+        named_tensors = {
+                name: tensor
+                for name, tensor in reconstructed_tensors
+            }
 
         # Load the reconstructed tensors using the standard method
-        self.model.load_weights(reconstructed_tensors)
+        self.model.load_weights(named_tensors)
 
         return True, "Succeeded to update parameter online from flattened bucket tensor."
 
