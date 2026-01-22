@@ -19,15 +19,15 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
 
     def _create_weight(self):
         self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
-        self.load_cnt = 0
+        self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
-            self.load_cnt += 1
+            self.weight.load_ok = True
 
     def verify_load(self):
-        return self.load_cnt == 1
+        return self.weight.load_ok
 
     def _native_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
@@ -84,18 +84,19 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
     def _create_weight(self):
         self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
         self.bias: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
-        self.load_cnt = 0
+        self.weight.load_ok = False
+        self.bias.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
-            self.load_cnt += 1
+            self.weight.load_ok = True
         if self.bias_name in weights:
             self.bias.copy_(weights[self.bias_name])
-            self.load_cnt += 1
+            self.bias.load_ok = True
 
     def verify_load(self):
-        return self.load_cnt == 2
+        return self.weight.load_ok and self.bias.load_ok
 
     def _native_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
@@ -175,7 +176,7 @@ class TpRMSNormWeight(RMSNormWeight):
             self.weight[:, end - start].copy_(t_weight[start:end].to(self.data_type_))
             # the padding part is zero
             self.weight[:, end:].zero_()
-            self.load_cnt += 1
+            self.weight.load_ok = True
 
 
 class NoTpGEMMANormWeight(RMSNormWeight):

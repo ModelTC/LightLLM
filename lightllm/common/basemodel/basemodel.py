@@ -637,8 +637,6 @@ class TpPartBaseModel:
 
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
-        input_ids0, input_ids1 = model_input0.input_ids, model_input1.input_ids
-
         infer_state0 = self._create_inferstate(model_input0, 0)
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
@@ -668,9 +666,7 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
-        model_output0, model_output1 = self._overlap_tpsp_context_forward(
-            input_ids0, infer_state0, input_ids1=input_ids1, infer_state1=infer_state1
-        )
+        model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义

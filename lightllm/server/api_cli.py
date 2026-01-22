@@ -517,6 +517,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--enable_ep_moe",
+        action="store_true",
+        help="""Whether to enable ep moe for deepseekv3 model.""",
+    )
+    parser.add_argument(
         "--ep_redundancy_expert_config_path",
         type=str,
         default=None,
@@ -530,7 +535,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
-        help="""Whether to enable fused shared experts for deepseekv3 model. only work when MOE_MODE=TP """,
+        help="""Whether to enable fused shared experts for deepseekv3 model. only work when tensor parallelism""",
     )
     parser.add_argument(
         "--mtp_mode",

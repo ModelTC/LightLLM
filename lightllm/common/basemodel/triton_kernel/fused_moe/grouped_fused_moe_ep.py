@@ -6,13 +6,15 @@ import triton.language as tl
 from typing import Any, Callable, Dict, Optional, Tuple
 import torch.distributed as dist
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-from lightllm.common.fused_moe.moe_silu_and_mul_mix_quant_ep import silu_and_mul_masked_post_quant_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
+    silu_and_mul_masked_post_quant_fwd,
+)
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
     tma_align_input_scale,
 )
-from lightllm.common.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
+from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
 from lightllm.common.triton_utils.autotuner import Autotuner
 import numpy as np

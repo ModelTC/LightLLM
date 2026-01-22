@@ -14,6 +14,7 @@ from functools import partial
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
+from lightllm.utils.envs_utils import get_env_start_args
 
 logger = init_logger(__name__)
 
@@ -41,8 +42,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _bind_ffn(self):
         if self.is_moe:
-            moe_mode = os.environ.get("MOE_MODE", "TP")
-            if moe_mode == "EP":
+            enable_ep_moe = get_env_start_args().enable_ep_moe
+            if enable_ep_moe:
                 self._ffn = partial(Qwen3MOETransformerLayerInfer._moe_ffn_edp, self)
                 self._tpsp_ffn = self._tpsp_ffn_ep
             else:

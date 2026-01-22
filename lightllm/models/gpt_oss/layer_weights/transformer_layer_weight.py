@@ -9,6 +9,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMM
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.envs_utils import get_env_start_args
 
 logger = init_logger(__name__)
 
@@ -25,10 +26,10 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
         return
 
     def _init_moe(self):
-        moe_mode = os.getenv("MOE_MODE", "TP")
+        enable_ep_moe = get_env_start_args().enable_ep_moe
         moe_intermediate_size = self.network_config_["intermediate_size"]
         n_routed_experts = self.network_config_["num_local_experts"]
-        assert moe_mode in ["TP"], "For now, GPT-OSS type model only support MOE TP mode."
+        assert not enable_ep_moe, "For now, GPT-OSS type model only support MOE TP mode."
 
         self.moe_gate = ROWMMWeight(
             in_dim=self.n_embed,

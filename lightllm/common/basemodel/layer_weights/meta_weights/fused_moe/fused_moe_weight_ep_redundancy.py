@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from .fused_moe_weight_ep import FusedMoeWeightEP
+from .fused_moe_weight import FusedMoeWeight
 from lightllm.utils.log_utils import init_logger
 from typing import Dict
 
@@ -10,7 +10,7 @@ logger = init_logger(__name__)
 class FusedMoeWeightEPAutoRedundancy:
     def __init__(
         self,
-        ep_fused_moe_weight: FusedMoeWeightEP,
+        ep_fused_moe_weight: FusedMoeWeight,
     ) -> None:
         super().__init__()
         self._ep_w = ep_fused_moe_weight

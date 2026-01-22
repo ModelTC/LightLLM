@@ -9,8 +9,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWBMMWeight,
     COLMMWeight,
     RMSNormWeight,
-    FusedMoeWeightEP,
-    create_tp_moe_wegiht_obj,
+    FusedMoeWeight,
 )
 from ..triton_kernel.weight_dequant import weight_dequant
 
@@ -39,9 +38,8 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self.kv_lora_rank = self.network_config_["kv_lora_rank"]
         self.num_fused_shared_experts = 0
         if get_env_start_args().enable_fused_shared_experts and self.is_moe:
-            # MOE_MODE 处于 TP 模式下才能使能 enable_fused_shared_experts
-            moe_mode = os.getenv("MOE_MODE", "TP")
-            assert moe_mode == "TP"
+            # enable_fused_shared_experts can only work with tensor parallelism
+            assert not get_env_start_args().enable_ep_moe, "enable_fused_shared_experts can only work with tp mode."
             self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
         self.n_embed = self.network_config_["hidden_size"]
         self.n_inter = self.network_config_["intermediate_size"]
@@ -97,7 +95,6 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         weight_scale_suffix = None
         if self.quant_cfg.quantized_weight:
             weight_scale_suffix = kv_b_quant_method.weight_scale_suffix
-
         if f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight" in weights:
             kv_b_proj_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight"]
             # for deepseek_v3, the bmm operator is not quantized
@@ -187,9 +184,9 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _load_mlp(self, mlp_prefix, is_shared_experts=False):
-        moe_mode = os.getenv("MOE_MODE", "TP")
+        enable_ep_moe = get_env_start_args().enable_ep_moe
         mlp_inter = self.moe_inter if is_shared_experts else self.n_inter
-        if self.is_moe and moe_mode == "EP":
+        if self.is_moe and enable_ep_moe:
             self.gate_up_proj = ROWMMWeight(
                 in_dim=self.n_embed,
                 out_dims=[mlp_inter, mlp_inter],
@@ -243,38 +240,21 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         # == 0 时，说明不存在融合共享专家，共享专家单独加载和进行推理。
         if self.num_fused_shared_experts == 0:
             self._load_mlp(f"model.layers.{self.layer_num_}.mlp.shared_experts", is_shared_experts=True)
-        moe_mode = os.getenv("MOE_MODE", "TP")
-        assert moe_mode in ["EP", "TP"]
-        if moe_mode == "TP":
-            self.experts = create_tp_moe_wegiht_obj(
-                gate_proj_name="gate_proj",
-                down_proj_name="down_proj",
-                up_proj_name="up_proj",
-                e_score_correction_bias_name=self.e_score_correction_bias_name,
-                weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
-                n_routed_experts=self.n_routed_experts,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-                split_inter_size=moe_intermediate_size // self.tp_world_size_,
-                data_type=self.data_type_,
-                network_config=self.network_config_,
-                layer_num=self.layer_num_,
-                quant_cfg=self.quant_cfg,
-            )
-        elif moe_mode == "EP":
-            self.experts = FusedMoeWeightEP(
-                gate_proj_name="gate_proj",
-                down_proj_name="down_proj",
-                up_proj_name="up_proj",
-                e_score_correction_bias_name=self.e_score_correction_bias_name,
-                weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
-                n_routed_experts=self.n_routed_experts,
-                data_type=self.data_type_,
-                network_config=self.network_config_,
-                layer_num=self.layer_num_,
-                quant_cfg=self.quant_cfg,
-            )
-        else:
-            raise ValueError(f"Unsupported moe mode: {moe_mode}")
+        self.experts = FusedMoeWeight(
+            gate_proj_name="gate_proj",
+            down_proj_name="down_proj",
+            up_proj_name="up_proj",
+            e_score_correction_bias_name=self.e_score_correction_bias_name,
+            weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
+            n_routed_experts=self.n_routed_experts,
+            hidden_size=self.n_embed,
+            moe_intermediate_size=moe_intermediate_size,
+            data_type=self.data_type_,
+            quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            layer_num=self.layer_num_,
+            network_config=self.network_config_,
+        )
 
     def _init_ffn(self):
         self._load_mlp(f"model.layers.{self.layer_num_}.mlp")
