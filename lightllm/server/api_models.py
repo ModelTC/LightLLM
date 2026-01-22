@@ -220,6 +220,9 @@ class ChatCompletionRequest(BaseModel):
     role_settings: Optional[Dict[str, str]] = None
     character_settings: Optional[List[Dict[str, str]]] = None
 
+    # R3: Return routed experts for MoE models
+    return_routed_experts: Optional[bool] = False
+
     # Class variables to store loaded default values
     _loaded_defaults: ClassVar[Dict[str, Any]] = {}
 
@@ -279,6 +282,8 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
+    # R3: Routing data for MoE models (when return_routed_experts=True)
+    routed_experts: Optional[Dict[str, Any]] = None
 
     @field_validator("id", mode="before")
     def ensure_id_is_str(cls, v):

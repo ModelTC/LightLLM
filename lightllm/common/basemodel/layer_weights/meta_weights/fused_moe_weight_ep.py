@@ -105,6 +105,11 @@ class FusedMoeWeightEP(BaseWeight):
         # auto update redundancy expert vars
         self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
 
+        self.moe_layer_index = None
+
+    def set_moe_layer_index(self, moe_layer_index: int):
+        self.moe_layer_index = moe_layer_index
+
     def experts(
         self,
         input_tensor,
@@ -115,6 +120,8 @@ class FusedMoeWeightEP(BaseWeight):
         topk_group,
         num_expert_group,
         is_prefill,
+        mem_index=None,
+        routing_buffer=None,
     ):
         topk_weights, topk_ids = select_experts(
             hidden_states=input_tensor,
@@ -139,6 +146,14 @@ class FusedMoeWeightEP(BaseWeight):
                 enable_counter=self.auto_update_redundancy_expert,
             )
 
+        if (
+            routing_buffer is not None
+            and self.global_rank_ == 0
+            and self.moe_layer_index is not None
+            and mem_index is not None
+        ):
+            routing_buffer[self.moe_layer_index, mem_index, :top_k] = topk_ids.to(torch.int32)
+
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2
         return fused_experts_impl(
@@ -162,6 +177,8 @@ class FusedMoeWeightEP(BaseWeight):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        mem_index=None,
+        routing_buffer=None,
     ):
 
         topk_weights, topk_idx = select_experts(
@@ -186,6 +203,14 @@ class FusedMoeWeightEP(BaseWeight):
                 expert_counter=self.routed_expert_counter_tensor,
                 enable_counter=self.auto_update_redundancy_expert,
             )
+
+        if (
+            routing_buffer is not None
+            and self.global_rank_ == 0
+            and self.moe_layer_index is not None
+            and mem_index is not None
+        ):
+            routing_buffer[self.moe_layer_index, mem_index, : self.num_experts_per_tok] = topk_idx
 
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank()
@@ -204,6 +229,8 @@ class FusedMoeWeightEP(BaseWeight):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        mem_index=None,
+        routing_buffer=None,
     ):
         topk_weights, topk_idx = select_experts(
             hidden_states=hidden_states,
@@ -226,6 +253,15 @@ class FusedMoeWeightEP(BaseWeight):
                 expert_counter=self.routed_expert_counter_tensor,
                 enable_counter=self.auto_update_redundancy_expert,
             )
+
+        if (
+            routing_buffer is not None
+            and self.global_rank_ == 0
+            and self.moe_layer_index is not None
+            and mem_index is not None
+        ):
+            routing_buffer[self.moe_layer_index, mem_index, : self.num_experts_per_tok] = topk_idx
+
         M, K = hidden_states.shape
         w1, w1_scale = self.w1
         block_size_k = 0

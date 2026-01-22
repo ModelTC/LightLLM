@@ -200,6 +200,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="the dp balancer type, default is bs_balancer",
     )
     parser.add_argument(
+        "--enable_return_routed_experts",
+        action="store_true",
+        default=False,
+        help="Enable returning routed expert indices for MoE models (R3 feature).",
+    )
+    parser.add_argument(
         "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
     )
     parser.add_argument(

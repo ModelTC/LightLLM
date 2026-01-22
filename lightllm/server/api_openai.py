@@ -208,6 +208,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
+        "return_routed_experts": request.return_routed_experts,
     }
 
     # Structured output handling
@@ -237,6 +238,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         finish_reason_dict = {}
         prompt_tokens_dict = {}
         completion_tokens = 0
+        routed_experts_data = None
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             from .req_id_generator import convert_sub_id_to_group_id
 
@@ -246,6 +248,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             if finish_status.is_finished():
                 finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
                 prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
+                # Capture routed_experts from metadata if present
+                if "routed_experts" in metadata:
+                    routed_experts_data = metadata["routed_experts"]
         choices = []
         sub_ids = list(final_output_dict.keys())[: request.n]
         for i in range(request.n):
@@ -325,7 +330,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             )
             choices.append(choice)
         resp = ChatCompletionResponse(
-            id=group_request_id, created=created_time, model=request.model, choices=choices, usage=usage
+            id=group_request_id,
+            created=created_time,
+            model=request.model,
+            choices=choices,
+            usage=usage,
+            routed_experts=routed_experts_data,
         )
         return resp
 

@@ -66,6 +66,9 @@ class MemoryManager:
         )
         self.HOLD_TOKEN_MEMINDEX = self.size
 
+        self.routing_buffer = None
+        self.num_moe_layers = 0
+
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         """
         将每一层生成的kv拷贝到mem manager对应mem_index 位置中
@@ -74,6 +77,14 @@ class MemoryManager:
 
         destindex_copy_kv(kv, mem_index, self.kv_buffer[layer_index])
         return
+
+    def init_routing_buffer(self, num_moe_layers: int, topk: int):
+        self.num_moe_layers = num_moe_layers
+        self.routing_buffer = torch.zeros((num_moe_layers, self.size + 1, topk), dtype=torch.int32, device="cuda")
+
+    def copy_routing_to_buffer(self, moe_layer_index: int, mem_index: torch.Tensor, topk_ids: torch.Tensor):
+        if self.routing_buffer is not None:
+            self.routing_buffer[moe_layer_index, mem_index, :] = topk_ids.to(torch.int32)
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         k = self.kv_buffer[layer_index][:, : self.head_num, :]

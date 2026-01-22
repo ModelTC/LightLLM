@@ -101,7 +101,23 @@ class FusedMoeWeightTP(BaseWeight):
         self.w2 = [None, None]  # weight, weight_scale
         self.lock = threading.Lock()
 
-    def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
+        self.moe_layer_index = None
+
+    def set_moe_layer_index(self, moe_layer_index: int):
+        self.moe_layer_index = moe_layer_index
+
+    def experts(
+        self,
+        input_tensor,
+        router_logits,
+        top_k,
+        renormalize,
+        use_grouped_topk,
+        topk_group,
+        num_expert_group,
+        mem_index=None,
+        routing_buffer=None,
+    ):
         from lightllm.common.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(
@@ -116,6 +132,15 @@ class FusedMoeWeightTP(BaseWeight):
             scoring_func=self.scoring_func,
         )
         topk_weights.mul_(self.routed_scaling_factor)
+
+        if (
+            routing_buffer is not None
+            and self.tp_rank_ == 0
+            and self.moe_layer_index is not None
+            and mem_index is not None
+        ):
+            routing_buffer[self.moe_layer_index, mem_index, :top_k] = topk_ids.to(torch.int32)
+
         if self.num_fused_shared_experts > 0:
             pad_topk_ids = (
                 torch.arange(
@@ -356,7 +381,23 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
         self.w2 = [None, None, None]  # weight, weight_scale, zero_point
         self.lock = threading.Lock()
 
-    def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
+        self.moe_layer_index = None
+
+    def set_moe_layer_index(self, moe_layer_index: int):
+        self.moe_layer_index = moe_layer_index
+
+    def experts(
+        self,
+        input_tensor,
+        router_logits,
+        top_k,
+        renormalize,
+        use_grouped_topk,
+        topk_group,
+        num_expert_group,
+        mem_index=None,
+        routing_buffer=None,
+    ):
         from lightllm.common.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(
@@ -371,6 +412,15 @@ class FusedAWQMARLINMoeWeightTP(BaseWeight):
             scoring_func=self.scoring_func,
         )
         topk_weights.mul_(self.routed_scaling_factor)
+
+        if (
+            routing_buffer is not None
+            and self.tp_rank_ == 0
+            and self.moe_layer_index is not None
+            and mem_index is not None
+        ):
+            routing_buffer[self.moe_layer_index, mem_index, :top_k] = topk_ids.to(torch.int32)
+
         if self.num_fused_shared_experts > 0:
             pad_topk_ids = (
                 torch.arange(

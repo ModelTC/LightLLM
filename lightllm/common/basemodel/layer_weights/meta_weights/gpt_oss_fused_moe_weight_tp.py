@@ -121,8 +121,27 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeightTP):
         router_top_value = torch.nn.functional.softmax(router_top_value, dim=1, dtype=router_top_value.dtype)
         return router_top_value, router_indices
 
-    def experts(self, input_tensor, router_logits, top_k, renormalize, use_grouped_topk, topk_group, num_expert_group):
+    def experts(
+        self,
+        input_tensor,
+        router_logits,
+        top_k,
+        renormalize,
+        use_grouped_topk,
+        topk_group,
+        num_expert_group,
+        mem_index=None,
+        routing_buffer=None,
+    ):
         topk_weights, topk_ids = self.router(router_logits, top_k)
+
+        if (
+            routing_buffer is not None
+            and self.tp_rank_ == 0
+            and self.moe_layer_index is not None
+            and mem_index is not None
+        ):
+            routing_buffer[self.moe_layer_index, mem_index, :top_k] = topk_ids.to(torch.int32)
 
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2

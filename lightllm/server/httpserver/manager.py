@@ -10,6 +10,7 @@ import copy
 import hashlib
 import datetime
 import pickle
+import base64
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -686,6 +687,11 @@ class HttpServerManager:
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 for req in req_status.group_req_objs.shm_req_objs:
+                    if hasattr(req, "shm_routing_data") and req.shm_routing_data is not None:
+                        try:
+                            req.close_routing_data_shm_array()
+                        except Exception as e:
+                            logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
@@ -772,6 +778,20 @@ class HttpServerManager:
                                         finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
                                     else:
                                         finish_status = FinishStatus(req.finish_status.status)
+
+                                    if req.sample_params.return_routed_experts and req.routing_data_num_moe_layers > 0:
+                                        try:
+                                            req.link_routing_data_shm_array()
+                                            routing_data = req.get_routing_data()
+                                            if routing_data is not None:
+                                                metadata["routed_experts"] = {
+                                                    "shape": list(routing_data.shape),
+                                                    "dtype": "int32",
+                                                    "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
+                                                }
+                                                req.close_routing_data_shm_array()
+                                        except Exception as e:
+                                            logger.warning(f"Failed to read routing data for req {req_id}: {e}")
 
                                     token_list.append((req_id, text, metadata, finish_status))
                             else:

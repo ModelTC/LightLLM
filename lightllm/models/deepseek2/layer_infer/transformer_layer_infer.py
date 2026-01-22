@@ -325,6 +325,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=self.n_group,
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
+            mem_index=infer_state.mem_index,
+            routing_buffer=infer_state.mem_manager.routing_buffer,
         )
 
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
@@ -351,6 +353,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
             is_prefill=infer_state.is_prefill,
+            mem_index=infer_state.mem_index,
+            routing_buffer=infer_state.mem_manager.routing_buffer,
         )
 
         if self.n_shared_experts is not None:
@@ -437,7 +441,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_topk_weight,
             _0_handle,
             _0_hook,
-        ) = layer_weight.experts.low_latency_dispatch(_0_input1, _0_router_logits)
+        ) = layer_weight.experts.low_latency_dispatch(
+            _0_input1,
+            _0_router_logits,
+            mem_index=infer_state.mem_index,
+            routing_buffer=infer_state.mem_manager.routing_buffer,
+        )
         infer_state.hook = _0_hook
 
         # 1 attention
@@ -471,7 +480,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             _1_topk_weight,
             _1_handle,
             _1_hook,
-        ) = layer_weight.experts.low_latency_dispatch(_1_input1, _1_router_logits)
+        ) = layer_weight.experts.low_latency_dispatch(
+            _1_input1,
+            _1_router_logits,
+            mem_index=infer_state1.mem_index,
+            routing_buffer=infer_state1.mem_manager.routing_buffer,
+        )
         infer_state1.hook = _1_hook
 
         # moe calu
@@ -551,7 +565,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state1.hook = None
 
         _0_topk_weight, _0_topk_idx, _0_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
-            _0_input1, _0_router_logits
+            _0_input1,
+            _0_router_logits,
+            mem_index=infer_state.mem_index,
+            routing_buffer=infer_state.mem_manager.routing_buffer,
         )
         from deep_ep import Buffer
 
@@ -589,7 +606,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.hook = None
 
         _1_topk_weight, _1_topk_idx, _1_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
-            _1_input1, _1_router_logits
+            _1_input1,
+            _1_router_logits,
+            mem_index=infer_state1.mem_index,
+            routing_buffer=infer_state1.mem_manager.routing_buffer,
         )
 
         _1_overlap_event = Buffer.capture()

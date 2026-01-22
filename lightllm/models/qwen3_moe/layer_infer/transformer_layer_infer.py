@@ -140,6 +140,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
+            mem_index=infer_state.mem_index,
+            routing_buffer=infer_state.mem_manager.routing_buffer,
         )
         return hidden_states.view(num_tokens, hidden_dim)
 
@@ -160,6 +162,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_group=None,
             num_expert_group=None,
             is_prefill=infer_state.is_prefill,
+            mem_index=infer_state.mem_index,
+            routing_buffer=infer_state.mem_manager.routing_buffer,
         )
 
         ep_output = ep_output.view(token_num, hidden_dim)
@@ -241,7 +245,12 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_topk_weight,
             _0_handle,
             _0_hook,
-        ) = layer_weight.experts.low_latency_dispatch(_0_input1, _0_router_logits)
+        ) = layer_weight.experts.low_latency_dispatch(
+            _0_input1,
+            _0_router_logits,
+            mem_index=infer_state.mem_index,
+            routing_buffer=infer_state.mem_manager.routing_buffer,
+        )
         infer_state.hook = _0_hook
 
         # 1 attention
@@ -271,7 +280,12 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _1_topk_weight,
             _1_handle,
             _1_hook,
-        ) = layer_weight.experts.low_latency_dispatch(_1_input1, _1_router_logits)
+        ) = layer_weight.experts.low_latency_dispatch(
+            _1_input1,
+            _1_router_logits,
+            mem_index=infer_state1.mem_index,
+            routing_buffer=infer_state1.mem_manager.routing_buffer,
+        )
         infer_state1.hook = _1_hook
 
         # moe calu
@@ -347,7 +361,10 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state1.hook = None
 
         _0_topk_weight, _0_topk_idx, _0_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
-            _0_input1, _0_router_logits
+            _0_input1,
+            _0_router_logits,
+            mem_index=infer_state.mem_index,
+            routing_buffer=infer_state.mem_manager.routing_buffer,
         )
         from deep_ep import Buffer
 
@@ -385,7 +402,10 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.hook = None
 
         _1_topk_weight, _1_topk_idx, _1_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
-            _1_input1, _1_router_logits
+            _1_input1,
+            _1_router_logits,
+            mem_index=infer_state1.mem_index,
+            routing_buffer=infer_state1.mem_manager.routing_buffer,
         )
 
         _1_overlap_event = Buffer.capture()

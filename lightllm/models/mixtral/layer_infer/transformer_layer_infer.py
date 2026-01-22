@@ -27,6 +27,16 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
             renormalize=self.renormalize,
             alloc_tensor_func=self.alloc_tensor,
         )
+
+        routing_buffer = infer_state.mem_manager.routing_buffer
+        if (
+            routing_buffer is not None
+            and layer_weight.experts.tp_rank_ == 0
+            and layer_weight.experts.moe_layer_index is not None
+            and infer_state.mem_index is not None
+        ):
+            routing_buffer[layer_weight.experts.moe_layer_index, infer_state.mem_index, :] = topk_ids.to(torch.int32)
+
         from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
 
         return fused_experts_impl(

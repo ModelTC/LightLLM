@@ -276,7 +276,30 @@ class TpPartBaseModel:
                 self.prefill_graph.warmup(self)
 
     def _init_custom(self):
-        pass
+        if self.args.enable_return_routed_experts:
+            self._init_routing_buffer()
+
+    def _init_routing_buffer(self):
+        moe_weights = []
+        for layer_weight in self.trans_layers_weight:
+            if hasattr(layer_weight, "experts") and layer_weight.experts is not None:
+                moe_weights.append(layer_weight.experts)
+
+        num_moe_layers = len(moe_weights)
+        if num_moe_layers == 0:
+            logger.warning("enable_return_routed_experts is set but no MoE layers found.")
+            return
+
+        topk = self.config.get("num_experts_per_tok", self.config.get("top_k", None))
+        if topk is None:
+            logger.warning("enable_return_routed_experts is set but could not determine topk from config.")
+            return
+
+        self.mem_manager.init_routing_buffer(num_moe_layers, topk)
+        logger.info(f"Initialized routing buffer for {num_moe_layers} MoE layers with topk={topk}")
+
+        for moe_layer_idx, moe_weight in enumerate(moe_weights):
+            moe_weight.set_moe_layer_index(moe_layer_idx)
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
