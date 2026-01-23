@@ -10,7 +10,7 @@ from .triton.fp import TritonAttBackend
 from .triton.int4kv import Int4kvTritonAttBackend
 from .triton.int8kv import Int8kvTritonAttBackend
 from .triton.mla import MlaTritonAttBackend
-from .fa3.fp import Fa3AttBackend, Fa3ViTAttBackend
+from .fa3.fp import Fa3AttBackend
 from .fa3.fp8 import Fp8Fa3AttBackend
 from .fa3.mla import MlaFa3AttBackend
 from .flashinfer.fp8 import Fp8FlashInferAttBackend
@@ -46,13 +46,6 @@ mla_data_type_to_backend = {
     },
 }
 
-vit_data_type_to_backend = {
-    "None": {
-        "triton": TritonAttBackend,
-        "fa3": Fa3ViTAttBackend,
-    },
-}
-
 
 def _auto_select_backend(
     llm_dtype: str, is_mla: bool = False, priority_list: list = ["fa3", "flashinfer", "triton"]
@@ -67,30 +60,10 @@ def _auto_select_backend(
     for backend_name in priority_list:
         if validate(backend_name):
             logger.info(f"Auto-selected {backend_name} backend (validated)")
-            print(f"llm_dtype is {llm_dtype}, backend_name is {backend_name} ")
             return backend_map[llm_dtype][backend_name]
 
     # Fallback to triton without validation (should not happen)
     logger.warning("No backend validation succeeded, falling back to triton")
-    return backend_map[llm_dtype]["triton"]
-
-
-def _auto_select_vit_backend(llm_dtype: str, priority_list: list = ["fa3", "triton"]) -> type:
-    """Auto-select the best available backend with validation for vit.
-
-    Priority: FA3 > Triton
-    Each backend is validated in a subprocess with ground truth checks.
-    """
-    backend_map = vit_data_type_to_backend
-
-    for backend_name in priority_list:
-        if validate(backend_name):
-            logger.info(f"Auto-selected {backend_name} backend (validated) for ViT")
-            print(f"llm_dtype is {llm_dtype}, backend_name is {backend_name} ")
-            return backend_map[llm_dtype][backend_name]
-
-    # Fallback to triton without validation (should not happen)
-    logger.warning("No backend validation succeeded for vit, falling back to triton")
     return backend_map[llm_dtype]["triton"]
 
 
@@ -132,7 +105,3 @@ def get_mla_decode_att_backend_class(index=0, priority_list: list = ["fa3", "fla
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
         return _auto_select_backend(llm_dtype, is_mla=True, priority_list=priority_list)
-
-
-def get_vit_att_backend_class(index=0, priority_list: list = ["fa3", "triton"]) -> BaseAttBackend:
-    return _auto_select_vit_backend(llm_dtype="None", priority_list=priority_list)

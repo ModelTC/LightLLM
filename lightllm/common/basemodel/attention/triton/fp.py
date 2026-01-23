@@ -1,6 +1,6 @@
 import dataclasses
 import torch
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl, BaseVitAttState
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
 
 
@@ -10,9 +10,6 @@ class TritonAttBackend(BaseAttBackend):
 
     def create_att_decode_state(self, infer_state) -> "TritonDecodeAttState":
         return TritonDecodeAttState(backend=self, infer_state=infer_state)
-
-    def create_vit_att_state(self, infer_state) -> "TritonDecodeAttState":
-        return TritonVitAttState(backend=self, infer_state=infer_state)
 
 
 @dataclasses.dataclass
@@ -276,31 +273,3 @@ class TritonDecodeAttState(BaseDecodeAttState):
             b_seq_len=self.infer_state.b_seq_len,
         )
         return o_tensor
-
-
-@dataclasses.dataclass
-class TritonVitAttState(BaseVitAttState):
-    def init_state(self):
-        pass
-
-    def _vit_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        o: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-        alloc_func=torch.empty,
-    ):
-        from lightllm.models.vit.triton_kernel.flashattention_nopad import _flash_attention_triton_fwd
-
-        _flash_attention_triton_fwd(
-            q,
-            k,
-            v,
-            o,
-            cu_seqlens,  # q k v cu_seqlens,
-            max_seqlen,
-        )
-        return
