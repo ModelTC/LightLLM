@@ -228,14 +228,23 @@ class FusedMoeWeightTP(BaseWeight):
         w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{suffix}"
         w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{suffix}"
         w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{suffix}"
+
+        merge_w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{suffix}"
+        merge_w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{suffix}"
+        merge_w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{suffix}"
+
         intermediate_size = self.split_inter_size
         load_func, slice_func = self._get_load_and_slice_func(type, is_row=True)
         if suffix == "weight":
             with self.lock:
                 if w1_weight in weights:
                     self.gate_up_buffer[expert_idx][0] = slice_func(weights[w1_weight])
+                if merge_w1_weight in weights:
+                    self.gate_up_buffer[expert_idx][0] = slice_func(weights[merge_w1_weight][expert_idx])
                 if w3_weight in weights:
                     self.gate_up_buffer[expert_idx][1] = slice_func(weights[w3_weight])
+                if merge_w3_weight in weights:
+                    self.gate_up_buffer[expert_idx][1] = slice_func(weights[merge_w3_weight][expert_idx])
                 if None not in self.gate_up_buffer[expert_idx]:
                     tmp_weight = torch.cat(
                         [self.gate_up_buffer[expert_idx][0], self.gate_up_buffer[expert_idx][1]], dim=0
@@ -251,6 +260,8 @@ class FusedMoeWeightTP(BaseWeight):
         load_func, slice_func = self._get_load_and_slice_func(type, is_row=False)
         if w2_weight in weights:
             load_func(slice_func(weights[w2_weight]), self.w2.get_expert(expert_idx), start_idx=0)
+        if merge_w2_weight in weights:
+            load_func(slice_func(weights[merge_w2_weight][expert_idx]), self.w2.get_expert(expert_idx), start_idx=0)
 
     def _get_load_and_slice_func(self, type: str, is_row: bool = True):
         if is_row:
