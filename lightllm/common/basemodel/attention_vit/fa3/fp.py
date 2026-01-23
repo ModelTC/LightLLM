@@ -16,7 +16,6 @@ class Fa3VitAttBackend(BaseVitAttBackend):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> None:
-        self.backend: Fa3VitAttBackend = self.backend  # for typing
 
         head_dim = q.shape[-1]
         softmax_scale = head_dim ** -0.5
