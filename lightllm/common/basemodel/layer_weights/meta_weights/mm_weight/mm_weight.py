@@ -116,7 +116,7 @@ class MMWeightTpl(BaseWeightTpl):
     def _create_weight(self):
         self.bias = None
         if self.bias_names is not None:
-            self.bias = torch.empty(self.cusum_out_dims[-1], dtype=self.data_type_).cuda(get_current_device_id())
+            self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).cuda(get_current_device_id())
             self.bias._load_ok = [False] * len(self.bias_names)
         self.mm_param: WeightPack = self.quant_method.create_weight(
             in_dim=self.in_dim, out_dim=sum(self.out_dims), dtype=self.data_type_, device_id=get_current_device_id()
