@@ -86,6 +86,8 @@ class FusedMoeWeight(BaseWeightTpl):
         self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
         self.redundancy_expert_ids_tensor = torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cuda")
         self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
+        # TODO: find out the reason of failure of deepep when redundancy_expert_num is 1.
+        assert self.redundancy_expert_num != 1, "redundancy_expert_num can not be 1 for some unknown hang of deepep."
 
     def _init_parallel_params(self):
         self.local_n_routed_experts = self.n_routed_experts + self.num_fused_shared_experts
