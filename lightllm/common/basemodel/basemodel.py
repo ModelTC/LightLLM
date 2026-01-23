@@ -32,7 +32,7 @@ from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
-from .attention import get_prefill_att_backend_class, get_decode_att_backend_class, get_vit_att_backend_class
+from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
 
 logger = init_logger(__name__)
@@ -119,6 +119,7 @@ class TpPartBaseModel:
         self._init_custom()
         # wait必须在init cudagraph 之前，避免错误捕获
         self._wait_other_modules_ready()
+
         self._init_att_backend()
         self._init_att_backend1()
 
