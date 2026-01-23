@@ -229,9 +229,9 @@ class FusedMoeWeightTP(BaseWeight):
         w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{suffix}"
         w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{suffix}"
 
-        merge_w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{suffix}"
-        merge_w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{suffix}"
-        merge_w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{suffix}"
+        merge_w1_weight = f"{self.weight_prefix}.{self.w1_weight_name}.{suffix}"
+        merge_w2_weight = f"{self.weight_prefix}.{self.w2_weight_name}.{suffix}"
+        merge_w3_weight = f"{self.weight_prefix}.{self.w3_weight_name}.{suffix}"
 
         intermediate_size = self.split_inter_size
         load_func, slice_func = self._get_load_and_slice_func(type, is_row=True)
