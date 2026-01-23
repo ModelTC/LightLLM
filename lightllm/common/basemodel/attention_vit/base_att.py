@@ -2,7 +2,7 @@ import torch
 from abc import ABC, abstractmethod
 
 
-class BaseVitAttBackend:
+class BaseVitAttBackend(ABC):
     """
     用于创建支持各种不同的AttBackend, 如 fa3, flashinfer, triton 实现等，
     这个是单列模式, 每种backend只有一个实例
@@ -24,14 +24,6 @@ class BaseVitAttBackend:
 
     def __init__(self, model):
         self.model = model
-
-    def create_vit_att_state(self) -> "BaseVitAttState":
-        raise NotImplementedError("not impl")
-
-
-class BaseVitAttState(ABC):
-
-    backend: BaseVitAttBackend = None
 
     @abstractmethod
     def vit_att(

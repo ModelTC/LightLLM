@@ -1,19 +1,12 @@
 import dataclasses
 import torch
-from ..base_att import BaseVitAttState, BaseVitAttBackend
-from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+from ..base_att import BaseVitAttBackend
 
 
 class Fa3VitAttBackend(BaseVitAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
 
-    def create_vit_att_state(self) -> "Fa3VitAttState":
-        return Fa3VitAttState(backend=self)
-
-
-@dataclasses.dataclass
-class Fa3VitAttState(BaseVitAttState):
     def vit_att(
         self,
         q: torch.Tensor,

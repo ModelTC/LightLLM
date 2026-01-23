@@ -1,18 +1,8 @@
-import dataclasses
 import torch
-from ..base_att import BaseVitAttBackend, BaseVitAttState
+from ..base_att import BaseVitAttBackend
 
 
 class TritonVitAttBackend(BaseVitAttBackend):
-    def create_vit_att_state(self, infer_state) -> "TritonVitAttState":
-        return TritonVitAttState(backend=self, infer_state=infer_state)
-
-
-@dataclasses.dataclass
-class TritonVitAttState(BaseVitAttState):
-    def init_state(self):
-        pass
-
     def _vit_att(
         self,
         q: torch.Tensor,
