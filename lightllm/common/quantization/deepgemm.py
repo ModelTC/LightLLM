@@ -107,7 +107,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
         weight_scale = torch.empty(expert_prefix + (scale_out_dim, scale_in_dim), dtype=torch.float32).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
-        weight_scale_out_dims = [_out_dim // self.block_size for _out_dim in out_dims]
+        weight_scale_out_dims = [(_out_dim + self.block_size - 1) // self.block_size for _out_dim in out_dims]
         mm_param_list = self._split_weight_pack(
             mm_param,
             weight_out_dims=out_dims,
