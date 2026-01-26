@@ -4,6 +4,7 @@ import numpy as np
 import torch.nn.functional as F
 from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.common.basemodel.layer_weights.meta_weights import LayerNormWeight
 
 
 class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
@@ -13,6 +14,8 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
         self.image_size = self.network_config_["image_size"]
         self.patch_size = self.network_config_["patch_size"]
         self.llm_hidden_size = self.network_config_["llm_hidden_size"]
+        self.num_patches = (self.image_size // self.patch_size) ** 2
+        self.num_positions = self.num_patches + 1
         self._create_weight()
         return
 
@@ -24,17 +27,11 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
 
         # Pre-allocate memory for vision model weights
         self.class_embedding = torch.empty((1, 1, split_embed_dim), dtype=self.data_type_).cuda()
-        self.position_embedding = torch.empty(
-            (1, 197, split_embed_dim), dtype=self.data_type_
-        ).cuda()  # 197 = (224//16)^2 + 1
+        self.position_embedding = torch.empty((1, self.num_positions, split_embed_dim), dtype=self.data_type_).cuda()
         self.patch_embedding_weight_ = torch.empty(
             (split_embed_dim, 3, self.patch_size, self.patch_size), dtype=self.data_type_
         ).cuda()
         self.patch_embedding_bias_ = torch.empty(split_embed_dim, dtype=self.data_type_).cuda()
-
-        # Pre-allocate memory for adapter weights
-        self.layernorm_weight_ = torch.empty(self.embed_dim, dtype=self.data_type_).cuda()
-        self.layernorm_bias_ = torch.empty(self.embed_dim, dtype=self.data_type_).cuda()
 
         split_indexes_llm = np.linspace(0, self.llm_hidden_size, self.tp_world_size_ + 1, dtype=np.int64)
         split_start_llm = split_indexes_llm[self.tp_rank_]
@@ -45,6 +42,13 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
         self.mlp1_1_bias_ = torch.empty(split_llm_hidden_size, dtype=self.data_type_).cuda()
         self.mlp1_3_weight_ = torch.empty((split_llm_hidden_size, self.llm_hidden_size), dtype=self.data_type_).cuda()
         self.mlp1_3_bias_ = torch.empty(self.llm_hidden_size, dtype=self.data_type_).cuda()
+
+        self.layernorm_weight_ = LayerNormWeight(
+            dim=self.embed_dim,
+            weight_name="mlp1.0.weight",
+            data_type=self.data_type_,
+            bias_name="mlp1.0.bias",
+        )
         return
 
     def _cuda(self, cpu_tensor):
@@ -68,6 +72,7 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
         return pos_embed
 
     def load_hf_weights(self, weights):
+        super().load_hf_weights(weights)
         split_indexes = np.linspace(0, self.embed_dim, self.tp_world_size_ + 1, dtype=np.int64)
         split_start = split_indexes[self.tp_rank_]
         split_end = split_indexes[self.tp_rank_ + 1]
@@ -85,11 +90,6 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
             self.patch_embedding_bias_.copy_(
                 weights["vision_model.embeddings.patch_embedding.bias"][split_start:split_end]
             )
-
-        if "mlp1.0.weight" in weights:
-            self.layernorm_weight_.copy_(weights["mlp1.0.weight"])
-        if "mlp1.0.bias" in weights:
-            self.layernorm_bias_.copy_(weights["mlp1.0.bias"])
 
         split_indexes = np.linspace(0, self.llm_hidden_size, self.tp_world_size_ + 1, dtype=np.int64)
         split_start = split_indexes[self.tp_rank_]
