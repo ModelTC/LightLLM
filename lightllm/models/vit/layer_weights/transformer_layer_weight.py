@@ -138,13 +138,18 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
             bias_name=self._ffn_norm_bias_name,
         )
         if self.qk_norm:
+            head_num = self.network_config_["num_attention_heads"]
+            head_dim = self.network_config_["hidden_size"] // head_num
+            head_dim = self.network_config_.get("head_dim", head_dim)
             self.q_norm_weight_ = TpRMSNormWeight(
-                dim=hidden_size,
+                head_num=head_num,
+                head_dim=head_dim,
                 weight_name=self._q_norm_weight_name,
                 data_type=self.data_type_,
             )
             self.k_norm_weight_ = TpRMSNormWeight(
-                dim=hidden_size,
+                head_num=head_num,
+                head_dim=head_dim,
                 weight_name=self._k_norm_weight_name,
                 data_type=self.data_type_,
             )

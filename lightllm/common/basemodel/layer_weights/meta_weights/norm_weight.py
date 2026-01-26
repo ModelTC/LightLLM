@@ -9,7 +9,7 @@ from .platform_op import PlatformAwareOp
 
 
 class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
-    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, **kwargs):
         super().__init__()
         self.dim = dim
         self.weight_name = weight_name
@@ -113,10 +113,12 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
     def _triton_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
-        assert input.ndim == 2 and self.weight.ndim == 1
+        # assert input.ndim == 2 and self.weight.ndim == 1
+        print(input.shape)
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
-        return layernorm_forward(x=input, weight=self.weight, bias=self.bias, eps=eps, out=out)
+        out[:] = layernorm_forward(x=input, weight=self.weight, bias=self.bias, eps=eps)
+        return out
 
     def _cuda_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
@@ -137,34 +139,36 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
 
 
 class TpRMSNormWeight(RMSNormWeight):
-    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
+    def __init__(self, head_num, head_dim, weight_name: str, data_type: torch.dtype):
+        padded_head_num = self._get_tp_padded_head_num(head_num)
+        dim = padded_head_num * head_dim
         super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
-        self.tp_world_size_ = get_dp_world_size()
-        self.tp_rank_ = get_current_rank_in_dp()
-        self.dim = self._get_tp_padded_dim(dim=dim)
         self.repeat_times_ = 1
 
-    def _get_tp_padded_dim(self, dim: int):
+    def _get_tp_padded_head_num(self, head_num: int):
         """
         Get the padded dimension for the weight.
-        1. if dim is divisible by tp_world_size_, return dim
-        2. if dim is greater than tp_world_size_, return (dim + tp_world_size_ - 1) // tp_world_size_ * tp_world_size_
-        3. if dim is less than tp_world_size_, assert tp_world_size_ is divisible by dim, and return dim
+        1. If head_num is divisible by tp_world_size_, return head_num.
+        2. If head_num is greater than tp_world_size_, return:
+           (head_num + tp_world_size_ - 1) // tp_world_size_ * tp_world_size_
+        3. If head_num is less than tp_world_size_, assert tp_world_size_ is
+           divisible by head_num, and return head_num.
         """
-        if dim % self.tp_world_size_ == 0:
-            return dim // self.tp_world_size_
+        self.tp_world_size_ = get_dp_world_size()
+        if head_num % self.tp_world_size_ == 0:
+            return head_num // self.tp_world_size_
 
-        if dim > self.tp_world_size_:
-            return (dim + self.tp_world_size_ - 1) // self.tp_world_size_ * self.tp_world_size_
+        if head_num > self.tp_world_size_:
+            return (head_num + self.tp_world_size_ - 1) // self.tp_world_size_ * self.tp_world_size_
         else:
             assert (
-                self.tp_world_size_ % dim == 0
-            ), f"tp_world_size_ must be divisible by dim, but found: {self.tp_world_size_} % {dim}"
-            self.repeat_times_ = self.tp_world_size_ // dim
-            return dim * self.repeat_times_ // self.tp_world_size_
+                self.tp_world_size_ % head_num == 0
+            ), f"tp_world_size_ must be divisible by head_num, but found: {self.tp_world_size_} % {head_num}"
+            self.repeat_times_ = self.tp_world_size_ // head_num
+            return head_num * self.repeat_times_ // self.tp_world_size_
 
     def load_hf_weights(self, weights):
-        if self.weight_name in weights and self.weight is None:
+        if self.weight_name in weights:
             t_weight = weights[self.weight_name]
             hidden_size = t_weight.shape[0]
             split_hidden_size = hidden_size // self.tp_world_size_
@@ -172,9 +176,9 @@ class TpRMSNormWeight(RMSNormWeight):
             start = split_hidden_size * self.tp_rank_ // self.repeat_times_
             end = min(split_hidden_size * (self.tp_rank_ + 1) // self.repeat_times_, hidden_size)
 
-            self.weight[:, end - start].copy_(t_weight[start:end].to(self.data_type_))
+            self.weight[: end - start].copy_(t_weight[start:end].to(self.data_type_))
             # the padding part is zero
-            self.weight[:, end:].zero_()
+            self.weight[end - start :].zero_()
             self.weight.load_ok = True
 
 

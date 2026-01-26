@@ -116,7 +116,8 @@ class MMWeightTpl(BaseWeightTpl):
             self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).cuda(get_current_device_id())
             # bias_list shares storage with bias for each output shard
             self.bias_list = torch.split(self.bias, self.out_dims, dim=0)
-            self.bias.load_ok = [False] * len(self.bias_names)
+            for sub_bias in self.bias_list:
+                sub_bias.load_ok = False
         self.mm_param: WeightPack = None
         self.mm_param_list: List[WeightPack] = None
         self.mm_param, self.mm_param_list = self.quant_method.create_weight(
@@ -160,7 +161,7 @@ class MMWeightTpl(BaseWeightTpl):
 
     def verify_load(self):
         mm_param_load_ok = all(all(_mm_param.load_ok) for _mm_param in self.mm_param_list)
-        bias_load_ok = True if self.bias is None else all(self.bias.load_ok)
+        bias_load_ok = True if self.bias is None else all(sub_bias.load_ok for sub_bias in self.bias_list)
         if not (mm_param_load_ok and bias_load_ok):
             logger.warning(f"mm_param_load_ok: {self.mm_param_list[0].load_ok}")
         return mm_param_load_ok and bias_load_ok
