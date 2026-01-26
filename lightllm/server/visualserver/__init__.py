@@ -13,4 +13,4 @@ def init_vit_att_backend():
 def get_vit_attn_backend():
     if VIT_ATTN_BACKEND is None:
         raise RuntimeError("VIT_ATTN_BACKEND is not initialized. Call init_vit_att_backend() first.")
-    return VIT_ATTN_BACKEND.vit_att
+    return VIT_ATTN_BACKEND._vit_att_fwd

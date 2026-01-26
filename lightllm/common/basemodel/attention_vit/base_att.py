@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 class BaseVitAttBackend(ABC):
     """
-    用于创建支持各种不同的AttBackend, 如 fa3, flashinfer, triton 实现等，
+    用于创建支持各种不同的AttBackend, 如 fa3, sdpa, triton 实现等，
     这个是单列模式, 每种backend只有一个实例
     """
 
@@ -26,7 +26,7 @@ class BaseVitAttBackend(ABC):
         pass
 
     @abstractmethod
-    def vit_att(
+    def _vit_att_fwd(
         self,
         q: torch.Tensor,
         k: torch.Tensor,

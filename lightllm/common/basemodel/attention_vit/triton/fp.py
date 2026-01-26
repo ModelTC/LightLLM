@@ -4,7 +4,7 @@ from lightllm.models.vit.triton_kernel.flashattention_nopad import _flash_attent
 
 
 class TritonVitAttBackend(BaseVitAttBackend):
-    def vit_att(
+    def _vit_att_fwd(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
