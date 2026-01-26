@@ -116,7 +116,7 @@ class MMWeightTpl(BaseWeightTpl):
             self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).cuda(get_current_device_id())
             # bias_list shares storage with bias for each output shard
             self.bias_list = torch.split(self.bias, self.out_dims, dim=0)
-            self.bias._load_ok = [False] * len(self.bias_names)
+            self.bias.load_ok = [False] * len(self.bias_names)
         self.mm_param: WeightPack = None
         self.mm_param_list: List[WeightPack] = None
         self.mm_param, self.mm_param_list = self.quant_method.create_weight(
@@ -130,14 +130,7 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             weight = self.param_slicer._slice_weight(weights[param_name])
-            if self.quant_method.weight_need_quanted(weight):
-                self.quant_method.quantize(weight, self.mm_param_list[sub_child_index])
-                # online quantization, so we need to set the load_ok for weight_scale and weight_zero_point.
-                self.mm_param_list[sub_child_index].load_ok[1] = True
-                self.mm_param_list[sub_child_index].load_ok[2] = True
-            else:
-                self.quant_method.load_weight(weight, self.mm_param_list[sub_child_index])
-            self.mm_param_list[sub_child_index].load_ok[0] = True
+            self.quant_method.load_weight(weight, self.mm_param_list[sub_child_index])
         return
 
     def _load_bias(
@@ -146,7 +139,7 @@ class MMWeightTpl(BaseWeightTpl):
         if param_name in weights:
             bias = self.param_slicer._slice_bias(weights[param_name])
             self.bias_list[sub_child_index].copy_(bias)
-            self.bias_list[sub_child_index]._load_ok = True
+            self.bias_list[sub_child_index].load_ok = True
         return
 
     def _load_weight_scale(
@@ -167,7 +160,7 @@ class MMWeightTpl(BaseWeightTpl):
 
     def verify_load(self):
         mm_param_load_ok = all(all(_mm_param.load_ok) for _mm_param in self.mm_param_list)
-        bias_load_ok = True if self.bias is None else all(self.bias._load_ok)
+        bias_load_ok = True if self.bias is None else all(self.bias.load_ok)
         if not (mm_param_load_ok and bias_load_ok):
             logger.warning(f"mm_param_load_ok: {self.mm_param_list[0].load_ok}")
         return mm_param_load_ok and bias_load_ok
@@ -210,7 +203,7 @@ class BMMWeightTpl(BaseWeightTpl):
 
     def _create_weight(self):
         self.weight = torch.empty(self.dim0, self.dim1, self.dim2, dtype=self.data_type_).cuda(get_current_device_id())
-        self.weight._load_ok = False
+        self.weight.load_ok = False
         return
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
@@ -218,11 +211,11 @@ class BMMWeightTpl(BaseWeightTpl):
             if weight_name in weights:
                 weight = self.param_slicer._slice_weight(weights[weight_name])
                 self.weight.copy_(weight)
-                self.weight._load_ok = True
+                self.weight.load_ok = True
         return
 
     def verify_load(self):
-        return self.weight._load_ok
+        return self.weight.load_ok
 
     def bmm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True

@@ -28,8 +28,8 @@ class NoQuantization(QuantizationMethod):
             device = input_tensor.device
             if use_custom_tensor_mananger:
                 out = g_cache_manager.alloc_tensor(shape, dtype, device=device)
-            else:
-                out = torch.empty(shape, dtype=dtype, device=device)
+        else:
+            out = torch.empty(shape, dtype=dtype, device=device)
         if bias is None:
             return torch.mm(input_tensor, weight, out=out)
         return torch.addmm(bias, input_tensor, weight, out=out)
@@ -42,10 +42,14 @@ class NoQuantization(QuantizationMethod):
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=None, weight_zero_point=None)
         # weight layout is (out_dim, in_dim), so the split dimension is -2.
-        mm_param_list = self._split_weight_pack(mm_param, out_dims, weight_split_dim=-2)
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=out_dims,
+            weight_split_dim=-2,
+        )
         return mm_param, mm_param_list
 
-    def weight_need_quanted(self, weight: torch.Tensor) -> bool:
+    def _check_weight_need_quanted(self, weight: torch.Tensor) -> bool:
         return False
 
     def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0) -> None:
@@ -54,9 +58,3 @@ class NoQuantization(QuantizationMethod):
     @property
     def method_name(self):
         return "none"
-
-    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int = 0) -> None:
-        if weight is None:
-            return
-        weight_pack.weight.copy_(weight)
-        return

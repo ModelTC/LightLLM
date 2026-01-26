@@ -119,8 +119,19 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         weight_zero_point = torch.empty(
             expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
         ).cuda(device_id)
+        weight_out_dims = [_out_dim // self.pack_factor for _out_dim in out_dims]
+        weight_scale_out_dims = out_dims
+        weight_zero_point_out_dims = weight_out_dims
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
-        mm_param_list = self._split_weight_pack(mm_param, out_dims, weight_split_dim=-1, weight_scale_split_dim=-1)
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=weight_out_dims,
+            weight_split_dim=-1,
+            weight_scale_out_dims=weight_scale_out_dims,
+            weight_scale_split_dim=-1,
+            weight_zero_point_out_dims=weight_zero_point_out_dims,
+            weight_zero_point_split_dim=-1,
+        )
         return mm_param, mm_param_list
 
 
@@ -209,8 +220,19 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         weight_zero_point = torch.empty(
             expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
         ).cuda(device_id)
+        weight_out_dims = [_out_dim * self.tile_size // self.pack_factor for _out_dim in out_dims]
+        weight_scale_out_dims = out_dims
+        weight_zero_point_out_dims = [_out_dim // self.pack_factor for _out_dim in out_dims]
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
-        mm_param_list = self._split_weight_pack(mm_param, out_dims, weight_split_dim=-1, weight_scale_split_dim=-1)
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=weight_out_dims,
+            weight_split_dim=-1,
+            weight_scale_out_dims=weight_scale_out_dims,
+            weight_scale_split_dim=-1,
+            weight_zero_point_out_dims=weight_zero_point_out_dims,
+            weight_zero_point_split_dim=-1,
+        )
         return mm_param, mm_param_list
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
@@ -225,6 +247,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             num_bits=self.hf_quantization_config["bits"],
         )
         weight_pack.weight.copy_(repack_weight)
+        weight_pack.load_ok[0] = True
         return
 
     def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
@@ -240,6 +263,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             group_size=self.hf_quantization_config["group_size"],
         )
         weight_pack.weight_scale.copy_(repack_weight_scale)
+        weight_pack.load_ok[1] = True
         return
 
     def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack) -> None:
@@ -253,6 +277,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             num_bits=self.hf_quantization_config["bits"],
         )
         weight_pack.weight_zero_point.copy_(repack_weight_zero_point)
+        weight_pack.load_ok[2] = True
         return
 
 

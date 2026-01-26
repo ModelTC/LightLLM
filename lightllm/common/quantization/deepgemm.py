@@ -1,5 +1,5 @@
 import torch
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Tuple
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
@@ -99,14 +99,23 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
 
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
-    ) -> WeightPack:
+    ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
         scale_out_dim = (out_dim + self.block_size - 1) // self.block_size
         scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
         weight_scale = torch.empty(expert_prefix + (scale_out_dim, scale_in_dim), dtype=torch.float32).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=weight_scale)
+        mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
+        weight_scale_out_dims = [_out_dim // self.block_size for _out_dim in out_dims]
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=out_dims,
+            weight_split_dim=-2,
+            weight_scale_out_dims=weight_scale_out_dims,
+            weight_scale_split_dim=-2,
+        )
+        return mm_param, mm_param_list
 
 
 def _deepgemm_fp8_nt(a_tuple, b_tuple, out):

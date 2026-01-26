@@ -113,7 +113,13 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).cuda(device_id)
         weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
-        mm_param_list = self._split_weight_pack(mm_param, out_dims, weight_split_dim=-2, weight_scale_split_dim=-1)
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=out_dims,
+            weight_split_dim=-2,
+            weight_scale_out_dims=out_dims,
+            weight_scale_split_dim=-1,
+        )
         return mm_param, mm_param_list
 
 
@@ -170,7 +176,14 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
         weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
-        mm_param_list = self._split_weight_pack(mm_param, out_dims, weight_split_dim=-2, weight_scale_split_dim=-1)
+
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=out_dims,
+            weight_split_dim=-2,
+            weight_scale_out_dims=out_dims,
+            weight_scale_split_dim=-1,
+        )
         return mm_param, mm_param_list
 
 
@@ -242,5 +255,12 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
             expert_prefix + (out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32
         ).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
-        mm_param_list = self._split_weight_pack(mm_param, out_dims, weight_split_dim=-2, weight_scale_split_dim=-2)
+        weight_scale_out_dims = [_out_dim // self.block_size for _out_dim in out_dims]
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=out_dims,
+            weight_split_dim=-2,
+            weight_scale_out_dims=weight_scale_out_dims,
+            weight_scale_split_dim=-2,
+        )
         return mm_param, mm_param_list

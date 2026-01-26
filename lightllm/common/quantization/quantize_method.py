@@ -34,7 +34,6 @@ class QuantizationMethod(ABC):
         self.has_weight_zero_point: bool = None
         self.group_size: int = -1  # -1表示不分组即per-channel量化，其他表示分组大小
         self.pack_factor: int = 1
-        self.block_size: int = 1
 
         # 一些量化模式需要用到的额外量化参数，如awq量化
         self.hf_quantization_config = None
@@ -85,29 +84,32 @@ class QuantizationMethod(ABC):
             num_experts=num_experts,
         )
 
-    def weight_need_quanted(self, weight: torch.Tensor) -> bool:
-        if weight is None:
-            return False
-        # 判断一个 weight 是否需要进行量化操作。
-        return weight.dtype in [torch.bfloat16, torch.float16, torch.float32, torch.float64]
-
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
-        if weight is None:
+        if self._check_weight_need_quanted(weight):
+            self.quantize(weight, weight_pack)
+            weight_pack.load_ok = [True, True, True]
             return
-        weight_pack.weight.copy_(weight)
+        weight_pack.weight[:].copy_(weight)
+        weight_pack.load_ok[0] = True
         return
 
     def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
         if weight_scale is None:
             return
         weight_pack.weight_scale.copy_(weight_scale)
+        weight_pack.load_ok[1] = True
         return
 
     def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack) -> None:
         if weight_zero_point is None:
             return
         weight_pack.weight_zero_point.copy_(weight_zero_point)
+        weight_pack.load_ok[2] = True
         return
+
+    def _check_weight_need_quanted(self, weight: torch.Tensor) -> bool:
+        # 判断一个 weight 是否需要进行量化操作。
+        return weight.dtype in [torch.bfloat16, torch.float16, torch.float32, torch.float64]
 
     def _create_weight(
         self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
@@ -117,25 +119,28 @@ class QuantizationMethod(ABC):
     def _split_weight_pack(
         self,
         weight_pack: WeightPack,
-        out_dims: List[int],
+        weight_out_dims: List[int],
         weight_split_dim: Optional[int],
+        weight_scale_out_dims: List[int] = None,
         weight_scale_split_dim: Optional[int] = None,
+        weight_zero_point_out_dims: List[int] = None,
+        weight_zero_point_split_dim: Optional[int] = None,
     ) -> List[WeightPack]:
         # only support per-channel or block-wise quantization for now.
         mm_param_list: List[WeightPack] = []
-        packed_out_dims = [dim // self.pack_factor for dim in out_dims]
-        scale_out_dims = [dim // self.block_size for dim in out_dims]
-        weight = torch.split(weight_pack.weight, packed_out_dims, dim=weight_split_dim)
+        weight = torch.split(weight_pack.weight, weight_out_dims, dim=weight_split_dim)
         weight_scale = (
-            [None] * len(out_dims)
+            [None] * len(weight_out_dims)
             if weight_pack.weight_scale is None
-            else (torch.split(weight_pack.weight_scale, scale_out_dims, dim=weight_scale_split_dim))
+            else (torch.split(weight_pack.weight_scale, weight_scale_out_dims, dim=weight_scale_split_dim))
         )
         # the ndim of weight_zero_point is the same as weight_scale.
         weight_zero_point = (
-            [None] * len(out_dims)
+            [None] * len(weight_out_dims)
             if weight_pack.weight_zero_point is None
-            else (torch.split(weight_pack.weight_zero_point, packed_out_dims, dim=weight_scale_split_dim))
+            else (
+                torch.split(weight_pack.weight_zero_point, weight_zero_point_out_dims, dim=weight_zero_point_split_dim)
+            )
         )
         for weight, weight_scale, weight_zero_point in zip(weight, weight_scale, weight_zero_point):
             mm_param_list.append(

@@ -266,7 +266,7 @@ class FusedMoeWeight(BaseWeightTpl):
             self._load_weight(self.redundancy_expert_idx_to_local_idx, weights)
 
     def verify_load(self):
-        return True
+        return all(all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list)
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size
@@ -333,11 +333,11 @@ class FusedMoeWeight(BaseWeightTpl):
         row_slice_func = self.row_slicer._slice_weight
         col_slice_func = self.col_slicer._slice_weight
         if w1_weight in weights:
-            self._load_weight_func(row_slice_func(weights[w1_weight]), self.w1_list[local_expert_idx])
+            self.quant_method.load_weight(row_slice_func(weights[w1_weight]), self.w1_list[local_expert_idx])
         if w3_weight in weights:
-            self._load_weight_func(row_slice_func(weights[w3_weight]), self.w3_list[local_expert_idx])
+            self.quant_method.load_weight(row_slice_func(weights[w3_weight]), self.w3_list[local_expert_idx])
         if w2_weight in weights:
-            self._load_weight_func(col_slice_func(weights[w2_weight]), self.w2_list[local_expert_idx])
+            self.quant_method.load_weight(col_slice_func(weights[w2_weight]), self.w2_list[local_expert_idx])
 
     def _load_expert_scale(
         self,
@@ -351,11 +351,11 @@ class FusedMoeWeight(BaseWeightTpl):
         row_slice_func = self.row_slicer._slice_weight_scale
         col_slice_func = self.col_slicer._slice_weight_scale
         if w1_scale in weights:
-            self._load_weight_scale_func(row_slice_func(weights[w1_scale]), self.w1_list[local_expert_idx])
+            self.quant_method.load_weight_scale(row_slice_func(weights[w1_scale]), self.w1_list[local_expert_idx])
         if w3_scale in weights:
-            self._load_weight_scale_func(row_slice_func(weights[w3_scale]), self.w3_list[local_expert_idx])
+            self.quant_method.load_weight_scale(row_slice_func(weights[w3_scale]), self.w3_list[local_expert_idx])
         if w2_scale in weights:
-            self._load_weight_scale_func(col_slice_func(weights[w2_scale]), self.w2_list[local_expert_idx])
+            self.quant_method.load_weight_scale(col_slice_func(weights[w2_scale]), self.w2_list[local_expert_idx])
 
     def _load_expert_zero_point(
         self,
@@ -375,14 +375,14 @@ class FusedMoeWeight(BaseWeightTpl):
         row_slice_func = self.row_slicer._slice_weight_zero_point
         col_slice_func = self.col_slicer._slice_weight_zero_point
         if w1_zero_point in weights:
-            self._load_weight_zero_point_func(row_slice_func(weights[w1_zero_point]), self.w1_list[local_expert_idx])
+            self.quant_method.load_weight_zero_point(
+                row_slice_func(weights[w1_zero_point]), self.w1_list[local_expert_idx]
+            )
         if w3_zero_point in weights:
-            self._load_weight_zero_point_func(row_slice_func(weights[w3_zero_point]), self.w3_list[local_expert_idx])
+            self.quant_method.load_weight_zero_point(
+                row_slice_func(weights[w3_zero_point]), self.w3_list[local_expert_idx]
+            )
         if w2_zero_point in weights:
-            self._load_weight_zero_point_func(col_slice_func(weights[w2_zero_point]), self.w2_list[local_expert_idx])
-
-    def _load_weight_func(self, weight: torch.Tensor, weight_pack: WeightPack):
-        if self.quant_method.weight_need_quanted(weight):
-            self.quant_method.quantize(weight, weight_pack)
-        else:
-            self.quant_method.load_weight(weight, weight_pack)
+            self.quant_method.load_weight_zero_point(
+                col_slice_func(weights[w2_zero_point]), self.w2_list[local_expert_idx]
+            )
