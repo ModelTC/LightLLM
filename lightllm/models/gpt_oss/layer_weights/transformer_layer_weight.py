@@ -72,6 +72,8 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
         super()._init_weight()
 
         self.attn_sinks = TpAttSinkWeight(
+            all_kv_head_num=self.q_head_num_ + self.k_head_num_,
+            head_dim=self.head_dim,
             weight_name=f"model.layers.{self.layer_num_}.self_attn.sinks",
             data_type=torch.bfloat16,
         )
