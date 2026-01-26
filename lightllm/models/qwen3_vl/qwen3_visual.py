@@ -129,6 +129,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
     ):
         super().__init__()
         self.data_type = kvargs.get("data_type", "bfloat16")
+
         self.depth = depth
         self.out_hidden_size = out_hidden_size
         self.hidden_size = hidden_size
