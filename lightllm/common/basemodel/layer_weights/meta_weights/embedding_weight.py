@@ -12,8 +12,6 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         super().__init__()
         self.dim = dim
         self.vocab_size = vocab_size
-        self.tp_world_size_ = get_dp_world_size()
-        self.tp_rank_ = get_current_rank_in_dp()
         # 计算 split_indexes
         split_indexes = np.linspace(0, self.vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
         self.tp_vocab_start_id = int(split_indexes[self.tp_rank_])
@@ -86,7 +84,7 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         return self._forward(input_ids=input_ids, out=out, alloc_func=alloc_func)
 
 
-class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
+class LMHeadWeight(EmbeddingWeight):
     def __init__(
         self,
         dim: int,
@@ -95,27 +93,14 @@ class LMHeadWeight(BaseWeightTpl, PlatformAwareOp):
         data_type: torch.dtype,
         embedding_weight: Optional[EmbeddingWeight] = None,
     ):
-        super().__init__()
-        self.dim = dim
-        self.vocab_size = vocab_size
-        self.tp_world_size_ = get_dp_world_size()
-        self.tp_rank_ = get_current_rank_in_dp()
-        # 计算 split_indexes
-        split_indexes = np.linspace(0, self.vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
-        self.tp_vocab_start_id = int(split_indexes[self.tp_rank_])
-        self.tp_vocab_end_id = int(split_indexes[self.tp_rank_ + 1])
-        self.weight_name: str = weight_name
-        self.data_type_ = data_type
         self._embedding_weight = embedding_weight
-        self._create_weight()
+        super().__init__(dim=dim, vocab_size=vocab_size, weight_name=weight_name, data_type=data_type)
 
     def _create_weight(self):
         if self._embedding_weight is not None:
             self.weight = self._embedding_weight.weight
             return
-        tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
-        self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
-        self.weight.load_ok = False
+        super()._create_weight()
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         # When set tile_embedding=True, no need to load - EmbeddingWeight already loaded it
