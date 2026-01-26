@@ -279,29 +279,28 @@ class FusedMoeWeight(BaseWeightTpl):
                 device=f"cuda:{self.device_id_}",
             )
 
-        self.w13: WeightPack = self.quant_method.create_weight(
-            out_dim=intermediate_size * 2,
+        self.w13, w13_param_list = self.quant_method.create_moe_weight(
+            out_dims=[intermediate_size, intermediate_size],
             in_dim=self.hidden_size,
             dtype=self.data_type_,
             device_id=self.device_id_,
             num_experts=self.local_n_routed_experts,
         )
-        self.w13_list: List[WeightPack] = self._get_expert_weight_list(self.w13, 2)
-        self.w2: WeightPack = self.quant_method.create_weight(
-            out_dim=self.hidden_size,
+        self.w2, _ = self.quant_method.create_moe_weight(
+            out_dims=[self.hidden_size],
             in_dim=intermediate_size,
             dtype=self.data_type_,
             device_id=self.device_id_,
             num_experts=self.local_n_routed_experts,
         )
-        self.w2_list: List[WeightPack] = self._get_expert_weight_list(self.w2, 1)
-        self.load_cnt = 0
+        self.w1_list: List[WeightPack] = self._get_expert_weight_list(w13_param_list[0])
+        self.w3_list: List[WeightPack] = self._get_expert_weight_list(w13_param_list[1])
+        self.w2_list: List[WeightPack] = self._get_expert_weight_list(self.w2)
 
-    def _get_expert_weight_list(self, weight_pack: WeightPack, weight_num: int = 1):
+    def _get_expert_weight_list(self, weight_pack: WeightPack):
         weight_list = []
         for idx in range(self.local_n_routed_experts):
             expert_weight = weight_pack.get_expert(idx)
-            expert_weight.create_cpu_buffer(weight_num)
             weight_list.append(expert_weight)
         return weight_list
 
@@ -334,15 +333,11 @@ class FusedMoeWeight(BaseWeightTpl):
         row_slice_func = self.row_slicer._slice_weight
         col_slice_func = self.col_slicer._slice_weight
         if w1_weight in weights:
-            self.w13_list[local_expert_idx].weight_cpu_buffer[0] = row_slice_func(weights[w1_weight])
+            self._load_weight_func(row_slice_func(weights[w1_weight]), self.w1_list[local_expert_idx])
         if w3_weight in weights:
-            self.w13_list[local_expert_idx].weight_cpu_buffer[1] = row_slice_func(weights[w3_weight])
-        w13_weight = self.w13_list[local_expert_idx].get_fused_weight_part("weight")
-        self._load_weight_func(w13_weight, self.w13_list[local_expert_idx])
+            self._load_weight_func(row_slice_func(weights[w3_weight]), self.w3_list[local_expert_idx])
         if w2_weight in weights:
-            self.w2_list[local_expert_idx].weight_cpu_buffer[0] = col_slice_func(weights[w2_weight])
-            w2_weight = self.w2_list[local_expert_idx].get_fused_weight_part("weight")
-            self._load_weight_func(w2_weight, self.w2_list[local_expert_idx])
+            self._load_weight_func(col_slice_func(weights[w2_weight]), self.w2_list[local_expert_idx])
 
     def _load_expert_scale(
         self,
@@ -356,15 +351,11 @@ class FusedMoeWeight(BaseWeightTpl):
         row_slice_func = self.row_slicer._slice_weight_scale
         col_slice_func = self.col_slicer._slice_weight_scale
         if w1_scale in weights:
-            self.w13_list[local_expert_idx].weight_scale_cpu_buffer[0] = row_slice_func(weights[w1_scale])
+            self._load_weight_scale_func(row_slice_func(weights[w1_scale]), self.w1_list[local_expert_idx])
         if w3_scale in weights:
-            self.w13_list[local_expert_idx].weight_scale_cpu_buffer[1] = row_slice_func(weights[w3_scale])
-        w13_scale = self.w13_list[local_expert_idx].get_fused_weight_part("weight_scale")
-        self.quant_method.load_weight_scale(w13_scale, self.w13_list[local_expert_idx])
+            self._load_weight_scale_func(row_slice_func(weights[w3_scale]), self.w3_list[local_expert_idx])
         if w2_scale in weights:
-            self.w2_list[local_expert_idx].weight_scale_cpu_buffer[0] = col_slice_func(weights[w2_scale])
-        w2_scale = self.w2_list[local_expert_idx].get_fused_weight_part("weight_scale")
-        self.quant_method.load_weight_scale(w2_scale, self.w2_list[local_expert_idx])
+            self._load_weight_scale_func(col_slice_func(weights[w2_scale]), self.w2_list[local_expert_idx])
 
     def _load_expert_zero_point(
         self,
@@ -384,15 +375,11 @@ class FusedMoeWeight(BaseWeightTpl):
         row_slice_func = self.row_slicer._slice_weight_zero_point
         col_slice_func = self.col_slicer._slice_weight_zero_point
         if w1_zero_point in weights:
-            self.w13_list[local_expert_idx].weight_zero_point_cpu_buffer[0] = row_slice_func(weights[w1_zero_point])
+            self._load_weight_zero_point_func(row_slice_func(weights[w1_zero_point]), self.w1_list[local_expert_idx])
         if w3_zero_point in weights:
-            self.w13_list[local_expert_idx].weight_zero_point_cpu_buffer[1] = row_slice_func(weights[w3_zero_point])
-        w13_zero_point = self.w13_list[local_expert_idx].get_fused_weight_part("weight_zero_point")
-        self.quant_method.load_weight_zero_point(w13_zero_point, self.w13_list[local_expert_idx])
+            self._load_weight_zero_point_func(row_slice_func(weights[w3_zero_point]), self.w3_list[local_expert_idx])
         if w2_zero_point in weights:
-            self.w2_list[local_expert_idx].weight_zero_point_cpu_buffer[0] = col_slice_func(weights[w2_zero_point])
-        w2_zero_point = self.w2_list[local_expert_idx].get_fused_weight_part("weight_zero_point")
-        self.quant_method.load_weight_zero_point(w2_zero_point, self.w2_list[local_expert_idx])
+            self._load_weight_zero_point_func(col_slice_func(weights[w2_zero_point]), self.w2_list[local_expert_idx])
 
     def _load_weight_func(self, weight: torch.Tensor, weight_pack: WeightPack):
         if self.quant_method.weight_need_quanted(weight):

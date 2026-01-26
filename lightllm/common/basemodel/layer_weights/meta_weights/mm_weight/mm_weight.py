@@ -34,9 +34,6 @@ class MMWeightTpl(BaseWeightTpl):
         if isinstance(out_dims, int):
             out_dims = [out_dims]
         self.out_dims = out_dims
-        self.cusum_out_dims = [0]
-        for out_dim in out_dims[:-1]:
-            self.cusum_out_dims.append(self.cusum_out_dims[-1] + out_dim)
 
         if isinstance(weight_names, str):
             weight_names = [weight_names]
@@ -117,13 +114,14 @@ class MMWeightTpl(BaseWeightTpl):
         self.bias = None
         if self.bias_names is not None:
             self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).cuda(get_current_device_id())
+            # bias_list shares storage with bias for each output shard
+            self.bias_list = torch.split(self.bias, self.out_dims, dim=0)
             self.bias._load_ok = [False] * len(self.bias_names)
-        self.mm_param: WeightPack = self.quant_method.create_weight(
-            in_dim=self.in_dim, out_dim=sum(self.out_dims), dtype=self.data_type_, device_id=get_current_device_id()
+        self.mm_param: WeightPack = None
+        self.mm_param_list: List[WeightPack] = None
+        self.mm_param, self.mm_param_list = self.quant_method.create_weight(
+            in_dim=self.in_dim, out_dims=self.out_dims, dtype=self.data_type_, device_id=get_current_device_id()
         )
-        # For fused weights such as gate_up_proj, we first load them into a CPU buffer
-        # for online quantization (e.g., per-tensor quantization).
-        self.mm_param.create_cpu_buffer(len(self.weight_names))
         return
 
     # 执行顺序
@@ -132,12 +130,14 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             weight = self.param_slicer._slice_weight(weights[param_name])
-            self.mm_param.weight_cpu_buffer[sub_child_index] = weight
-            weight = self.mm_param.get_fused_weight_part("weight")
             if self.quant_method.weight_need_quanted(weight):
-                self.quant_method.quantize(weight, self.mm_param)
+                self.quant_method.quantize(weight, self.mm_param_list[sub_child_index])
+                # online quantization, so we need to set the load_ok for weight_scale and weight_zero_point.
+                self.mm_param_list[sub_child_index].load_ok[1] = True
+                self.mm_param_list[sub_child_index].load_ok[2] = True
             else:
-                self.quant_method.load_weight(weight, self.mm_param)
+                self.quant_method.load_weight(weight, self.mm_param_list[sub_child_index])
+            self.mm_param_list[sub_child_index].load_ok[0] = True
         return
 
     def _load_bias(
@@ -145,10 +145,8 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             bias = self.param_slicer._slice_bias(weights[param_name])
-            start_idx = self.cusum_out_dims[sub_child_index]
-            end_idx = start_idx + bias.shape[0]
-            self.bias[start_idx:end_idx].copy_(bias)
-            self.bias._load_ok[sub_child_index] = True
+            self.bias_list[sub_child_index].copy_(bias)
+            self.bias_list[sub_child_index]._load_ok = True
         return
 
     def _load_weight_scale(
@@ -156,9 +154,7 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             weight_scale = self.param_slicer._slice_weight_scale(weights[param_name])
-            self.mm_param.weight_scale_cpu_buffer[sub_child_index] = weight_scale
-            weight_scale = self.mm_param.get_fused_weight_part("weight_scale")
-            self.quant_method.load_weight_scale(weight_scale, self.mm_param)
+            self.quant_method.load_weight_scale(weight_scale, self.mm_param_list[sub_child_index])
         return
 
     def _load_weight_zero_point(
@@ -166,16 +162,14 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             weight_zero_point = self.param_slicer._slice_weight_zero_point(weights[param_name])
-            self.mm_param.weight_zero_point_cpu_buffer[sub_child_index] = weight_zero_point
-            weight_zero_point = self.mm_param.get_fused_weight_part("weight_zero_point")
-            self.quant_method.load_weight_zero_point(weight_zero_point, self.mm_param)
+            self.quant_method.load_weight_zero_point(weight_zero_point, self.mm_param_list[sub_child_index])
         return
 
     def verify_load(self):
-        mm_param_load_ok = all(self.mm_param.load_ok)
+        mm_param_load_ok = all(all(_mm_param.load_ok) for _mm_param in self.mm_param_list)
         bias_load_ok = True if self.bias is None else all(self.bias._load_ok)
         if not (mm_param_load_ok and bias_load_ok):
-            logger.warning(f"mm_param_load_ok: {self.mm_param.load_ok}, bias_load_ok: {self.bias}")
+            logger.warning(f"mm_param_load_ok: {self.mm_param_list[0].load_ok}")
         return mm_param_load_ok and bias_load_ok
 
     def _get_tp_dim(self, dim: int) -> int:

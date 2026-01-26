@@ -63,7 +63,6 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
             layer_num=layer_num,
             network_config=network_config,
         )
-        del self.w13, self.w2
 
         self.hidden_size = network_config["hidden_size"]
 
@@ -80,6 +79,9 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         self._gate_up_blocks_name = f"{weight_prefix}.{gate_up_proj_name}_blocks"
         self._gate_up_scales_name = f"{weight_prefix}.{gate_up_proj_name}_scales"
         return
+
+    def _create_weight(self):
+        pass
 
     def _fuse_weight_scale(self):
         assert False, "Not implemented for GPT-OSS."

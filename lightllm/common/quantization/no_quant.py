@@ -1,5 +1,5 @@
 import torch
-from typing import Optional
+from typing import Optional, List, Union, Tuple
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
@@ -34,12 +34,16 @@ class NoQuantization(QuantizationMethod):
             return torch.mm(input_tensor, weight, out=out)
         return torch.addmm(bias, input_tensor, weight, out=out)
 
-    def create_weight(
-        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
-    ) -> WeightPack:
+    def _create_weight(
+        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> Tuple[WeightPack, List[WeightPack]]:
+        out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=None, weight_zero_point=None)
+        mm_param = WeightPack(weight=weight, weight_scale=None, weight_zero_point=None)
+        # weight layout is (out_dim, in_dim), so the split dimension is -2.
+        mm_param_list = self._split_weight_pack(mm_param, out_dims, weight_split_dim=-2)
+        return mm_param, mm_param_list
 
     def weight_need_quanted(self, weight: torch.Tensor) -> bool:
         return False

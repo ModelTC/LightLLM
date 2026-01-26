@@ -1,5 +1,5 @@
 import torch
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, List
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
@@ -108,9 +108,10 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             out.add_(bias)
         return out
 
-    def create_weight(
-        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
-    ) -> WeightPack:
+    def _create_weight(
+        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> Tuple[WeightPack, List[WeightPack]]:
+        out_dim = sum(out_dims)
         group_size = self.hf_quantization_config["group_size"]
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(expert_prefix + (in_dim, out_dim // self.pack_factor), dtype=torch.int32).cuda(device_id)
@@ -118,7 +119,9 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         weight_zero_point = torch.empty(
             expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
         ).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point, fused_dim=1)
+        mm_param = WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+        mm_param_list = self._split_weight_pack(mm_param, out_dims, weight_split_dim=-1, weight_scale_split_dim=-1)
+        return mm_param, mm_param_list
 
 
 @QUANTMETHODS.register("awq_marlin", platform="cuda")
@@ -144,21 +147,6 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
 
     def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
-
-    def params_repack(
-        self, weight: torch.Tensor, weight_scale: torch.Tensor, weight_zero_point: torch.Tensor, dtype_type: torch.dtype
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        一些量化方法在将参数完成量化后，为了加速性能，还需要将参数进行重拍，使算子性能达到最优，如awq方法。
-        """
-        weight = self._process_weight_after_loading(weight.cuda(get_current_device_id()))
-        weight_scale = self._process_weight_scale_after_loading(
-            weight_scale.cuda(get_current_device_id()).to(dtype_type)
-        )
-        weight_zero_point = self._process_weight_zero_point_after_loading(
-            weight_zero_point.cuda(get_current_device_id())
-        )
-        return weight, weight_scale, weight_zero_point
 
     def apply(
         self,
@@ -206,9 +194,10 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             out.add_(bias)
         return out
 
-    def create_weight(
-        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
-    ) -> WeightPack:
+    def _create_weight(
+        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> Tuple[WeightPack, List[WeightPack]]:
+        out_dim = sum(out_dims)
         self.n = out_dim
         self.k = in_dim
         group_size = self.hf_quantization_config["group_size"]
@@ -220,7 +209,9 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         weight_zero_point = torch.empty(
             expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
         ).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point, fused_dim=1)
+        mm_param = WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+        mm_param_list = self._split_weight_pack(mm_param, out_dims, weight_split_dim=-1, weight_scale_split_dim=-1)
+        return mm_param, mm_param_list
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
         assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
