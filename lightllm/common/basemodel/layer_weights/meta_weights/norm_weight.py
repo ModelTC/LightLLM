@@ -189,7 +189,6 @@ class NoTpGEMMANormWeight(RMSNormWeight):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
             self.weight += 1
-            self.load_cnt += 1
 
 
 class QKRMSNORMWeight(RMSNormWeight):
