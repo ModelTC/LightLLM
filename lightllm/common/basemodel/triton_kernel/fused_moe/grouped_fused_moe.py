@@ -388,7 +388,7 @@ def grouped_matmul_kernel(
     n,  # int
     topk_num,  # int
     token_scale_ptr,  # [1,] for per tensor quant, or [token_num, hidden_dim // block_size] for per token, group quant
-    weight_scale_ptr,  # [expert_num,] or [export_num, n // block_size_n, k // block_size_k]
+    weight_scale_ptr,  # [expert_num, n] or [export_num, n // block_size_n, k // block_size_k]
     weight_scale_stride0,
     weight_scale_stride1,
     weight_scale_stride2,
@@ -498,7 +498,10 @@ def grouped_matmul_kernel(
             b_scale_ptrs = weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bsn * weight_scale_stride1
         else:
             a_scale = tl.load(token_scale_ptr, eviction_policy="evict_last")
-            b_scale = tl.load(weight_scale_ptr + expert_id, eviction_policy="evict_last")
+            b_scale = tl.load(
+                weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bn[None, :] * weight_scale_stride1,
+                eviction_policy="evict_last",
+            )
             ab_scale = a_scale * b_scale
 
     if NEED_TRANS:
