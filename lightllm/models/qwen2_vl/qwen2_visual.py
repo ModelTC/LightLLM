@@ -234,11 +234,6 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
             raise ValueError(f"Unsupport datatype {self.data_type}!")
         return
 
-    def _init_vit_att(self, vit_att):
-        for blk in self.blocks:
-            blk.attn.vit_att_backend = vit_att
-        return
-
     def load_model(self, weight_dir):
 
         processor_config_path = os.path.join(weight_dir, "preprocessor_config.json")
