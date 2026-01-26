@@ -45,6 +45,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.data_type = kvargs["data_type"]
         init_vision_distributed_env(kvargs)
+        init_vit_att_backend()
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 
         try:
@@ -82,7 +83,6 @@ class VisualModelRpcServer(rpyc.Service):
             else:
                 raise Exception(f"can not support {self.model_type} now")
 
-            init_vit_att_backend()
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
             self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=True)
