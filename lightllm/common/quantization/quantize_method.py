@@ -17,7 +17,9 @@ class WeightPack:
         weight = self.weight[expert_idx]
         weight_scale = self.weight_scale[expert_idx] if self.weight_scale is not None else None
         weight_zero_point = self.weight_zero_point[expert_idx] if self.weight_zero_point is not None else None
-        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+        return WeightPack(
+            weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point, fused_dim=self.fused_dim
+        )
 
     def create_cpu_buffer(self, weight_num: int):
         self.weight_cpu_buffer = [None] * weight_num
@@ -37,7 +39,13 @@ class WeightPack:
             raise ValueError(f"unknown weight type: {weight_type}")
         cpu_buffer = getattr(self, buffer_name)
         if None not in cpu_buffer:
-            fused = torch.cat(cpu_buffer, dim=self.fused_dim)
+            try:
+                fused = torch.cat(cpu_buffer, dim=self.fused_dim)
+            except Exception as e:
+                print(len(cpu_buffer), self.fused_dim)
+                for buff in cpu_buffer:
+                    print(buff.shape)
+                raise e
             setattr(self, buffer_name, [None] * len(cpu_buffer))
             self.load_ok[index] = True
             return fused
@@ -91,6 +99,8 @@ class QuantizationMethod(ABC):
         pass
 
     def weight_need_quanted(self, weight: torch.Tensor) -> bool:
+        if weight is None:
+            return False
         # 判断一个 weight 是否需要进行量化操作。
         return weight.dtype in [torch.bfloat16, torch.float16, torch.float32, torch.float64]
 
