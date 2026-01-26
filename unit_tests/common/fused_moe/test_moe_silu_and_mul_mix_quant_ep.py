@@ -14,8 +14,10 @@ if not is_fp8_native_supported():
     pytest.skip(reason="not support fp8 test in this gpu card", allow_module_level=True)
 
 import random
-from lightllm.common.fused_moe.moe_silu_and_mul_mix_quant_ep import silu_and_mul_masked_post_quant_fwd
-from lightllm.common.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
+    silu_and_mul_masked_post_quant_fwd,
+)
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.log_utils import init_logger
 
@@ -37,7 +39,7 @@ logger = init_logger(__name__)
 )
 def test_silu_and_mul_masked(expert_num, token_num, hidden_dim):
     quant_group_size = 128
-    in_tensor = torch.randn((expert_num, token_num, hidden_dim), dtype=torch.float16, device="cuda")
+    in_tensor = torch.randn((expert_num, token_num, hidden_dim), dtype=torch.bfloat16, device="cuda")
     out_tensor = torch.empty((expert_num, token_num, hidden_dim // 2), dtype=torch.float8_e4m3fn, device="cuda")
     out_scale_tensor = torch.randn(
         (expert_num, token_num, hidden_dim // 2 // quant_group_size), dtype=torch.float32, device="cuda"
