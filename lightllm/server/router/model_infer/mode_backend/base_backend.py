@@ -132,6 +132,7 @@ class ModeBackend:
         self.infer_state_lock = g_infer_state_lock
         # 防止InferStateLock 中的全局共享信息被重复异常初始化,导致同步异常的问题。
         # 所以做一次barrier等待
+        time.sleep(0.1)
         dist.barrier()
 
         wait_events = []
