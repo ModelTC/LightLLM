@@ -1,9 +1,10 @@
 import torch
-from ..base_att import BaseVitAttBackend
+from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
+from lightllm.models.vit.triton_kernel.flashattention_nopad import _flash_attention_triton_fwd
 
 
 class TritonVitAttBackend(BaseVitAttBackend):
-    def _vit_att(
+    def vit_att(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -11,10 +12,7 @@ class TritonVitAttBackend(BaseVitAttBackend):
         o: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        alloc_func=torch.empty,
     ):
-        from lightllm.models.vit.triton_kernel.flashattention_nopad import _flash_attention_triton_fwd
-
         _flash_attention_triton_fwd(
             q,
             k,
@@ -23,4 +21,4 @@ class TritonVitAttBackend(BaseVitAttBackend):
             cu_seqlens,  # q k v cu_seqlens,
             max_seqlen,
         )
-        return
+        return o

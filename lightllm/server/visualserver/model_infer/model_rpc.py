@@ -24,15 +24,11 @@ from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
-from lightllm.common.basemodel.basemodel import BaseAttBackend, get_vit_att_backend_class
+from lightllm.server.visualserver import init_vit_att_backend
 from lightllm.utils.dist_utils import set_global_rank
 
 
 class VisualModelRpcServer(rpyc.Service):
-    def _init_vit_att_backend(self):
-        self.vit_att_backend: BaseAttBackend = get_vit_att_backend_class(index=0)(model=self)
-        return
-
     def exposed_init_model(self, kvargs):
         kvargs = obtain(kvargs)
         import torch
@@ -48,7 +44,6 @@ class VisualModelRpcServer(rpyc.Service):
         self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.data_type = kvargs["data_type"]
-        set_global_rank(kvargs["tp_rank_id"])  # 这里看后面怎么改
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 
@@ -87,8 +82,7 @@ class VisualModelRpcServer(rpyc.Service):
             else:
                 raise Exception(f"can not support {self.model_type} now")
 
-            self._init_vit_att_backend()
-            self.model._init_vit_att(self.vit_att_backend.create_vit_att_state())
+            init_vit_att_backend()
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
             self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=True)

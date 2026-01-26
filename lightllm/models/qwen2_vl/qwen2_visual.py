@@ -32,8 +32,8 @@ from torch.nn import LayerNorm
 from transformers.activations import ACT2FN
 from safetensors import safe_open
 from lightllm.server.multimodal_params import ImageItem
+from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
-from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
 
@@ -127,7 +127,6 @@ class VisionFlashAttention(nn.Module):
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
-        self.vit_att_backend = None
 
     def forward(
         self,
@@ -144,7 +143,7 @@ class VisionFlashAttention(nn.Module):
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
 
-        self.vit_att_backend.vit_att(q, k, v, attn_output, cu_seqlens, max_seqlen)
+        get_vit_attn_backend()(q, k, v, attn_output, cu_seqlens, max_seqlen)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output

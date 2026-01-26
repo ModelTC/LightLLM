@@ -22,8 +22,8 @@ class BaseVitAttBackend(ABC):
         # 返回已有的实例
         return cls._instances[cls]
 
-    def __init__(self, model):
-        self.model = model
+    def __init__(self):
+        pass
 
     @abstractmethod
     def vit_att(

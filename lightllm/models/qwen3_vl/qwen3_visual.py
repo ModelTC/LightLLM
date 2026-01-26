@@ -181,11 +181,6 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
         )
         self._init_datatype()
 
-    def _init_vit_att(self, vit_att):
-        for blk in self.blocks:
-            blk.attn.vit_att_backend = vit_att
-        return
-
     def _init_datatype(self):
         if isinstance(self.data_type, torch.dtype):
             return

@@ -334,6 +334,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
                 (priority: fa3 > flashinfer > triton)""",
     )
     parser.add_argument(
+        "--vit_att_backend",
+        type=str,
+        nargs="+",
+        choices=["auto", "triton", "fa3", "sdpa"],
+        default=["auto"],
+        help="""vit attention kernel used in vlm.
+                auto: automatically select best backend based on GPU and available packages
+                (priority: fa3 > sdpa > triton)""",
+    )
+    parser.add_argument(
         "--llm_kv_type",
         type=str,
         choices=["None", "int8kv", "int4kv"],

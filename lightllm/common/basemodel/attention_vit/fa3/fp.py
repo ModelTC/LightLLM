@@ -1,12 +1,9 @@
 import dataclasses
 import torch
-from ..base_att import BaseVitAttBackend
+from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
 
 
 class Fa3VitAttBackend(BaseVitAttBackend):
-    def __init__(self, model):
-        super().__init__(model=model)
-
     def vit_att(
         self,
         q: torch.Tensor,
