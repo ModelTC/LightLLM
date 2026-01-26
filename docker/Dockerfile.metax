@@ -1,0 +1,5 @@
+FROM cr.metax-tech.com/public-ai-release/maca/vllm:maca.ai3.1.0.7-torch2.6-py310-ubuntu22.04-amd64
+
+ENV PATH=/opt/conda/bin:/opt/conda/condabin:${PATH}
+COPY . /lightllm
+RUN pip install -r /lightllm/requirements_metax.txt && pip install -e /lightllm --no-cache-dir
