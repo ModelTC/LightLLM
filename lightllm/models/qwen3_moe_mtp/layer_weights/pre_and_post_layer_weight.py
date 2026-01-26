@@ -24,13 +24,11 @@ class Qwen3MOEMTPPreAndPostLayerWeight(PreAndPostLayerWeight):
             dim=hidden_size,
             weight_name="model.layers.0.norm_after_embedding.weight",
             data_type=self.data_type_,
-            bias_name=None,
         )
         self.hnorm_weight_ = RMSNormWeight(
             dim=hidden_size,
             weight_name="model.layers.0.norm_before_output.weight",
             data_type=self.data_type_,
-            bias_name=None,
         )
         # 与Qwen3MOE模型共享
         self.wte_weight_: EmbeddingWeight = None

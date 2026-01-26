@@ -142,13 +142,11 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
                 dim=hidden_size,
                 weight_name=self._q_norm_weight_name,
                 data_type=self.data_type_,
-                bias_name=None,
             )
             self.k_norm_weight_ = TpRMSNormWeight(
                 dim=hidden_size,
                 weight_name=self._k_norm_weight_name,
                 data_type=self.data_type_,
-                bias_name=None,
             )
 
     def load_hf_weights(self, weights):

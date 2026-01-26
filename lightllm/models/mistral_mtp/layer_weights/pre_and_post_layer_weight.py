@@ -28,7 +28,6 @@ class MistralMTPPreAndPostLayerWeight(PreAndPostLayerWeight):
             dim=hidden_size,
             weight_name="mtp.hnorm.weight",
             data_type=self.data_type_,
-            bias_name=None,
         )
 
         self.wte_weight_: EmbeddingWeight = None

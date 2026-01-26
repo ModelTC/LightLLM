@@ -9,12 +9,11 @@ from .platform_op import PlatformAwareOp
 
 
 class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
-    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
         super().__init__()
         self.dim = dim
         self.weight_name = weight_name
         self.data_type_ = data_type
-        assert bias_name is None, "RMSNormWeight does not have bias"
         self._create_weight()
 
     def _create_weight(self):
@@ -138,8 +137,8 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
 
 
 class TpRMSNormWeight(RMSNormWeight):
-    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
-        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type, bias_name=bias_name)
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
+        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
         self.tp_world_size_ = get_dp_world_size()
         self.tp_rank_ = get_current_rank_in_dp()
         self.dim = self._get_tp_padded_dim(dim=dim)
@@ -180,8 +179,8 @@ class TpRMSNormWeight(RMSNormWeight):
 
 
 class NoTpGEMMANormWeight(RMSNormWeight):
-    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
-        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type, bias_name=bias_name)
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
+        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
         self.tp_world_size_ = 1
         self.tp_rank_ = 0
 
@@ -192,8 +191,8 @@ class NoTpGEMMANormWeight(RMSNormWeight):
 
 
 class QKRMSNORMWeight(RMSNormWeight):
-    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
-        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type, bias_name=bias_name)
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
+        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
         self.tp_world_size_ = 1
         self.tp_rank_ = 0
 

@@ -116,11 +116,9 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
             dim=hidden_size,
             weight_name=self._att_norm_weight_name,
             data_type=self.data_type_,
-            bias_name=self._att_norm_bias_name,
         )
         self.ffn_norm_weight_ = RMSNormWeight(
             dim=hidden_size,
             weight_name=self._ffn_norm_weight_name,
             data_type=self.data_type_,
-            bias_name=self._ffn_norm_bias_name,
         )

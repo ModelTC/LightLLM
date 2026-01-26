@@ -23,19 +23,16 @@ class Deepseek3MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
             dim=hidden_size,
             weight_name="model.layers.0.enorm.weight",
             data_type=self.data_type_,
-            bias_name=None,
         )
         self.hnorm_weight_ = RMSNormWeight(
             dim=hidden_size,
             weight_name="model.layers.0.hnorm.weight",
             data_type=self.data_type_,
-            bias_name=None,
         )
         self.final_norm_weight_ = RMSNormWeight(
             dim=hidden_size,
             weight_name="model.layers.0.shared_head.norm.weight",
             data_type=self.data_type_,
-            bias_name=None,
         )
 
         # 与DeepseekV3模型共享, 不通过 load 加载

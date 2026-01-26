@@ -21,5 +21,4 @@ class Qwen3MOEMTPTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             dim=hidden_size,
             weight_name=self._ffn_norm_weight_name,
             data_type=self.data_type_,
-            bias_name=self._ffn_norm_bias_name,
         )
