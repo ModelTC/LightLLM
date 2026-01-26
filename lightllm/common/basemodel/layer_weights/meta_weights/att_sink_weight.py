@@ -5,21 +5,22 @@ from lightllm.utils.dist_utils import get_current_device_id
 
 
 class TpAttSinkWeight(BaseWeightTpl):
-    def __init__(self, all_kv_head_num: int, head_dim: int, weight_name: str, data_type):
+    def __init__(self, all_q_head_num: int, weight_name: str, data_type):
         super().__init__()
-        self.all_kv_head_num = all_kv_head_num
-        self.head_dim = head_dim
+        self.all_q_head_num = all_q_head_num
         self.weight_name = weight_name
         self.data_type_ = data_type
-        self._start_head_index, self._end_head_index = self._get_head_tp_split_params(all_head_num=self.all_kv_head_num)
+        self._start_head_index, self._end_head_index = self._get_head_tp_split_params(all_head_num=self.all_q_head_num)
         self._create_weight()
 
     def _create_weight(self):
-        self.weight = torch.empty((self.all_kv_head_num, self.head_dim), dtype=self.data_type_, device="cuda")
+        self.weight = torch.empty(
+            (self._end_head_index - self._start_head_index,), dtype=self.data_type_, device="cuda"
+        )
         self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
-        if self.weight_name not in weights or self.weight is not None:
+        if self.weight_name not in weights:
             return
 
         t_weight = weights[self.weight_name]

@@ -48,13 +48,13 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
             e_score_correction_bias_name="",
             weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
             n_routed_experts=n_routed_experts,
-            split_inter_size=moe_intermediate_size // self.tp_world_size_,
+            hidden_size=self.n_embed,
+            moe_intermediate_size=moe_intermediate_size,
             data_type=self.data_type_,
-            network_config=self.network_config_,
-            layer_num=self.layer_num_,
-            world_size=self.tp_world_size_,  # diff with FusedMoeWeightTP
-            quant_cfg=self.quant_cfg,
+            quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
             num_fused_shared_experts=0,
+            layer_num=self.layer_num_,
+            network_config=self.network_config_,
         )
 
     def _init_weight_names(self):
@@ -72,8 +72,7 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
         super()._init_weight()
 
         self.attn_sinks = TpAttSinkWeight(
-            all_kv_head_num=self.q_head_num_ + self.k_head_num_,
-            head_dim=self.head_dim,
+            all_q_head_num=self.q_head_num_,
             weight_name=f"model.layers.{self.layer_num_}.self_attn.sinks",
             data_type=torch.bfloat16,
         )
