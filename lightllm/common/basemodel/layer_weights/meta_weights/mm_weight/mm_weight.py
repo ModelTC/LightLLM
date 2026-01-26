@@ -121,7 +121,9 @@ class MMWeightTpl(BaseWeightTpl):
         self.mm_param: WeightPack = self.quant_method.create_weight(
             in_dim=self.in_dim, out_dim=sum(self.out_dims), dtype=self.data_type_, device_id=get_current_device_id()
         )
-        self.mm_param.initialize_load_status(len(self.weight_names))
+        # For fused weights such as gate_up_proj, we first load them into a CPU buffer
+        # for online quantization (e.g., per-tensor quantization).
+        self.mm_param.create_cpu_buffer(len(self.weight_names))
         return
 
     # 执行顺序
@@ -130,16 +132,12 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             weight = self.param_slicer._slice_weight(weights[param_name])
-            start_idx = self.cusum_out_dims[sub_child_index]
+            self.mm_param.weight_cpu_buffer[sub_child_index] = weight
+            weight = self.mm_param.get_fused_weight_part("weight")
             if self.quant_method.weight_need_quanted(weight):
-                self.quant_method.quantize(weight, self.mm_param, offset=start_idx)
-                # weight_scale and zero_point will be computed during online quantization.
-                # so we set them to True here.
-                self.mm_param.load_ok[sub_child_index][1] = True
-                self.mm_param.load_ok[sub_child_index][2] = True
+                self.quant_method.quantize(weight, self.mm_param)
             else:
-                self.quant_method.load_weight(weight, self.mm_param, start_idx)
-            self.mm_param.load_ok[sub_child_index][0] = True
+                self.quant_method.load_weight(weight, self.mm_param)
         return
 
     def _load_bias(
@@ -158,9 +156,9 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             weight_scale = self.param_slicer._slice_weight_scale(weights[param_name])
-            start_idx = self.cusum_out_dims[sub_child_index]
-            self.quant_method.load_weight_scale(weight_scale, self.mm_param, start_idx)
-            self.mm_param.load_ok[sub_child_index][1] = True
+            self.mm_param.weight_scale_cpu_buffer[sub_child_index] = weight_scale
+            weight_scale = self.mm_param.get_fused_weight_part("weight_scale")
+            self.quant_method.load_weight_scale(weight_scale, self.mm_param)
         return
 
     def _load_weight_zero_point(
@@ -168,13 +166,13 @@ class MMWeightTpl(BaseWeightTpl):
     ) -> None:
         if param_name in weights:
             weight_zero_point = self.param_slicer._slice_weight_zero_point(weights[param_name])
-            start_idx = self.cusum_out_dims[sub_child_index]
-            self.quant_method.load_weight_zero_point(weight_zero_point, self.mm_param, start_idx)
-            self.mm_param.load_ok[sub_child_index][2] = True
+            self.mm_param.weight_zero_point_cpu_buffer[sub_child_index] = weight_zero_point
+            weight_zero_point = self.mm_param.get_fused_weight_part("weight_zero_point")
+            self.quant_method.load_weight_zero_point(weight_zero_point, self.mm_param)
         return
 
     def verify_load(self):
-        mm_param_load_ok = all(all(load_ok_list) for load_ok_list in self.mm_param.load_ok)
+        mm_param_load_ok = all(self.mm_param.load_ok)
         bias_load_ok = True if self.bias is None else all(self.bias._load_ok)
         if not (mm_param_load_ok and bias_load_ok):
             logger.warning(f"mm_param_load_ok: {self.mm_param.load_ok}, bias_load_ok: {self.bias}")

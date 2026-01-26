@@ -118,22 +118,7 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         weight_zero_point = torch.empty(
             expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
         ).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
-
-    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        start_idx = start_idx // self.pack_factor
-        weight_pack.weight[:, start_idx : start_idx + weight.shape[1]].copy_(weight)
-        return
-
-    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        weight_pack.weight_scale[:, start_idx : start_idx + weight_scale.shape[1]].copy_(weight_scale)
-        return
-
-    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        start_idx = start_idx // self.pack_factor
-        end_idx = start_idx + weight_zero_point.shape[1]
-        weight_pack.weight_zero_point[:, start_idx:end_idx].copy_(weight_zero_point)
-        return
+        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point, fused_dim=1)
 
 
 @QUANTMETHODS.register("awq_marlin", platform="cuda")
@@ -235,10 +220,12 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         weight_zero_point = torch.empty(
             expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
         ).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point, fused_dim=1)
 
-    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
         assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
+        if weight is None:
+            return
         device_id = get_current_device_id()
         repack_weight = vllm_ops.awq_marlin_repack(
             weight.cuda(device_id),
@@ -246,12 +233,13 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             size_n=weight.shape[1] * self.pack_factor,
             num_bits=self.hf_quantization_config["bits"],
         )
-        start_idx = start_idx // self.pack_factor * self.tile_size
-        weight_pack.weight[:, start_idx : start_idx + repack_weight.shape[1]].copy_(repack_weight)
+        weight_pack.weight.copy_(repack_weight)
         return
 
-    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
         assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
+        if weight_scale is None:
+            return
         group_size = self.hf_quantization_config["group_size"]
         device_id = get_current_device_id()
         repack_weight_scale = marlin_permute_scales(
@@ -260,10 +248,12 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             size_n=weight_scale.shape[1],
             group_size=self.hf_quantization_config["group_size"],
         )
-        weight_pack.weight_scale[:, start_idx : start_idx + repack_weight_scale.shape[1]].copy_(repack_weight_scale)
+        weight_pack.weight_scale.copy_(repack_weight_scale)
         return
 
-    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
+    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack) -> None:
+        if weight_zero_point is None:
+            return
         device_id = get_current_device_id()
         repack_weight_zero_point = awq_to_marlin_zero_points(
             weight_zero_point.cuda(device_id),
@@ -271,10 +261,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
             size_n=weight_zero_point.shape[1] * self.pack_factor,
             num_bits=self.hf_quantization_config["bits"],
         )
-        start_idx = start_idx // self.pack_factor
-        weight_pack.weight_zero_point[:, start_idx : start_idx + repack_weight_zero_point.shape[1]].copy_(
-            repack_weight_zero_point
-        )
+        weight_pack.weight_zero_point.copy_(repack_weight_zero_point)
         return
 
 

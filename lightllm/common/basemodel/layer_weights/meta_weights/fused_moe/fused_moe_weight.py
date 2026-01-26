@@ -1,11 +1,12 @@
 import torch
 import threading
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
     get_row_slice_mixin,
     get_col_slice_mixin,
+    SliceMixinTpl,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
 from lightllm.common.quantization.quantize_method import QuantizationMethod
@@ -285,6 +286,7 @@ class FusedMoeWeight(BaseWeightTpl):
             device_id=self.device_id_,
             num_experts=self.local_n_routed_experts,
         )
+        self.w13_list: List[WeightPack] = self._get_expert_weight_list(self.w13, 2)
         self.w2: WeightPack = self.quant_method.create_weight(
             out_dim=self.hidden_size,
             in_dim=intermediate_size,
@@ -292,7 +294,16 @@ class FusedMoeWeight(BaseWeightTpl):
             device_id=self.device_id_,
             num_experts=self.local_n_routed_experts,
         )
+        self.w2_list: List[WeightPack] = self._get_expert_weight_list(self.w2, 1)
         self.load_cnt = 0
+
+    def _get_expert_weight_list(self, weight_pack: WeightPack, weight_num: int = 1):
+        weight_list = []
+        for idx in range(self.local_n_routed_experts):
+            expert_weight = weight_pack.get_expert(idx)
+            expert_weight.create_cpu_buffer(weight_num)
+            weight_list.append(expert_weight)
+        return weight_list
 
     def _load_weight(self, expert_idx_to_local_idx: Dict[int, int], weights: Dict[str, torch.Tensor]):
 
@@ -332,32 +343,38 @@ class FusedMoeWeight(BaseWeightTpl):
         w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{suffix}"
         w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{suffix}"
         w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{suffix}"
-        intermediate_size = self.split_inter_size
-        load_func, slice_func = self._get_load_and_slice_func(type, is_row=True)
+        load_func = self._get_load_func(type)
+        row_slice_func = self._get_slice_func(self.row_slicer, type)
+        col_slice_func = self._get_slice_func(self.col_slicer, type)
         if w1_weight in weights:
-            load_func(slice_func(weights[w1_weight]), self.w13.get_expert(local_expert_idx), start_idx=0)
+            self.w13_list[local_expert_idx].weight_cpu_buffer[0] = row_slice_func(weights[w1_weight])
         if w3_weight in weights:
-            load_func(
-                slice_func(weights[w3_weight]), self.w13.get_expert(local_expert_idx), start_idx=intermediate_size
-            )
-        load_func, slice_func = self._get_load_and_slice_func(type, is_row=False)
+            self.w13_list[local_expert_idx].weight_cpu_buffer[1] = row_slice_func(weights[w3_weight])
+        w13_weight = self.w13_list[local_expert_idx].get_fused_weight_part(suffix)
+        load_func(w13_weight, self.w13_list[local_expert_idx])
         if w2_weight in weights:
-            load_func(slice_func(weights[w2_weight]), self.w2.get_expert(local_expert_idx), start_idx=0)
+            self.w2_list[local_expert_idx].weight_cpu_buffer[0] = col_slice_func(weights[w2_weight])
+        w2_weight = self.w2_list[local_expert_idx].get_fused_weight_part(suffix)
+        load_func(w2_weight, self.w2_list[local_expert_idx])
 
-    def _load_weight_func(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int = 0):
+    def _load_weight_func(self, weight: torch.Tensor, weight_pack: WeightPack):
         if self.quant_method.weight_need_quanted(weight):
-            self.quant_method.quantize(weight, weight_pack, start_idx)
+            self.quant_method.quantize(weight, weight_pack)
         else:
-            self.quant_method.load_weight(weight, weight_pack, start_idx)
+            self.quant_method.load_weight(weight, weight_pack)
 
-    def _get_load_and_slice_func(self, type: str, is_row: bool = True):
-        if is_row:
-            slicer = self.row_slicer
-        else:
-            slicer = self.col_slicer
+    def _get_load_func(self, type: str):
         if type == "weight":
-            return self._load_weight_func, slicer._slice_weight
+            return self._load_weight_func
         elif type == "weight_scale":
-            return getattr(self.quant_method, "load_weight_scale"), slicer._slice_weight_scale
+            return getattr(self.quant_method, "load_weight_scale")
         elif type == "weight_zero_point":
-            return getattr(self.quant_method, "load_weight_zero_point"), slicer._slice_weight_zero_point
+            return getattr(self.quant_method, "load_weight_zero_point")
+
+    def _get_slice_func(self, slicer: SliceMixinTpl, type: str):
+        if type == "weight":
+            return slicer._slice_weight
+        elif type == "weight_scale":
+            return slicer._slice_weight_scale
+        elif type == "weight_zero_point":
+            return slicer._slice_weight_zero_point

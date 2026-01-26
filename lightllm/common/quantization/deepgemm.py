@@ -107,14 +107,6 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         weight_scale = torch.empty(expert_prefix + (scale_out_dim, scale_in_dim), dtype=torch.float32).cuda(device_id)
         return WeightPack(weight=weight, weight_scale=weight_scale)
 
-    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        weight_pack.weight[start_idx : start_idx + weight.shape[0]].copy_(weight)
-        return
-
-    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        weight_pack.weight_scale[start_idx // self.block_size : start_idx + weight_scale.shape[0]].copy_(weight_scale)
-        return
-
 
 def _deepgemm_fp8_nt(a_tuple, b_tuple, out):
     if HAS_DEEPGEMM:

@@ -10,6 +10,7 @@ class WeightPack:
     weight: Optional[torch.Tensor] = None
     weight_scale: Optional[torch.Tensor] = None
     weight_zero_point: Optional[torch.Tensor] = None
+    fused_dim: Optional[int] = 0
 
     def get_expert(self, expert_idx: int):
         assert self.weight.ndim == 3, f"weight must be a 3D tensor, but got {self.weight.ndim}"
@@ -18,9 +19,29 @@ class WeightPack:
         weight_zero_point = self.weight_zero_point[expert_idx] if self.weight_zero_point is not None else None
         return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
 
-    def initialize_load_status(self, weight_num: int):
-        initial_loaded_status = [False, self.weight_scale is None, self.weight_zero_point is None]
-        self.load_ok = [initial_loaded_status.copy() for _ in range(weight_num)]
+    def create_cpu_buffer(self, weight_num: int):
+        self.weight_cpu_buffer = [None] * weight_num
+        self.weight_scale_cpu_buffer = [None] * weight_num
+        self.weight_zero_point_cpu_buffer = [None] * weight_num
+        self.load_ok = [False, self.weight_scale is None, self.weight_zero_point is None]
+        return
+
+    def get_fused_weight_part(self, weight_type) -> Optional[torch.Tensor]:
+        buffer_map = {
+            "weight": ("weight_cpu_buffer", 0),
+            "weight_scale": ("weight_scale_cpu_buffer", 1),
+            "weight_zero_point": ("weight_zero_point_cpu_buffer", 2),
+        }
+        buffer_name, index = buffer_map.get(weight_type)
+        if buffer_name is None:
+            raise ValueError(f"unknown weight type: {weight_type}")
+        cpu_buffer = getattr(self, buffer_name)
+        if None not in cpu_buffer:
+            fused = torch.cat(cpu_buffer, dim=self.fused_dim)
+            setattr(self, buffer_name, [None] * len(cpu_buffer))
+            self.load_ok[index] = True
+            return fused
+        return None
 
 
 class QuantizationMethod(ABC):
@@ -44,7 +65,6 @@ class QuantizationMethod(ABC):
         self,
         weight: torch.Tensor,
         output: WeightPack,
-        offset: int = 0,
     ) -> None:
         pass
 
@@ -74,17 +94,20 @@ class QuantizationMethod(ABC):
         # 判断一个 weight 是否需要进行量化操作。
         return weight.dtype in [torch.bfloat16, torch.float16, torch.float32, torch.float64]
 
-    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        raise NotImplementedError(
-            f"quantization method {self.method_name} is not supported to load offline quantized weight"
-        )
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
+        if weight is None:
+            return
+        weight_pack.weight.copy_(weight)
+        return
 
-    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        raise NotImplementedError(
-            f"quantization method {self.method_name} is not supported to load offline quantized weight scale"
-        )
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
+        if weight_scale is None:
+            return
+        weight_pack.weight_scale.copy_(weight_scale)
+        return
 
-    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack, start_idx: int) -> None:
-        raise NotImplementedError(
-            f"quantization method {self.method_name} is not supported to load offline quantized weight zero point"
-        )
+    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack) -> None:
+        if weight_zero_point is None:
+            return
+        weight_pack.weight_zero_point.copy_(weight_zero_point)
+        return
