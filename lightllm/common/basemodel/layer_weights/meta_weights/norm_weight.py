@@ -10,7 +10,7 @@ from .platform_op import PlatformAwareOp
 
 class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
-        super().__init__()
+        super().__init__(tp_rank=0, tp_world_size=1)
         self.dim = dim
         self.weight_name = weight_name
         self.data_type_ = data_type
@@ -73,7 +73,7 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
 
 class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
-        super().__init__()
+        super().__init__(tp_rank=0, tp_world_size=1)
         self.dim = dim
         self.weight_name = weight_name
         self.bias_name = bias_name
@@ -114,11 +114,11 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         # assert input.ndim == 2 and self.weight.ndim == 1
-        print(input.shape)
         if out is None:
-            out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
-        out[:] = layernorm_forward(x=input, weight=self.weight, bias=self.bias, eps=eps)
-        return out
+            return layernorm_forward(x=input, weight=self.weight, bias=self.bias, eps=eps)
+        else:
+            out.copy_(layernorm_forward(x=input, weight=self.weight, bias=self.bias, eps=eps))
+            return out
 
     def _cuda_forward(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
@@ -143,6 +143,9 @@ class TpRMSNormWeight(RMSNormWeight):
         padded_head_num = self._get_tp_padded_head_num(head_num)
         dim = padded_head_num * head_dim
         super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
+        # 重新初始化 tp rank 的信息， load hf weights 的时候会用到
+        self.tp_rank_ = get_current_rank_in_dp()
+        self.tp_world_size_ = get_dp_world_size()
         self.repeat_times_ = 1
 
     def _get_tp_padded_head_num(self, head_num: int):
@@ -185,8 +188,6 @@ class TpRMSNormWeight(RMSNormWeight):
 class NoTpGEMMANormWeight(RMSNormWeight):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
         super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
-        self.tp_world_size_ = 1
-        self.tp_rank_ = 0
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.weight_name in weights:
@@ -197,8 +198,6 @@ class NoTpGEMMANormWeight(RMSNormWeight):
 class QKRMSNORMWeight(RMSNormWeight):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
         super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
-        self.tp_world_size_ = 1
-        self.tp_rank_ = 0
 
     def _native_forward(
         self,
