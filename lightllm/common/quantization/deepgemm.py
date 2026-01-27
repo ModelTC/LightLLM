@@ -24,7 +24,7 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         self.cache_manager = g_cache_manager
         assert HAS_DEEPGEMM, "deepgemm is not installed, you can't use quant api of it"
 
-    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
+    def quantize(self, weight: torch.Tensor, output: WeightPack):
         raise NotImplementedError("Not implemented")
 
     def apply(
@@ -58,13 +58,13 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def method_name(self):
         return "deepgemm-fp8w8a8-b128"
 
-    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
+    def quantize(self, weight: torch.Tensor, output: WeightPack):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
         device = output.weight.device
         weight, scale = weight_quant(weight.cuda(device), self.block_size)
-        output.weight[offset : offset + weight.shape[0], :].copy_(weight)
-        output.weight_scale[offset // self.block_size : offset + weight.shape[0] // self.block_size].copy_(scale)
+        output.weight.copy_(weight)
+        output.weight_scale.copy_(scale)
         return
 
     def apply(
