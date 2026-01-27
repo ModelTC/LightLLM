@@ -44,6 +44,15 @@ def get_tokenizer(
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
+    import os
+    # Support loading tokenizer from a different directory
+    original_model_dir = tokenizer_name
+    tokenizer_dir = os.environ.get("LIGHTLLM_TOKENIZER_DIR", None)
+    processor_dir = os.environ.get("LIGHTLLM_PROCESSOR_DIR", None)
+    if tokenizer_dir:
+        tokenizer_name = tokenizer_dir
+        logger.info(f"Loading tokenizer from LIGHTLLM_TOKENIZER_DIR: {tokenizer_name}")
+    
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
             raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
@@ -75,12 +84,16 @@ def get_tokenizer(
             "slowdown. Consider using a fast tokenizer instead."
         )
 
-    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
+    # Use original_model_dir for config to get architectures, not tokenizer_dir
+    config_source = original_model_dir if tokenizer_dir else tokenizer_name
+    # Use processor_dir if available for AutoProcessor, otherwise use config_source
+    processor_source = processor_dir if processor_dir else config_source
+    model_cfg, _ = PretrainedConfig.get_config_dict(config_source)
     model_type = model_cfg.get("model_type", "")
-    if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
+    if model_cfg.get("architectures") and model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor
 
-        image_processor = Qwen2VLImageProcessor.from_pretrained(tokenizer_name)
+        image_processor = Qwen2VLImageProcessor.from_pretrained(processor_source)
         tokenizer = Tarsier2Tokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
     elif model_type == "llava" or model_type == "internlmxcomposer2":
         tokenizer = LlavaTokenizer(tokenizer, model_cfg)
@@ -89,19 +102,19 @@ def get_tokenizer(
     elif model_type in ["qwen2_vl", "qwen2_5_vl"] and "vision_config" in model_cfg:
         from transformers import AutoProcessor
 
-        processor = AutoProcessor.from_pretrained(tokenizer_name)
+        processor = AutoProcessor.from_pretrained(processor_source)
         tokenizer = QWen2VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
     elif model_type in ["qwen3_vl", "qwen3_vl_moe"] and "vision_config" in model_cfg:
         from transformers import AutoProcessor
 
-        processor = AutoProcessor.from_pretrained(tokenizer_name)
+        processor = AutoProcessor.from_pretrained(processor_source)
         tokenizer = QWen3VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
     elif model_type == "internvl_chat":
-        tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
+        tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=config_source)
     elif model_type == "gemma3":
         tokenizer = Gemma3Tokenizer(tokenizer, model_cfg)
 

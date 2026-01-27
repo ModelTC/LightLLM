@@ -380,9 +380,11 @@ class HttpServerManager:
                     metadata["input_usage"] = input_usage
                     is_first_gen_token = False
                     if self.args.return_input_hidden_states:
-                        metadata["hidden_states"] = req_status.group_req_objs.shm_req_objs[
-                            0
-                        ].shm_hidden_states.arr.tolist()
+                        shm_req = req_status.group_req_objs.shm_req_objs[0]
+                        metadata["hidden_states"] = shm_req.shm_hidden_states.arr
+                        # 添加共享内存信息，支持客户端直接读取 shared memory
+                        metadata["shm_hidden_states_name"] = shm_req.shm_hidden_states.name
+                        metadata["shm_hidden_states_shape"] = list(shm_req.shm_hidden_states.arr.shape)
                 yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
