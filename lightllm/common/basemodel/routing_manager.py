@@ -14,7 +14,6 @@ class SharedRoutingConfig:
 
     def __init__(self):
         service_name = get_unique_server_name()
-        # Shape: [num_moe_layers, topk]
         self._shm = SharedArray(f"{service_name}_routing_config", shape=(2,), dtype=np.int32)
 
     @property
@@ -37,7 +36,6 @@ class SharedRoutingConfig:
         return self.num_moe_layers > 0 and self.topk > 0
 
 
-# Global shared routing config (lazy initialized)
 _shared_routing_config: Optional[SharedRoutingConfig] = None
 
 
@@ -49,7 +47,6 @@ def get_shared_routing_config() -> SharedRoutingConfig:
     return _shared_routing_config
 
 
-# MoE layer counter for auto-incrementing moe_layer_index
 _moe_layer_counter: int = 0
 
 
@@ -147,10 +144,6 @@ class RoutingCaptureManager:
         return self.cpu_buffer[:, mem_indexes, :].numpy()
 
     def extract_for_request_no_sync(self, mem_indexes: torch.Tensor) -> np.ndarray:
-        """Extract routing data without synchronizing events.
-
-        Call sync_events() once before using this method in a batch.
-        """
         return self.cpu_buffer[:, mem_indexes, :].numpy()
 
 
@@ -181,7 +174,6 @@ def init_routing_capture(model) -> None:
     if not getattr(model.args, "enable_return_routed_experts", False):
         return
 
-    # Only create routing capture manager on rank 0
     if get_current_rank_in_dp() != 0:
         logger.info("Skipping routing capture initialization on non-zero rank")
         return
@@ -212,7 +204,6 @@ def init_routing_capture(model) -> None:
         enable_overlap=enable_overlap,
     )
 
-    # Set shared routing config for cross-process access
     shared_config = get_shared_routing_config()
     shared_config.num_moe_layers = num_moe_layers
     shared_config.topk = topk

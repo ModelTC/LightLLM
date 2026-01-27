@@ -241,7 +241,6 @@ class Req(ctypes.Structure):
             return
         service_uni_name = get_unique_server_name()
         name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
-        # num_tokens equals shm_cur_kv_len at the time of creation
         shape = (num_moe_layers, self.shm_cur_kv_len, topk)
         self.shm_routing_data = ShmArray(name, shape, dtype=np.int32)
         self.shm_routing_data.link_shm()
@@ -259,14 +258,11 @@ class Req(ctypes.Structure):
         return
 
     def get_routing_metadata(self, num_moe_layers: int, topk: int):
-        """Safely extract routing data and format for API response.
-
-        Returns a dict with shape, dtype, and base64-encoded data, or None if unavailable.
-        """
         if num_moe_layers == 0 or topk == 0:
             return None
         try:
-            self.link_routing_data_shm_array(num_moe_layers, topk)
+            if not hasattr(self, "shm_routing_data") or self.shm_routing_data is None:
+                self.link_routing_data_shm_array(num_moe_layers, topk)
             routing_data = self.get_routing_data()
             if routing_data is None:
                 return None
@@ -278,8 +274,6 @@ class Req(ctypes.Structure):
         except Exception as e:
             logger.warning(f"Failed to read routing data for req {self.request_id}: {e}")
             return None
-        finally:
-            self.close_routing_data_shm_array()
 
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()

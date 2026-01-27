@@ -115,14 +115,6 @@ class InferenceContext:
         return req_objs
 
     def _extract_routing_data(self, req: "InferReq", sync: bool = True):
-        """Extract MoE routing data for a completed request.
-
-        Args:
-            req: The inference request to extract routing data for.
-            sync: If True, synchronize CUDA events before extraction. Set to False
-                  when processing multiple requests in batch after calling
-                  g_routing_capture_manager.sync_events() once.
-        """
         mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len]
         num_moe_layers = g_routing_capture_manager.num_moe_layers
         topk = g_routing_capture_manager.topk
@@ -170,7 +162,6 @@ class InferenceContext:
         if len(finished_request_ids) == 0:
             return
 
-        # Optimization: sync CUDA events once for batch routing data extraction
         need_routing_data = g_routing_capture_manager is not None
         if need_routing_data:
             g_routing_capture_manager.sync_events()
@@ -610,7 +601,6 @@ class InferReqUpdatePack:
             shm_req.shm_cur_output_len = self.output_len
 
             if finish_status.is_finished():
-                # Extract routing data before setting finish_status so HTTP server sees it
                 g_infer_context._extract_routing_data(req_obj)
                 shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
                 shm_req.finish_status = req_obj.finish_status

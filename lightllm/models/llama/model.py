@@ -85,7 +85,6 @@ class LlamaTpPartModel(TpPartBaseModel):
         super()._init_custom()
 
     def _init_rotary_by_scaling_type(self, scaling_type, rope_scaling):
-        """Initialize rotary embeddings based on scaling type."""
         if scaling_type == "default" or "mrope_section" in rope_scaling:
             self._init_to_get_rotary()
         elif scaling_type == "yarn":
