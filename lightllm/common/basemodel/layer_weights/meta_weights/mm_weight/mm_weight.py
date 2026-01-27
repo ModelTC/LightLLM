@@ -61,7 +61,7 @@ class MMWeightTpl(BaseWeightTpl):
         )
 
     def gen_weight_quant_param_names(self, quant_method: Optional[QuantizationMethod]):
-        if quant_method is None:
+        if quant_method.method_name == "none":
             self.weight_zero_point_names = None
             self.weight_scale_names = None
             return
@@ -82,7 +82,7 @@ class MMWeightTpl(BaseWeightTpl):
                 quanted_weight_names.append(weight_name)
 
         if len(quanted_weight_names) != 0:
-            self.weight_names = quanted_weight_names
+            self.quanted_weight_names = quanted_weight_names
 
         if len(weight_scale_names) != 0:
             self.weight_scale_names = weight_scale_names

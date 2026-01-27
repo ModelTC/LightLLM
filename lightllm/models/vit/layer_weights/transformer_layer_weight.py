@@ -123,20 +123,31 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_norm(self):
-        norm_weight_cls = RMSNormWeight if self.norm_type == "rms_norm" else LayerNormWeight
         hidden_size = self.network_config_["hidden_size"]
-        self.att_norm_weight_ = norm_weight_cls(
-            dim=hidden_size,
-            weight_name=self._att_norm_weight_name,
-            data_type=self.data_type_,
-            bias_name=self._att_norm_bias_name,
-        )
-        self.ffn_norm_weight_ = norm_weight_cls(
-            dim=hidden_size,
-            weight_name=self._ffn_norm_weight_name,
-            data_type=self.data_type_,
-            bias_name=self._ffn_norm_bias_name,
-        )
+        if self.norm_type == "rms_norm":
+            self.att_norm_weight_ = RMSNormWeight(
+                dim=hidden_size,
+                weight_name=self._att_norm_weight_name,
+                data_type=self.data_type_,
+            )
+            self.ffn_norm_weight_ = RMSNormWeight(
+                dim=hidden_size,
+                weight_name=self._ffn_norm_weight_name,
+                data_type=self.data_type_,
+            )
+        else:
+            self.att_norm_weight_ = LayerNormWeight(
+                dim=hidden_size,
+                weight_name=self._att_norm_weight_name,
+                data_type=self.data_type_,
+                bias_name=self._att_norm_bias_name,
+            )
+            self.ffn_norm_weight_ = LayerNormWeight(
+                dim=hidden_size,
+                weight_name=self._ffn_norm_weight_name,
+                data_type=self.data_type_,
+                bias_name=self._ffn_norm_bias_name,
+            )
         if self.qk_norm:
             head_num = self.network_config_["num_attention_heads"]
             head_dim = self.network_config_["hidden_size"] // head_num

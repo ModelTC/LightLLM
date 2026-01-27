@@ -9,7 +9,7 @@ from .platform_op import PlatformAwareOp
 
 
 class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
-    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, **kwargs):
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
         super().__init__()
         self.dim = dim
         self.weight_name = weight_name

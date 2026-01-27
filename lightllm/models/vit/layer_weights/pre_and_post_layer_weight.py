@@ -5,10 +5,11 @@ import torch.nn.functional as F
 from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.basemodel.layer_weights.meta_weights import LayerNormWeight, COLMMWeight, ROWMMWeight
+from lightllm.common.quantization import Quantcfg
 
 
 class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config):
+    def __init__(self, data_type, network_config, quant_cfg):
         super().__init__(data_type, network_config)
         self.embed_dim = self.network_config_["hidden_size"]
         self.image_size = self.network_config_["image_size"]
@@ -17,6 +18,7 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
         self.downsample_ratio = self.network_config_["downsample_ratio"]
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches + 1
+        self.quant_cfg: Quantcfg = quant_cfg
         self._create_weight()
         return
 
@@ -46,6 +48,7 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_names=["mlp1.1.weight"],
             data_type=self.data_type_,
             bias_names=["mlp1.1.bias"],
+            quant_method=self.quant_cfg.get_quant_method(-1, "mlp1_1"),
         )
         self.mlp1_3_ = COLMMWeight(
             in_dim=self.llm_hidden_size,
@@ -53,6 +56,7 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_names=["mlp1.3.weight"],
             data_type=self.data_type_,
             bias_names=["mlp1.3.bias"],
+            quant_method=self.quant_cfg.get_quant_method(-1, "mlp1_3"),
         )
         return
 

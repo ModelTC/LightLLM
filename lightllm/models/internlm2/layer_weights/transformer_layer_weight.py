@@ -21,6 +21,10 @@ class Internlm2TransformerLayerWeight(LlamaTransformerLayerWeight):
             del weights[qkv_weight_name]
         super().load_hf_weights(weights)
 
+    def _parse_config(self):
+        super()._parse_config()
+        self.n_kv_head = self.network_config_["num_key_value_heads"]
+
     def _init_weight_names(self):
         super()._init_weight_names()
         self._o_weight_name = f"model.layers.{self.layer_num_}.attention.wo.weight"

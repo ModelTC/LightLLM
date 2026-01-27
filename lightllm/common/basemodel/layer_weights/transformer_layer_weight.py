@@ -15,7 +15,7 @@ class TransformerLayerWeight(BaseLayerWeight):
         self.layer_num_ = layer_num
         self.data_type_ = data_type
         self.network_config_ = network_config
-        self.quant_cfg = quant_cfg
+        self.quant_cfg: Quantcfg = quant_cfg
         self._parse_config()
         self._init_weight_names()
         self._init_weight()
