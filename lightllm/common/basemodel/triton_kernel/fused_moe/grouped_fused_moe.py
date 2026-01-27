@@ -387,7 +387,7 @@ def grouped_matmul_kernel(
     k,  # int
     n,  # int
     topk_num,  # int
-    token_scale_ptr,  # [1,] for per tensor quant, or [token_num, hidden_dim // block_size] for per token, group quant
+    token_scale_ptr,  # [token_num,] for pertoken quant, or [token_num,hidden_dim//block_size] for per group quant
     weight_scale_ptr,  # [expert_num, n] or [export_num, n // block_size_n, k // block_size_k]
     weight_scale_stride0,
     weight_scale_stride1,
@@ -497,7 +497,14 @@ def grouped_matmul_kernel(
 
             b_scale_ptrs = weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bsn * weight_scale_stride1
         else:
-            a_scale = tl.load(token_scale_ptr, eviction_policy="evict_last")
+            # per token scale quant
+            if TOKEN_INPUT_USE_TMA:
+                assert MUL_ROUTED_WEIGHT is True
+                a_scale_ptrs = token_scale_ptr + (token_start_index + tl.arange(0, BLOCK_SIZE_M))[:, None]
+            else:
+                a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num)[:, None]
+
+            a_scale = tl.load(a_scale_ptrs, eviction_policy="evict_last")
             b_scale = tl.load(
                 weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bn[None, :] * weight_scale_stride1,
                 eviction_policy="evict_last",
@@ -748,8 +755,12 @@ def grouped_matmul(
     if use_fp8_w8a8:
         # 当权重使用 block wise 量化时，激活也使用 per token， group size 量化
         if block_size_k == 0:
-            token_inputs, token_input_scale = vllm_ops.scaled_fp8_quant(token_inputs, token_input_scale)
+            # input 使用 per token 量化
+            token_inputs, token_input_scale = vllm_ops.scaled_fp8_quant(
+                token_inputs, token_input_scale, use_per_token_if_dynamic=True
+            )
         else:
+            # input 使用 per group quant 量化
             _m, _k = token_inputs.shape
             assert _k % block_size_k == 0
             token_inputs, token_input_scale = per_token_group_quant_fp8(
