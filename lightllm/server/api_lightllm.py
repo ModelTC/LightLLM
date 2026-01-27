@@ -56,6 +56,8 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     is_first_metadata = True
     input_usage = None
     hidden_states = None
+    shm_hidden_states_name = None
+    shm_hidden_states_shape = None
     async for sub_req_id, request_output, metadata, finish_status in results_generator:
         # when set "--return_all_prompt_logprobs", the first token metadata will contains
         # prompt_logprobs and prompt_token_ids
@@ -65,8 +67,14 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
             prompt_tokens = metadata.get("prompt_tokens", 0)
             input_usage = metadata.get("input_usage", None)
             hidden_states = metadata.get("hidden_states", None)
+            shm_hidden_states_name = metadata.get("shm_hidden_states_name", None)
+            shm_hidden_states_shape = metadata.get("shm_hidden_states_shape", None)
             if hidden_states is not None:
                 del metadata["hidden_states"]
+            if shm_hidden_states_name is not None:
+                del metadata["shm_hidden_states_name"]
+            if shm_hidden_states_shape is not None:
+                del metadata["shm_hidden_states_shape"]
             if prompt_logprobs is not None:
                 del metadata["prompt_logprobs"]
             if prompt_token_ids is not None:
@@ -108,6 +116,10 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
             ret["hidden_states_dtype"] = str(hidden_states.dtype)
         else:
             ret["hidden_states"] = hidden_states
+    # 添加共享内存信息，支持客户端直接读取 shared memory（零拷贝模式）
+    if shm_hidden_states_name is not None:
+        ret["shm_hidden_states_name"] = shm_hidden_states_name
+        ret["shm_hidden_states_shape"] = shm_hidden_states_shape
     if return_details:
         ret["tokens"] = ret_data_format(tokens_list)
     if prompt_token_ids is not None:
