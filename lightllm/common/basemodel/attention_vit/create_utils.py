@@ -6,23 +6,32 @@ from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
 from lightllm.common.basemodel.attention_vit.fa3.fp import Fa3VitAttBackend
 from lightllm.common.basemodel.attention_vit.triton.fp import TritonVitAttBackend
 from lightllm.common.basemodel.attention_vit.sdpa.fp import SdpaVitAttBackend
+from lightllm.common.basemodel.attention_vit.xformers.fp import XformersVitAttBackend
 
 logger = init_logger(__name__)
 
 
-vit_att_backend = {"triton": TritonVitAttBackend, "sdpa": SdpaVitAttBackend, "fa3": Fa3VitAttBackend}
+vit_att_backend = {
+    "triton": TritonVitAttBackend,
+    "sdpa": SdpaVitAttBackend,
+    "fa3": Fa3VitAttBackend,
+    "xformers": XformersVitAttBackend,
+}
 
 
-def get_vit_att_backend_class(index=0, priority_list: list = ["fa3", "sdpa", "triton"]) -> BaseVitAttBackend:
+def get_vit_att_backend_class(
+    index=0, priority_list: list = ["fa3", "xformers", "sdpa", "triton"]
+) -> BaseVitAttBackend:
     args = get_env_start_args()
     backend_str = args.vit_att_backend[index]
     if backend_str != "auto":
+        logger.info(f"Selected {backend_str} backend for VIT")
         return vit_att_backend[backend_str]
     else:
         return _select_vit_backend(priority_list=priority_list)
 
 
-def _select_vit_backend(priority_list: list = ["fa3", "sdpa", "triton"]) -> type:
+def _select_vit_backend(priority_list: list = ["fa3", "xformers", "sdpa", "triton"]) -> type:
     """Auto-select the best available backend with validation for VIT.
 
     Priority: FA3 > Sdpa > Triton
@@ -43,6 +52,8 @@ def _select_vit_backend(priority_list: list = ["fa3", "sdpa", "triton"]) -> type
 def validate(backend_name: str) -> bool:
     if backend_name == "fa3":
         validate_ok = _validate_fa3()
+    elif backend_name == "xformers":
+        validate_ok = _validate_xformers()
     elif backend_name == "sdpa":
         validate_ok = _validate_sdpa()
     elif backend_name == "triton":
@@ -86,6 +97,16 @@ def _validate_fa3():
     torch.cuda.synchronize()
 
     if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
+        return False
+
+    return True
+
+
+def _validate_xformers():
+    """Validate Xformers Attn"""
+    from xformers import ops as xformers_ops
+
+    if xformers_ops is None:
         return False
 
     return True
