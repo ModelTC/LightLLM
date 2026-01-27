@@ -3,6 +3,9 @@ from .triton_impl import FuseMoeTriton
 from lightllm.common.quantization.quantize_method import (
     WeightPack,
 )
+from lightllm.common.quantization.awq import (
+    AWQMARLINW4A16QuantizationMethod,
+)
 from typing import Optional
 
 
@@ -32,6 +35,8 @@ class FuseMoeMarlin(FuseMoeTriton):
         w2_weight, w2_scale, w2_zero_point = w2.weight, w2.weight_scale, w2.weight_zero_point
 
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+
+        self.quant_method: AWQMARLINW4A16QuantizationMethod = self.quant_method
 
         fused_marlin_moe(
             input_tensor,
