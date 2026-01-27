@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.routing_manager import reset_moe_layer_counter
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
@@ -164,6 +165,7 @@ class TpPartBaseModel:
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_weights(self, start_layer_index=0):
+        reset_moe_layer_counter()
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
         self.trans_layers_weight = [
             self.transformer_weight_class(

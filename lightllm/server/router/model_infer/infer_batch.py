@@ -19,6 +19,7 @@ from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.common.basemodel.routing_manager import g_routing_capture_manager
 
 logger = init_logger(__name__)
 
@@ -113,6 +114,17 @@ class InferenceContext:
 
         return req_objs
 
+    def _extract_routing_data(self, req: "InferReq"):
+        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len]
+        num_moe_layers = g_routing_capture_manager.num_moe_layers
+        topk = g_routing_capture_manager.topk
+        num_tokens = req.cur_kv_len
+        logger.debug(f"R3: Extracting routing for req {req.req_id}: {num_moe_layers}x{num_tokens}x{topk}")
+        routing_data = g_routing_capture_manager.extract_for_request(mem_indexes.cpu())
+        req.shm_req.create_routing_data_shm_array(num_moe_layers, num_tokens, topk)
+        req.shm_req.shm_routing_data.arr[:] = routing_data
+        logger.debug(f"R3: Successfully extracted routing data for req {req.req_id}")
+
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
@@ -155,6 +167,9 @@ class InferenceContext:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
+
+            self._extract_routing_data(req)
+
             self.free_a_req_mem(free_token_index, req)
 
             free_req_index.append(req.req_idx)
@@ -580,6 +595,8 @@ class InferReqUpdatePack:
             shm_req.shm_cur_output_len = self.output_len
 
             if finish_status.is_finished():
+                # Extract routing data before setting finish_status so HTTP server sees it
+                g_infer_context._extract_routing_data(req_obj)
                 shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
                 shm_req.finish_status = req_obj.finish_status
 

@@ -497,6 +497,7 @@ class SamplingParams(ctypes.Structure):
             "add_spaces_between_special_tokens": self.add_spaces_between_special_tokens,
             "print_eos_token": self.print_eos_token,
             "disable_prompt_cache": self.disable_prompt_cache,
+            "return_routed_experts": self.return_routed_experts,
         }
 
     def to_origin_dict(self):

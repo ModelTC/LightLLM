@@ -1,4 +1,3 @@
-import os
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, FusedMoeWeight
 

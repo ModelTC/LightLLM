@@ -122,6 +122,9 @@ class Req(ctypes.Structure):
         ("cpu_cache_match_page_indexes", CpuCachePageList),
         # 分块hash的块大小
         ("cpu_cache_token_page_size", ctypes.c_int),
+        ("routing_data_num_moe_layers", ctypes.c_int),
+        ("routing_data_num_tokens", ctypes.c_int),
+        ("routing_data_topk", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -180,6 +183,10 @@ class Req(ctypes.Structure):
         self.stop_str_matched = False
         self.stop_str_matched_token_index = -1
 
+        self.routing_data_num_moe_layers = 0
+        self.routing_data_num_tokens = 0
+        self.routing_data_topk = 0
+
         self.post_init()
 
         self.cpu_cache_token_page_size = get_env_start_args().cpu_cache_token_page_size
@@ -225,6 +232,40 @@ class Req(ctypes.Structure):
         name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
         self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
         self.shm_logprobs.link_shm()
+        return
+
+    def create_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int):
+        service_uni_name = get_unique_server_name()
+        name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
+        shape = (num_moe_layers, num_tokens, topk)
+        self.shm_routing_data = ShmArray(name, shape, dtype=np.int32)
+        self.shm_routing_data.create_shm()
+        self.routing_data_num_moe_layers = num_moe_layers
+        self.routing_data_num_tokens = num_tokens
+        self.routing_data_topk = topk
+        return
+
+    def link_routing_data_shm_array(self):
+        if self.routing_data_num_moe_layers == 0:
+            return
+        service_uni_name = get_unique_server_name()
+        name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
+        shape = (self.routing_data_num_moe_layers, self.routing_data_num_tokens, self.routing_data_topk)
+        self.shm_routing_data = ShmArray(name, shape, dtype=np.int32)
+        self.shm_routing_data.link_shm()
+        return
+
+    def get_routing_data(self):
+        if self.routing_data_num_moe_layers == 0 or not hasattr(self, "shm_routing_data"):
+            return None
+        if self.shm_routing_data is None:
+            return None
+        return self.shm_routing_data.arr
+
+    def close_routing_data_shm_array(self):
+        if hasattr(self, "shm_routing_data") and self.shm_routing_data is not None:
+            self.shm_routing_data.close_shm()
+            self.shm_routing_data = None
         return
 
     def get_prompt_ids(self):
