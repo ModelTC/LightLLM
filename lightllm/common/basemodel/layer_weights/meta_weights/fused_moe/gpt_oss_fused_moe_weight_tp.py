@@ -81,6 +81,9 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         return
 
     def _create_weight(self):
+        """
+        因为加载方式比较特殊，不在这里创建weight。
+        """
         pass
 
     def _fuse_weight_scale(self):
