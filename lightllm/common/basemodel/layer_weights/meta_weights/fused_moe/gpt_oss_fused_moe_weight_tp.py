@@ -125,6 +125,10 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
             w2_bias = weights[self._down_bias_name]
             self.w2_bias = self._cuda(w2_bias)
 
+    def verify_load(self):
+        assert self.w1 is not None and self.w2 is not None
+        return True
+
     def _router(self, router_logits, top_k):
         router_top_value, router_indices = torch.topk(router_logits, top_k, dim=-1)
         router_top_value = torch.nn.functional.softmax(router_top_value, dim=1, dtype=router_top_value.dtype)
