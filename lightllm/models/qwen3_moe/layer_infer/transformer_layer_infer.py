@@ -14,6 +14,7 @@ from functools import partial
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
+from lightllm.utils.envs_utils import get_env_start_args
 
 logger = init_logger(__name__)
 
@@ -41,8 +42,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _bind_ffn(self):
         if self.is_moe:
-            moe_mode = os.environ.get("MOE_MODE", "TP")
-            if moe_mode == "EP":
+            enable_ep_moe = get_env_start_args().enable_ep_moe
+            if enable_ep_moe:
                 self._ffn = partial(Qwen3MOETransformerLayerInfer._moe_ffn_edp, self)
                 self._tpsp_ffn = self._tpsp_ffn_ep
             else:
@@ -60,20 +61,13 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
-        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-
-        layer_weight.q_norm_weight_.rmsnorm_forward(
-            q.view(-1, self.head_dim_),
+        cache_kv = layer_weight.kv_proj.mm(input)
+        layer_weight.q_norm_weight_(q, eps=self.eps_)
+        layer_weight.k_norm_weight_(
+            cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
             eps=self.eps_,
-            out=q.view(-1, self.head_dim_),
         )
-
-        cache_kv[:, : self.tp_k_head_num_, :] = layer_weight.k_norm_weight_.rmsnorm_forward(
-            input=cache_kv[:, : self.tp_k_head_num_, :].reshape(-1, cache_kv.shape[-1]),
-            eps=self.eps_,
-            alloc_func=self.alloc_tensor,
-        ).view(-1, self.tp_k_head_num_, cache_kv.shape[-1])
-
+        cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
@@ -98,19 +92,13 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
-        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-
-        layer_weight.q_norm_weight_.rmsnorm_forward(
-            q.view(-1, self.head_dim_),
+        cache_kv = layer_weight.kv_proj.mm(input)
+        layer_weight.q_norm_weight_(q, eps=self.eps_)
+        layer_weight.k_norm_weight_(
+            cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
             eps=self.eps_,
-            out=q.view(-1, self.head_dim_),
         )
-
-        cache_kv[:, : self.tp_k_head_num_, :] = layer_weight.k_norm_weight_.rmsnorm_forward(
-            cache_kv[:, : self.tp_k_head_num_, :].reshape(-1, cache_kv.shape[-1]),
-            eps=self.eps_,
-            alloc_func=self.alloc_tensor,
-        ).view(-1, self.tp_k_head_num_, cache_kv.shape[-1])
+        cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),

@@ -465,10 +465,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help="""Quantization method: ppl-w4a16-128 | flashllm-w6a16
-                        | ao-int4wo-[32,64,128,256] | ao-int8wo | ao-fp8w8a16 | ao-fp6w6a16
-                        | vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
-                        | triton-fp8w8a8-block128""",
+        help="""Quantization method: vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
+                        | deepgemm-fp8w8a8-b128 | triton-fp8w8a8-block128 | awq | awq_marlin""",
     )
     parser.add_argument(
         "--quant_cfg",
@@ -481,9 +479,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--vit_quant_type",
         type=str,
         default="none",
-        help="""Quantization method: ppl-w4a16-128 | flashllm-w6a16
-                        | ao-int4wo-[32,64,128,256] | ao-int8wo | ao-fp8w8a16 | ao-fp6w6a16
-                        | vllm-w8a8 | vllm-fp8w8a8""",
+        help="""Quantization method for ViT: vllm-w8a8 | vllm-fp8w8a8""",
     )
     parser.add_argument(
         "--vit_quant_cfg",
@@ -521,6 +517,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--enable_ep_moe",
+        action="store_true",
+        help="""Whether to enable ep moe for deepseekv3 model.""",
+    )
+    parser.add_argument(
         "--ep_redundancy_expert_config_path",
         type=str,
         default=None,
@@ -534,7 +535,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
-        help="""Whether to enable fused shared experts for deepseekv3 model. only work when MOE_MODE=TP """,
+        help="""Whether to enable fused shared experts for deepseekv3 model. only work when tensor parallelism""",
     )
     parser.add_argument(
         "--mtp_mode",
@@ -607,5 +608,25 @@ def make_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
+    )
+    parser.add_argument(
+        "--hardware_platform",
+        type=str,
+        default="cuda",
+        choices=["cuda", "musa"],
+        help="""Hardware platform: cuda | musa""",
+    )
+    parser.add_argument(
+        "--enable_torch_fallback",
+        action="store_true",
+        help="""Whether to enable torch naive implementation for the op.
+        If the op is not implemented for the platform, it will use torch naive implementation.""",
+    )
+    parser.add_argument(
+        "--enable_triton_fallback",
+        action="store_true",
+        help="""Whether to enable triton implementation for the op.
+        If the op is not implemented for the platform and the hardware support triton,
+        it will use triton implementation.""",
     )
     return parser

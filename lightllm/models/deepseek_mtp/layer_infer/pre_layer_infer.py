@@ -22,16 +22,8 @@ class Deepseek3MTPPreLayerInfer(LlamaPreLayerInfer):
             input_embdings.shape[0] == tgt_embdings.shape[0]
         ), f"shape {input_embdings.shape} != shape {tgt_embdings.shape}"
 
-        layer_weight.enorm_weight_.rmsnorm_forward(
-            input=input_embdings,
-            eps=self.eps_,
-            out=input_embdings,
-        )
-        layer_weight.hnorm_weight_.rmsnorm_forward(
-            input=tgt_embdings,
-            eps=self.eps_,
-            out=tgt_embdings,
-        )
+        layer_weight.enorm_weight_(input=input_embdings, eps=self.eps_, out=input_embdings)
+        layer_weight.hnorm_weight_(input=tgt_embdings, eps=self.eps_, out=tgt_embdings)
         cat_embdings = torch.cat((input_embdings, tgt_embdings), dim=-1)
 
         ans_logics = layer_weight.eh_proj_weight_.mm(cat_embdings)
@@ -43,16 +35,8 @@ class Deepseek3MTPPreLayerInfer(LlamaPreLayerInfer):
         tgt_embdings = infer_state.mtp_draft_input_hiddens
         assert input_embdings.shape[0] == tgt_embdings.shape[0]
 
-        layer_weight.enorm_weight_.rmsnorm_forward(
-            input=input_embdings,
-            eps=self.eps_,
-            out=input_embdings,
-        )
-        layer_weight.hnorm_weight_.rmsnorm_forward(
-            input=tgt_embdings,
-            eps=self.eps_,
-            out=tgt_embdings,
-        )
+        layer_weight.enorm_weight_(input=input_embdings, eps=self.eps_, out=input_embdings)
+        layer_weight.hnorm_weight_(input=tgt_embdings, eps=self.eps_, out=tgt_embdings)
         cat_embdings = torch.cat((input_embdings, tgt_embdings), dim=-1)
 
         ans_logics = layer_weight.eh_proj_weight_.mm(cat_embdings)

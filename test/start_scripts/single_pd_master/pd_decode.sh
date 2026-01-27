@@ -5,7 +5,7 @@
 export host=$1
 export pd_master_ip=$2
 nvidia-cuda-mps-control -d
-MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+LOADWORKER=18 python -m lightllm.server.api_server \
 --model_dir /path/DeepSeek-R1 \
 --run_mode "decode" \
 --tp 8 \
@@ -13,6 +13,7 @@ MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
 --host $host \
 --port 8121 \
 --nccl_port 12322 \
+--enable_ep_moe \
 --pd_master_ip $pd_master_ip \
 --pd_master_port 60011 
 # if you want to enable microbatch overlap, you can uncomment the following lines

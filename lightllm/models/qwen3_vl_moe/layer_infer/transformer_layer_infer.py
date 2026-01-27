@@ -5,7 +5,6 @@ from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.models.qwen3_moe.layer_infer.transformer_layer_infer import Qwen3MOETransformerLayerInfer
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
-from lightllm.models.qwen3.triton_kernel.qk_norm import qk_rmsnorm_forward
 from lightllm.distributed import all_reduce
 from lightllm.models.qwen3_vl.triton_kernel.deepstack_multimodal_emb import apply_deepstack_features
 
@@ -26,14 +25,12 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input)
-        qk_rmsnorm_forward(
+        layer_weight.q_norm_weight_(
             q,
-            weight=layer_weight.q_norm_weight_.weight,
             eps=self.eps_,
         )
-        qk_rmsnorm_forward(
+        layer_weight.k_norm_weight_(
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
-            weight=layer_weight.k_norm_weight_.weight,
             eps=self.eps_,
         )
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
