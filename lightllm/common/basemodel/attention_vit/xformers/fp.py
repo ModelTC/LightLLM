@@ -20,10 +20,7 @@ class XformersVitAttBackend(BaseVitAttBackend):
         assert cu_seqlens is not None and cu_seqlens.ndim == 1
         assert q.shape == k.shape == v.shape == o.shape
 
-        T, H, D = q.shape
-
-        cu_cpu = cu_seqlens if cu_seqlens.device.type == "cpu" else cu_seqlens.to("cpu")
-        seqlens = (cu_cpu[1:] - cu_cpu[:-1]).to(torch.int64).tolist()
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int64).tolist()
         seqlens = [int(L) for L in seqlens if int(L) > 0]
 
         if len(seqlens) == 0:
