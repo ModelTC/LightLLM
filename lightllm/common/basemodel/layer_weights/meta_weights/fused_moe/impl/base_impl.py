@@ -62,5 +62,5 @@ class FuseMoeBaseImpl:
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
-    ):
+    ) -> torch.Tensor:
         pass
