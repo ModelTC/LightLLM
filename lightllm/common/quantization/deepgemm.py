@@ -102,6 +102,12 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         weight_scale_out_dims = [(_out_dim + self.block_size - 1) // self.block_size for _out_dim in out_dims]
+        divisible_by_block_size = [_out_dim % self.block_size != 0 for _out_dim in out_dims]
+        if sum(divisible_by_block_size) > 1:
+            raise ValueError(
+                f"out_dims only contains one dim can not be divisible \
+                by block_size {self.block_size}, but got {out_dims}"
+            )
         weight_scale_out_dim = sum(weight_scale_out_dims)
         weight_scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
         expert_prefix = (num_experts,) if num_experts > 1 else ()
