@@ -1,5 +1,5 @@
 from lightllm.common.basemodel import PreAndPostLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LayerNormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LayerNormWeight, LMHeadWeight
 
 
 class BloomPreAndPostLayerWeight(PreAndPostLayerWeight):
@@ -26,4 +26,10 @@ class BloomPreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_name="word_embeddings.weight",
             data_type=self.data_type_,
         )
-        self.lm_head_weight_ = self.wte_weight_
+        self.lm_head_weight_ = LMHeadWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
+            weight_name="word_embeddings.weight",
+            data_type=self.data_type_,
+            embedding_weight=self.wte_weight_,
+        )
