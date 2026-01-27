@@ -61,39 +61,20 @@ class MMWeightTpl(BaseWeightTpl):
         )
 
     def gen_weight_quant_param_names(self):
-        if self.quant_method.method_name == "none":
-            self.quanted_weight_names = [None] * len(self.weight_names)
-            self.weight_zero_point_names = [None] * len(self.weight_names)
-            self.weight_scale_names = [None] * len(self.weight_names)
-            return
+        self.quanted_weight_names = [None] * len(self.weight_names)
+        self.weight_zero_point_names = [None] * len(self.weight_names)
+        self.weight_scale_names = [None] * len(self.weight_names)
 
-        quanted_weight_names = []
-        weight_scale_names = []
-        weight_zero_point_names = []
-
-        for weight_name in self.weight_names:
+        for sub_child_index, weight_name in enumerate(self.weight_names):
             if self.quant_method.weight_scale_suffix is not None:
                 weight_scale_name = weight_name.replace("weight", self.quant_method.weight_scale_suffix)
-                weight_scale_names.append(weight_scale_name)
+                self.weight_scale_names[sub_child_index] = weight_scale_name
             if self.quant_method.weight_zero_point_suffix is not None:
                 weight_zero_point_name = weight_name.replace("weight", self.quant_method.weight_zero_point_suffix)
-                weight_zero_point_names.append(weight_zero_point_name)
+                self.weight_zero_point_names[sub_child_index] = weight_zero_point_name
             if self.quant_method.weight_suffix is not None:
                 weight_name = weight_name.replace("weight", self.quant_method.weight_suffix)
-                quanted_weight_names.append(weight_name)
-
-        if len(quanted_weight_names) != 0:
-            self.quanted_weight_names = quanted_weight_names
-
-        if len(weight_scale_names) != 0:
-            self.weight_scale_names = weight_scale_names
-        else:
-            self.weight_scale_names = None
-
-        if len(weight_zero_point_names) != 0:
-            self.weight_zero_point_names = weight_zero_point_names
-        else:
-            self.weight_zero_point_names = None
+                self.quanted_weight_names[sub_child_index] = weight_name
         return
 
     def load_hf_weights(self, weights):
