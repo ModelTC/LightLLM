@@ -37,7 +37,7 @@ class BaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0) -> None:
+    def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
         raise NotImplementedError("Not implemented")
 
     def apply(
