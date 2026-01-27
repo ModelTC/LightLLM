@@ -72,7 +72,7 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         weight = weight.float().cuda(self.device_id_)
         scale = weight.abs().max(dim=-1)[0] / 127
         weight = weight / scale.reshape(-1, 1)
-        weight = torch.round(weight.clamp(min=-128, max=127)).to(dtype=torch.int8)
+        weight = torch.round(weight.clamp(min=-127, max=127)).to(dtype=torch.int8)
         output.weight.copy_(weight)
         output.weight_scale.copy_(scale)
         return
