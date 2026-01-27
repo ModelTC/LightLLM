@@ -44,7 +44,8 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
 
         qk_rope_head_dim = 64
         q_nope, q_rope = q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:]
-        o_tensor = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q.device)
+        #  GLM-4.7-Flash ： v_head_dim != qk_nope_head_dim
+        o_tensor = alloc_func((q_nope.shape[0], q_nope.shape[1], v.shape[-1]), dtype=q_nope.dtype, device=q.device)
         k_nope, k_rope = k
         assert att_control.mla_prefill
         softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
