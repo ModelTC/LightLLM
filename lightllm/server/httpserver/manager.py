@@ -10,7 +10,6 @@ import copy
 import hashlib
 import datetime
 import pickle
-import base64
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -30,6 +29,7 @@ from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+from lightllm.common.basemodel.routing_manager import get_shared_routing_config
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
@@ -115,6 +115,9 @@ class HttpServerManager:
         # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+        # Cache routing config for MoE expert routing data extraction
+        self._routing_config = get_shared_routing_config() if args.enable_return_routed_experts else None
         return
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
@@ -779,19 +782,12 @@ class HttpServerManager:
                                     else:
                                         finish_status = FinishStatus(req.finish_status.status)
 
-                                    if req.sample_params.return_routed_experts and req.routing_data_num_moe_layers > 0:
-                                        try:
-                                            req.link_routing_data_shm_array()
-                                            routing_data = req.get_routing_data()
-                                            if routing_data is not None:
-                                                metadata["routed_experts"] = {
-                                                    "shape": list(routing_data.shape),
-                                                    "dtype": str(routing_data.dtype),
-                                                    "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
-                                                }
-                                                req.close_routing_data_shm_array()
-                                        except Exception as e:
-                                            logger.warning(f"Failed to read routing data for req {req_id}: {e}")
+                                    if self._routing_config is not None and self._routing_config.is_initialized():
+                                        routing_meta = req.get_routing_metadata(
+                                            self._routing_config.num_moe_layers, self._routing_config.topk
+                                        )
+                                        if routing_meta is not None:
+                                            metadata["routed_experts"] = routing_meta
 
                                     token_list.append((req_id, text, metadata, finish_status))
                             else:

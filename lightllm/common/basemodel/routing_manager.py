@@ -3,8 +3,51 @@ import numpy as np
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_rank_in_dp
+from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
+
+
+class SharedRoutingConfig:
+    """Shared MoE routing configuration across processes."""
+
+    def __init__(self):
+        service_name = get_unique_server_name()
+        # Shape: [num_moe_layers, topk]
+        self._shm = SharedArray(f"{service_name}_routing_config", shape=(2,), dtype=np.int32)
+
+    @property
+    def num_moe_layers(self) -> int:
+        return int(self._shm.arr[0])
+
+    @num_moe_layers.setter
+    def num_moe_layers(self, value: int):
+        self._shm.arr[0] = value
+
+    @property
+    def topk(self) -> int:
+        return int(self._shm.arr[1])
+
+    @topk.setter
+    def topk(self, value: int):
+        self._shm.arr[1] = value
+
+    def is_initialized(self) -> bool:
+        return self.num_moe_layers > 0 and self.topk > 0
+
+
+# Global shared routing config (lazy initialized)
+_shared_routing_config: Optional[SharedRoutingConfig] = None
+
+
+def get_shared_routing_config() -> SharedRoutingConfig:
+    """Get or create the shared routing config."""
+    global _shared_routing_config
+    if _shared_routing_config is None:
+        _shared_routing_config = SharedRoutingConfig()
+    return _shared_routing_config
+
 
 # MoE layer counter for auto-incrementing moe_layer_index
 _moe_layer_counter: int = 0
@@ -75,12 +118,8 @@ class RoutingCaptureManager:
         )
 
     def capture(self, moe_layer_index: int, topk_ids: torch.Tensor, microbatch_index: int = 0) -> None:
-        assert (
-            0 <= moe_layer_index < self.num_moe_layers
-        ), f"moe_layer_index {moe_layer_index} out of range [0, {self.num_moe_layers})"
-        slot = microbatch_index % self.num_slots
         num_tokens = topk_ids.shape[0]
-        self.gpu_buffer[slot, moe_layer_index, :num_tokens, :] = topk_ids.to(self.dtype)
+        self.gpu_buffer[microbatch_index, moe_layer_index, :num_tokens, :] = topk_ids.to(self.dtype)
 
     def flush_to_cpu_async(self, mem_indexes: torch.Tensor, microbatch_index: int) -> None:
         num_tokens = mem_indexes.shape[0]
@@ -98,9 +137,20 @@ class RoutingCaptureManager:
             self.cpu_buffer[:, cpu_indexes, :] = self.gpu_buffer[slot, :, :num_tokens, :].cpu()
             event.record()
 
-    def extract_for_request(self, mem_indexes: torch.Tensor) -> np.ndarray:
+    def sync_events(self) -> None:
+        """Synchronize all flush events. Call once before batch extraction."""
         for event in self.flush_events:
             event.synchronize()
+
+    def extract_for_request(self, mem_indexes: torch.Tensor) -> np.ndarray:
+        self.sync_events()
+        return self.cpu_buffer[:, mem_indexes, :].numpy()
+
+    def extract_for_request_no_sync(self, mem_indexes: torch.Tensor) -> np.ndarray:
+        """Extract routing data without synchronizing events.
+
+        Call sync_events() once before using this method in a batch.
+        """
         return self.cpu_buffer[:, mem_indexes, :].numpy()
 
 
@@ -132,8 +182,6 @@ def init_routing_capture(model) -> None:
         return
 
     # Only create routing capture manager on rank 0
-    # Routing decisions are identical across all TP ranks, so we only need to capture on rank 0
-    # which is the rank that communicates results back to the Router/HTTP server
     if get_current_rank_in_dp() != 0:
         logger.info("Skipping routing capture initialization on non-zero rank")
         return
@@ -145,16 +193,9 @@ def init_routing_capture(model) -> None:
         )
         return
 
-    n_routed_experts = model.config.get("n_routed_experts", model.config.get("num_experts", 0))
-    if n_routed_experts == 0:
-        logger.warning(
-            "enable_return_routed_experts is set but n_routed_experts=0. " "Routing capture will not be enabled."
-        )
-        return
-
-    topk = model.config.get("num_experts_per_tok", 1)
-    num_experts = n_routed_experts
-
+    num_experts = model.config.get("n_routed_experts", model.config.get("num_experts", 0))
+    topk = model.config.get("num_experts_per_tok", 0)
+    assert num_experts > 0 and topk > 0
     enable_overlap = getattr(model.args, "enable_decode_microbatch_overlap", False)
 
     logger.info(
@@ -167,10 +208,15 @@ def init_routing_capture(model) -> None:
         topk=topk,
         num_experts=num_experts,
         batch_max_tokens=model.max_total_token_num,
-        # Add 1 to handle potential edge case where mem_index == size
         kv_cache_size=model.mem_manager.size + 1,
         enable_overlap=enable_overlap,
     )
+
+    # Set shared routing config for cross-process access
+    shared_config = get_shared_routing_config()
+    shared_config.num_moe_layers = num_moe_layers
+    shared_config.topk = topk
+    logger.info(f"Shared routing config set: num_moe_layers={num_moe_layers}, topk={topk}")
 
 
 def flush_routing_capture(mem_indexes: torch.Tensor, microbatch_index: int = 0) -> None:

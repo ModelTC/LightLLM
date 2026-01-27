@@ -13,7 +13,7 @@ from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.routing_manager import g_routing_capture_manager, get_next_moe_layer_index
+from lightllm.common.basemodel.routing_manager import get_next_moe_layer_index
 
 logger = init_logger(__name__)
 
@@ -105,7 +105,6 @@ class FusedMoeWeight(BaseWeightTpl):
                 f"redundancy_expertids: {self.redundancy_expert_ids}"
             )
             self.local_n_routed_experts = self.n_routed_experts // self.global_world_size + self.redundancy_expert_num
-            self.split_inter_size = self.moe_intermediate_size
             n_experts_per_rank = self.n_routed_experts // self.global_world_size
             start_expert_id = self.global_rank_ * n_experts_per_rank
             self.local_expert_ids = (

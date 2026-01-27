@@ -114,16 +114,25 @@ class InferenceContext:
 
         return req_objs
 
-    def _extract_routing_data(self, req: "InferReq"):
+    def _extract_routing_data(self, req: "InferReq", sync: bool = True):
+        """Extract MoE routing data for a completed request.
+
+        Args:
+            req: The inference request to extract routing data for.
+            sync: If True, synchronize CUDA events before extraction. Set to False
+                  when processing multiple requests in batch after calling
+                  g_routing_capture_manager.sync_events() once.
+        """
         mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len]
         num_moe_layers = g_routing_capture_manager.num_moe_layers
         topk = g_routing_capture_manager.topk
         num_tokens = req.cur_kv_len
-        logger.debug(f"R3: Extracting routing for req {req.req_id}: {num_moe_layers}x{num_tokens}x{topk}")
-        routing_data = g_routing_capture_manager.extract_for_request(mem_indexes.cpu())
+        if sync:
+            routing_data = g_routing_capture_manager.extract_for_request(mem_indexes.cpu())
+        else:
+            routing_data = g_routing_capture_manager.extract_for_request_no_sync(mem_indexes.cpu())
         req.shm_req.create_routing_data_shm_array(num_moe_layers, num_tokens, topk)
         req.shm_req.shm_routing_data.arr[:] = routing_data
-        logger.debug(f"R3: Successfully extracted routing data for req {req.req_id}")
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
@@ -161,6 +170,11 @@ class InferenceContext:
         if len(finished_request_ids) == 0:
             return
 
+        # Optimization: sync CUDA events once for batch routing data extraction
+        need_routing_data = g_routing_capture_manager is not None
+        if need_routing_data:
+            g_routing_capture_manager.sync_events()
+
         free_req_index = []
         free_token_index = []
         for request_id in finished_request_ids:
@@ -168,7 +182,8 @@ class InferenceContext:
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
 
-            self._extract_routing_data(req)
+            if need_routing_data:
+                self._extract_routing_data(req, sync=False)
 
             self.free_a_req_mem(free_token_index, req)
 

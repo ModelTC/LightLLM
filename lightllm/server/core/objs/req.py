@@ -1,6 +1,7 @@
 import os
 import math
 import ctypes
+import base64
 import numpy as np
 import time
 from .sampling_params import SamplingParams
@@ -122,9 +123,6 @@ class Req(ctypes.Structure):
         ("cpu_cache_match_page_indexes", CpuCachePageList),
         # 分块hash的块大小
         ("cpu_cache_token_page_size", ctypes.c_int),
-        ("routing_data_num_moe_layers", ctypes.c_int),
-        ("routing_data_num_tokens", ctypes.c_int),
-        ("routing_data_topk", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -183,10 +181,6 @@ class Req(ctypes.Structure):
         self.stop_str_matched = False
         self.stop_str_matched_token_index = -1
 
-        self.routing_data_num_moe_layers = 0
-        self.routing_data_num_tokens = 0
-        self.routing_data_topk = 0
-
         self.post_init()
 
         self.cpu_cache_token_page_size = get_env_start_args().cpu_cache_token_page_size
@@ -240,25 +234,21 @@ class Req(ctypes.Structure):
         shape = (num_moe_layers, num_tokens, topk)
         self.shm_routing_data = ShmArray(name, shape, dtype=np.int32)
         self.shm_routing_data.create_shm()
-        self.routing_data_num_moe_layers = num_moe_layers
-        self.routing_data_num_tokens = num_tokens
-        self.routing_data_topk = topk
         return
 
-    def link_routing_data_shm_array(self):
-        if self.routing_data_num_moe_layers == 0:
+    def link_routing_data_shm_array(self, num_moe_layers: int, topk: int):
+        if num_moe_layers == 0:
             return
         service_uni_name = get_unique_server_name()
         name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
-        shape = (self.routing_data_num_moe_layers, self.routing_data_num_tokens, self.routing_data_topk)
+        # num_tokens equals shm_cur_kv_len at the time of creation
+        shape = (num_moe_layers, self.shm_cur_kv_len, topk)
         self.shm_routing_data = ShmArray(name, shape, dtype=np.int32)
         self.shm_routing_data.link_shm()
         return
 
     def get_routing_data(self):
-        if self.routing_data_num_moe_layers == 0 or not hasattr(self, "shm_routing_data"):
-            return None
-        if self.shm_routing_data is None:
+        if not hasattr(self, "shm_routing_data") or self.shm_routing_data is None:
             return None
         return self.shm_routing_data.arr
 
@@ -267,6 +257,29 @@ class Req(ctypes.Structure):
             self.shm_routing_data.close_shm()
             self.shm_routing_data = None
         return
+
+    def get_routing_metadata(self, num_moe_layers: int, topk: int):
+        """Safely extract routing data and format for API response.
+
+        Returns a dict with shape, dtype, and base64-encoded data, or None if unavailable.
+        """
+        if num_moe_layers == 0 or topk == 0:
+            return None
+        try:
+            self.link_routing_data_shm_array(num_moe_layers, topk)
+            routing_data = self.get_routing_data()
+            if routing_data is None:
+                return None
+            return {
+                "shape": list(routing_data.shape),
+                "dtype": str(routing_data.dtype),
+                "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to read routing data for req {self.request_id}: {e}")
+            return None
+        finally:
+            self.close_routing_data_shm_array()
 
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
