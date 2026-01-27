@@ -51,7 +51,7 @@ class MMWeightTpl(BaseWeightTpl):
         self.quant_method: QuantizationMethod = NoQuantization() if quant_method is None else quant_method
         self.param_slicer: SliceMixinTpl = None
         self._create_weight()
-        self.gen_weight_quant_param_names(quant_method=quant_method)
+        self.gen_weight_quant_param_names()
 
     def mm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
@@ -60,10 +60,11 @@ class MMWeightTpl(BaseWeightTpl):
             input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger, bias=self.bias
         )
 
-    def gen_weight_quant_param_names(self, quant_method: Optional[QuantizationMethod]):
-        if quant_method.method_name == "none":
-            self.weight_zero_point_names = None
-            self.weight_scale_names = None
+    def gen_weight_quant_param_names(self):
+        if self.quant_method.method_name == "none":
+            self.quanted_weight_names = [None] * len(self.weight_names)
+            self.weight_zero_point_names = [None] * len(self.weight_names)
+            self.weight_scale_names = [None] * len(self.weight_names)
             return
 
         quanted_weight_names = []
@@ -71,14 +72,14 @@ class MMWeightTpl(BaseWeightTpl):
         weight_zero_point_names = []
 
         for weight_name in self.weight_names:
-            if quant_method.weight_scale_suffix is not None:
-                weight_scale_name = weight_name.replace("weight", quant_method.weight_scale_suffix)
+            if self.quant_method.weight_scale_suffix is not None:
+                weight_scale_name = weight_name.replace("weight", self.quant_method.weight_scale_suffix)
                 weight_scale_names.append(weight_scale_name)
-            if quant_method.weight_zero_point_suffix is not None:
-                weight_zero_point_name = weight_name.replace("weight", quant_method.weight_zero_point_suffix)
+            if self.quant_method.weight_zero_point_suffix is not None:
+                weight_zero_point_name = weight_name.replace("weight", self.quant_method.weight_zero_point_suffix)
                 weight_zero_point_names.append(weight_zero_point_name)
-            if quant_method.weight_suffix is not None:
-                weight_name = weight_name.replace("weight", quant_method.weight_suffix)
+            if self.quant_method.weight_suffix is not None:
+                weight_name = weight_name.replace("weight", self.quant_method.weight_suffix)
                 quanted_weight_names.append(weight_name)
 
         if len(quanted_weight_names) != 0:
@@ -99,16 +100,13 @@ class MMWeightTpl(BaseWeightTpl):
 
         for sub_child_index, param_name in enumerate(self.weight_names):
             self._load_weight(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
-
+        for sub_child_index, param_name in enumerate(self.weight_scale_names):
+            self._load_weight_scale(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
+        for sub_child_index, param_name in enumerate(self.weight_zero_point_names):
+            self._load_weight_zero_point(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
         if self.bias_names is not None:
             for sub_child_index, param_name in enumerate(self.bias_names):
                 self._load_bias(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
-        if self.weight_scale_names is not None:
-            for sub_child_index, param_name in enumerate(self.weight_scale_names):
-                self._load_weight_scale(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
-        if self.weight_zero_point_names is not None:
-            for sub_child_index, param_name in enumerate(self.weight_zero_point_names):
-                self._load_weight_zero_point(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
 
     def _create_weight(self):
         self.bias = None
@@ -129,6 +127,10 @@ class MMWeightTpl(BaseWeightTpl):
     def _load_weight(
         self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
     ) -> None:
+        quanted_param_name = self.quanted_weight_names[sub_child_index]
+        # if the original weight is quantized, use the quantized_param_name.
+        if quanted_param_name in weights:
+            param_name = quanted_param_name
         if param_name in weights:
             weight = self.param_slicer._slice_weight(weights[param_name])
             self.quant_method.load_weight(weight, self.mm_param_list[sub_child_index])
