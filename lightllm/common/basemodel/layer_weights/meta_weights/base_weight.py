@@ -18,7 +18,7 @@ class BaseWeight(ABC):
         pass
 
     @abstractmethod
-    def verify_load(self):
+    def verify_load(self) -> bool:
         pass
 
 
@@ -33,8 +33,8 @@ class BaseWeightTpl(BaseWeight):
     def load_hf_weights(self, weights):
         raise NotImplementedError("load_hf_weights must implement this method")
 
-    def verify_load(self):
+    def verify_load(self) -> bool:
         raise NotImplementedError("verify_load must implement this method")
 
-    def _create_weight(self) -> bool:
+    def _create_weight(self):
         raise NotImplementedError("create_weight must implement this method")
