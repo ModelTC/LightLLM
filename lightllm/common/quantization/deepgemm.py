@@ -101,13 +101,15 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
+        weight_scale_out_dims = [(_out_dim + self.block_size - 1) // self.block_size for _out_dim in out_dims]
+        weight_scale_out_dim = sum(weight_scale_out_dims)
+        weight_scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-        scale_out_dim = (out_dim + self.block_size - 1) // self.block_size
-        scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
-        weight_scale = torch.empty(expert_prefix + (scale_out_dim, scale_in_dim), dtype=torch.float32).cuda(device_id)
+        weight_scale = torch.empty(
+            expert_prefix + (weight_scale_out_dim, weight_scale_in_dim), dtype=torch.float32
+        ).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
-        weight_scale_out_dims = [(_out_dim + self.block_size - 1) // self.block_size for _out_dim in out_dims]
         mm_param_list = self._split_weight_pack(
             mm_param,
             weight_out_dims=out_dims,
