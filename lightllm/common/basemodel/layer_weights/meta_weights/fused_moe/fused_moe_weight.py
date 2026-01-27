@@ -46,12 +46,6 @@ class FusedMoeWeight(BaseWeightTpl):
         self.hidden_size = hidden_size
         self.moe_intermediate_size = moe_intermediate_size
         self.quant_method = quant_method
-        self.row_slicer = get_row_slice_mixin(
-            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
-        )
-        self.col_slicer = get_col_slice_mixin(
-            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
-        )
         assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.n_routed_experts = n_routed_experts
@@ -91,6 +85,15 @@ class FusedMoeWeight(BaseWeightTpl):
         assert self.redundancy_expert_num != 1, "redundancy_expert_num can not be 1 for some unknown hang of deepep."
 
     def _init_parallel_params(self):
+        if self.enable_ep_moe:
+            self.tp_rank_ = 0
+            self.tp_world_size_ = 1
+        self.row_slicer = get_row_slice_mixin(
+            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
+        )
+        self.col_slicer = get_col_slice_mixin(
+            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
+        )
         self.local_n_routed_experts = self.n_routed_experts + self.num_fused_shared_experts
         self.split_inter_size = self.moe_intermediate_size // self.tp_world_size_
         if self.enable_ep_moe:
@@ -100,7 +103,6 @@ class FusedMoeWeight(BaseWeightTpl):
                 f"redundancy_expertids: {self.redundancy_expert_ids}"
             )
             self.local_n_routed_experts = self.n_routed_experts // self.global_world_size + self.redundancy_expert_num
-            self.split_inter_size = self.moe_intermediate_size
             n_experts_per_rank = self.n_routed_experts // self.global_world_size
             start_expert_id = self.global_rank_ * n_experts_per_rank
             self.local_expert_ids = (
