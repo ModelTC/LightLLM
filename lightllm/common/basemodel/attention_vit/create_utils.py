@@ -34,7 +34,7 @@ def get_vit_att_backend_class(
 def _select_vit_backend(priority_list: list = ["fa3", "xformers", "sdpa", "triton"]) -> type:
     """Auto-select the best available backend with validation for VIT.
 
-    Priority: FA3 > Sdpa > Triton
+    Priority: FA3 > Xformers > Sdpa > Triton
     Each backend is validated in a subprocess with ground truth checks.
     """
     backend_map = vit_att_backend
