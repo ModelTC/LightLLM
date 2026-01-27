@@ -11,8 +11,8 @@ from lightllm.common.triton_utils.autotuner import autotune
 from lightllm.utils.device_utils import triton_support_tensor_descriptor, is_5090_gpu
 
 
-class Fp8ScaledMMKernelConfig(KernelConfigs):
-    kernel_name: str = "fp8_scaled_mm_per_token"
+class ScaledMMKernelConfig(KernelConfigs):
+    kernel_name: str = "scaled_mm_per_token"
 
     @classmethod
     @lru_cache(maxsize=200)
@@ -105,6 +105,7 @@ def _scaled_mm_per_token(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
+    ACC_DTYPE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     m_block_num = tl.cdiv(M, BLOCK_M)
@@ -134,7 +135,7 @@ def _scaled_mm_per_token(
     a_s = tl.load(Ascale_ptrs)
     b_s = tl.load(Bscale_ptrs)
 
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
 
     for k in range(0, tl.cdiv(K, BLOCK_K)):
         if USE_TMA:
@@ -155,6 +156,7 @@ def _scaled_mm_per_token(
             a_ptrs += BLOCK_K * stride_ak
             b_ptrs += BLOCK_K * stride_bk
 
+    acc = acc.to(tl.float32)
     acc = acc * a_s[:, None] * b_s[None, :]
 
     acc = acc.to(out.dtype.element_ty)
@@ -206,13 +208,13 @@ def _get_static_key(A, B, out_dtype):
 
 
 @autotune(
-    kernel_name="fp8_scaled_mm_per_token:v3",
+    kernel_name="scaled_mm_per_token:v1",
     configs_gen_func=get_test_configs,
     static_key_func=_get_static_key,
     run_key_func=lambda A: A.shape[0],
     mutates_args=["out"],
 )
-def fp8_scaled_mm_per_token(
+def scaled_mm_per_token(
     A: torch.Tensor,
     B: torch.Tensor,
     Ascale: torch.Tensor,
@@ -221,7 +223,7 @@ def fp8_scaled_mm_per_token(
     out: torch.Tensor,
     run_config=None,
 ) -> torch.Tensor:
-    """w8a8fp8 per-token quantization mm.
+    """w8a8 per-token quantization mm (supports fp8 and int8).
 
     Args:
         A: Matrix A with shape of [M, K].
@@ -239,7 +241,7 @@ def fp8_scaled_mm_per_token(
     M, K = A.shape
     _, N = B.shape
     if not run_config:
-        run_config = Fp8ScaledMMKernelConfig.try_to_get_best_config(M=M, N=N, K=K, out_dtype=out_dtype)
+        run_config = ScaledMMKernelConfig.try_to_get_best_config(M=M, N=N, K=K, out_dtype=out_dtype)
     NEED_N_MASK = N % run_config["BLOCK_N"] != 0
     NEED_K_MASK = K % run_config["BLOCK_K"] != 0
     grid = (triton.cdiv(M, run_config["BLOCK_M"]) * triton.cdiv(N, run_config["BLOCK_N"]),)
@@ -283,6 +285,8 @@ def fp8_scaled_mm_per_token(
         B_desc = None
         out_desc = None
 
+    ACC_DTYPE = tl.int32 if A.dtype == torch.int8 else tl.float32
+
     _scaled_mm_per_token[grid](
         A=A,
         A_desc=A_desc,
@@ -305,10 +309,15 @@ def fp8_scaled_mm_per_token(
         B_IS_TRANS=B_is_trans,
         NEED_N_MASK=NEED_N_MASK,
         NEED_K_MASK=NEED_K_MASK,
+        ACC_DTYPE=ACC_DTYPE,
         **run_config,
     )
 
     return out
+
+
+fp8_scaled_mm_per_token = scaled_mm_per_token
+int8_scaled_mm_per_token = scaled_mm_per_token
 
 
 if __name__ == "__main__":
@@ -324,7 +333,7 @@ if __name__ == "__main__":
     M_list = [1, 2, 4, 8, 16, 32, 48]
 
     print(f"{'='*80}")
-    print(f"Starting Autotune for FP8 Scaled MM (N={N}, K={K})")
+    print(f"Starting Autotune for Scaled MM (N={N}, K={K})")
     print(f"M values to test: {M_list}")
     print(f"Total configs per M: {len(get_test_configs())}")
     print(f"{'='*80}\n")
@@ -360,7 +369,7 @@ if __name__ == "__main__":
     gt_C = d_A.mm(d_B)
 
     # 运行kernel验证正确性
-    fp8_scaled_mm_per_token(A_verify, B, Ascale_verify, Bscale, output_dtype, out_verify)
+    scaled_mm_per_token(A_verify, B, Ascale_verify, Bscale, output_dtype, out_verify)
 
     # 计算cosine similarity
     cosine_sim = F.cosine_similarity(out_verify.flatten().unsqueeze(0), gt_C.flatten().unsqueeze(0), dim=1)
@@ -390,7 +399,7 @@ if __name__ == "__main__":
         A = test_data[M]["A"]
         Ascale = test_data[M]["Ascale"]
         out = test_data[M]["out"]
-        fp8_scaled_mm_per_token(A, B, Ascale, Bscale, output_dtype, out)
+        scaled_mm_per_token(A, B, Ascale, Bscale, output_dtype, out)
         print(f"[M={M}] Autotune completed!")
 
     Autotuner.end_autotune_warmup()
@@ -418,7 +427,7 @@ if __name__ == "__main__":
         gt_C = d_A.mm(d_B)
 
         # 运行一次确保结果正确
-        fp8_scaled_mm_per_token(A, B, Ascale, Bscale, output_dtype, out)
+        scaled_mm_per_token(A, B, Ascale, Bscale, output_dtype, out)
         sgl_res = fp8_scaled_mm(A, B, Ascale, Bscale, output_dtype)
 
         cosine_sim = F.cosine_similarity(out.flatten().unsqueeze(0), gt_C.flatten().unsqueeze(0), dim=1)
@@ -437,7 +446,7 @@ if __name__ == "__main__":
         ms_sgl = triton.testing.do_bench(fn_sgl, warmup=25, rep=100)
 
         # Our kernel
-        fn_ours = lambda: fp8_scaled_mm_per_token(A, B, Ascale, Bscale, output_dtype, out)
+        fn_ours = lambda: scaled_mm_per_token(A, B, Ascale, Bscale, output_dtype, out)
         ms_ours = triton.testing.do_bench_cudagraph(fn_ours, rep=100)
 
         print(f"[M={M}] BF16:       {ms_bf16:.3f} ms")

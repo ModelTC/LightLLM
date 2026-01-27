@@ -162,19 +162,6 @@ class BloomPreAndPostLayerWeight(PreAndPostLayerWeight):
                                                                  self.tp_rank_: split_vob_size * (self.tp_rank_ + 1), :])
             self.lm_head_weight_ = self.wte_weight_
         return
-    
-    def verify_load(self):
-        errors = "weights load not ok"
-        weights = [self.pre_norm_weight_, 
-                   self.pre_norm_bias_, 
-                   self.final_norm_weight_, 
-                   self.final_norm_bias_,
-                   self.wte_weight_,
-                   self.lm_head_weight_]
-        for i in range(len(weights)):
-            assert weights[i] is not None, "index:" + str(i) + " " + errors
-        return 
-
 ~~~
 
 ***transformer_layer_weight.py***
@@ -204,30 +191,6 @@ class BloomTransformerLayerWeight(TransformerLayerWeight):
         self._load_qkvo_weights(weights)
         self._load_ffn_weights(weights)
         return
-    
-    def verify_load(self):
-        errors = "weights load not ok"
-        weights = [self.att_norm_weight_,
-                   self.att_norm_bias_,
-                   self.q_weight_,
-                   self.k_weight_,
-                   self.v_weight_,
-                   self.q_bias_,
-                   self.k_bias_,
-                   self.v_bias_,
-                   self.o_weight_,
-                   self.o_bias_,
-
-                   self.ffn_norm_weight_,
-                   self.ffn_norm_bias_,
-                   self.ffn_1_weight_,
-                   self.ffn_1_bias_,
-                   self.ffn_2_weight_,
-                   self.ffn_2_bias_,
-                   ]
-        for i in range(len(weights)):
-            assert weights[i] is not None, "index:" + str(i) + " " + errors
-        return 
 
     def _load_qkvo_weights(self, weights):
         if f"h.{self.layer_num_}.input_layernorm.weight" in weights:

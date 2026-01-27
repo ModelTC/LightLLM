@@ -103,20 +103,15 @@ class TpPartBaseModel:
         self._verify_params()
         self._init_quant()
 
-        # 更连续的显存分配可以有更好的性能
-        if self.max_total_token_num is None:
-            self._init_weights()
-            self._init_mem_manager()
-        else:
-            self._init_mem_manager()
-            self._init_weights()
-
+        self._init_weights()
+        self._init_mem_manager()
         self._init_kv_move_buffer()
         self._check_mem_size()
         self._init_req_manager()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
+        self._load_hf_weights()
         # wait必须在init cudagraph 之前，避免错误捕获
         self._wait_other_modules_ready()
 
@@ -179,6 +174,9 @@ class TpPartBaseModel:
             )
             for i in range(start_layer_index, start_layer_index + self.config["n_layer"])
         ]
+        return
+
+    def _load_hf_weights(self):
         load_hf_weights(
             self.data_type,
             weight_dir=self.weight_dir_,
@@ -639,8 +637,6 @@ class TpPartBaseModel:
 
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
-        input_ids0, input_ids1 = model_input0.input_ids, model_input1.input_ids
-
         infer_state0 = self._create_inferstate(model_input0, 0)
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
@@ -670,9 +666,7 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
-        model_output0, model_output1 = self._overlap_tpsp_context_forward(
-            input_ids0, infer_state0, input_ids1=input_ids1, infer_state1=infer_state1
-        )
+        model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义

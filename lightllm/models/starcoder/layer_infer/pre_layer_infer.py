@@ -14,24 +14,18 @@ class StarcoderPreLayerInfer(PreLayerInfer):
         self.layer_norm_eps_ = network_config["layer_norm_epsilon"]
 
     def context_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: StarcoderPreAndPostLayerWeight):
-        input_embdings = layer_weight.wte_weight_.embedding(input_ids=input_ids, alloc_func=self.alloc_tensor)
+        input_embdings = layer_weight.wte_weight_(input_ids=input_ids, alloc_func=self.alloc_tensor)
         if self.tp_world_size_ > 1:
             all_reduce(input_embdings, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
 
-        position_embeds = layer_weight.wpe_weight_.embedding(
-            input_ids=infer_state.position_ids,
-            alloc_func=self.alloc_tensor,
-        )
+        position_embeds = layer_weight.wpe_weight_(input_ids=infer_state.position_ids, alloc_func=self.alloc_tensor)
 
         return input_embdings.add_(position_embeds)
 
     def token_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: StarcoderPreAndPostLayerWeight):
-        input_embdings = layer_weight.wte_weight_.embedding(input_ids=input_ids, alloc_func=self.alloc_tensor)
+        input_embdings = layer_weight.wte_weight_(input_ids=input_ids, alloc_func=self.alloc_tensor)
         if self.tp_world_size_ > 1:
             all_reduce(input_embdings, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
 
-        position_embeds = layer_weight.wpe_weight_.embedding(
-            input_ids=infer_state.position_ids,
-            alloc_func=self.alloc_tensor,
-        )
+        position_embeds = layer_weight.wpe_weight_(input_ids=infer_state.position_ids, alloc_func=self.alloc_tensor)
         return input_embdings.add_(position_embeds)

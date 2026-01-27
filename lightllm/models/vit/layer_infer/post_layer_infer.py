@@ -15,6 +15,7 @@ class ViTPostLayerInfer:
         self.network_config_ = network_config
         self.llm_hidden_size = network_config["llm_hidden_size"]
         self.downsample_ratio = network_config["downsample_ratio"]
+        self.eps_ = network_config["layer_norm_eps"]
         return
 
     def pixel_shuffle(self, x, scale_factor=0.5):
@@ -33,25 +34,12 @@ class ViTPostLayerInfer:
         h = w = int(vit_embeds.shape[1] ** 0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
         vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
-        vit_embeds_norm = torch.nn.functional.layer_norm(
-            vit_embeds,
-            (vit_embeds.shape[-1],),
-            weight=layer_weight.layernorm_weight_,
-            bias=layer_weight.layernorm_bias_,
-        )
-
-        vit_embeds_1 = torch.addmm(
-            layer_weight.mlp1_1_bias_, vit_embeds_norm.view(-1, vit_embeds_norm.shape[-1]), layer_weight.mlp1_1_weight_
-        )
+        vit_embeds_norm = layer_weight.layernorm_weight_(input=vit_embeds, eps=self.eps_)
+        vit_embeds_1 = layer_weight.mlp1_1_.mm(vit_embeds_norm.view(-1, vit_embeds_norm.shape[-1]))
 
         vit_embeds_gelu = gelu_fwd(vit_embeds_1, use_custom_tensor_mananger=True)
 
-        vit_embeds_out = torch.addmm(
-            layer_weight.mlp1_3_bias_,
-            vit_embeds_gelu.view(-1, self.llm_hidden_size // self.tp_world_size_),
-            layer_weight.mlp1_3_weight_,
-            beta=1.0 / self.tp_world_size_,
-        )
+        vit_embeds_out = layer_weight.mlp1_3_.mm(vit_embeds_gelu.view(-1, self.llm_hidden_size // self.tp_world_size_))
 
         if self.tp_world_size_ == 1:
             return vit_embeds_out.view(batch_size, -1, self.llm_hidden_size)

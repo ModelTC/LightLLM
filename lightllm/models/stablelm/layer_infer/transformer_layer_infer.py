@@ -53,17 +53,13 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
     ) -> torch.Tensor:
-        return layer_weight.att_norm_weight_.layernorm_forward(
-            input=input.view(-1, self.embed_dim_),
-            eps=self.eps_,
-            alloc_func=self.alloc_tensor,
+        return layer_weight.att_norm_weight_(
+            input=input.view(-1, self.embed_dim_), eps=self.eps_, alloc_func=self.alloc_tensor
         )
 
     def _ffn_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
     ) -> torch.Tensor:
-        return layer_weight.ffn_norm_weight_.layernorm_forward(
-            input=input.view(-1, self.embed_dim_),
-            eps=self.eps_,
-            alloc_func=self.alloc_tensor,
+        return layer_weight.ffn_norm_weight_(
+            input=input.view(-1, self.embed_dim_), eps=self.eps_, alloc_func=self.alloc_tensor
         )

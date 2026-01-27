@@ -4,6 +4,7 @@ from functools import partial
 from .base_layer_weight import BaseLayerWeight
 from .meta_weights import BaseWeight, MMWeightTpl
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.quantization import Quantcfg
 
 logger = init_logger(__name__)
 
@@ -14,7 +15,7 @@ class TransformerLayerWeight(BaseLayerWeight):
         self.layer_num_ = layer_num
         self.data_type_ = data_type
         self.network_config_ = network_config
-        self.quant_cfg = quant_cfg
+        self.quant_cfg: Quantcfg = quant_cfg
         self._parse_config()
         self._init_weight_names()
         self._init_weight()
@@ -40,3 +41,6 @@ class TransformerLayerWeight(BaseLayerWeight):
                     attr.load_hf_weights(weights)
             elif isinstance(attr, BaseWeight):
                 attr.load_hf_weights(weights)
+
+    def get_quant_method(self, name):
+        return self.quant_cfg.get_quant_method(self.layer_num_, name)

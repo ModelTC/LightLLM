@@ -37,14 +37,10 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         k = cache_kv[:, 0 : self.tp_k_head_num_, :]
 
-        q = layer_weight.q_norm_weight_.rmsnorm_forward(
-            input=q.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-        ).to(cache_kv.dtype)
+        q = layer_weight.q_norm_weight_(input=q.float(), eps=self.eps_, alloc_func=self.alloc_tensor).to(cache_kv.dtype)
 
-        cache_kv[:, 0 : self.tp_k_head_num_, :] = layer_weight.k_norm_weight_.rmsnorm_forward(
-            input=k.float(),
-            eps=self.eps_,
-            alloc_func=self.alloc_tensor,
+        cache_kv[:, 0 : self.tp_k_head_num_, :] = layer_weight.k_norm_weight_(
+            input=k.float(), eps=self.eps_, alloc_func=self.alloc_tensor
         ).to(cache_kv.dtype)
 
         is_sliding = bool((self.layer_num_ + 1) % self.sliding_window_pattern)
@@ -92,7 +88,7 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
-        input1 = layer_weight.pre_feedforward_layernorm_weight_.rmsnorm_forward(
+        input1 = layer_weight.pre_feedforward_layernorm_weight_(
             input=input_embdings.float(), eps=self.eps_, alloc_func=self.alloc_tensor
         ).to(torch.bfloat16)
 
@@ -101,10 +97,8 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
 
-        ffn_out = layer_weight.post_feedforward_layernorm_weight_.rmsnorm_forward(
-            input=ffn_out.float(),
-            eps=self.eps_,
-            alloc_func=self.alloc_tensor,
+        ffn_out = layer_weight.post_feedforward_layernorm_weight_(
+            input=ffn_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
         ).to(torch.bfloat16)
 
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
@@ -127,7 +121,7 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
-        input1 = layer_weight.pre_feedforward_layernorm_weight_.rmsnorm_forward(
+        input1 = layer_weight.pre_feedforward_layernorm_weight_(
             input=input_embdings.float(), eps=self.eps_, alloc_func=self.alloc_tensor
         ).to(torch.bfloat16)
 
@@ -136,10 +130,8 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
 
-        ffn_out = layer_weight.post_feedforward_layernorm_weight_.rmsnorm_forward(
-            input=ffn_out.float(),
-            eps=self.eps_,
-            alloc_func=self.alloc_tensor,
+        ffn_out = layer_weight.post_feedforward_layernorm_weight_(
+            input=ffn_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
         ).to(torch.bfloat16)
 
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))

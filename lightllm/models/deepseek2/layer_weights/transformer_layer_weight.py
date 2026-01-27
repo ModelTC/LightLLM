@@ -6,13 +6,11 @@ from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
-    COLMMWeight,
-    NoTpNormWeight,
-    FusedMoeWeightEP,
     ROWBMMWeight,
-    create_tp_moe_wegiht_obj,
+    COLMMWeight,
+    RMSNormWeight,
+    FusedMoeWeight,
 )
-from functools import partial
 from ..triton_kernel.weight_dequant import weight_dequant
 
 
@@ -40,10 +38,16 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self.kv_lora_rank = self.network_config_["kv_lora_rank"]
         self.num_fused_shared_experts = 0
         if get_env_start_args().enable_fused_shared_experts and self.is_moe:
-            # MOE_MODE 处于 TP 模式下才能使能 enable_fused_shared_experts
-            moe_mode = os.getenv("MOE_MODE", "TP")
-            assert moe_mode == "TP"
+            # enable_fused_shared_experts can only work with tensor parallelism
+            assert not get_env_start_args().enable_ep_moe, "enable_fused_shared_experts can only work with tp mode."
             self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
+        self.n_embed = self.network_config_["hidden_size"]
+        self.n_inter = self.network_config_["intermediate_size"]
+        self.moe_inter = self.network_config_.get("moe_intermediate_size", self.n_inter)
+        self.q_out_dim = self.num_attention_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        self.kv_a_out_dim = self.kv_lora_rank + self.qk_rope_head_dim
+        self.kv_b_out_dim = self.num_attention_heads * (self.qk_nope_head_dim + self.v_head_dim)
+        self.o_in_dim = self.num_attention_heads * self.v_head_dim
 
     def _init_weight_names(self):
         if self.q_lora_rank is None:
@@ -60,31 +64,14 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             self._init_ffn()
         self._init_norm()
 
-    def _load_kb(self, kv_b_proj_):
-        k_b_proj_ = kv_b_proj_.view(self.num_attention_heads, self.qk_nope_head_dim * 2, self.kv_lora_rank)[
-            :, : self.qk_nope_head_dim, :
-        ]
-        return k_b_proj_.contiguous().to(kv_b_proj_.dtype)
-
-    def _load_kb_scale(self, kv_b_proj_, block_size):
-        k_b_proj_scale_ = kv_b_proj_.view(
-            self.num_attention_heads, self.qk_nope_head_dim * 2 // block_size, self.kv_lora_rank // block_size
-        )[:, : self.qk_nope_head_dim // block_size, :]
-        return k_b_proj_scale_.contiguous().to(kv_b_proj_.dtype)
-
-    def _load_vb(self, kv_b_proj_):
-        v_b_proj_ = kv_b_proj_.T.view(self.kv_lora_rank, self.num_attention_heads, self.qk_nope_head_dim * 2,)[
-            :, :, self.qk_nope_head_dim :
-        ].transpose(0, 1)
-        return v_b_proj_.contiguous().to(kv_b_proj_.dtype)
-
-    def _load_vb_scale(self, kv_b_proj_scale_, block_size):
-        v_b_proj_scale_ = kv_b_proj_scale_.T.view(
-            self.kv_lora_rank // block_size,
-            self.num_attention_heads,
-            self.qk_nope_head_dim * 2 // block_size,
-        )[:, :, self.qk_nope_head_dim // block_size :].transpose(0, 1)
-        return v_b_proj_scale_.contiguous().to(kv_b_proj_scale_.dtype)
+    def _split_kv_b_proj(self, kv_b_proj_):
+        kv_b_proj_ = kv_b_proj_.view(self.num_attention_heads, self.qk_nope_head_dim * 2, self.kv_lora_rank)
+        k_b_proj_, v_b_proj_ = torch.split(kv_b_proj_, [self.qk_nope_head_dim, self.v_head_dim], dim=-2)
+        # num_attention_heads x qk_nope_head_dim x kv_lora_rank
+        k_b_proj_ = k_b_proj_.contiguous().to(kv_b_proj_.dtype)
+        # num_attention_heads x kv_lora_rank x v_head_dim
+        v_b_proj_ = v_b_proj_.transpose(1, 2).contiguous().to(kv_b_proj_.dtype)
+        return k_b_proj_, v_b_proj_
 
     def _rename_shared_experts(self, weights, weight_scale_suffix):
         # 将共享专家对应的参数，改造为与路由专家一致的权重名称和映射关系。
@@ -108,7 +95,6 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         weight_scale_suffix = None
         if self.quant_cfg.quantized_weight:
             weight_scale_suffix = kv_b_quant_method.weight_scale_suffix
-
         if f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight" in weights:
             kv_b_proj_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight"]
             # for deepseek_v3, the bmm operator is not quantized
@@ -117,21 +103,9 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                     kv_b_proj_.cuda(),
                     weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix].cuda(),
                 ).cpu()
-            weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight"] = self._load_kb(kv_b_proj_)
-            weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight"] = self._load_vb(kv_b_proj_)
-
-        if (
-            self.quant_cfg.quantized_weight
-            and f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix in weights
-        ):
-            kv_b_proj_scale_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix]
-            block_size = 128
-            weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj." + weight_scale_suffix] = self._load_kb_scale(
-                kv_b_proj_scale_, block_size
-            )
-            weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj." + weight_scale_suffix] = self._load_vb_scale(
-                kv_b_proj_scale_, block_size
-            )
+            k_b_proj_, v_b_proj_ = self._split_kv_b_proj(kv_b_proj_)
+            weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight"] = k_b_proj_
+            weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight"] = v_b_proj_
 
         # rename the shared experts weight
         if self.num_fused_shared_experts > 0:
@@ -141,116 +115,120 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
     def _init_qkvo(self):
         if self.q_lora_rank is None:
             self.q_weight_ = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[self.q_out_dim],
                 weight_names=f"model.layers.{self.layer_num_}.self_attn.q_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="q_weight",
+                quant_method=self.get_quant_method("q_weight"),
             )
             self.kv_a_proj_with_mqa_ = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[self.kv_a_out_dim],
                 weight_names=f"model.layers.{self.layer_num_}.self_attn.kv_a_proj_with_mqa.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="kv_a_proj_with_mqa",
+                quant_method=self.get_quant_method("kv_a_proj_with_mqa"),
                 tp_rank=0,
                 tp_world_size=1,
             )
         else:
             self.qkv_a_proj_with_mqa_ = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[self.q_lora_rank, self.kv_a_out_dim],
                 weight_names=[
                     f"model.layers.{self.layer_num_}.self_attn.q_a_proj.weight",
                     f"model.layers.{self.layer_num_}.self_attn.kv_a_proj_with_mqa.weight",
                 ],
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="qkv_a_proj_with_mqa",
+                quant_method=self.get_quant_method("qkv_a_proj_with_mqa"),
                 tp_rank=0,
                 tp_world_size=1,
             )
             self.q_b_proj_ = ROWMMWeight(
+                in_dim=self.q_lora_rank,
+                out_dims=[self.q_out_dim],
                 weight_names=f"model.layers.{self.layer_num_}.self_attn.q_b_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="q_b_proj",
+                quant_method=self.get_quant_method("q_b_proj"),
             )
         self.k_b_proj_ = ROWBMMWeight(
+            dim0=self.num_attention_heads,
+            dim1=self.qk_nope_head_dim,
+            dim2=self.kv_lora_rank,
             weight_names=f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight",
             data_type=self.data_type_,
-            quant_cfg=None,
-            layer_num=self.layer_num_,
-            name="k_b_proj",
+            quant_method=None,
         )
         self.v_b_proj_ = ROWBMMWeight(
+            dim0=self.num_attention_heads,
+            dim1=self.kv_lora_rank,
+            dim2=self.v_head_dim,
             weight_names=f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight",
             data_type=self.data_type_,
-            quant_cfg=None,
-            layer_num=self.layer_num_,
-            name="v_b_proj",
+            quant_method=None,
         )
         if self.enable_cc_method:
             self.cc_kv_b_proj_ = ROWMMWeight(
+                in_dim=self.kv_lora_rank,
+                out_dims=[self.kv_b_out_dim],
                 weight_names=f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="cc_kv_b_proj",
+                quant_method=self.get_quant_method("cc_kv_b_proj"),
             )
 
         self.o_weight_ = COLMMWeight(
+            in_dim=self.o_in_dim,
+            out_dims=[self.n_embed],
             weight_names=f"model.layers.{self.layer_num_}.self_attn.o_proj.weight",
             data_type=self.data_type_,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="o_weight",
+            quant_method=self.get_quant_method("o_weight"),
         )
 
-    def _load_mlp(self, mlp_prefix):
-        moe_mode = os.getenv("MOE_MODE", "TP")
-        if self.is_moe and moe_mode == "EP":
+    def _load_mlp(self, mlp_prefix, is_shared_experts=False):
+        enable_ep_moe = get_env_start_args().enable_ep_moe
+        mlp_inter = self.moe_inter if is_shared_experts else self.n_inter
+        if self.is_moe and enable_ep_moe:
             self.gate_up_proj = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[mlp_inter, mlp_inter],
                 weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="gate_up_proj",
+                quant_method=self.get_quant_method("gate_up_proj"),
                 tp_rank=0,
                 tp_world_size=1,
             )
             self.down_proj = COLMMWeight(
+                in_dim=mlp_inter,
+                out_dims=[self.n_embed],
                 weight_names=f"{mlp_prefix}.down_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="down_proj",
+                quant_method=self.get_quant_method("down_proj"),
                 tp_rank=0,
                 tp_world_size=1,
             )
         else:
             self.gate_up_proj = ROWMMWeight(
+                in_dim=self.n_embed,
+                out_dims=[mlp_inter, mlp_inter],
                 weight_names=[f"{mlp_prefix}.gate_proj.weight", f"{mlp_prefix}.up_proj.weight"],
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="gate_up_proj",
+                quant_method=self.get_quant_method("gate_up_proj"),
             )
             self.down_proj = COLMMWeight(
+                in_dim=mlp_inter,
+                out_dims=[self.n_embed],
                 weight_names=f"{mlp_prefix}.down_proj.weight",
                 data_type=self.data_type_,
-                quant_cfg=self.quant_cfg,
-                layer_num=self.layer_num_,
-                name="down_proj",
+                quant_method=self.get_quant_method("down_proj"),
             )
 
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
         self.moe_gate = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_routed_experts],
             weight_names=f"model.layers.{self.layer_num_}.mlp.gate.weight",
             data_type=self.data_type_,
-            layer_num=self.layer_num_,
-            name="moe_gate",
+            quant_method=None,
             tp_rank=0,
             tp_world_size=1,
         )
@@ -261,54 +239,47 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         # 专家对应的 gate_up_proj 等weight 参数。当 num_fused_shared_experts
         # == 0 时，说明不存在融合共享专家，共享专家单独加载和进行推理。
         if self.num_fused_shared_experts == 0:
-            self._load_mlp(f"model.layers.{self.layer_num_}.mlp.shared_experts")
-        moe_mode = os.getenv("MOE_MODE", "TP")
-        assert moe_mode in ["EP", "TP"]
-        if moe_mode == "TP":
-            self.experts = create_tp_moe_wegiht_obj(
-                gate_proj_name="gate_proj",
-                down_proj_name="down_proj",
-                up_proj_name="up_proj",
-                e_score_correction_bias_name=self.e_score_correction_bias_name,
-                weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
-                n_routed_experts=self.n_routed_experts,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-                split_inter_size=moe_intermediate_size // self.tp_world_size_,
-                data_type=self.data_type_,
-                network_config=self.network_config_,
-                layer_num=self.layer_num_,
-                quant_cfg=self.quant_cfg,
-            )
-        elif moe_mode == "EP":
-            self.experts = FusedMoeWeightEP(
-                gate_proj_name="gate_proj",
-                down_proj_name="down_proj",
-                up_proj_name="up_proj",
-                e_score_correction_bias_name=self.e_score_correction_bias_name,
-                weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
-                n_routed_experts=self.n_routed_experts,
-                data_type=self.data_type_,
-                network_config=self.network_config_,
-                layer_num=self.layer_num_,
-                quant_cfg=self.quant_cfg,
-            )
-        else:
-            raise ValueError(f"Unsupported moe mode: {moe_mode}")
+            self._load_mlp(f"model.layers.{self.layer_num_}.mlp.shared_experts", is_shared_experts=True)
+        self.experts = FusedMoeWeight(
+            gate_proj_name="gate_proj",
+            down_proj_name="down_proj",
+            up_proj_name="up_proj",
+            e_score_correction_bias_name=self.e_score_correction_bias_name,
+            weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
+            n_routed_experts=self.n_routed_experts,
+            hidden_size=self.n_embed,
+            moe_intermediate_size=moe_intermediate_size,
+            data_type=self.data_type_,
+            quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            layer_num=self.layer_num_,
+            network_config=self.network_config_,
+        )
 
     def _init_ffn(self):
         self._load_mlp(f"model.layers.{self.layer_num_}.mlp")
 
     def _init_norm(self):
-        self.att_norm_weight_ = NoTpNormWeight(
-            f"model.layers.{self.layer_num_}.input_layernorm.weight", self.data_type_
+        hidden_size = self.network_config_["hidden_size"]
+
+        self.att_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
+            weight_name=f"model.layers.{self.layer_num_}.input_layernorm.weight",
+            data_type=self.data_type_,
         )
-        self.ffn_norm_weight_ = NoTpNormWeight(
-            f"model.layers.{self.layer_num_}.post_attention_layernorm.weight", self.data_type_
+        self.ffn_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
+            weight_name=f"model.layers.{self.layer_num_}.post_attention_layernorm.weight",
+            data_type=self.data_type_,
         )
-        self.kv_a_layernorm_ = NoTpNormWeight(
-            f"model.layers.{self.layer_num_}.self_attn.kv_a_layernorm.weight", self.data_type_
+        self.kv_a_layernorm_ = RMSNormWeight(
+            dim=self.kv_lora_rank,
+            weight_name=f"model.layers.{self.layer_num_}.self_attn.kv_a_layernorm.weight",
+            data_type=self.data_type_,
         )
         if self.q_lora_rank is not None:
-            self.q_a_layernorm_ = NoTpNormWeight(
-                f"model.layers.{self.layer_num_}.self_attn.q_a_layernorm.weight", self.data_type_
+            self.q_a_layernorm_ = RMSNormWeight(
+                dim=self.q_lora_rank,
+                weight_name=f"model.layers.{self.layer_num_}.self_attn.q_a_layernorm.weight",
+                data_type=self.data_type_,
             )

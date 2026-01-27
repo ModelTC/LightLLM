@@ -16,6 +16,4 @@ class BloomPostLayerInfer(LlamaPostLayerInfer):
         return
 
     def _norm(self, input, infer_state, layer_weight: BloomPreAndPostLayerWeight) -> torch.Tensor:
-        return layer_weight.final_norm_weight_.layernorm_forward(
-            input=input, eps=self.eps_, alloc_func=self.alloc_tensor
-        )
+        return layer_weight.final_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)

@@ -111,7 +111,9 @@ class VisionTransformer:
         return
 
     def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
+        self.pre_post_weight = self.pre_and_post_weight_class(
+            self.data_type, network_config=self.config, quant_cfg=self.quant_cfg
+        )
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 i,

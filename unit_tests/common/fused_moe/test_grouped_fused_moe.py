@@ -2,7 +2,12 @@ import torch
 import time
 import pytest
 import triton
-from lightllm.common.fused_moe.grouped_fused_moe import moe_align, moe_align1, moe_align2, grouped_matmul
+from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import (
+    moe_align,
+    moe_align1,
+    moe_align2,
+    grouped_matmul,
+)
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)

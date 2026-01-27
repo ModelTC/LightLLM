@@ -57,14 +57,14 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     def _att_norm(
         self, input: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight
     ) -> torch.Tensor:
-        return layer_weight.att_norm_weight_.layernorm_forward(
+        return layer_weight.att_norm_weight_(
             input=input.view(-1, self.embed_dim_), eps=self.eps_, alloc_func=self.alloc_tensor
         )
 
     def _ffn_norm(
         self, input: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight
     ) -> torch.Tensor:
-        return layer_weight.ffn_norm_weight_.layernorm_forward(
+        return layer_weight.ffn_norm_weight_(
             input=input.view(-1, self.embed_dim_), eps=self.eps_, alloc_func=self.alloc_tensor
         )
 

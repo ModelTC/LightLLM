@@ -22,7 +22,7 @@ import torch
 from lightllm.utils.sgl_utils import sgl_ops
 from lightllm.utils.light_utils import light_ops
 from typing import Callable, List, Optional, Tuple
-from lightllm.common.fused_moe.softmax_topk import softmax_topk
+from lightllm.common.basemodel.triton_kernel.fused_moe.softmax_topk import softmax_topk
 from lightllm.common.triton_utils.autotuner import Autotuner
 
 use_cuda_grouped_topk = os.getenv("LIGHTLLM_CUDA_GROUPED_TOPK", "False").upper() in ["ON", "TRUE", "1"]
@@ -177,8 +177,8 @@ def select_experts(
     scoring_func: str = "softmax",
     custom_routing_function: Optional[Callable] = None,
 ):
-    from lightllm.common.fused_moe.topk_select import fused_topk
-    from lightllm.common.fused_moe.grouped_topk import triton_grouped_topk
+    from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import fused_topk
+    from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk
 
     # DeekSeekv2 uses grouped_top_k
     if use_grouped_topk:

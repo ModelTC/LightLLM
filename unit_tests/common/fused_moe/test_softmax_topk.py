@@ -2,7 +2,7 @@ import torch
 import time
 import pytest
 import numpy as np
-from lightllm.common.fused_moe.softmax_topk import softmax_topk
+from lightllm.common.basemodel.triton_kernel.fused_moe.softmax_topk import softmax_topk
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)

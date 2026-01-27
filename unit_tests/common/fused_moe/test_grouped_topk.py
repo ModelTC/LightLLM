@@ -2,8 +2,8 @@ import torch
 import time
 import pytest
 import numpy as np
-from lightllm.common.fused_moe.grouped_topk import triton_grouped_topk
-from lightllm.common.fused_moe.topk_select import biased_grouped_topk as grouped_topk
+from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk
+from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import biased_grouped_topk as grouped_topk
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)

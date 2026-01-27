@@ -367,17 +367,14 @@ PD 分离模式参数
 .. option:: --quant_type
 
     量化方法，可选值：
-    
-    * ``ppl-w4a16-128``
-    * ``flashllm-w6a16``
-    * ``ao-int4wo-[32,64,128,256]``
-    * ``ao-int8wo``
-    * ``ao-fp8w8a16``
-    * ``ao-fp6w6a16``
+
     * ``vllm-w8a8``
     * ``vllm-fp8w8a8``
     * ``vllm-fp8w8a8-b128``
+    * ``deepgemm-fp8w8a8-b128``
     * ``triton-fp8w8a8-block128``
+    * ``awq``
+    * ``awq_marlin``
     * ``none`` (默认)
 
 .. option:: --quant_cfg
@@ -389,13 +386,7 @@ PD 分离模式参数
 .. option:: --vit_quant_type
 
     ViT 量化方法，可选值：
-    
-    * ``ppl-w4a16-128``
-    * ``flashllm-w6a16``
-    * ``ao-int4wo-[32,64,128,256]``
-    * ``ao-int8wo``
-    * ``ao-fp8w8a16``
-    * ``ao-fp6w6a16``
+
     * ``vllm-w8a8``
     * ``vllm-fp8w8a8``
     * ``none`` (默认)
