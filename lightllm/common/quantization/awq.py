@@ -47,7 +47,7 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
 
-    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
+    def quantize(self, weight: torch.Tensor, output: WeightPack):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
@@ -81,7 +81,7 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def method_name(self):
         return "awq"
 
-    def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0):
+    def quantize(self, weight: torch.Tensor, output: WeightPack):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
@@ -156,7 +156,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def method_name(self):
         return "awq_marlin"
 
-    def quantize(self, weight: torch.Tensor, offset: int = 0) -> WeightPack:
+    def quantize(self, weight: torch.Tensor, output: WeightPack):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
     def apply(
