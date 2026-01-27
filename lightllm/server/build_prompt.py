@@ -22,6 +22,7 @@ async def build_prompt(request, tools) -> str:
         kwargs["character_settings"] = request.character_settings
     if request.role_settings:
         kwargs["role_setting"] = request.role_settings
+    kwargs["system_instruction"] = request.system_instruction
 
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
