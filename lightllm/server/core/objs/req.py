@@ -24,19 +24,20 @@ class FinishStatus(ctypes.Structure):
     NO_FINISH = 0
     FINISHED_STOP = 1
     FINISHED_LENGTH = 2
+    FINISHED_ABORTED = 3
 
     def __init__(self, init_state=NO_FINISH):
         self.status = init_state
 
     def set_status(self, new_status):
-        assert 0 <= new_status <= 2
+        assert 0 <= new_status <= 3
         self.status = new_status
 
     def get_status(self):
         return self.status
 
     def is_finished(self):
-        return self.FINISHED_STOP <= self.status <= self.FINISHED_LENGTH
+        return self.FINISHED_STOP <= self.status <= self.FINISHED_ABORTED
 
     def is_stopped(self):
         return self.status == self.FINISHED_STOP
@@ -49,6 +50,8 @@ class FinishStatus(ctypes.Structure):
             return "stop"
         elif self.status == self.FINISHED_LENGTH:
             return "length"
+        elif self.status == self.FINISHED_ABORTED:
+            return "abort"
         return None
 
 
@@ -247,9 +250,8 @@ class Req(ctypes.Structure):
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
 
-        if self.is_aborted and can_released_mark and ref_count_ok:
-            return True
-
+        # if self.is_aborted and can_released_mark and ref_count_ok:
+        #     return True
         ok_finished_gen_req = self.finish_status.is_finished() or self.stop_str_matched
 
         if ok_finished_gen_req and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():

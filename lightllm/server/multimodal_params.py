@@ -56,8 +56,10 @@ class AudioItem:
         assert self._preload_data is not None
         ans = self._preload_data
         self._preload_data = None
-        self._data = None
         return ans
+
+    def free(self):
+        self._data = None
 
     def to_dict(self):
         ret = {}
@@ -121,8 +123,10 @@ class ImageItem:
         assert self._preload_data is not None
         ans = self._preload_data
         self._preload_data = None
-        self._data = None
         return ans
+
+    def free(self):
+        self._data = None
 
     def to_dict(self):
         ret = {}
@@ -174,3 +178,10 @@ class MultimodalParams:
         ret = {}
         ret["images"] = [i.to_origin_dict() for i in self.images]
         return ret
+
+    def free(self):
+        for image in self.images:
+            image.free()
+        for audio in self.audios:
+            audio.free()
+        return
