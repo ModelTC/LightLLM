@@ -104,19 +104,20 @@ def _validate_fa3():
 
 def _validate_xformers():
     """Validate Xformers Attn"""
-    from xformers import ops as xformers_ops
+    try:
+        import xformers.ops
+        from xformers.ops import fmha
 
-    if xformers_ops is None:
+        return True
+    except ImportError:
         return False
-
-    return True
 
 
 def _validate_sdpa():
     """Validate SDPA Attn"""
-    from torch.nn.functional import scaled_dot_product_attention
+    try:
+        from torch.nn.functional import scaled_dot_product_attention
 
-    if scaled_dot_product_attention is None:
+        return True
+    except ImportError:
         return False
-
-    return True
