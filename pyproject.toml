@@ -87,6 +87,7 @@ dependencies = [
     "sgl-kernel==0.3.21",
     "cupy-cuda12x==13.6.0",
     "cuda-bindings==12.9.5",
+    "torch-c-dlpack-ext==0.1.5",
 
     # Constrained decoding
     "interegular==0.3.3",
