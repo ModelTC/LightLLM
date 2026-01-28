@@ -1,15 +1,12 @@
 import torch
 import torch.nn.functional as F
-from lightllm.utils.log_utils import init_logger
 
-logger = init_logger(__name__)
 try:
     from xformers import ops as xformers_ops
     from xformers.ops import fmha
 except ImportError:
     xformers_ops = None
     fmha = None
-    logger.warning("xformers or flash-attn is not installed, please ensure xformers and flash-attn is installed.")
 
 from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
 
