@@ -200,6 +200,9 @@ def normal_or_p_d_start(args):
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     already_uesd_ports = [args.port]
+    if args.nccl_port is not None:
+        already_uesd_ports.append(args.nccl_port)
+
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
     ports_locker = PortLocker(already_uesd_ports)
@@ -234,7 +237,8 @@ def normal_or_p_d_start(args):
         can_use_ports = can_use_ports[1:]
 
     # 将申请好的端口放入args参数中
-    args.nccl_port = nccl_port
+    if args.nccl_port is None:
+        args.nccl_port = nccl_port
     args.router_port = router_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
