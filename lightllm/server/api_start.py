@@ -165,11 +165,17 @@ def normal_or_p_d_start(args):
     if args.disable_chunked_prefill:
         args.chunked_prefill_size = args.max_req_total_len
         # 普通模式下
-        args.batch_max_tokens = args.max_req_total_len
+        if args.batch_max_tokens is None:
+            args.batch_max_tokens = args.max_req_total_len
+        else:
+            assert args.batch_max_tokens >= args.max_req_total_len, f"batch_max_tokens must >= max_req_total_len"
+            f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
     else:
         # chunked 模式下
-        args.batch_max_tokens = args.batch_max_tokens // args.dp
-        args.chunked_prefill_size = args.batch_max_tokens // 2
+        if args.batch_max_tokens is None:
+            args.batch_max_tokens = 16384 // args.dp
+        if args.chunked_prefill_size is None:
+            args.chunked_prefill_size = args.batch_max_tokens // 2
         assert (
             args.batch_max_tokens >= args.chunked_prefill_size
         ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
@@ -223,8 +229,9 @@ def normal_or_p_d_start(args):
     for _ in range(args.visual_dp):
         tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
         visual_model_tp_ports.append(tp_ports_for_dp)
-        visual_nccl_ports.append(can_use_ports[args.visual_tp])
-        can_use_ports = can_use_ports[args.visual_tp + 1 :]
+        can_use_ports = can_use_ports[args.visual_tp :]
+        visual_nccl_ports.append(can_use_ports[0])
+        can_use_ports = can_use_ports[1:]
 
     # 将申请好的端口放入args参数中
     args.nccl_port = nccl_port
