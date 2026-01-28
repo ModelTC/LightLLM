@@ -17,65 +17,9 @@ class Glm4MoeLiteTransformerLayerWeight(Deepseek2TransformerLayerWeight):
 
         from lightllm.utils.envs_utils import get_env_start_args
 
-        self.num_fused_shared_experts = 0
-        if get_env_start_args().enable_fused_shared_experts and self.is_moe:
-            moe_mode = os.getenv("MOE_MODE", "TP")
-            assert moe_mode == "TP"
-            self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
-
-    def load_hf_weights(self, weights):
-        from lightllm.common.basemodel import TransformerLayerWeight
-        from lightllm.models.deepseek2.triton_kernel.weight_dequant import weight_dequant
-
-        kv_b_quant_method = self.quant_cfg.get_quant_method(self.layer_num_, "kv_b_proj")
-        weight_scale_suffix = None
-        if self.quant_cfg.quantized_weight:
-            weight_scale_suffix = kv_b_quant_method.weight_scale_suffix
-
-        if f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight" in weights:
-            kv_b_proj_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight"]
-            if self.quant_cfg.quantized_weight:
-                kv_b_proj_ = weight_dequant(
-                    kv_b_proj_.cuda(),
-                    weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix].cuda(),
-                ).cpu()
-            k_b_proj_ = self._load_kb(kv_b_proj_)
-            v_b_proj_ = self._load_vb(kv_b_proj_)
-            weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight"] = k_b_proj_
-            weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight"] = v_b_proj_
-
-        if self.num_fused_shared_experts > 0:
-            self._rename_shared_experts(weights, weight_scale_suffix)
-
-        return TransformerLayerWeight.load_hf_weights(self, weights)
-
-    def _load_kb(self, kv_b_proj_):
-        kv_dim = self.qk_nope_head_dim + self.v_head_dim
-        k_b_proj_ = kv_b_proj_.view(self.num_attention_heads, kv_dim, self.kv_lora_rank)[:, : self.qk_nope_head_dim, :]
-        return k_b_proj_.contiguous().to(kv_b_proj_.dtype)
-
-    def _load_kb_scale(self, kv_b_proj_, block_size):
-        kv_dim = self.qk_nope_head_dim + self.v_head_dim
-        k_b_proj_scale_ = kv_b_proj_.view(
-            self.num_attention_heads, kv_dim // block_size, self.kv_lora_rank // block_size
-        )[:, : self.qk_nope_head_dim // block_size, :]
-        return k_b_proj_scale_.contiguous().to(kv_b_proj_.dtype)
-
-    def _load_vb(self, kv_b_proj_):
-        kv_dim = self.qk_nope_head_dim + self.v_head_dim
-        v_b_proj_ = kv_b_proj_.T.view(self.kv_lora_rank, self.num_attention_heads, kv_dim)[
-            :, :, self.qk_nope_head_dim :
-        ].transpose(0, 1)
-        return v_b_proj_.contiguous().to(kv_b_proj_.dtype)
-
-    def _load_vb_scale(self, kv_b_proj_scale_, block_size):
-        kv_dim = self.qk_nope_head_dim + self.v_head_dim
-        v_b_proj_scale_ = kv_b_proj_scale_.T.view(
-            self.kv_lora_rank // block_size,
-            self.num_attention_heads,
-            kv_dim // block_size,
-        )[:, :, self.qk_nope_head_dim // block_size :].transpose(0, 1)
-        return v_b_proj_scale_.contiguous().to(kv_b_proj_scale_.dtype)
+        self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
+        if get_env_start_args().enable_ep_moe and self.is_moe:
+            assert self.num_fused_shared_experts == 0, "n_shared_experts must be 0 when enable_ep_moe"
 
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
