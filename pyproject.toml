@@ -1,0 +1,201 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lightllm"
+version = "1.1.0"
+description = "LightLLM - A lightweight, high-performance LLM inference and serving framework"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9.16"
+authors = [
+    { name = "model toolchain" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = ["llm", "inference", "serving", "deep-learning", "pytorch", "triton"]
+
+# Full dependencies (default installation includes all features)
+# Versions pinned to tested Docker environment
+dependencies = [
+    # Communication & async
+    "pyzmq==27.1.0",
+    "uvloop==0.22.1",
+    "rpyc==6.0.2",
+
+    # ML frameworks
+    "torch==2.9.1",
+    "triton==3.5.1",
+    "transformers>=4.50.0",
+    "safetensors==0.7.0",
+
+    # Numeric & data processing
+    "numpy==2.2.6",
+    "einops==0.8.1",
+
+    # Web server
+    "fastapi==0.128.0",
+    "uvicorn==0.40.0",
+    "pydantic==2.12.5",
+    "httpx==0.28.1",
+    "ujson==5.11.0",
+    "gunicorn==23.0.0",
+    "websockets==16.0",
+
+    # Utilities
+    "packaging==25.0",
+    "ninja==1.13.0",
+    "orjson==3.11.5",
+    "tqdm==4.67.1",
+    "requests==2.32.5",
+    "filelock==3.20.2",
+    "fsspec==2025.10.0",
+    "Pillow==12.1.0",
+    "psutil==7.2.1",
+    "prometheus_client==0.23.1",
+    "setproctitle==1.3.7",
+    "PyYAML==6.0.3",
+    "easydict==1.13",
+
+    # Core server components
+    "sortedcontainers==2.4.0",
+    "atomics==1.0.3",
+    "frozendict==2.4.7",
+    "xxhash==3.6.0",
+
+    # Tokenizers
+    "sentencepiece==0.2.1",
+    "tiktoken==0.12.0",
+
+    # Multimodal support
+    "torchvision==0.24.1",
+    "librosa==0.11.0",
+    "numba==0.61.2",
+    "matplotlib==3.10.8",
+
+    # CUDA optimizations
+    "flashinfer-python==0.6.1",
+    "sgl-kernel==0.3.21",
+    "cupy-cuda12x==13.6.0",
+    "cuda-bindings==12.9.5",
+    "torch-c-dlpack-ext==0.1.5",
+
+    # Constrained decoding
+    "interegular==0.3.3",
+    "partial-json-parser==0.2.1.1.post7",
+]
+
+[project.optional-dependencies]
+# Minimal installation (core functionality only, no CUDA optimizations or multimodal)
+minimal = [
+    "pyzmq==27.1.0",
+    "uvloop==0.22.1",
+    "rpyc==6.0.2",
+    "torch==2.9.1",
+    "triton==3.5.1",
+    "transformers>=4.50.0",
+    "safetensors==0.7.0",
+    "numpy==2.2.6",
+    "einops==0.8.1",
+    "fastapi==0.128.0",
+    "uvicorn==0.40.0",
+    "pydantic==2.12.5",
+    "httpx==0.28.1",
+    "ujson==5.11.0",
+    "packaging==25.0",
+    "ninja==1.13.0",
+    "orjson==3.11.5",
+    "tqdm==4.67.1",
+    "requests==2.32.5",
+    "filelock==3.20.2",
+    "fsspec==2025.10.0",
+    "Pillow==12.1.0",
+    "psutil==7.2.1",
+    "prometheus_client==0.23.1",
+    "setproctitle==1.3.7",
+    "PyYAML==6.0.3",
+    "sortedcontainers==2.4.0",
+    "atomics==1.0.3",
+    "frozendict==2.4.7",
+    "xxhash==3.6.0",
+]
+
+# Development dependencies
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "pre-commit>=3.0.0",
+    "mypy>=1.0.0",
+]
+
+# Documentation dependencies
+docs = [
+    "sphinx>=7.0.0",
+    "sphinx-rtd-theme>=2.0.0",
+    "myst-parser>=2.0.0",
+]
+
+# DeepSeek optimizations (requires manual installation due to build complexity)
+# Install: uv pip install ".[deepseek]" --no-build-isolation
+deepseek = [
+    "deep-gemm @ git+https://github.com/deepseek-ai/DeepGEMM.git@v2.1.1.post3",
+]
+
+[project.urls]
+Homepage = "https://github.com/ModelTC/lightllm"
+Documentation = "https://lightllm-docs.readthedocs.io/"
+Repository = "https://github.com/ModelTC/lightllm"
+Issues = "https://github.com/ModelTC/lightllm/issues"
+
+[tool.setuptools]
+packages = { find = { exclude = ["build", "include", "test", "dist", "docs", "benchmarks", "lightllm.egg-info", "unit_tests"] } }
+
+[tool.setuptools.package-data]
+lightllm = [
+    "common/all_kernel_configs/*/*.json",
+    "common/triton_utils/*/*/*/*/*.json",
+]
+
+[tool.black]
+line-length = 120
+target-version = ["py39", "py310", "py311", "py312"]
+exclude = '''
+/(
+    \.git
+    | \.venv
+    | build
+    | dist
+    | \.eggs
+)/
+'''
+
+[tool.flake8]
+max-line-length = 120
+extend-ignore = ["E203", "E501", "W503"]
+exclude = [".git", "__pycache__", "build", "dist", ".eggs", "*.egg-info"]
+
+[tool.pytest.ini_options]
+testpaths = ["test", "unit_tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.uv]
+# Disable build isolation for packages that need torch during build
+no-build-isolation-package = ["deep-gemm"]
