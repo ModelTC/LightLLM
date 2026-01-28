@@ -284,6 +284,17 @@ PD 分离模式参数
 
     为 ViT 构建分布式环境的 NCCL 端口列表，例如 29500 29501 29502，默认为 [29500]
 
+.. option:: --vit_att_backend
+
+    设置 ViT 使用的注意力后端。可选值为：
+
+    * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > xformers > sdpa > triton
+    * ``fa3``: 使用 Flash-Attention 3 后端
+    * ``xformers``: 使用 xformers 后端
+    * ``sdpa``: 使用 sdpa 后端
+    * ``triton``: 使用 Triton 后端
+
+
 性能优化参数
 ------------
 

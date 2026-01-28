@@ -43,6 +43,7 @@ def test_model_inference(args):
             "disable_cudagraph": args.disable_cudagraph,
             "llm_prefill_att_backend": args.llm_prefill_att_backend,
             "llm_decode_att_backend": args.llm_decode_att_backend,
+            "vit_att_backend": args.vit_att_backend,
             "llm_kv_type": args.llm_kv_type,
             "llm_kv_quant_group_size": args.llm_kv_quant_group_size,
         }

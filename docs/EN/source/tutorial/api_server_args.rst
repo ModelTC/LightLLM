@@ -282,6 +282,17 @@ Multimodal Parameters
 
     List of NCCL ports for ViT, e.g., 29500 29501 29502, default is [29500]
 
+.. option:: --vit_att_backend
+
+    Set the attention backend for ViT. Available options:
+
+    * ``auto``: Automatically select the best backend (default), with priority fa3 > xformers > sdpa > triton
+    * ``fa3``: Use Flash-Attention 3 backend
+    * ``xformers``: Use xformers backend
+    * ``sdpa``: Use sdpa backend
+    * ``triton``: Use Triton backend
+
+
 Performance Optimization Parameters
 -----------------------------------
 

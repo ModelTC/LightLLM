@@ -14,6 +14,7 @@ from lightllm.server.core.objs import ShmReqManager, StartArgs
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from .model_infer.model_rpc import start_model_process, VisualModelRpcClient
+from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
@@ -63,7 +64,7 @@ class VisualManager:
     async def wait_to_model_ready(self):
 
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
-
+        self.vit_attn_backend = init_vit_att_backend(index=0)
         for dp_rank_id in range(self.vit_dp):
             tp_ports_each_dp = self.visual_model_rpc_ports[dp_rank_id]
             for tp_rank_id in range(self.vit_tp):
@@ -91,6 +92,7 @@ class VisualManager:
                     "quant_type": self.args.vit_quant_type,
                     "quant_cfg": self.args.vit_quant_cfg,
                     "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
+                    "vit_attn_backend": self.vit_attn_backend,
                 }
                 init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)

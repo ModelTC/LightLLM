@@ -121,6 +121,72 @@ def _validate_triton():
     return True, None
 
 
+def _validate_xformers():
+    """Validate Xformers Attn with ground truth."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False, "CUDA not available"
+
+        import xformers.ops as xformers_ops
+        from xformers.ops import fmha
+    except Exception as e:
+        return False, f"xformers import failed: {type(e).__name__}: {e}"
+
+    batch, heads, seq, dim = 1, 4, 8, 64
+    dtype = torch.bfloat16
+    device = "cuda"
+
+    q = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    k = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    v = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+
+    expected = _compute_ground_truth(q, k, v, is_causal=False)
+
+    q_bmhd = q.transpose(1, 2).contiguous()  # (B, seq, heads, dim)
+    k_bmhd = k.transpose(1, 2).contiguous()
+    v_bmhd = v.transpose(1, 2).contiguous()
+
+    try:
+        out = xformers_ops.memory_efficient_attention(q_bmhd, k_bmhd, v_bmhd, p=0.0)
+    except Exception as e:
+        return False, f"xformers attention run failed: {type(e).__name__}: {e}"
+
+    out = out.transpose(1, 2).contiguous()
+
+    if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
+        return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
+
+    return True, None
+
+
+def _validate_sdpa():
+    """Validate SDPA Attn with ground truth."""
+    try:
+        import torch
+        from torch.nn.functional import scaled_dot_product_attention
+    except Exception as e:
+        return False, f"SDPA import failed: {type(e).__name__}: {e}"
+
+    batch, heads, seq, dim = 1, 4, 8, 64
+    dtype = torch.bfloat16
+    device = "cuda"
+
+    q = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    k = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    v = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+
+    expected = _compute_ground_truth(q, k, v, is_causal=False)
+
+    out = scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+
+    if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
+        return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
+
+    return True, None
+
+
 def _run_in_subprocess(backend_name, pipe):
     """Run validation in subprocess with suppressed output."""
     import sys
@@ -133,6 +199,10 @@ def _run_in_subprocess(backend_name, pipe):
     try:
         if backend_name == "fa3":
             success, err = _validate_fa3()
+        elif backend_name == "xformers":
+            success, err = _validate_xformers()
+        elif backend_name == "sdpa":
+            success, err = _validate_sdpa()
         elif backend_name == "flashinfer":
             success, err = _validate_flashinfer()
         elif backend_name == "triton":
