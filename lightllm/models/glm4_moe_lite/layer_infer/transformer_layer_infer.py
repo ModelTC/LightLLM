@@ -23,19 +23,6 @@ class Glm4MoeLiteTransformerLayerInfer(Deepseek2TransformerLayerInfer):
     def is_moe(self, value):
         pass
 
-    def _bind_ffn(self):
-        if self.is_moe:
-            moe_mode = os.environ.get("MOE_MODE", "TP")
-            if moe_mode == "EP":
-                self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn_edp, self)
-                self._tpsp_ffn = self._tpsp_ffn_ep
-            else:
-                self._ffn = partial(Glm4MoeLiteTransformerLayerInfer._moe_ffn, self)
-                self._tpsp_ffn = self._tpsp_ffn_tp
-        else:
-            self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
-            self._tpsp_ffn = self._tpsp_ffn_tp
-
     def _get_o(self, input: torch.Tensor, infer_state, layer_weight) -> torch.Tensor:
         if input.shape[2] == self.kv_lora_rank:
             input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
