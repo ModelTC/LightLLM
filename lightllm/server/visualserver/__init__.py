@@ -4,9 +4,9 @@ from lightllm.common.basemodel.attention_vit.create_utils import get_vit_att_bac
 VIT_ATTN_BACKEND: BaseVitAttBackend = None
 
 
-def init_vit_att_backend():
+def set_vit_att_backend(backend_name: str):
     global VIT_ATTN_BACKEND
-    VIT_ATTN_BACKEND = get_vit_att_backend_class(index=0)()
+    VIT_ATTN_BACKEND = get_vit_att_backend_class(backend_name)
     return
 
 

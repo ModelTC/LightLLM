@@ -16,8 +16,8 @@ from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
 
 class XformersVitAttBackend(BaseVitAttBackend):
     @torch.no_grad()
+    @staticmethod
     def _vit_att_fwd(
-        self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,

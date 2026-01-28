@@ -4,8 +4,8 @@ from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
 
 
 class SdpaVitAttBackend(BaseVitAttBackend):
+    @staticmethod
     def _vit_att_fwd(
-        self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,

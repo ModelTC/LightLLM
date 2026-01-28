@@ -4,7 +4,7 @@ import multiprocessing as mp
 import os
 import torch
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.dist_utils import get_global_rank, get_global_vit_rank
+from lightllm.utils.dist_utils import get_global_rank
 from functools import lru_cache
 
 logger = init_logger(__name__)
@@ -219,18 +219,6 @@ def _run_in_subprocess(backend_name, pipe):
 @lru_cache(maxsize=None)
 def validate(backend_name: str) -> bool:
     if get_global_rank() == 0:
-        validate_ok = _validate(backend_name)
-        torch.distributed.broadcast_object_list([validate_ok], src=0)
-    else:
-        validate_ok = [None]
-        torch.distributed.broadcast_object_list(validate_ok, src=0)
-        validate_ok = validate_ok[0]
-    return validate_ok
-
-
-@lru_cache(maxsize=None)
-def validate_vit(backend_name: str) -> bool:
-    if get_global_vit_rank() == 0:
         validate_ok = _validate(backend_name)
         torch.distributed.broadcast_object_list([validate_ok], src=0)
     else:
