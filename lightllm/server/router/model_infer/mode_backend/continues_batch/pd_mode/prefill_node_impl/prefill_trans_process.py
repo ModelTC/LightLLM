@@ -9,7 +9,7 @@ from torch.distributed import TCPStore
 from datetime import timedelta
 from typing import List, Dict, Union
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import KVMoveTask, PDTransJoinInfo, PDTransLeaveInfo, KVMoveTaskGroup
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
@@ -94,7 +94,6 @@ def _init_env(
     device_id,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
-    mem_queues: List[mp.Queue],
 ):
     import os
 
@@ -116,7 +115,12 @@ def _init_env(
             host_name=store_ip, port=store_port, is_master=True, use_libuv=True, timeout=timedelta(seconds=30)
         )
         task_out_queue.put("proc_start")
-        mem_managers: List[MemoryManager] = [mem_queue.get(timeout=60) for mem_queue in mem_queues]
+
+        # 从共享内存读取所有rank的mem_manager
+        node_world_size = args.tp // args.nnodes
+        mem_managers: List[MemoryManager] = [
+            MemoryManager.loads_from_shm(rank_in_node=rank) for rank in range(node_world_size)
+        ]
         task_out_queue.put("get_mem_managers_ok")
         connect_id_to_comm: Dict[str, PyNcclCommunicator] = {}
 
@@ -150,11 +154,8 @@ def start_prefill_trans_process(
     device_id,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
-    mem_queues: List[mp.Queue],
 ):
-    proc = mp.Process(
-        target=_init_env, args=(args, store_ip, store_port, device_id, task_in_queue, task_out_queue, mem_queues)
-    )
+    proc = mp.Process(target=_init_env, args=(args, store_ip, store_port, device_id, task_in_queue, task_out_queue))
     proc.start()
     assert proc.is_alive()
     logger.info(f"prefill trans kv process for device: {device_id} started!")

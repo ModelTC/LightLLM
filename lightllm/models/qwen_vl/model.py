@@ -1,5 +1,3 @@
-import json
-import numpy as np
 import unicodedata
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.server.core.objs import SamplingParams
@@ -88,7 +86,8 @@ class QWenVLTokenizer(BaseMultiModalTokenizer):
         input_ids.extend(origin_ids[end:])
         if multimodal_params:
             image_cnt = len(multimodal_params.images)
-            assert image_cnt == image_id, "invalid image tag num: {} vs {}!".format(image_cnt, image_id)
+            if image_cnt != image_id:
+                raise ValueError(image_cnt == image_id, f"invalid image tag num: {image_cnt} vs {image_id}!")
         return input_ids
 
 

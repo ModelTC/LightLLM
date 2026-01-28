@@ -20,6 +20,9 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 
 [English Docs](https://lightllm-en.readthedocs.io/en/latest/) | [中文文档](https://lightllm-cn.readthedocs.io/en/latest/) | [Blogs](https://modeltc.github.io/lightllm-blog/)
 
+## Tech Blogs
+- [2025/11] 🚀 Prefix KV Cache Transfer between DP rankers is now supported! Check out the technical deep dive in our [blog post](https://light-ai.top/lightllm-blog/2025/11/18/dp_kv_fetch.html).
+
 ## News
 - [2025/09] 🔥 LightLLM [v1.1.0](https://www.light-ai.top/lightllm-blog/2025/09/03/lightllm.html) release!
 - [2025/08] Pre $^3$ achieves the outstanding paper award of [ACL2025](https://2025.aclweb.org/program/awards/).
@@ -36,7 +39,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 
 ## Performance
 
-Learn more in the release blogs: [v1.0.0 blog](https://www.light-ai.top/lightllm-blog//by%20mtc%20team/2025/02/16/lightllm/).
+Learn more in the release blogs: [v1.1.0 blog](https://www.light-ai.top/lightllm-blog/2025/09/03/lightllm.html).
 
 ## FAQ
 

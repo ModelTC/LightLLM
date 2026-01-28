@@ -15,12 +15,20 @@ from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_toke
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from ..chunked_prefill.impl import ChunkedPrefillBackend
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class DiversehBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
-        self.prefill = self.beam_prefill
+
+        if get_env_start_args().mtp_mode:
+            # 当前只有 mistral mtp 可以使用 diverse mode 的 mtp 功能。
+            self.prefill = self.beam_prefill
+            assert get_env_start_args().mtp_mode in ["vanilla_no_att", "eagle_no_att"]
+        else:
+            self.prefill = self.beam_prefill
+
         self.classed_req_strict_prefill = True
 
     def beam_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
@@ -28,7 +36,7 @@ class DiversehBackend(ChunkedPrefillBackend):
         group_reqs = [g_infer_context.requests_mapping[req.req_id] for req in prefill_reqs if req.is_master_req()]
 
         model_input, group_run_reqs = prepare_prefill_inputs(
-            group_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
+            group_reqs, is_chuncked_mode=not self.disable_chunked_prefill
         )
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):

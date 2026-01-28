@@ -227,7 +227,7 @@ class CustomAllreduce:
             # fix circle import
             from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
-            out = g_cache_manager.alloc_tensor(inp.shape, inp.dtype, device=inp.device, is_graph_out=False)
+            out = g_cache_manager.alloc_tensor(inp.shape, inp.dtype, device=inp.device)
         if registered:
             ops.all_reduce(self._ptr, inp, out, 0, 0)
         else:
@@ -248,7 +248,7 @@ class CustomAllreduce:
                 # fix circle import
                 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
-                out = g_cache_manager.alloc_tensor(input.shape, input.dtype, device=input.device, is_graph_out=False)
+                out = g_cache_manager.alloc_tensor(input.shape, input.dtype, device=input.device)
                 return out
         else:
             # Note: outside of cuda graph context, custom allreduce incurs a

@@ -11,7 +11,7 @@ export UCX_TLS=rc,cuda,gdr_copy
 export host=$1
 export pd_master_ip=$2
 nvidia-cuda-mps-control -d 
-MOE_MODE=EP KV_TRANS_USE_P2P=1 LOADWORKER=18 python -m lightllm.server.api_server \
+LOADWORKER=18 python -m lightllm.server.api_server \
 --model_dir /path/DeepSeek-R1 \
 --run_mode "nixl_prefill" \
 --tp 8 \
@@ -19,7 +19,7 @@ MOE_MODE=EP KV_TRANS_USE_P2P=1 LOADWORKER=18 python -m lightllm.server.api_serve
 --host $host \
 --port 8019 \
 --nccl_port 2732 \
---enable_fa3 \
+--enable_ep_moe \
 --disable_cudagraph \
 --pd_master_ip $pd_master_ip \
 --pd_master_port 60011 

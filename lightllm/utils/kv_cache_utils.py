@@ -8,9 +8,24 @@ import time
 import numpy as np
 import triton
 from functools import lru_cache
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    enable_huge_page,
+    get_llm_data_type,
+    get_added_mtp_kv_layer_num,
+)
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, get_model_type
+from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num
+from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.common.kv_cache_mem_manager import (
+    MemoryManager,
+    CalibrationFP8KVMemoryManager,
+    ExportCalibrationMemoryManager,
+    PPLINT8KVMemoryManager,
+    PPLINT4KVMemoryManager,
+    Deepseek2MemoryManager,
+)
+
 from typing import List, Tuple, Optional
 from tqdm import tqdm
 from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
@@ -24,7 +39,7 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
         return []
 
     chunks_hash_value = []
-    hsum = xxhash.xxh3_64()
+    hsum = xxhash.xxh3_128()
 
     # 计算每个分块的哈希值, 但是输入token需要少一个，因为
     # 如果计算所有的token，会导致输入input_len 命中全长的
@@ -37,7 +52,6 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
         chunk = tokens[start_index:end_index]
         chunk_np = np.array(chunk, dtype=np.uint64)
         hsum.update(chunk_np.tobytes())
-
         hash_value = hsum.intdigest()
         chunks_hash_value.append(hash_value)
 
@@ -49,51 +63,102 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    if get_model_type(model_path=args.model_dir) in ["deepseek_v2", "deepseek_v3"]:
-        item_size = 2
-        num_key_value_heads = 1
-        head_dim = 512 + 64
-        layer_num = get_layer_num(args.model_dir)
+    mem_manager_class = select_mem_manager_class()
+    if mem_manager_class is Deepseek2MemoryManager:
+        cpu_cache_meta = CpuKVCacheMeta(
+            page_num=0,
+            token_page_size=args.cpu_cache_token_page_size,
+            layer_num=get_layer_num(args.model_dir),
+            num_heads=1,
+            head_dim=512 + 64,
+            data_type=get_llm_data_type(),
+            scale_head_dim=0,
+            scale_data_type=get_llm_data_type(),
+        )
+    elif mem_manager_class is MemoryManager:
+        cpu_cache_meta = CpuKVCacheMeta(
+            page_num=0,
+            token_page_size=args.cpu_cache_token_page_size,
+            layer_num=get_layer_num(args.model_dir),
+            num_heads=get_num_key_value_heads(args.model_dir) * 2,
+            head_dim=get_head_dim(args.model_dir),
+            data_type=get_llm_data_type(),
+            scale_head_dim=0,
+            scale_data_type=get_llm_data_type(),
+        )
+    elif mem_manager_class is PPLINT8KVMemoryManager:
+        cpu_cache_meta = CpuKVCacheMeta(
+            page_num=0,
+            token_page_size=args.cpu_cache_token_page_size,
+            layer_num=get_layer_num(args.model_dir),
+            num_heads=get_num_key_value_heads(args.model_dir) * 2,
+            head_dim=get_head_dim(args.model_dir),
+            data_type=torch.int8,
+            scale_head_dim=get_head_dim(args.model_dir) // 8,
+            scale_data_type=get_llm_data_type(),
+        )
     else:
-        item_size = 2
-        num_key_value_heads = get_num_key_value_heads(args.model_dir) * 2
-        head_dim = get_head_dim(args.model_dir)
-        layer_num = get_layer_num(args.model_dir)
+        logger.error(f"not support mem manager: {mem_manager_class} for cpu kv cache")
+        raise Exception(f"not support mem manager: {mem_manager_class} for cpu kv cache")
 
     if args.mtp_mode is not None:
         # TODO 可能会存在不同mtp模式的精度问题
-        layer_num += 1
+        cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
-    one_token_byte_size = layer_num * num_key_value_heads * head_dim * item_size
-    one_page_byte_size = args.cpu_cache_token_page_size * one_token_byte_size
-    cpu_cache_page_num = int((args.cpu_cache_storage_size * 1024 * 1024 * 1024) / one_page_byte_size)
-
-    cpu_cache_meta = CpuKVCacheMeta(
-        page_num=cpu_cache_page_num,
-        layer_num=layer_num,
-        token_page_size=args.cpu_cache_token_page_size,
-        num_heads=num_key_value_heads,
-        head_dim=head_dim,
-        item_size=item_size,
+    cpu_cache_page_num = int(
+        (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.calcu_one_page_size())
     )
+    cpu_cache_meta.page_num = cpu_cache_page_num
 
     logger.info(f"cpu kv cache page num: {cpu_cache_meta.page_num}")
 
     return cpu_cache_meta
 
 
+@dataclasses.dataclass
+class CpuKVCacheMeta:
+    page_num: int
+    token_page_size: int
+    layer_num: int
+    num_heads: int
+    head_dim: int
+    data_type: torch.dtype
+    scale_head_dim: int
+    scale_data_type: torch.dtype
+
+    def calcu_size(self):
+        return self.page_num * self.calcu_one_page_size()
+
+    def calcu_one_page_size(self):
+        return (
+            self.token_page_size
+            * self.layer_num
+            * self.num_heads
+            * (self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize)
+        )
+
+    def get_merged_head_dim(self):
+        """
+        返回将head_dim 和 scale_head_dim 看成融合成一个head_dim时候, head_dim的长度。
+        """
+        assert (
+            self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize
+        ) % self.data_type.itemsize == 0
+        return (
+            self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize
+        ) // self.data_type.itemsize
+
+
 @lru_cache(maxsize=None)
-def create_shm_kv_cache_ptr() -> int:
+def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
     libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
     libc.shmget.restype = ctypes.c_int
     libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
     libc.shmat.restype = ctypes.c_void_p
 
-    args = get_env_start_args()
-    key = args.cpu_kv_cache_shm_id
-    requested_size = calcu_cpu_cache_meta().calcu_size()
-    use_hugetlb = True
+    requested_size = size
+    use_hugetlb = enable_huge_page()
 
     # 计算大页大小（默认从 /proc/meminfo 读取 Hugepagesize）
     def _get_default_hugepage_size() -> int:
@@ -109,37 +174,35 @@ def create_shm_kv_cache_ptr() -> int:
             pass
         return 2 * 1024 * 1024  # fallback 2MB
 
-    # 向上对齐到大页大小
-    huge_sz = _get_default_hugepage_size()
-    size_to_alloc = triton.cdiv(requested_size, huge_sz) * huge_sz
     shmflg = 0o666 | 0o1000  # 权限和 IPC_CREAT 标志
     if use_hugetlb:
+        # 向上对齐到大页大小
+        huge_sz = _get_default_hugepage_size()
+        size_to_alloc = triton.cdiv(requested_size, huge_sz) * huge_sz
         SHM_HUGETLB = 0o4000
         shmflg |= SHM_HUGETLB
         logger.info(
             f"Using SHM_HUGETLB, hugepage_size={huge_sz} bytes, requested={requested_size}, alloc={size_to_alloc}"
         )
+    else:
+        size_to_alloc = requested_size
+        logger.info(f"Using regular pages, requested={requested_size}, alloc={size_to_alloc}")
 
-    # 优先尝试 HugeTLB 分配，失败则回退到普通页
     shmid = libc.shmget(key, size_to_alloc, shmflg)
     hugepages_num = (size_to_alloc + 1024 * 1024 * 1024 - 1) // (1024 * 1024 * 1024)
-    if shmid < 0 and use_hugetlb:
-        err = ctypes.get_errno()
-        logger.error(
-            f"shmget with SHM_HUGETLB failed (errno={err}). Falling back to regular pages."
-            f"You may need to configure hugepages manually, e.g.,"
-            f"sudo sed -i 's/^GRUB_CMDLINE_LINUX=\"/& default_hugepagesz=1G \
-                hugepagesz=1G hugepages={hugepages_num}/' /etc/default/grub"
-            f"sudo update-grub"
-            f"sudo reboot"
-        )
-        # 回退：去掉 HUGETLB 标志，使用请求原始大小
-        shmflg_n = 0o666 | 0o1000
-        shmid = libc.shmget(key, size_to_alloc, shmflg_n)
-
     if shmid < 0:
         err = ctypes.get_errno()
-        raise Exception(f"Error creating shared memory (errno={err})")
+        if use_hugetlb:
+            raise Exception(
+                f"shmget with SHM_HUGETLB failed (errno={err}). Falling back to regular pages."
+                f"You may need to configure hugepages manually, e.g.,"
+                f"sudo sed -i 's/^GRUB_CMDLINE_LINUX=\"/& default_hugepagesz=1G \
+                    hugepagesz=1G hugepages={hugepages_num}/' /etc/default/grub"
+                f"sudo update-grub"
+                f"sudo reboot"
+            )
+        else:
+            raise Exception(f"Error creating regular shared memory (errno={err})")
 
     register_sysv_shm_for_cleanup(key, shmid)
     logger.info(f"Shared memory ID: {shmid}")
@@ -150,20 +213,17 @@ def create_shm_kv_cache_ptr() -> int:
         raise Exception("Error attaching shared memory")
     logger.info(f"Shared cpu kv cache tensor memory at address: {shm_addr}")
 
+    # Best-effort memory prefaulting in background to speed up subsequent cudaHostRegister
+    def _pre_warm_memory():
+        page_size = _get_default_hugepage_size() if use_hugetlb else 4096
+        arr = np.ctypeslib.as_array(ctypes.cast(shm_addr, ctypes.POINTER(ctypes.c_uint8)), shape=(size_to_alloc,))
+        volatile_sum = int(arr[::page_size].sum())
+        logger.info(f"pre warmed shared memory pages successfully, checksum={volatile_sum})")
+
+    th = threading.Thread(target=_pre_warm_memory, name=f"cpu_cache_pre_warm_{key}", daemon=True)
+    th.start()
+
     return shm_addr
-
-
-@dataclasses.dataclass
-class CpuKVCacheMeta:
-    page_num: int
-    layer_num: int
-    token_page_size: int
-    num_heads: int
-    head_dim: int
-    item_size: int
-
-    def calcu_size(self):
-        return self.page_num * self.layer_num * self.token_page_size * self.num_heads * self.head_dim * self.item_size
 
 
 @lru_cache(maxsize=None)
@@ -205,7 +265,7 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
         assert host_ptr.value == device_ptr.value
         handle.tasks_finished.set()
 
-    th = threading.Thread(target=_worker, name="cpu_cache_register", daemon=True)
+    th = threading.Thread(target=_worker, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
     handle.thread = th
     th.start()
     return handle
@@ -247,7 +307,7 @@ class AsyncRegistrationHandle:
 
 
 @lru_cache(maxsize=None)
-def attach_shm_kv_cache_ptr() -> int:
+def attach_shm_kv_cache_ptr(key: int, size: int) -> int:
     libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
     libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
     libc.shmget.restype = ctypes.c_int
@@ -255,11 +315,8 @@ def attach_shm_kv_cache_ptr() -> int:
     libc.shmat.restype = ctypes.c_void_p
 
     # Try to locate an existing SHM without creating a new one
-    args = get_env_start_args()
-    key = args.cpu_kv_cache_shm_id
     shmid = libc.shmget(key, 0, 0)
     if shmid < 0:
-        size = calcu_cpu_cache_meta().calcu_size()
         shmid = libc.shmget(key, size, 0)
     if shmid < 0:
         err = ctypes.get_errno()

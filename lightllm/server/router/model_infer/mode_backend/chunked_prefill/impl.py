@@ -40,12 +40,14 @@ class ChunkedPrefillBackend(ModeBackend):
         if get_env_start_args().mtp_mode:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
-            self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
+            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att"]
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
             self._draft_decode_func = self._draft_decode_eagle if self.is_mtp_eagle else self._draft_decode_vanilla
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
+
+        self.classed_req_strict_prefill = False
         return
 
     def infer_loop(self):
@@ -104,9 +106,7 @@ class ChunkedPrefillBackend(ModeBackend):
         prefill_reqs: List[InferReq],
     ):
         # 第一阶段: 模型推理
-        model_input, run_reqs = prepare_prefill_inputs(
-            prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
-        )
+        model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
@@ -183,9 +183,7 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack: OverlapEventPack,
         prefill_reqs: List[InferReq],
     ):
-        model_input, run_reqs = prepare_prefill_inputs(
-            prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill, is_multimodal=self.is_multimodal
-        )
+        model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
@@ -327,7 +325,7 @@ class ChunkedPrefillBackend(ModeBackend):
             draft_model_input = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input,
                 b_next_token_ids=draft_next_token_ids_gpu,
-                deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
+                mtp_draft_input_hiddens=draft_model_output.mtp_main_output_hiddens,
             )
             draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
@@ -351,7 +349,7 @@ class ChunkedPrefillBackend(ModeBackend):
         for draft_model_idx in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
@@ -395,13 +393,13 @@ class ChunkedPrefillBackend(ModeBackend):
         for _step in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
             draft_model_input.b_seq_len += 1
-            draft_model_input.max_len_in_batch += 1
+            draft_model_input.max_kv_seq_len += 1
             eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
             draft_model_input.mem_indexes = torch.cat(
                 [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],

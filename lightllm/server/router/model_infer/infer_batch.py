@@ -18,6 +18,7 @@ from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
+from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 logger = init_logger(__name__)
 
@@ -30,12 +31,18 @@ class InferenceContext:
     requests_mapping: Dict[int, "InferReq"] = None
     infer_req_ids = None
     vocab_size = None
+    cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
 
     def register(
-        self, backend, req_manager: ReqManager, radix_cache: RadixCache, shm_req_manager: ShmReqManager, vocab_size: int
+        self,
+        backend,
+        req_manager: ReqManager,
+        radix_cache: RadixCache,
+        shm_req_manager: ShmReqManager,
+        vocab_size: int,
     ):
         self.args = get_env_start_args()
         from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -50,6 +57,10 @@ class InferenceContext:
         self.infer_req_ids = []
 
         self.vocab_size = vocab_size
+        return
+
+    def init_cpu_embed_cache_client(self):
+        self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:
@@ -309,7 +320,7 @@ class InferReq:
         req_id: int,
         req_idx: int,
         shm_index: int,
-        multimodal_params=None,
+        multimodal_params: MultimodalParams,
         vocab_size: int = -1,
         init_prefix_cache: bool = True,
     ):
@@ -433,6 +444,9 @@ class InferReq:
             self.related_master_req = None
         else:
             logger.warning(f"try to remove master req, but related_master_req is None, req id {self.req_id}")
+
+    def get_radix_cache_shared_len(self):
+        return 0 if self.shared_kv_node is None else self.shared_kv_node.node_prefix_total_len
 
     def get_output_len(self):
         return self.cur_output_len

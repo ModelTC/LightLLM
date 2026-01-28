@@ -1,11 +1,11 @@
 import torch
 import time
-import numpy as np
 import torch.nn.functional as F
+import torch.distributed as dist
 from typing import List, Tuple, Optional, Callable
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
+from lightllm.server.router.model_infer.infer_batch import InferSamplingParams, g_infer_context, InferReq
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.pre import (
     padded_prepare_prefill_inputs,
@@ -34,7 +34,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode:
-            self.is_mtp_eagle = get_env_start_args().mtp_mode == "deepseekv3_eagle"
+            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att"]
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
@@ -58,7 +58,31 @@ class DPChunkedPrefillBackend(ModeBackend):
                 self.decode = self.decode_overlap
             else:
                 self.decode = self.decode_normal
+
+        self.classed_req_strict_prefill = False
         return
+
+    def _init_reqs(self, reqs: List[Tuple]):
+        if not self.args.enable_dp_prompt_cache_fetch:
+            return super()._init_reqs(reqs)
+
+        dp_rank_in_node = self.dp_rank_in_node
+        current_dp_reqs = [req for req in reqs if req[3] == dp_rank_in_node]
+        other_dp_reqs = [req for req in reqs if req[3] != dp_rank_in_node]
+
+        g_infer_state_lock.acquire()
+
+        infer_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
+        req_dp_ranks = [req[3] for req in reqs]
+        self.dp_kv_shared_module.fill_reqs_info(reqs=infer_reqs)
+        trans_taskes = self.dp_kv_shared_module.build_shared_kv_trans_tasks(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
+        self.dp_kv_shared_module.kv_trans(trans_tasks=trans_taskes)
+
+        g_infer_context._filter(finished_request_ids=[req[0] for req in other_dp_reqs])
+        g_infer_state_lock.release()
+
+        req_ids = [e[0] for e in current_dp_reqs]
+        return req_ids
 
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
@@ -117,7 +141,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         event_pack: OverlapEventPack,
         prefill_reqs: List[InferReq],
     ):
-        model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
+        model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs)
         run_reqs_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
@@ -208,7 +232,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_input1,
             run_reqs1,
             _,
-        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
+        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
@@ -331,7 +355,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
     def prefill_mtp(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         # main model prefill
-        model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
+        model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs)
         req_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output: ModelOutput = self.model.forward(model_input)
@@ -510,7 +534,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         for draft_model_idx in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids_gpu
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
@@ -561,13 +585,13 @@ class DPChunkedPrefillBackend(ModeBackend):
         for _step in range(self.mtp_step):
 
             draft_model_input.input_ids = draft_next_token_ids_gpu
-            draft_model_input.deepseekv3_mtp_draft_input_hiddens = draft_model_output.deepseekv3_mtp_main_output_hiddens
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             # update the meta info of the inference
             draft_model_input.b_seq_len += 1
-            draft_model_input.max_len_in_batch += 1
+            draft_model_input.max_kv_seq_len += 1
             eagle_mem_indexes_i = eagle_mem_indexes[_step * real_req_num : (_step + 1) * real_req_num]
             eagle_mem_indexes_i = F.pad(
                 input=eagle_mem_indexes_i,
@@ -602,7 +626,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_input1,
             run_reqs1,
             _,
-        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs, is_multimodal=self.is_multimodal)
+        ) = padded_overlap_prepare_prefill_inputs(prefill_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             logits0 = model_output0.logits
@@ -648,13 +672,13 @@ class DPChunkedPrefillBackend(ModeBackend):
                 draft_model_input0 = prepare_mtp_prefill_inputs(
                     model_input=draft_model_input0,
                     b_next_token_ids=draft_next_token_ids_gpu0,
-                    deepseekv3_mtp_draft_input_hiddens=draft_model_output0.deepseekv3_mtp_main_output_hiddens,
+                    mtp_draft_input_hiddens=draft_model_output0.mtp_main_output_hiddens,
                 )
 
                 draft_model_input1 = prepare_mtp_prefill_inputs(
                     model_input=draft_model_input1,
                     b_next_token_ids=draft_next_token_ids_gpu1,
-                    deepseekv3_mtp_draft_input_hiddens=draft_model_output1.deepseekv3_mtp_main_output_hiddens,
+                    mtp_draft_input_hiddens=draft_model_output1.mtp_main_output_hiddens,
                 )
 
                 draft_model_output0, draft_model_output1 = self.draft_models[
@@ -812,7 +836,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             draft_model_input = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input,
                 b_next_token_ids=draft_next_token_ids_gpu,
-                deepseekv3_mtp_draft_input_hiddens=draft_model_output.deepseekv3_mtp_main_output_hiddens,
+                mtp_draft_input_hiddens=draft_model_output.mtp_main_output_hiddens,
             )
             draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
@@ -850,13 +874,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         for draft_model_idx in range(self.mtp_step):
 
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
-            draft_model_input0.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output0.deepseekv3_mtp_main_output_hiddens
-            )
+            draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1
-            draft_model_input1.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output1.deepseekv3_mtp_main_output_hiddens
-            )
+            draft_model_input1.mtp_draft_input_hiddens = draft_model_output1.mtp_main_output_hiddens
 
             draft_model_output0, draft_model_output1 = self.draft_models[draft_model_idx].microbatch_overlap_decode(
                 draft_model_input0, draft_model_input1
@@ -925,13 +945,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         for _step in range(self.mtp_step):
 
             draft_model_input0.input_ids = draft_next_token_ids_gpu0
-            draft_model_input0.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output0.deepseekv3_mtp_main_output_hiddens
-            )
+            draft_model_input0.mtp_draft_input_hiddens = draft_model_output0.mtp_main_output_hiddens
             draft_model_input1.input_ids = draft_next_token_ids_gpu1
-            draft_model_input1.deepseekv3_mtp_draft_input_hiddens = (
-                draft_model_output1.deepseekv3_mtp_main_output_hiddens
-            )
+            draft_model_input1.mtp_draft_input_hiddens = draft_model_output1.mtp_main_output_hiddens
 
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output0, draft_model_output1 = self.draft_models[draft_model_idx].microbatch_overlap_decode(
@@ -939,7 +955,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
 
             draft_model_input0.b_seq_len += 1
-            draft_model_input0.max_len_in_batch += 1
+            draft_model_input0.max_kv_seq_len += 1
             eagle_mem_indexes_i = eagle_mem_indexes0[_step * real_req_num0 : (_step + 1) * real_req_num0]
             eagle_mem_indexes_i = F.pad(
                 input=eagle_mem_indexes_i,
@@ -953,7 +969,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             ).view(-1)
 
             draft_model_input1.b_seq_len += 1
-            draft_model_input1.max_len_in_batch += 1
+            draft_model_input1.max_kv_seq_len += 1
             eagle_mem_indexes_i = eagle_mem_indexes1[_step * real_req_num1 : (_step + 1) * real_req_num1]
             eagle_mem_indexes_i = F.pad(
                 input=eagle_mem_indexes_i,

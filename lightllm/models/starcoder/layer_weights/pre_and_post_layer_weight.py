@@ -1,60 +1,43 @@
-import torch
-import numpy as np
 from lightllm.common.basemodel import PreAndPostLayerWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import (
+    EmbeddingWeight,
+    LayerNormWeight,
+    NoTpPosEmbeddingWeight,
+    LMHeadWeight,
+)
 
 
 class StarcoderPreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
-        self._create_weight()
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
 
     def _create_weight(self):
-        vob_size = self.network_config_["vocab_size"]
-        hidden_size = self.network_config_["hidden_size"]
-        split_vob_size = vob_size // self.tp_world_size_
-        max_position_embeddings = self.network_config_["max_position_embeddings"]
+        hidden_size = self.network_config["hidden_size"]
+        vocab_size = self.network_config["vocab_size"]
+        max_position_embeddings = self.network_config["max_position_embeddings"]
+        self.wte_weight_ = EmbeddingWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
+            weight_name="transformer.wte.weight",
+            data_type=self.data_type_,
+        )
+        self.wpe_weight_ = NoTpPosEmbeddingWeight(
+            dim=hidden_size,
+            max_position_embeddings=max_position_embeddings,
+            weight_name="transformer.wpe.weight",
+            data_type=self.data_type_,
+        )
 
-        # Pre-allocate memory for weights
-        self.wte_weight_ = torch.empty((split_vob_size, hidden_size), dtype=self.data_type_).cuda()
-        self.wpe_weight_ = torch.empty((max_position_embeddings, hidden_size), dtype=self.data_type_).cuda()
-        self.lm_head_weight_ = torch.empty((split_vob_size, hidden_size), dtype=self.data_type_).cuda()
-        self.final_norm_weight_ = torch.empty(hidden_size, dtype=self.data_type_).cuda()
-        self.final_norm_bias_ = torch.empty(hidden_size, dtype=self.data_type_).cuda()
-        return
-
-    def load_hf_weights(self, weights):
-
-        vob_size = self.network_config_["vocab_size"]
-        split_vob_size = vob_size // self.tp_world_size_
-        if "transformer.wte.weight" in weights:
-            # print(weights['transformer.wte.weight'].shape)
-            self.wte_weight_.copy_(
-                weights["transformer.wte.weight"][
-                    split_vob_size * self.tp_rank_ : split_vob_size * (self.tp_rank_ + 1), :
-                ]
-            )
-        if "transformer.wpe.weight" in weights:
-            # print(weights['transformer.wpe.weight'].shape)
-            self.wpe_weight_.copy_(weights["transformer.wpe.weight"])
-        if "lm_head.weight" in weights:
-            self.lm_head_weight_.copy_(
-                weights["lm_head.weight"][split_vob_size * self.tp_rank_ : split_vob_size * (self.tp_rank_ + 1), :]
-            )
-        if "transformer.ln_f.weight" in weights:
-            self.final_norm_weight_.copy_(weights["transformer.ln_f.weight"])
-        if "transformer.ln_f.bias" in weights:
-            self.final_norm_bias_.copy_(weights["transformer.ln_f.bias"])
-        return
-
-    def verify_load(self):
-        errors = "weights load not ok"
-        weights = [
-            self.final_norm_weight_,
-            self.final_norm_bias_,
-            self.wte_weight_,
-            self.wpe_weight_,
-            self.lm_head_weight_,
-        ]
-        for i in range(len(weights)):
-            assert weights[i] is not None, "index:" + str(i) + " " + errors
+        self.final_norm_weight_ = LayerNormWeight(
+            dim=hidden_size,
+            weight_name="transformer.ln_f.weight",
+            bias_name="transformer.ln_f.bias",
+            data_type=self.data_type_,
+        )
+        self.lm_head_weight_ = LMHeadWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
+            weight_name="lm_head.weight",
+            data_type=self.data_type_,
+        )
         return

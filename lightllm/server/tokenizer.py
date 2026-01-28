@@ -28,6 +28,7 @@ logger = init_logger(__name__)
 from ..models.llava.model import LlavaTokenizer
 from ..models.qwen_vl.model import QWenVLTokenizer
 from ..models.qwen2_vl.model import QWen2VLTokenizer
+from ..models.qwen3_vl.model import QWen3VLTokenizer
 from ..models.internvl.model import InternvlTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
 
@@ -90,6 +91,13 @@ def get_tokenizer(
 
         processor = AutoProcessor.from_pretrained(tokenizer_name)
         tokenizer = QWen2VLTokenizer(
+            tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
+        )
+    elif model_type in ["qwen3_vl", "qwen3_vl_moe"] and "vision_config" in model_cfg:
+        from transformers import AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(tokenizer_name)
+        tokenizer = QWen3VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
     elif model_type == "internvl_chat":

@@ -7,20 +7,22 @@ import triton.language as tl
 def _fwd_kernel(
     Prompt_ids,
     Text_weight_embs,
-    Img_embs,
+    Embed_cache,
     Out,
     Img_token_lens,
     Img_start_token_ids,
-    Img_start_locs,
+    Img_start_locs_in_cache,
     stride_text_emb_s,
     stride_text_emb_d,  # text_stride
-    stride_img_emb_s,
-    stride_img_emb_d,  # img_stride
+    stride_emb_cache_s,
+    stride_emb_cache_l,
+    stride_emb_cache_d,  # img_stride
     stride_out_s,
     stride_out_d,
     tp_text_start_token_id,
     tp_text_end_token_id,
     hidden_size,
+    tp_world_size,
     BLOCK_HIDDEN_DIM: tl.constexpr,
 ):
 
@@ -44,7 +46,7 @@ def _fwd_kernel(
         tl.store(Out + stride_out_s * seq_index + stride_out_d * off_d, load_emb, mask=off_d < hidden_size)
 
     img_start_token_id = tl.load(Img_start_token_ids + img_handle_id - 1, mask=img_handle_id >= 1, other=0)
-    img_start_loc = tl.load(Img_start_locs + img_handle_id - 1, mask=img_handle_id >= 1, other=0)
+    img_start_loc = tl.load(Img_start_locs_in_cache + img_handle_id - 1, mask=img_handle_id >= 1, other=0)
     img_token_len = tl.load(Img_token_lens + img_handle_id - 1, mask=img_handle_id >= 1, other=0)
     # load store img emb
     for _ in range(
@@ -57,11 +59,16 @@ def _fwd_kernel(
         1,
     ):
         load_emb = tl.load(
-            Img_embs + stride_img_emb_s * (img_start_loc + token_id - img_start_token_id) + off_d * stride_img_emb_d,
+            Embed_cache
+            + stride_emb_cache_s.to(tl.int64) * (img_start_loc + token_id - img_start_token_id)
+            + stride_emb_cache_l * 0
+            + stride_emb_cache_d * off_d,
             mask=off_d < hidden_size,
             other=0,
         )
-        tl.store(Out + stride_out_s * seq_index + stride_out_d * off_d, load_emb, mask=off_d < hidden_size)
+        tl.store(
+            Out + stride_out_s * seq_index + stride_out_d * off_d, load_emb / tp_world_size, mask=off_d < hidden_size
+        )
     return
 
 
@@ -70,12 +77,13 @@ def multimodal_emb(
     out: torch.Tensor,
     prompt_ids: torch.Tensor,
     text_weight_embs: torch.Tensor,
-    img_embs: torch.Tensor,
+    embed_cache: torch.Tensor,
     img_token_lens: torch.Tensor,
     img_start_token_ids: torch.Tensor,
-    img_start_locs: torch.Tensor,
-    tp_text_start_token_id,
-    tp_text_end_token_id,
+    img_start_locs_in_cache: torch.Tensor,
+    tp_text_start_token_id: int,
+    tp_text_end_token_id: int,
+    tp_world_size: int,
 ):
     total_len = prompt_ids.shape[0]
     BLOCK = triton.next_power_of_2(out.shape[1])
@@ -83,22 +91,24 @@ def multimodal_emb(
     grid = (total_len, len(img_token_lens) + 1)
     num_warps = 1
     _fwd_kernel[grid](
-        prompt_ids,
-        text_weight_embs,
-        img_embs,
-        out,
-        img_token_lens,
-        img_start_token_ids,
-        img_start_locs,
-        text_weight_embs.stride(0),
-        text_weight_embs.stride(1),
-        img_embs.stride(0),
-        img_embs.stride(1),
-        out.stride(0),
-        out.stride(1),
-        tp_text_start_token_id,
-        tp_text_end_token_id,
+        Prompt_ids=prompt_ids,
+        Text_weight_embs=text_weight_embs,
+        Embed_cache=embed_cache,
+        Out=out,
+        Img_token_lens=img_token_lens,
+        Img_start_token_ids=img_start_token_ids,
+        Img_start_locs_in_cache=img_start_locs_in_cache,
+        stride_text_emb_s=text_weight_embs.stride(0),
+        stride_text_emb_d=text_weight_embs.stride(1),
+        stride_emb_cache_s=embed_cache.stride(0),
+        stride_emb_cache_l=embed_cache.stride(1),
+        stride_emb_cache_d=embed_cache.stride(2),
+        stride_out_s=out.stride(0),
+        stride_out_d=out.stride(1),
+        tp_text_start_token_id=tp_text_start_token_id,
+        tp_text_end_token_id=tp_text_end_token_id,
         hidden_size=out.shape[1],
+        tp_world_size=float(tp_world_size),
         BLOCK_HIDDEN_DIM=BLOCK,
         num_warps=num_warps,
         num_stages=1,

@@ -1,0 +1,95 @@
+ARG CUDA_VERSION=12.8.0
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
+ARG PYTHON_VERSION=3.10
+ARG MAMBA_VERSION=24.7.1-0
+ARG TARGETPLATFORM
+ENV PATH=/opt/conda/bin:$PATH \
+    CONDA_PREFIX=/opt/conda
+
+RUN chmod 777 -R /tmp && apt-get update --allow-insecure-repositories && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl-dev \
+    curl \
+    g++ \
+    make \
+    git && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN case ${TARGETPLATFORM} in \
+    "linux/arm64")  MAMBA_ARCH=aarch64  ;; \
+    *)              MAMBA_ARCH=x86_64   ;; \
+    esac && \
+    curl -fsSL -o ~/mambaforge.sh -v "https://github.com/conda-forge/miniforge/releases/download/${MAMBA_VERSION}/Mambaforge-${MAMBA_VERSION}-Linux-${MAMBA_ARCH}.sh" && \
+    bash ~/mambaforge.sh -b -p /opt/conda && \
+    rm ~/mambaforge.sh
+
+RUN case ${TARGETPLATFORM} in \
+    "linux/arm64")  exit 1 ;; \
+    *)              /opt/conda/bin/conda update -y conda &&  \
+    /opt/conda/bin/conda install -y "python=${PYTHON_VERSION}" ;; \
+    esac && \
+    /opt/conda/bin/conda clean -ya
+
+
+WORKDIR /root
+
+RUN --mount=type=cache,target=/root/.cache/pip pip install vllm==0.11.0 --pre --extra-index-url https://wheels.vllm.ai/nightly
+
+COPY ./requirements.txt /lightllm/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r /lightllm/requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
+
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-deps -v 'git+https://github.com/ModelTC/LightKernel.git@07f2f62af5deb41f10a22660f9f42dba9273361e#egg=lightllm_kernel'
+
+RUN apt-get update && apt-get install -y libnuma-dev wget devscripts debhelper dh-make build-essential dkms
+RUN apt-get install -y ibverbs-providers infiniband-diags perftest rdma-core libibverbs-dev librdmacm-dev
+
+ENV CUDA_HOME=/usr/local/cuda \
+    GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/
+
+RUN mkdir -p /tmp/gdrcopy && cd /tmp \
+ && git clone https://github.com/NVIDIA/gdrcopy.git -b v2.4.4 \
+ && cd gdrcopy/packages \
+ && CUDA=/usr/local/cuda ./build-deb-packages.sh \
+ && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb \
+ && cd / && rm -rf /tmp/gdrcopy
+
+RUN apt-get update && apt-get install -y cmake automake autotools-dev  libtool libz-dev && \
+    DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev; \
+    rm -rf /usr/lib/ucx && \
+    rm -rf /opt/hpcx/ucx && \
+    cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx && 			     \
+    git checkout v1.19.x &&	     \
+    ./autogen.sh && ./configure     \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs=yes                \
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --with-efa                  \
+    --enable-mt &&              \
+    make -j &&                      \
+    make -j install-strip &&        \
+    ldconfig;
+
+RUN apt-get update && apt-get install -y  pkg-config tmux net-tools libaio-dev ;  \
+    cd /usr/local/src; \
+    pip install --upgrade meson pybind11 patchelf; \
+    git clone https://github.com/ai-dynamo/nixl.git -b 0.8.0 && \
+    cd nixl && \
+    rm -rf build && \
+    mkdir build && \
+    meson setup build/ --prefix=/usr/local/nixl --buildtype=release && \
+    cd build && \
+    ninja && \
+    ninja install && \
+    cd .. && pip install . --no-deps;
+
+COPY . /lightllm
+RUN pip install -e /lightllm --no-cache-dir

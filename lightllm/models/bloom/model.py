@@ -1,16 +1,11 @@
-import os
-import json
-import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.bloom.layer_infer.pre_layer_infer import BloomPreLayerInfer
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
 from lightllm.models.bloom.layer_weights.pre_and_post_layer_weight import BloomPreAndPostLayerWeight
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
-from lightllm.models.bloom.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel import InferStateInfo, TpPartBaseModel
-
-from lightllm.common.build_utils import repair_config
+from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
 
 
 @ModelRegistry("bloom")
@@ -42,18 +37,7 @@ class BloomTpPartModel(TpPartBaseModel):
         self.config["num_key_value_heads"] = self.config["num_attention_heads"]
         return
 
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
-        )
-        self.trans_layers_weight = [
-            self.transformer_weight_class(
-                i,
-                self.data_type,
-                network_config=self.config,
-                mode=self.mode,
-                quant_cfg=self.quant_cfg,
-            )
-            for i in range(self.config["n_layer"])
-        ]
+    def _init_att_backend(self):
+        self.prefill_att_backend = TritonAttBackend(self)
+        self.decode_att_backend = TritonAttBackend(self)
         return

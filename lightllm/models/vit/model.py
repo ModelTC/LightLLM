@@ -40,7 +40,6 @@ class VisionTransformer:
         self.tp_world_size_ = get_dp_world_size()
         self.weight_dir_ = kvargs["weight_dir"]
         self.load_way = kvargs.get("load_way", "HF")
-        self.mode = [m.replace("int4weight", "w4a16").replace("int8weight", "w8a16") for m in kvargs.get("mode", [])]
         self.weight_dict = kvargs.get("weight_dict", None)
         self.data_type = kvargs.get("data_type", "float16")
         self.quant_type = kvargs.get("quant_type", None)
@@ -113,14 +112,13 @@ class VisionTransformer:
 
     def _init_weights(self):
         self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
+            self.data_type, network_config=self.config, quant_cfg=self.quant_cfg
         )
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 i,
                 self.data_type,
                 network_config=self.config,
-                mode=self.mode,
                 quant_cfg=self.quant_cfg,
             )
             for i in range(self.config["num_hidden_layers"])
@@ -141,10 +139,10 @@ class VisionTransformer:
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_infer_layer(self):
-        self.pre_infer = self.pre_layer_infer_class(network_config=self.config, mode=self.mode)
-        self.post_infer = self.post_layer_infer_class(network_config=self.config, mode=self.mode)
+        self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
+        self.post_infer = self.post_layer_infer_class(network_config=self.config)
         self.layers_infer = [
-            self.transformer_layer_infer_class(i, network_config=self.config, mode=self.mode)
+            self.transformer_layer_infer_class(i, network_config=self.config)
             for i in range(self.config["num_hidden_layers"])
         ]
         return
@@ -185,7 +183,7 @@ class VisionTransformer:
             else:
                 raise Exception("Unsupport input types: {} for {}".format(type(img), img))
 
-            cur_num = img_tensors[-1].shape[0]
+            cur_num = img.token_num
             valid_ids.append([valid_id, valid_id + cur_num])
             valid_id += cur_num
 
@@ -195,7 +193,7 @@ class VisionTransformer:
         imgs = torch.cat(img_tensors, dim=0)
         pixel_values = imgs.cuda().to(dtype=self.data_type)
         all_img_embeds = self.forward(pixel_values)
-        return all_img_embeds, uuids, valid_ids
+        return all_img_embeds.view(-1, all_img_embeds.shape[-1]), uuids, valid_ids
 
     def cuda(self):
         return self

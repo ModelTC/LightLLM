@@ -23,7 +23,7 @@ class StartArgs:
     pd_master_port: int = field(default=1212)
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
-    pd_decode_rpyc_port: int = field(default=42000)
+    pd_decode_rpyc_port: int = field(default=None)
     select_p_d_node_strategy: str = field(
         default="round_robin", metadata={"choices": ["random", "round_robin", "adaptive_load"]}
     )
@@ -38,6 +38,27 @@ class StartArgs:
     tool_call_parser: Optional[str] = field(
         default=None, metadata={"choices": ["qwen25", "llama3", "mistral", "deepseekv3", "qwen"]}
     )
+    reasoning_parser: Optional[str] = field(
+        default=None,
+        metadata={
+            "choices": [
+                "deepseek-r1",
+                "deepseek-v3",
+                "glm45",
+                "gpt-oss",
+                "kimi",
+                "kimi_k2",
+                "qwen3",
+                "qwen3-thinking",
+                "minimax",
+                "minimax-append-think",
+                "step3",
+                "nano_v3",
+                "interns1",
+            ]
+        },
+    )
+    chat_template: Optional[str] = field(default=None)
     running_max_req_size: int = field(default=1000)
     tp: int = field(default=1)
     dp: int = field(default=1)
@@ -45,9 +66,8 @@ class StartArgs:
     node_rank: int = field(default=0)
     max_req_total_len: int = field(default=16384)
     nccl_host: str = field(default="127.0.0.1")
-    nccl_port: int = field(default=28765)
+    nccl_port: int = field(default=None)
     use_config_server_to_init_nccl: bool = field(default=False)
-    mode: List[str] = field(default_factory=lambda: [])
     trust_remote_code: bool = field(default=False)
     disable_log_stats: bool = field(default=False)
     log_stats_interval: int = field(default=10)
@@ -56,7 +76,7 @@ class StartArgs:
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
-    chunked_prefill_size: int = field(default=4096)
+    chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)
     token_healing_mode: bool = field(default=False)
@@ -69,6 +89,7 @@ class StartArgs:
     enable_decode_microbatch_overlap: bool = field(default=False)
     enable_prefill_microbatch_overlap: bool = field(default=False)
     cache_capacity: int = field(default=200)
+    embed_cache_storage_size: float = field(default=4)
     data_type: Optional[str] = field(
         default=None, metadata={"choices": ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]}
     )
@@ -81,13 +102,16 @@ class StartArgs:
     job_name: str = field(default="lightllm")
     grouping_key: List[str] = field(default_factory=lambda: [])
     push_interval: int = field(default=10)
-    visual_infer_batch_size: int = field(default=1)
-    visual_gpu_ids: Optional[List[int]] = field(default=None)
+    visual_infer_batch_size: int = field(default=None)
+    visual_send_batch_size: int = field(default=1)
+    visual_gpu_ids: List[int] = field(default=None)
     visual_tp: int = field(default=1)
     visual_dp: int = field(default=1)
     visual_nccl_ports: List[int] = field(default=None)
     enable_monitor_auth: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
+    enable_prefill_cudagraph: bool = field(default=False)
+    prefll_cudagraph_max_handle_token: int = field(default=512)
     graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
@@ -96,16 +120,26 @@ class StartArgs:
     quant_cfg: Optional[str] = field(default=None)
     vit_quant_type: Optional[str] = field(default="none")
     vit_quant_cfg: Optional[str] = field(default=None)
-    enable_flashinfer_prefill: bool = field(default=False)
-    enable_flashinfer_decode: bool = field(default=False)
+    llm_prefill_att_backend: List[str] = field(
+        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+    )
+    llm_decode_att_backend: List[str] = field(
+        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+    )
+    vit_att_backend: List[str] = field(
+        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
+    )
+    llm_kv_type: str = field(default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv"]})
+    llm_kv_quant_group_size: int = field(default=8)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
     penalty_counter_mode: str = field(
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
     )
+    enable_ep_moe: bool = field(default=False)
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
     mtp_mode: Optional[str] = field(
-        default=None, metadata={"choices": ["deepseekv3_vanilla", "deepseekv3_eagle", None]}
+        default=None, metadata={"choices": ["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att"]}
     )
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
@@ -118,6 +152,8 @@ class StartArgs:
     cpu_cache_token_page_size: int = field(default=256)
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
+    disk_cache_dir: Optional[str] = field(default=None)
+    enable_dp_prompt_cache_fetch: bool = field(default=False)
     # zmp ports
     router_port: int = field(default=None)
     router_rpc_port: int = field(default=None)
@@ -132,9 +168,6 @@ class StartArgs:
     # multi_modal
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
-
-    # kernel setting
-    enable_fa3: bool = field(default=False)
 
     httpserver_workers: int = field(default=1)
     disable_shm_warning: bool = field(default=False)

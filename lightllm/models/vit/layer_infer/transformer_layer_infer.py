@@ -3,17 +3,17 @@ import torch.distributed as dist
 
 from typing import Tuple
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
-from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.models.vit.triton_kernel.gelu_vit import gelu_fwd
 from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
+from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
 class ViTTransformerLayerInfer:
     """ """
 
-    def __init__(self, layer_num, network_config, mode=[]):
+    def __init__(self, layer_num, network_config):
         self.tp_rank_ = get_current_rank_in_dp()
         self.tp_world_size_ = get_dp_world_size()
         self.eps_ = network_config["layer_norm_eps"]
@@ -25,7 +25,6 @@ class ViTTransformerLayerInfer:
         self.tp_padding_embed_dim_ = self.tp_padding_head_num * self.head_dim_
 
         self.network_config_ = network_config
-        self.mode = mode
         self.layer_num_ = layer_num
         return
 
@@ -106,7 +105,7 @@ class ViTTransformerLayerInfer:
         q, k, v, out = map(reshape, (q, k, v, out))
         cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device) * seq_len
         max_seqlen = seq_len
-        flash_attention_fwd(q, k, v, out, cu_seqlens, max_seqlen)
+        get_vit_attn_backend()(q, k, v, out, cu_seqlens, max_seqlen)
         return out.reshape(batch_size, seq_len, -1)
 
     def _get_o(self, input, layer_weight: ViTTransformerLayerWeight) -> torch.Tensor:

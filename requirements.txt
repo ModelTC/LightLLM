@@ -87,6 +87,13 @@ librosa==0.11.0
 cuda_bindings==12.9.0
 orjson==3.11.2
 setproctitle==1.3.6
+xformers==0.0.32.post1
 xxhash==3.6.0
+torchvision==0.23.0
+interegular==0.3.3
+partial_json_parser==0.2.1.1.post6
+websockets==15.0.1
+cupy-cuda12x==13.6.0
+nixl==0.8.0
 torch_memory_saver==0.0.9
 portpicker==1.6.0

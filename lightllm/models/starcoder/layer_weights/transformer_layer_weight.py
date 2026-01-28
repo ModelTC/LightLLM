@@ -3,8 +3,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, CO
 
 
 class StarcoderTransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg, layer_prefix="transformer.h")
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, quant_cfg, layer_prefix="transformer.h")
         assert network_config["num_attention_heads"] % self.tp_world_size_ == 0
 
     def load_hf_weights(self, weights):
@@ -51,18 +51,18 @@ class StarcoderTransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_ffn(self):
         self.gate_up_proj = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_inter],
             weight_names=self._gate_up_weight_name,
             data_type=self.data_type_,
             bias_names=self._gate_up_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="gate_up_proj",
+            quant_method=self.get_quant_method("gate_up_proj"),
         )
         self.down_proj = COLMMWeight(
+            in_dim=self.n_inter,
+            out_dims=[self.n_embed],
             weight_names=self._down_weight_name,
             data_type=self.data_type_,
             bias_names=self._down_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="down_proj",
+            quant_method=self.get_quant_method("down_proj"),
         )

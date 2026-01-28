@@ -1,7 +1,7 @@
 import torch
 import triton
 import collections
-from lightllm.common.mem_manager import MemoryManager
+from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
@@ -11,6 +11,7 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank
+from .attention import BasePrefillAttState, BaseDecodeAttState
 
 
 class InferStateInfo:
@@ -19,16 +20,24 @@ class InferStateInfo:
     """
 
     def __init__(self):
+        # prefill 和 decode 使用的 att 状态对象
+        self.prefill_att_state: BasePrefillAttState = None
+        self.decode_att_state: BaseDecodeAttState = None
+
+        # 保留的扩展, 支持线性att与标准att混合使用时使用
+        self.prefill_att_state1: BasePrefillAttState = None
+        self.decode_att_state1: BaseDecodeAttState = None
+
+        self.input_ids: torch.Tensor = None
         self.batch_size: int = None
         self.total_token_num: int = None
         self.b_req_idx: torch.Tensor = None
-        self.b_start_loc: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
+
+        self.b_shared_seq_len: torch.Tensor = None  # only for diverse mode used in decode phase.
+        self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
+
         self.b_seq_len: torch.Tensor = None
-        # max_len_in_batch prefill 和 decode 阶段含义不同
-        # prefill 阶段指每个req 输入token的长度（不包括已经cache的部分）最大值
-        # decode 阶段指的是每个req的总长 最大值
-        self.max_len_in_batch: int = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
         # prefix_total_token_num 用于 prefill 阶段标识当前请求中所有已经ready的kv的长度
@@ -63,14 +72,19 @@ class InferStateInfo:
         self.max_q_seq_len: int = None
         self.max_kv_seq_len: int = None
 
+        # prefill 用
+        self.b_q_start_loc: torch.Tensor = None
+        # decode 用
+        self.b_kv_start_loc: torch.Tensor = None
+
         # 一些特殊模型，特殊模式使用的输入变量，本身这些变量不适合放在
         # inferstate的基类中，但是为了代码的简洁和方便，都放在基类中
         # 进行管理。注意这些成员变量只会在特定的模型和模式下才会生效。
 
-        # deepseekv3 mtp draft model 使用的额外输入参数,
-        # 在开启 mtp_mode == deepseekv3 时，mtp draft model
+        # mtp draft model 使用的额外输入参数,
+        # 在开启 mtp_mode 时，mtp draft model
         # 的输入会用到，其他模型和场景都不会用到
-        self.deepseekv3_mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+        self.mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
         # 在单节点多dp的运行模式下，在进行prefill的阶段，如果出现了dp之间数据不平衡的现象，
         # 可以将推理的数据，进行重新分配到各个dp，在做 att 之前，重新 all to all 到各自的
@@ -84,7 +98,7 @@ class InferStateInfo:
         self.dp_output_split_sizes: List[List[int]] = None
         self.dp_input_split_sizes: List[List[int]] = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
+    def init_some_extra_state(self, model):
         if self.is_prefill:
             (
                 self.b_q_seq_len,
@@ -93,11 +107,11 @@ class InferStateInfo:
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
             ) = gen_prefill_params(
-                input_token_num=input_ids.shape[0],
+                input_token_num=self.input_ids.shape[0],
                 b_ready_cache_len=self.b_ready_cache_len,
                 b_seq_len=self.b_seq_len,
             )
-            self.b_start_loc = self.b1_cu_q_seq_len[0:-1]
+            self.b_q_start_loc = self.b1_cu_q_seq_len[0:-1]
         else:
             (
                 self.b_q_seq_len,
@@ -106,9 +120,17 @@ class InferStateInfo:
                 self.b1_cu_kv_seq_len,
                 self.position_ids,
             ) = gen_decode_params(self.b_seq_len)
-            # TODO: check the correctness
-            self.max_kv_seq_len = self.max_len_in_batch
-            self.b_start_loc = self.b1_cu_kv_seq_len[0:-1]
+            self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
+
+    def init_att_state(self):
+        if self.is_prefill:
+            self.prefill_att_state.init_state()
+            if self.prefill_att_state1 is not None:
+                self.prefill_att_state1.init_state()
+        else:
+            self.decode_att_state.init_state()
+            if self.decode_att_state1 is not None:
+                self.decode_att_state1.init_state()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():
@@ -116,27 +138,10 @@ class InferStateInfo:
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
-        return
 
-    def mark_multimodal_objs_for_prefill(self, input_ids: torch.Tensor):
-        """
-        功能函数，用于标记在chuncked prefill的过程中，到底哪些多模态对象对应的token是需要参与计算的。
-        因为分chunck的原因，并不是所有的多模态对象对应的token都需要参与计算。
-        """
-        multi_objs = []
-        for _, p in enumerate(self.multimodal_params):
-            for obj in p["images"] + p["audios"]:
-                multi_objs.append(obj)
-
-        if multi_objs:
-            obj_start_ids = torch.tensor([e["token_id"] for e in multi_objs], dtype=torch.int64, device="cuda")
-            obj_token_lens = torch.tensor([e["token_num"] for e in multi_objs], dtype=torch.int64, device="cuda")
-            marks = mark_multimodal_obj(
-                obj_start_token_ids=obj_start_ids, obj_token_lens=obj_token_lens, input_ids=input_ids
-            )
-            marks_array = marks.detach().cpu().numpy()
-            for mark, obj in zip(marks_array, multi_objs):
-                obj["_prefill_"] = mark > 0
+        self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
+        if self.decode_att_state1 is not None:
+            self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return
 
     def prefill_dp_balance(self, input_ids: torch.Tensor):
@@ -228,6 +233,9 @@ class InferStateInfo:
 
             self.position_sin = self._all_to_all_balance_get(self.position_sin)
 
+        self._unbalance_input_ids = self.input_ids
+        self.input_ids = new_input_ids
+
         return new_input_ids
 
     def _all_to_all_balance_get(self, data: torch.Tensor):
@@ -247,8 +255,6 @@ class InferStateInfo:
             shape=(handle_len * scale_size,),
             data_type=data.dtype,
             device="cuda",
-            is_graph_out=False,
-            microbatch_index=self.microbatch_index,
         )
         dist.all_to_all_single(
             output=dest_data.view(-1),
@@ -276,8 +282,6 @@ class InferStateInfo:
             shape=(origin_len * scale_size,),
             data_type=data.dtype,
             device="cuda",
-            is_graph_out=False,
-            microbatch_index=self.microbatch_index,
         )
         dist.all_to_all_single(
             output=origin_data.view(-1),
@@ -288,3 +292,49 @@ class InferStateInfo:
             async_op=False,
         )
         return origin_data.view(-1, *old_shape[1:])
+
+    # 用于 prefll cuda graph 的专用功能接口
+    def prefill_cuda_graph_create_graph_obj(self):
+        if not hasattr(self, "prefill_cuda_graph_exe_list"):
+            self.prefill_cuda_graph_exe_list = []
+        graph_obj = torch.cuda.CUDAGraph()
+        capture_graph = torch.cuda.graph(graph_obj, pool=self.mem_pool)
+        self.prefill_cuda_graph_exe_list.append((graph_obj, capture_graph))
+        return
+
+    def prefill_cuda_graph_get_current_capture_graph(self) -> torch.cuda.graph:
+        assert len(self.prefill_cuda_graph_exe_list) > 0, "no cuda graph exe obj found"
+        if isinstance(self.prefill_cuda_graph_exe_list[-1], tuple):
+            return self.prefill_cuda_graph_exe_list[-1][1]
+        else:
+            return self.prefill_cuda_graph_exe_list[-2][1]
+
+    def prefill_cuda_graph_add_cpu_runnning_func(self, func, after_graph: torch.cuda.graph):
+        if not hasattr(self, "prefill_cuda_graph_exe_list"):
+            self.prefill_cuda_graph_exe_list = []
+        if after_graph is None:
+            self.prefill_cuda_graph_exe_list.append(func)
+            return
+
+        for i, e in enumerate(self.prefill_cuda_graph_exe_list):
+            if isinstance(e, tuple) and e[1] == after_graph:
+                self.prefill_cuda_graph_exe_list.insert(i + 1, func)
+                return
+        assert False, "after_graph not found in prefill_cuda_graph_exe_list"
+
+    def prefill_replay(self, new_infer_state: "InferStateInfo"):
+        for func in self.prefill_cuda_graph_exe_list:
+            if isinstance(func, tuple):
+                graph_obj, _ = func
+                graph_obj.replay()
+            else:
+                func(new_infer_state)
+        return
+
+    def copy_for_prefill_cuda_graph(self, new_infer_state: "InferStateInfo"):
+        for attr_name, attr_value in vars(new_infer_state).items():
+            if isinstance(attr_value, torch.Tensor):
+                attr_ = getattr(self, attr_name, None)
+                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr() and attr_.shape == attr_value.shape:
+                    attr_.copy_(attr_value, non_blocking=True)
+        return

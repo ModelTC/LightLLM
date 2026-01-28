@@ -1,11 +1,15 @@
-from .quantize_method import QuantizationMethod, WeightPack
-from .registry import QUANTMETHODS
 import torch
-from typing import Optional
+from typing import Optional, List, Union, Tuple
+
+from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
+from lightllm.common.quantization.registry import QUANTMETHODS
 
 
-@QUANTMETHODS.register("none")
+@QUANTMETHODS.register("none", platform="musa")
+@QUANTMETHODS.register("none", platform="cuda")
 class NoQuantization(QuantizationMethod):
+    """No quantization - uses full precision weights."""
+
     def apply(
         self,
         input_tensor: torch.Tensor,
@@ -23,21 +27,29 @@ class NoQuantization(QuantizationMethod):
             dtype = input_tensor.dtype
             device = input_tensor.device
             if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(shape, dtype, device=device, is_graph_out=False)
-            else:
-                out = torch.empty(shape, dtype=dtype, device=device)
+                out = g_cache_manager.alloc_tensor(shape, dtype, device=device)
+        else:
+            out = torch.empty(shape, dtype=dtype, device=device)
         if bias is None:
             return torch.mm(input_tensor, weight, out=out)
         return torch.addmm(bias, input_tensor, weight, out=out)
 
-    def create_weight(
-        self, out_dim: int, in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
-    ) -> WeightPack:
+    def _create_weight(
+        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> Tuple[WeightPack, List[WeightPack]]:
+        out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype).cuda(device_id)
-        return WeightPack(weight=weight, weight_scale=None, weight_zero_point=None)
+        mm_param = WeightPack(weight=weight, weight_scale=None, weight_zero_point=None)
+        # weight layout is (out_dim, in_dim), so the split dimension is -2.
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=out_dims,
+            weight_split_dim=-2,
+        )
+        return mm_param, mm_param_list
 
-    def weight_need_quanted(self, weight: torch.Tensor) -> bool:
+    def _check_weight_need_quanted(self, weight: torch.Tensor) -> bool:
         return False
 
     def quantize(self, weight: torch.Tensor, output: WeightPack, offset: int = 0) -> None:
@@ -46,7 +58,3 @@ class NoQuantization(QuantizationMethod):
     @property
     def method_name(self):
         return "none"
-
-    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack, start_idx: int = 0) -> None:
-        weight_pack.weight[start_idx : start_idx + weight.shape[0], :].copy_(weight)
-        return

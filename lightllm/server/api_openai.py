@@ -9,6 +9,8 @@ from io import BytesIO
 import pickle
 import uuid
 
+from lightllm.server.reasoning_parser import ReasoningParser
+
 from .function_call_parser import TOOLS_TAG_LIST, FunctionCallParser, ToolCallItem
 from .build_prompt import build_prompt, init_tokenizer
 
@@ -17,7 +19,7 @@ import ujson as json
 from http import HTTPStatus
 from PIL import Image
 import multiprocessing as mp
-from typing import AsyncGenerator, Union, List, Dict
+from typing import Any, AsyncGenerator, Optional, Union, List, Dict
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -79,7 +81,7 @@ def _process_tool_call_id(
         # SGLang sets call_item.tool_index to the *local* position inside that message.
         # Therefore, the index must be corrected by using
         # `history_tool_calls_cnt + call_item.tool_index` to ensure globally unique and properly ordered.
-        tool_call_id = f"functions.{call_item.name}:{history_tool_calls_cnt+call_item.tool_index}"
+        tool_call_id = f"functions.{call_item.name}:{history_tool_calls_cnt + call_item.tool_index}"
         logger.debug(
             f"Process tool call idx, parser: {tool_call_parser}, \
             tool_call_id: {tool_call_id}, \
@@ -107,6 +109,38 @@ def _get_history_tool_calls_cnt(request: ChatCompletionRequest) -> int:
             tool_calls = getattr(msg, "tool_calls", None)
             idx += len(list(tool_calls)) if tool_calls is not None else 0  # noqa
     return idx
+
+
+def _get_reasoning_from_request(request: ChatCompletionRequest) -> bool:
+    """Judge whether the request needs reasoning"""
+    reasoning_parser = get_env_start_args().reasoning_parser
+    if not reasoning_parser:
+        return False
+    if reasoning_parser in ["deepseek-v3"]:
+        return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
+    if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1"]:
+        # qwen3, glm45, nano_v3, and interns1 are reasoning by default
+        return not request.chat_template_kwargs or request.chat_template_kwargs.get("enable_thinking", True) is True
+    return True  # default
+
+
+def _process_reasoning_stream(
+    index: int,
+    delta: str,
+    reasoning_parser_dict: Dict[int, ReasoningParser],
+    content: Dict[str, Any],
+    request: ChatCompletionRequest,
+) -> tuple[Optional[str], str]:
+    """Process reasoning content in streaming response"""
+    if index not in reasoning_parser_dict:
+        request_enable_reasoning = _get_reasoning_from_request(request)
+        reasoning_parser_dict[index] = ReasoningParser(
+            get_env_start_args().reasoning_parser,
+            request.stream_reasoning,
+            request_enable_reasoning,
+        )
+    reasoning_parser = reasoning_parser_dict[index]
+    return reasoning_parser.parse_stream_chunk(delta)
 
 
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
@@ -161,7 +195,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     prompt = await build_prompt(request, tools)
     sampling_params_dict = {
-        "do_sample": True,
+        "do_sample": request.do_sample,
         "presence_penalty": request.presence_penalty,
         "frequency_penalty": request.frequency_penalty,
         "repetition_penalty": request.repetition_penalty,
@@ -175,11 +209,17 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "best_of": request.n,
         "add_special_tokens": False,
     }
+
+    # Structured output handling
     if request.response_format:
-        obj = request.response_format.get("schema")
-        if obj:
-            # guided_json takes str instead of dict obj
-            sampling_params_dict["guided_json"] = json.dumps(obj)
+        if request.response_format.type == "json_schema":
+            obj = request.response_format.json_schema
+            if obj:
+                # guided_json takes str instead of dict obj
+                sampling_params_dict["guided_json"] = json.dumps(obj.json_schema)
+        elif request.response_format.type == "json_object":
+            sampling_params_dict["guided_grammar"] = "json"
+
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
@@ -220,18 +260,39 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             finish_reason = finish_reason_dict[sub_req_id]
             text = "".join(final_output_dict[sub_req_id])
+            full_text = text
+
+            # Handle reasoning content
+            reasoning_text = None
+            reasoning_parser = get_env_start_args().reasoning_parser
+            if reasoning_parser and request.separate_reasoning:
+                request_enable_reasoning = _get_reasoning_from_request(request)
+                try:
+                    parser = ReasoningParser(
+                        model_type=reasoning_parser,
+                        stream_reasoning=False,
+                        force_reasoning=request_enable_reasoning,
+                    )
+                    reasoning_text, text = parser.parse_non_stream(text)
+                except Exception as e:
+                    logger.error(f"Reasoning parsing error: {e}")
+                    return create_error_response(
+                        HTTPStatus.BAD_REQUEST,
+                        "Failed to parse fc related info to json format!",
+                    )
+
+            # Handle tool_calls parsing
             tool_calls = None
             tool_choice = request.tool_choice
             tools = request.tools
-
-            if tool_choice != "none" and any([i in text for i in TOOLS_TAG_LIST]):
+            if tool_choice != "none" and any([i in full_text for i in TOOLS_TAG_LIST]):
                 if finish_reason == "stop":
                     finish_reason = "tool_calls"
                 try:
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                     parser = FunctionCallParser(tools, tool_parser)
-                    full_normal_text, call_info_list = parser.parse_non_stream(text)
+                    full_normal_text, call_info_list = parser.parse_non_stream(full_text)
                     tool_calls = []
                     history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                     for call_info in call_info_list:
@@ -251,7 +312,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     )
             if finish_reason == "tool_calls":
                 text = ""
-            chat_message = ChatMessage(role="assistant", content=text, tool_calls=tool_calls)
+            chat_message = ChatMessage(
+                role="assistant",
+                content=text if text else "",
+                tool_calls=tool_calls,
+                reasoning_content=reasoning_text if reasoning_text else "",
+            )
             choice = ChatCompletionResponseChoice(
                 index=i,
                 message=chat_message,
@@ -267,6 +333,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         return create_error_response(HTTPStatus.BAD_REQUEST, "stream api only support n = 1")
 
     parser_dict = {}
+    reasoning_parser_dict = {}
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -278,12 +345,31 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             prompt_tokens = metadata["prompt_tokens"]
             completion_tokens += 1
-            if request.tool_choice != "none" and request.tools:
-                delta = request_output
-                group_request_id = convert_sub_id_to_group_id(sub_req_id)
-                index = metadata["id"]
-                finish_reason = finish_status.get_finish_reason()
+            group_request_id = convert_sub_id_to_group_id(sub_req_id)
+            index = sub_req_id
+            delta = request_output
+            finish_reason = finish_status.get_finish_reason()
 
+            # Handle reasoning content
+            if get_env_start_args().reasoning_parser and request.separate_reasoning:
+                reasoning_text, delta = _process_reasoning_stream(
+                    index, delta, reasoning_parser_dict, request_output, request
+                )
+                if reasoning_text:
+                    choice_data = ChatCompletionStreamResponseChoice(
+                        index=0,
+                        delta=DeltaMessage(reasoning_content=reasoning_text),
+                        finish_reason=None,
+                    )
+                    chunk = ChatCompletionStreamResponse(
+                        id=group_request_id,
+                        created=created_time,
+                        choices=[choice_data],
+                        model=request.model,
+                    )
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+            if request.tool_choice != "none" and request.tools:
                 if index not in parser_dict:
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
@@ -362,7 +448,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             else:
                 group_request_id = convert_sub_id_to_group_id(sub_req_id)
 
-                delta_message = DeltaMessage(role="assistant", content=request_output)
+                delta_message = DeltaMessage(role="assistant", content=delta)
                 if finish_status.is_finished():
                     finish_reason = finish_status.get_finish_reason()
                 stream_choice = ChatCompletionStreamResponseChoice(
@@ -452,6 +538,15 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
         "best_of": request.best_of,
         "add_special_tokens": False,
     }
+
+    if request.response_format:
+        if request.response_format.type == "json_schema":
+            obj = request.response_format.json_schema
+            if obj:
+                # guided_json takes str instead of dict obj
+                sampling_params_dict["guided_json"] = json.dumps(obj.json_schema)
+        elif request.response_format.type == "json_object":
+            sampling_params_dict["guided_grammar"] = "json"
 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)

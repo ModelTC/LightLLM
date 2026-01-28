@@ -28,7 +28,7 @@ LightLLM支持多种多模态模型的推理，下面以InternVL为例，对多�
 - **LOADWORKER**: 设置模型加载的工作进程数
 
 基础服务参数
-^^^^^^^^^^^
+^^^^^^^^^^^^
 
 - **--port 8080**: API服务器监听端口
 - **--tp 2**: 张量并行度(Tensor Parallelism)

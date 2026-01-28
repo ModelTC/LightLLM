@@ -4,15 +4,21 @@ import numpy as np
 import torch.nn.functional as F
 from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.common.basemodel.layer_weights.meta_weights import LayerNormWeight, COLMMWeight, ROWMMWeight
+from lightllm.common.quantization import Quantcfg
 
 
 class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config, quant_cfg):
+        super().__init__(data_type, network_config)
         self.embed_dim = self.network_config_["hidden_size"]
         self.image_size = self.network_config_["image_size"]
         self.patch_size = self.network_config_["patch_size"]
         self.llm_hidden_size = self.network_config_["llm_hidden_size"]
+        self.downsample_ratio = self.network_config_["downsample_ratio"]
+        self.num_patches = (self.image_size // self.patch_size) ** 2
+        self.num_positions = self.num_patches + 1
+        self.quant_cfg: Quantcfg = quant_cfg
         self._create_weight()
         return
 
@@ -24,23 +30,34 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
 
         # Pre-allocate memory for vision model weights
         self.class_embedding = torch.empty((1, 1, split_embed_dim), dtype=self.data_type_).cuda()
-        self.position_embedding = torch.empty((1, 197, split_embed_dim), dtype=self.data_type_).cuda()  # 197 = (224//16)^2 + 1
-        self.patch_embedding_weight_ = torch.empty((split_embed_dim, 3, self.patch_size, self.patch_size), dtype=self.data_type_).cuda()
+        self.position_embedding = torch.empty((1, self.num_positions, split_embed_dim), dtype=self.data_type_).cuda()
+        self.patch_embedding_weight_ = torch.empty(
+            (split_embed_dim, 3, self.patch_size, self.patch_size), dtype=self.data_type_
+        ).cuda()
         self.patch_embedding_bias_ = torch.empty(split_embed_dim, dtype=self.data_type_).cuda()
 
-        # Pre-allocate memory for adapter weights
-        self.layernorm_weight_ = torch.empty(self.embed_dim, dtype=self.data_type_).cuda()
-        self.layernorm_bias_ = torch.empty(self.embed_dim, dtype=self.data_type_).cuda()
-
-        split_indexes_llm = np.linspace(0, self.llm_hidden_size, self.tp_world_size_ + 1, dtype=np.int64)
-        split_start_llm = split_indexes_llm[self.tp_rank_]
-        split_end_llm = split_indexes_llm[self.tp_rank_ + 1]
-        split_llm_hidden_size = split_end_llm - split_start_llm
-
-        self.mlp1_1_weight_ = torch.empty((self.llm_hidden_size, split_llm_hidden_size), dtype=self.data_type_).cuda()
-        self.mlp1_1_bias_ = torch.empty(split_llm_hidden_size, dtype=self.data_type_).cuda()
-        self.mlp1_3_weight_ = torch.empty((split_llm_hidden_size, self.llm_hidden_size), dtype=self.data_type_).cuda()
-        self.mlp1_3_bias_ = torch.empty(self.llm_hidden_size, dtype=self.data_type_).cuda()
+        self.layernorm_weight_ = LayerNormWeight(
+            dim=self.embed_dim * int(1 / self.downsample_ratio) ** 2,
+            weight_name="mlp1.0.weight",
+            data_type=self.data_type_,
+            bias_name="mlp1.0.bias",
+        )
+        self.mlp1_1_ = ROWMMWeight(
+            in_dim=self.embed_dim * int(1 / self.downsample_ratio) ** 2,
+            out_dims=[self.llm_hidden_size],
+            weight_names=["mlp1.1.weight"],
+            data_type=self.data_type_,
+            bias_names=["mlp1.1.bias"],
+            quant_method=self.quant_cfg.get_quant_method(-1, "mlp1_1"),
+        )
+        self.mlp1_3_ = COLMMWeight(
+            in_dim=self.llm_hidden_size,
+            out_dims=[self.llm_hidden_size],
+            weight_names=["mlp1.3.weight"],
+            data_type=self.data_type_,
+            bias_names=["mlp1.3.bias"],
+            quant_method=self.quant_cfg.get_quant_method(-1, "mlp1_3"),
+        )
         return
 
     def _cuda(self, cpu_tensor):
@@ -64,13 +81,12 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
         return pos_embed
 
     def load_hf_weights(self, weights):
+        super().load_hf_weights(weights)
         split_indexes = np.linspace(0, self.embed_dim, self.tp_world_size_ + 1, dtype=np.int64)
         split_start = split_indexes[self.tp_rank_]
         split_end = split_indexes[self.tp_rank_ + 1]
         if "vision_model.embeddings.class_embedding" in weights:
-            self.class_embedding.copy_(
-                weights["vision_model.embeddings.class_embedding"][:, :, split_start:split_end]
-            )
+            self.class_embedding.copy_(weights["vision_model.embeddings.class_embedding"][:, :, split_start:split_end])
         if "vision_model.embeddings.position_embedding" in weights:
             self.position_embedding.copy_(
                 weights["vision_model.embeddings.position_embedding"][:, :, split_start:split_end]
@@ -83,26 +99,6 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
             self.patch_embedding_bias_.copy_(
                 weights["vision_model.embeddings.patch_embedding.bias"][split_start:split_end]
             )
-
-        if "mlp1.0.weight" in weights:
-            self.layernorm_weight_.copy_(weights["mlp1.0.weight"])
-        if "mlp1.0.bias" in weights:
-            self.layernorm_bias_.copy_(weights["mlp1.0.bias"])
-
-        split_indexes = np.linspace(0, self.llm_hidden_size, self.tp_world_size_ + 1, dtype=np.int64)
-        split_start = split_indexes[self.tp_rank_]
-        split_end = split_indexes[self.tp_rank_ + 1]
-
-        if "mlp1.1.weight" in weights:
-            self.mlp1_1_weight_.copy_(weights["mlp1.1.weight"][split_start:split_end, :].t())
-        if "mlp1.1.bias" in weights:
-            self.mlp1_1_bias_.copy_(weights["mlp1.1.bias"][split_start:split_end])
-
-        if "mlp1.3.weight" in weights:
-            self.mlp1_3_weight_.copy_(weights["mlp1.3.weight"][:, split_start:split_end].t())
-        if "mlp1.3.bias" in weights:
-            self.mlp1_3_bias_.copy_(weights["mlp1.3.bias"])
-
         return
 
     def verify_load(self):

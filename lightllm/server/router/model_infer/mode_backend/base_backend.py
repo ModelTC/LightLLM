@@ -38,6 +38,8 @@ from lightllm.distributed import dist_group_manager
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
+from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
@@ -97,7 +99,6 @@ class ModeBackend:
         # dp_size_in_node 计算兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, self.dp_size // self.nnodes)
         self.load_way = kvargs["load_way"]
-        self.mode = kvargs["mode"]
         self.disable_chunked_prefill = self.args.disable_chunked_prefill
         self.chunked_prefill_size = self.args.chunked_prefill_size
         self.return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
@@ -150,13 +151,15 @@ class ModeBackend:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
             wait_events.append(self.multi_level_cache_module)
 
+        if self.args.enable_multimodal:
+            g_infer_context.init_cpu_embed_cache_client()
+
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
         model_kvargs = {
             "weight_dir": self.weight_dir,
             "max_total_token_num": max_total_token_num,
             "load_way": self.load_way,
-            "mode": self.mode,
             "max_req_num": kvargs.get("max_req_num", 1000),
             "max_seq_length": kvargs.get("max_seq_length", 1024 * 5),
             "is_token_healing": kvargs.get("is_token_healing", False),
@@ -192,6 +195,7 @@ class ModeBackend:
             self.preload_prompt_cache_kv_buffer(model_cfg)
 
         self.logger.info(f"loaded model class {self.model.__class__}")
+
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
@@ -222,7 +226,20 @@ class ModeBackend:
                 [rank for rank in range(self.global_world_size)], backend="nccl"
             )
 
+        if (
+            self.args.run_mode in ["nixl_prefill", "nixl_decode", "prefill", "decode"]
+            or self.args.enable_dp_prompt_cache_fetch
+        ):
+            # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
+            # 读取
+            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+            dist.barrier(group=self.node_nccl_group)
+
         self.init_custom()
+
+        if self.args.enable_dp_prompt_cache_fetch:
+            self.init_dp_kv_shared()
+
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         # 只会在 nixl pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_nixl_trans_io_buffer = ShmObjsIOBuffer(tail_str="nixl")
@@ -241,6 +258,28 @@ class ModeBackend:
 
     def init_custom(self):
         pass
+
+    def init_dp_kv_shared(self):
+        from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
+        from lightllm.common.kv_cache_mem_manager import MemoryManager
+
+        torch.cuda.set_device(get_current_device_id())
+
+        self.dp_kv_shared_module = DPKVSharedMoudle(
+            max_req_num=self.args.running_max_req_size,
+            max_req_seq_len=self.args.max_req_total_len + 8,
+            dp_size_in_node=self.dp_size_in_node,
+            backend=self,
+        )
+
+        # Collect mem_managers from all ranks
+        self.mem_managers = []
+        for rank_idx in range(self.node_world_size):
+            if rank_idx != self.rank_in_node:
+                self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
+            else:
+                self.mem_managers.append(self.model.mem_manager)
+        return
 
     def get_max_total_token_num(self):
         return self.model.mem_manager.size
@@ -261,20 +300,19 @@ class ModeBackend:
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
-        if self.args.mtp_mode == "deepseekv3_vanilla":
+        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
             num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode == "deepseekv3_eagle":
+        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
             num_mtp_modules = 1
         else:
             assert False, f"error mtp mode {self.args.mtp_mode}"
 
         for i in range(num_mtp_modules):
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
+            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
             mtp_model_kvargs = {
-                "weight_dir": self.args.mtp_draft_model_dir,
+                "weight_dir": self.args.mtp_draft_model_dir[i],
                 "max_total_token_num": self.model.mem_manager.size,
                 "load_way": main_kvargs["load_way"],
-                "mode": main_kvargs["mode"],
                 "max_req_num": main_kvargs.get("max_req_num", 1000),
                 "max_seq_length": main_kvargs.get("max_seq_length", 1024 * 5),
                 "is_token_healing": False,
@@ -290,13 +328,21 @@ class ModeBackend:
                 "quant_cfg": main_kvargs.get("quant_cfg", None),
                 "run_mode": "normal",
                 "main_model": self.model,
-                "mem_layer_start": self.model.config["num_hidden_layers"] + i * mtp_model_cfg["num_hidden_layers"],
+                "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir)
-            assert mtp_model_cfg["model_type"] == "deepseek_v3"
-            assert mtp_model_cfg["architectures"][0] == "DeepseekV3ForCausalLMNextN"
-            self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
+            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
+            if mtp_model_cfg["model_type"] == "deepseek_v3":
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
+            elif mtp_model_cfg["model_type"] == "qwen3_moe":
+                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
+                self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
+            elif mtp_model_cfg["model_type"] == "mistral":
+                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
+                self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
+            else:
+                assert False, f"error mtp mode {mtp_model_cfg['model_type']}"
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
@@ -440,11 +486,8 @@ class ModeBackend:
         # Create bucket and reconstruct tensors
         bucket = FlattenedTensorBucket(flattened_tensor=flattened_tensor, metadata=converted_metadata)
         reconstructed_tensors = bucket.reconstruct_tensors()
-        
-        named_tensors = {
-                name: tensor
-                for name, tensor in reconstructed_tensors
-            }
+
+        named_tensors = {name: tensor for name, tensor in reconstructed_tensors}
 
         # Load the reconstructed tensors using the standard method
         self.model.load_weights(named_tensors)
@@ -456,7 +499,9 @@ class ModeBackend:
             monkey_patch_torch_reductions()
             if request.load_format == "flattened_bucket":
                 # Handle flattened bucket format
-                serialized_named_tensors = MultiprocessingSerializer.deserialize(request.serialized_named_tensors[self.rank_in_dp])
+                serialized_named_tensors = MultiprocessingSerializer.deserialize(
+                    request.serialized_named_tensors[self.rank_in_dp]
+                )
                 return self._update_weights_from_flattened_bucket(flattened_tensor_bucket_dict=serialized_named_tensors)
 
             # We need to get device after patch otherwise the device would be wrong
@@ -469,7 +514,7 @@ class ModeBackend:
                 if isinstance(tensor, LocalSerializedTensor):
                     tensor = tensor.get(tp_rank)
                 clone = tensor.to(device).clone()
-                del tensor # free the ipc tensor
+                del tensor  # free the ipc tensor
                 return clone
 
             named_tensors = {

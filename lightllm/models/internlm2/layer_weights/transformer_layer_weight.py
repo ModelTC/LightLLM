@@ -2,8 +2,8 @@ from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTr
 
 
 class Internlm2TransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
     def load_hf_weights(self, weights):
@@ -20,6 +20,10 @@ class Internlm2TransformerLayerWeight(LlamaTransformerLayerWeight):
             weights[self._v_weight_name] = v_weight_
             del weights[qkv_weight_name]
         super().load_hf_weights(weights)
+
+    def _parse_config(self):
+        super()._parse_config()
+        self.n_kv_head = self.network_config_["num_key_value_heads"]
 
     def _init_weight_names(self):
         super()._init_weight_names()

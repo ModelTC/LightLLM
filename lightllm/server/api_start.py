@@ -108,6 +108,9 @@ def _launch_subprocesses(args: StartArgs):
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
 
+    if args.enable_multimodal:
+        args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
+
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
     # 确保单机上多实列不冲突
     if args.zmq_mode == "ipc:///tmp/":
@@ -145,21 +148,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.return_all_prompt_logprobs:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-    if "offline_calibration_fp8kv" in args.mode:
-        assert args.enable_fa3 is True or (
-            args.enable_flashinfer_prefill is True and args.enable_flashinfer_decode is True
-        ), (
-            "offline_calibration_fp8kv mode need enable fa3 or flashinfer, add --enable_fa3 or "
-            "--enable_flashinfer_prefill and --enable_flashinfer_decode"
-        )
-    if "export_fp8kv_calibration" in args.mode:
-        assert args.enable_fa3 is True or (
-            args.enable_flashinfer_prefill is True and args.enable_flashinfer_decode is True
-        ), (
-            "export_fp8kv_calibration mode need enable fa3 or flashinfer, add --enable_fa3 or "
-            "--enable_flashinfer_prefill and --enable_flashinfer_decode"
-        )
-        assert args.disable_cudagraph is True, "export_fp8kv_calibration mode need disable cudagraph"
 
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
@@ -190,6 +178,9 @@ def _launch_subprocesses(args: StartArgs):
     if args.visual_dp <= 0:
         raise ValueError("visual_dp must be a positive integer.")
 
+    if args.visual_infer_batch_size is None:
+        args.visual_infer_batch_size = args.visual_dp
+
     # 检查visual_infer_batch_size是否合理
     if args.visual_infer_batch_size // args.visual_dp < 1 or args.visual_infer_batch_size % args.visual_dp != 0:
         raise ValueError(
@@ -203,15 +194,18 @@ def _launch_subprocesses(args: StartArgs):
         if args.batch_max_tokens is None:
             args.batch_max_tokens = args.max_req_total_len
         else:
-            assert args.batch_max_tokens >= args.max_req_total_len, "batch_max_tokens must >= max_req_total_len"
+            assert args.batch_max_tokens >= args.max_req_total_len, f"batch_max_tokens must >= max_req_total_len"
+            f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
     else:
         # chunked 模式下
         if args.batch_max_tokens is None:
-            args.batch_max_tokens = min(args.max_req_total_len, 2 * args.chunked_prefill_size + 256)
-
+            args.batch_max_tokens = 16384 // args.dp
+        if args.chunked_prefill_size is None:
+            args.chunked_prefill_size = args.batch_max_tokens // 2
         assert (
             args.batch_max_tokens >= args.chunked_prefill_size
-        ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size"
+        ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
+        f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -231,9 +225,11 @@ def _launch_subprocesses(args: StartArgs):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    already_uesd_ports = [args.nccl_port, args.port]
-    if args.run_mode == "decode":
-        already_uesd_ports = [args.nccl_port, args.port, args.pd_decode_rpyc_port]
+    already_uesd_ports = [args.port]
+    if args.nccl_port is not None:
+        already_uesd_ports.append(args.nccl_port)
+    if args.pd_decode_rpyc_port is not None:
+        already_uesd_ports.append(args.pd_decode_rpyc_port)
 
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
@@ -242,10 +238,11 @@ def _launch_subprocesses(args: StartArgs):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=9 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp, used_nccl_ports=already_uesd_ports
+        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
+        nccl_port,
         router_port,
         router_rpc_port,
         detokenization_port,
@@ -255,19 +252,25 @@ def _launch_subprocesses(args: StartArgs):
         cache_port,
         metric_port,
         multi_level_kv_cache_port,
-    ) = can_use_ports[0:9]
-    can_use_ports = can_use_ports[9:]
+        pd_decode_rpyc_port,
+    ) = can_use_ports[0:10]
+    can_use_ports = can_use_ports[10:]
 
     visual_model_tp_ports = []
     visual_nccl_ports = []
     for _ in range(args.visual_dp):
         tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
-        visual_nccl_ports.append(can_use_ports[args.visual_tp])
-        can_use_ports = can_use_ports[args.visual_tp + 1 :]
         visual_model_tp_ports.append(tp_ports_for_dp)
+        can_use_ports = can_use_ports[args.visual_tp :]
+        visual_nccl_ports.append(can_use_ports[0])
+        can_use_ports = can_use_ports[1:]
 
     args.visual_nccl_ports = visual_nccl_ports
     # 将申请好的端口放入args参数中
+    if args.nccl_port is None:
+        args.nccl_port = nccl_port
+    if args.pd_decode_rpyc_port is None:
+        args.pd_decode_rpyc_port = pd_decode_rpyc_port
     args.router_port = router_port
     args.router_rpc_port = router_rpc_port
     args.detokenization_port = detokenization_port
@@ -277,7 +280,7 @@ def _launch_subprocesses(args: StartArgs):
     args.cache_port = cache_port
     args.metric_port = metric_port
     args.multi_level_kv_cache_port = multi_level_kv_cache_port
-
+    args.visual_nccl_ports = visual_nccl_ports
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
@@ -291,6 +294,14 @@ def _launch_subprocesses(args: StartArgs):
         args.router_max_wait_tokens = 0
 
     send_and_receive_node_ip(args)  # 多机用于收发node ip
+    # dp 必须 > 1
+    if args.enable_dp_prompt_cache_fetch and args.dp <= 1:
+        args.enable_dp_prompt_cache_fetch = False
+        logger.warning(
+            """dp <= 1 does not support dp_prompt_cache_fetch;
+            overriding enable_dp_prompt_cache_fetch to False"""
+        )
+
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
 

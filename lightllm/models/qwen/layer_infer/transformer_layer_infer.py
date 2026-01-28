@@ -1,7 +1,4 @@
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
 from typing import Tuple
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -12,8 +9,8 @@ from lightllm.models.qwen.infer_struct import QwenInferStateInfo
 class QwenTransformerLayerInfer(LlamaTransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         return
 
     def _get_qkv(self, input_emb, infer_state: QwenInferStateInfo, layer_weight: QwenTransformerLayerWeight):

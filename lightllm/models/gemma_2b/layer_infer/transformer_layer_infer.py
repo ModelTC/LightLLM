@@ -16,8 +16,8 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 class Gemma_2bTransformerLayerInfer(LlamaTransformerLayerInfer):
     """ """
 
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         self.tp_k_head_num_ = network_config["num_key_value_heads"]  # [SYM] always == 1
         self.tp_v_head_num_ = network_config["num_key_value_heads"]
         return

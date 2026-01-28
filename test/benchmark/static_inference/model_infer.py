@@ -41,7 +41,11 @@ def test_model_inference(args):
             "run_mode": "normal",
             "max_seq_length": args.max_req_total_len,
             "disable_cudagraph": args.disable_cudagraph,
-            "mode": args.mode,
+            "llm_prefill_att_backend": args.llm_prefill_att_backend,
+            "llm_decode_att_backend": args.llm_decode_att_backend,
+            "vit_att_backend": args.vit_att_backend,
+            "llm_kv_type": args.llm_kv_type,
+            "llm_kv_quant_group_size": args.llm_kv_quant_group_size,
         }
         proc = multiprocessing.Process(
             target=tppart_model_infer,
@@ -73,7 +77,6 @@ def overlap_prefill(
 ):
     _0_batch_size = batch_size // 2
     _0_total_token_num = total_token_num // 2
-    _0_max_len_in_batch = max_len_in_batch
     _0_input_ids = input_ids[: total_token_num // 2]
     _0_mem_indexes = mem_indexes[: total_token_num // 2]
     _0_b_req_idx = b_req_idx[: batch_size // 2]
@@ -83,20 +86,18 @@ def overlap_prefill(
     micro_batch1 = ModelInput(
         batch_size=_0_batch_size,
         total_token_num=_0_total_token_num,
-        max_len_in_batch=_0_max_len_in_batch,
         input_ids=_0_input_ids,
         b_req_idx=_0_b_req_idx,
         b_mtp_index=_0_b_mtp_index,
         b_seq_len=_0_b_seq_len,
         is_prefill=True,
         b_ready_cache_len=_o_b_ready_cache_len,
-        multimodal_params={},
+        multimodal_params=[{"images": [], "audios": []} for _ in range(_0_batch_size)],
         mem_indexes_cpu=_0_mem_indexes,
     )
 
     _1_batch_size = batch_size - batch_size // 2
     _1_total_token_num = total_token_num - total_token_num // 2
-    _1_max_len_in_batch = max_len_in_batch
     _1_input_ids = input_ids[total_token_num // 2 :]
     _1_mem_indexes = mem_indexes[total_token_num // 2 :]
     _1_b_req_idx = b_req_idx[batch_size // 2 :]
@@ -107,14 +108,13 @@ def overlap_prefill(
     micro_batch2 = ModelInput(
         batch_size=_1_batch_size,
         total_token_num=_1_total_token_num,
-        max_len_in_batch=_1_max_len_in_batch,
         input_ids=_1_input_ids,
         b_req_idx=_1_b_req_idx,
         b_mtp_index=_1_b_mtp_index,
         b_seq_len=_1_b_seq_len,
         is_prefill=True,
         b_ready_cache_len=_1_b_ready_cache_len,
-        multimodal_params={},
+        multimodal_params=[{"images": [], "audios": []} for _ in range(_1_batch_size)],
         mem_indexes_cpu=_1_mem_indexes,
     )
 
@@ -129,7 +129,6 @@ def overlap_decode(
 ):
     _0_batch_size = batch_size // 2
     _0_total_token_num = total_token_num // 2
-    _0_max_len_in_batch = max_len_in_batch
     _0_input_ids = input_ids[: batch_size // 2]
     _0_mem_indexes = mem_indexes[: batch_size // 2]
     _0_b_req_idx = b_req_idx[: batch_size // 2]
@@ -138,17 +137,16 @@ def overlap_decode(
     micro_batch1 = ModelInput(
         batch_size=_0_batch_size,
         total_token_num=_0_total_token_num,
-        max_len_in_batch=_0_max_len_in_batch,
         input_ids=_0_input_ids,
         b_req_idx=_0_b_req_idx,
         b_mtp_index=_0_b_mtp_index,
         b_seq_len=_0_b_seq_len,
         mem_indexes_cpu=_0_mem_indexes,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(_0_batch_size)],
     )
 
     _1_batch_size = batch_size - batch_size // 2
     _1_total_token_num = total_token_num - total_token_num // 2
-    _1_max_len_in_batch = max_len_in_batch
     _1_input_ids = input_ids[batch_size // 2 :]
     _1_mem_indexes = mem_indexes[batch_size // 2 :]
     _1_b_req_idx = b_req_idx[batch_size // 2 :]
@@ -158,12 +156,12 @@ def overlap_decode(
     micro_batch2 = ModelInput(
         batch_size=_1_batch_size,
         total_token_num=_1_total_token_num,
-        max_len_in_batch=_1_max_len_in_batch,
         input_ids=_1_input_ids,
         b_req_idx=_1_b_req_idx,
         b_mtp_index=_1_b_mtp_index,
         b_seq_len=_1_b_seq_len,
         mem_indexes_cpu=_1_mem_indexes,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(_1_batch_size)],
     )
 
     output, output1 = model_part.microbatch_overlap_decode(micro_batch1, micro_batch2)
@@ -189,7 +187,6 @@ def prefill(
     model_input = ModelInput(
         batch_size=batch_size,
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_len_in_batch,
         max_kv_seq_len=max_len_in_batch,
         max_cache_len=0,
@@ -202,6 +199,7 @@ def prefill(
         b_ready_cache_len=b_ready_cache_len,  # b_ready_cache_len
         b_prefill_start_loc=b_prefill_start_loc,
         prefix_total_token_num=0,  # the default kvcache len is zero.
+        multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
     )
 
     model_output = model_part.forward(model_input)
@@ -214,7 +212,6 @@ def decode(
     model_input = ModelInput(
         batch_size=batch_size,
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=1,
         max_kv_seq_len=max_len_in_batch,
         input_ids=input_ids,
@@ -223,6 +220,7 @@ def decode(
         b_mtp_index=b_mtp_index,
         mem_indexes_cpu=mem_indexes,
         is_prefill=False,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
     )
     model_output = model_part.forward(model_input)
     return model_output.logits

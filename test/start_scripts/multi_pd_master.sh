@@ -6,7 +6,7 @@ python -m lightllm.server.api_server --model_dir /mtc/models/DeepSeek-V2-Lite-Ch
 python -m lightllm.server.api_server --model_dir /mtc/models/DeepSeek-V2-Lite-Chat --run_mode "pd_master" --host 10.120.114.74 --port 60012 --config_server_host 10.120.114.74 --config_server_port 60088
 
 nvidia-cuda-mps-control -d 
-CUDA_VISIBLE_DEVICES=0 KV_TRANS_USE_P2P=1 LOADWORKER=1 python -m lightllm.server.api_server --model_dir /mtc/models/DeepSeek-V2-Lite-Chat \
+CUDA_VISIBLE_DEVICES=0 LOADWORKER=1 python -m lightllm.server.api_server --model_dir /mtc/models/DeepSeek-V2-Lite-Chat \
 --run_mode "prefill" \
 --host 10.120.178.74 \
 --port 8019 \
@@ -20,7 +20,7 @@ CUDA_VISIBLE_DEVICES=0 KV_TRANS_USE_P2P=1 LOADWORKER=1 python -m lightllm.server
 --config_server_host 10.120.114.74 \
 --config_server_port 60088
 
-CUDA_VISIBLE_DEVICES=1 KV_TRANS_USE_P2P=1 LOADWORKER=10 python -m lightllm.server.api_server --model_dir /mtc/models/DeepSeek-V2-Lite-Chat \
+CUDA_VISIBLE_DEVICES=1 LOADWORKER=10 python -m lightllm.server.api_server --model_dir /mtc/models/DeepSeek-V2-Lite-Chat \
 --run_mode "decode" \
 --host 10.120.178.74 \
 --port 8121 \

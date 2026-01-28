@@ -1,8 +1,9 @@
 import time
-
-from pydantic import BaseModel, Field, field_validator
-from typing import Dict, List, Optional, Union, Literal
 import uuid
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
+from transformers import GenerationConfig
 
 
 class ImageURL(BaseModel):
@@ -23,9 +24,10 @@ class Message(BaseModel):
 class Function(BaseModel):
     """Function descriptions."""
 
-    description: Optional[str] = Field(default=None, examples=[None])
     name: Optional[str] = None
-    parameters: Optional[object] = None
+    description: Optional[str] = Field(default=None, examples=[None])
+    parameters: Optional[dict] = None
+    response: Optional[dict] = None
 
 
 class Tool(BaseModel):
@@ -52,65 +54,19 @@ class StreamOptions(BaseModel):
     include_usage: Optional[bool] = False
 
 
-class CompletionRequest(BaseModel):
-    model: str
-    # prompt: string or tokens
-    prompt: Union[str, List[str], List[int], List[List[int]]]
-    suffix: Optional[str] = None
-    max_tokens: Optional[int] = 16
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
-    n: Optional[int] = 1
-    stream: Optional[bool] = False
-    stream_options: Optional[StreamOptions] = None
-    logprobs: Optional[int] = None
-    echo: Optional[bool] = False
-    stop: Optional[Union[str, List[str]]] = None
-    presence_penalty: Optional[float] = 0.0
-    frequency_penalty: Optional[float] = 0.0
-    best_of: Optional[int] = 1
-    logit_bias: Optional[Dict[str, float]] = None
-    user: Optional[str] = None
-
-    # Additional parameters supported by LightLLM
-    do_sample: Optional[bool] = False
-    top_k: Optional[int] = -1
-    repetition_penalty: Optional[float] = 1.0
-    ignore_eos: Optional[bool] = False
+class JsonSchemaResponseFormat(BaseModel):
+    name: str
+    description: Optional[str] = None
+    # schema is the field in openai but that causes conflicts with pydantic so
+    # instead use json_schema with an alias
+    json_schema: Optional[dict[str, Any]] = Field(default=None, alias="schema")
+    strict: Optional[bool] = None
 
 
-class ChatCompletionRequest(BaseModel):
-    model: str
-    messages: List[Message]
-    function_call: Optional[str] = "none"
-    temperature: Optional[float] = 1
-    top_p: Optional[float] = 1.0
-    n: Optional[int] = 1
-    stream: Optional[bool] = False
-    stream_options: Optional[StreamOptions] = None
-    stop: Optional[Union[str, List[str]]] = None
-    max_tokens: Optional[int] = 16
-    presence_penalty: Optional[float] = 0.0
-    frequency_penalty: Optional[float] = 0.0
-    logit_bias: Optional[Dict[str, float]] = None
-    user: Optional[str] = None
-    response_format: Optional[Dict] = None
-
-    # OpenAI Adaptive parameters for tool call
-    tools: Optional[List[Tool]] = Field(default=None, examples=[None])
-    tool_choice: Union[ToolChoice, Literal["auto", "required", "none"]] = Field(
-        default="auto", examples=["none"]
-    )  # noqa
-    parallel_tool_calls: Optional[bool] = True
-
-    # Additional parameters supported by LightLLM
-    do_sample: Optional[bool] = False
-    top_k: Optional[int] = -1
-    repetition_penalty: Optional[float] = 1.0
-    ignore_eos: Optional[bool] = False
-    role_settings: Optional[Dict[str, str]] = None
-    character_settings: Optional[List[Dict[str, str]]] = None
-    chat_template_kwargs: Optional[Dict[str, bool]] = None
+class ResponseFormat(BaseModel):
+    # type must be "json_schema", "json_object", or "text"
+    type: Literal["text", "json_object", "json_schema"]
+    json_schema: Optional[JsonSchemaResponseFormat] = None
 
 
 class FunctionResponse(BaseModel):
@@ -153,6 +109,150 @@ class ChatCompletionMessageGenericParam(BaseModel):
 ChatCompletionMessageParam = Union[ChatCompletionMessageGenericParam, Message]
 
 
+class CompletionRequest(BaseModel):
+    model: str
+    # prompt: string or tokens
+    prompt: Union[str, List[str], List[int], List[List[int]]]
+    suffix: Optional[str] = None
+    max_tokens: Optional[int] = 8192
+    temperature: Optional[float] = 1.0
+    top_p: Optional[float] = 1.0
+    n: Optional[int] = 1
+    stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
+    logprobs: Optional[int] = None
+    echo: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    best_of: Optional[int] = 1
+    logit_bias: Optional[Dict[str, float]] = None
+    user: Optional[str] = None
+    response_format: Optional[ResponseFormat] = Field(
+        default=None,
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", or {'type': 'text' } is supported."
+        ),
+    )
+
+    # Additional parameters supported by LightLLM
+    do_sample: Optional[bool] = True
+    top_k: Optional[int] = -1
+    repetition_penalty: Optional[float] = 1.0
+    ignore_eos: Optional[bool] = False
+
+    # Class variables to store loaded default values
+    _loaded_defaults: ClassVar[Dict[str, Any]] = {}
+
+    @classmethod
+    def load_generation_cfg(cls, weight_dir: str):
+        """Load default values from model generation config."""
+        try:
+            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            cls._loaded_defaults = {
+                "do_sample": generation_cfg.get("do_sample", True),
+                "presence_penalty": generation_cfg.get("presence_penalty", 0.0),
+                "frequency_penalty": generation_cfg.get("frequency_penalty", 0.0),
+                "repetition_penalty": generation_cfg.get("repetition_penalty", 1.0),
+                "temperature": generation_cfg.get("temperature", 1.0),
+                "top_p": generation_cfg.get("top_p", 1.0),
+                "top_k": generation_cfg.get("top_k", -1),
+            }
+            # Remove None values
+            cls._loaded_defaults = {k: v for k, v in cls._loaded_defaults.items() if v is not None}
+        except Exception:
+            pass
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_loaded_defaults(cls, data: Any):
+        """Apply loaded default values if field is not provided."""
+        if isinstance(data, dict) and cls._loaded_defaults:
+            for key, value in cls._loaded_defaults.items():
+                if key not in data:
+                    data[key] = value
+        return data
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str
+    messages: List[ChatCompletionMessageParam]
+    function_call: Optional[str] = "none"
+    temperature: Optional[float] = 1
+    top_p: Optional[float] = 1.0
+    n: Optional[int] = 1
+    stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
+    stop: Optional[Union[str, List[str]]] = None
+    max_tokens: Optional[int] = 8192
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    logit_bias: Optional[Dict[str, float]] = None
+    user: Optional[str] = None
+    response_format: Optional[ResponseFormat] = Field(
+        default=None,
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", or {'type': 'text' } is supported."
+        ),
+    )
+
+    # OpenAI Adaptive parameters for tool call
+    tools: Optional[List[Tool]] = Field(default=None, examples=[None])
+    tool_choice: Union[ToolChoice, Literal["auto", "required", "none"]] = Field(
+        default="auto", examples=["none"]
+    )  # noqa
+    parallel_tool_calls: Optional[bool] = True
+
+    # OpenAI parameters for reasoning and others
+    chat_template_kwargs: Optional[Dict] = None
+    separate_reasoning: Optional[bool] = True
+    stream_reasoning: Optional[bool] = False
+
+    # Additional parameters supported by LightLLM
+    do_sample: Optional[bool] = True
+    top_k: Optional[int] = -1
+    repetition_penalty: Optional[float] = 1.0
+    ignore_eos: Optional[bool] = False
+    role_settings: Optional[Dict[str, str]] = None
+    character_settings: Optional[List[Dict[str, str]]] = None
+
+    # Class variables to store loaded default values
+    _loaded_defaults: ClassVar[Dict[str, Any]] = {}
+
+    @classmethod
+    def load_generation_cfg(cls, weight_dir: str):
+        """Load default values from model generation config."""
+        try:
+            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            cls._loaded_defaults = {
+                "do_sample": generation_cfg.get("do_sample", True),
+                "presence_penalty": generation_cfg.get("presence_penalty", 0.0),
+                "frequency_penalty": generation_cfg.get("frequency_penalty", 0.0),
+                "repetition_penalty": generation_cfg.get("repetition_penalty", 1.0),
+                "temperature": generation_cfg.get("temperature", 1.0),
+                "top_p": generation_cfg.get("top_p", 1.0),
+                "top_k": generation_cfg.get("top_k", -1),
+            }
+            # Remove None values
+            cls._loaded_defaults = {k: v for k, v in cls._loaded_defaults.items() if v is not None}
+        except Exception:
+            pass
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_loaded_defaults(cls, data: Any):
+        """Apply loaded default values if field is not provided."""
+        if isinstance(data, dict) and cls._loaded_defaults:
+            for key, value in cls._loaded_defaults.items():
+                if key not in data:
+                    data[key] = value
+        return data
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: Optional[int] = 0
@@ -160,8 +260,9 @@ class UsageInfo(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    role: str
-    content: str
+    role: Optional[str] = None
+    content: Optional[str] = None
+    reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
 
@@ -188,12 +289,13 @@ class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+    reasoning_content: Optional[str] = None
 
 
 class ChatCompletionStreamResponseChoice(BaseModel):
     index: int
     delta: DeltaMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):

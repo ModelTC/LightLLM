@@ -13,6 +13,7 @@ from lightllm.server.core.objs import ShmReqManager, StartArgs
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from .model_infer.model_rpc import start_model_process, VisualModelRpcClient
+from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
@@ -57,12 +58,13 @@ class VisualManager:
         self.trust_remote_code = args.trust_remote_code
         self.args = args
         self.visual_model_rpc_ports = visual_model_rpc_ports
+        self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
 
     async def wait_to_model_ready(self):
 
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
-
+        self.vit_attn_backend = init_vit_att_backend(index=0)
         for dp_rank_id in range(self.vit_dp):
             tp_ports_each_dp = self.visual_model_rpc_ports[dp_rank_id]
             for tp_rank_id in range(self.vit_tp):
@@ -90,6 +92,7 @@ class VisualManager:
                     "quant_type": self.args.vit_quant_type,
                     "quant_cfg": self.args.vit_quant_cfg,
                     "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
+                    "vit_attn_backend": self.vit_attn_backend,
                 }
                 init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)
@@ -117,6 +120,18 @@ class VisualManager:
             else:
                 processing_group_reqs = []
                 images_need_infer = []
+                ready_to_send = []
+
+                def flush_ready(force: bool = False):
+                    if not ready_to_send:
+                        return
+                    if not force and len(ready_to_send) < self.send_batch_size:
+                        return
+
+                    for group_req_indexes in ready_to_send:
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                    ready_to_send.clear()
+
                 while len(self.waiting_reqs) > 0:
                     group_req_indexes = self.waiting_reqs.pop(0)
                     shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
@@ -146,23 +161,24 @@ class VisualManager:
                         if len(images_need_infer) == self.infer_batch_size:
                             await self.infer_imgs(images_need_infer)
                             images_need_infer = []
-                            for _group_req_indexes in processing_group_reqs:
-                                self.send_to_next_module.send_pyobj(
-                                    _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
-                                )
+                            ready_to_send.extend(processing_group_reqs)
                             processing_group_reqs = []
+                            flush_ready(force=False)
 
                     if len(images_need_infer) == 0:
-                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        ready_to_send.append(group_req_indexes)
+                        flush_ready(force=False)
                     else:
                         processing_group_reqs.append(group_req_indexes)
 
                 if len(images_need_infer) > 0:
                     await self.infer_imgs(images_need_infer)
-                    for _group_req_indexes in processing_group_reqs:
-                        self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-                    processing_group_reqs = []
                     images_need_infer = []
+
+                    # 这些处理完 image 的 group 也 ready 了
+                    ready_to_send.extend(processing_group_reqs)
+                    processing_group_reqs = []
+                flush_ready(force=True)
 
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):

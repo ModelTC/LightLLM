@@ -7,7 +7,7 @@ from .nixl_params import NIXLParamObj
 
 _SAMPLING_EPS = 1e-5
 DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in ["ON", "TRUE", "1"]
-SKIP_SPECIAL_TOKENS = os.getenv("SKIP_SPECIAL_TOKENS", "True").upper() in ["ON", "TRUE", "1"]
+SKIP_SPECIAL_TOKENS = os.getenv("SKIP_SPECIAL_TOKENS", "False").upper() in ["ON", "TRUE", "1"]
 
 # 从环境变量获取最大长度限制
 STOP_SEQUENCE_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_MAX_LENGTH", 256))
@@ -142,7 +142,7 @@ class GuidedGrammar(ctypes.Structure):
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
         try:
-            if self.length > 0 and tokenizer is not None:
+            if self.length > 0 and tokenizer is not None and constraint != "json":
                 import xgrammar as xgr
 
                 tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)

@@ -14,7 +14,7 @@ import inspect
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Union, List, Tuple, Dict, Optional, Literal
+from typing import Union, List, Tuple, Dict, Optional, AsyncGenerator
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
@@ -158,11 +158,18 @@ class HttpServerManager:
                 await asyncio.sleep(0.1)
                 continue
 
+            if isinstance(records, str) and "error" in records:
+                logger.error(str(records) + "and try to set --embed_cache_storage_size bigger")
+                raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
+
             uid_list = []
             for item, rec in zip(items, records):
+                item: Union[ImageItem, AudioItem] = item
                 item.uuid = rec["id"]
                 item.token_id = rec["token_id"]
                 item.token_num = rec["token_num"]
+                item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
+
                 uid_list.append(rec["id"])
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
@@ -220,6 +227,7 @@ class HttpServerManager:
                         img.uuid = None
                         img.token_id = None
                         img.token_num = None
+                        img.start_index_in_embed_cache = None
                 for audio in multimodal_params.audios:
                     if audio.uuid is not None:
                         ids_to_release.append(audio.uuid)
@@ -227,6 +235,7 @@ class HttpServerManager:
                         audio.uuid = None
                         audio.token_id = None
                         audio.token_num = None
+                        audio.start_index_in_embed_cache = None
                 if ids_to_release:
                     self.cache_client.root.release(ids_to_release)
         return
@@ -313,7 +322,7 @@ class HttpServerManager:
         nixl_pd_upload_websocket: ClientConnection = None,
         # 用于等待 pd_master 下发的交换信息
         nixl_pd_event: asyncio.Event = None,
-    ) -> Tuple[int, str, dict, FinishStatus]:
+    ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)
@@ -598,6 +607,7 @@ class HttpServerManager:
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
+        sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
@@ -626,6 +636,9 @@ class HttpServerManager:
 
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
+                    disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
+                    sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
                         is_first_token = False
@@ -648,9 +661,11 @@ class HttpServerManager:
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
                         x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                        cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
+                        disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
 
                         mtp_avg_token_per_step = out_token_counter / max(
-                            (out_token_counter - metadata["mtp_accepted_token_num"]), 1
+                            (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
                         )
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
@@ -660,10 +675,15 @@ class HttpServerManager:
                             f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
                             f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
                             f"prompt_token_num:{prompt_tokens} "
-                            f"prompt_cache_len:{prompt_cache_len} "
-                            f"prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"gpu cache hit: {prompt_cache_len > 0} "
+                            f"gpu_prompt_cache_len:{prompt_cache_len} "
+                            f"gpu_prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"cpu cache hit: {cpu_prompt_cache_len > 0} "
                             f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
-                            f"used_cpu_prompt_cache_len:{max(0, cpu_prompt_cache_len - prompt_cache_len)} "
+                            f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
+                            f"disk cache hit: {disk_prompt_cache_len > 0} "
+                            f"disk_prompt_cache_len:{disk_prompt_cache_len} "
+                            f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
                         if group_request_id < 0:
@@ -682,6 +702,9 @@ class HttpServerManager:
                         )
                         self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
                         self.metric_client.counter_inc("lightllm_request_success")
+                        self.metric_client.histogram_observe(
+                            "lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step
+                        )
 
                         return
                 req_status.out_token_info_list.clear()

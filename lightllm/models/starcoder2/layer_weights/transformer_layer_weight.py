@@ -3,8 +3,8 @@ from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTr
 
 
 class Starcoder2TransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
     def _parse_config(self):
@@ -28,18 +28,18 @@ class Starcoder2TransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_ffn(self):
         self.up_proj = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_inter],
             weight_names=self._up_weight_name,
             data_type=self.data_type_,
             bias_names=self._up_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="up_proj",
+            quant_method=self.get_quant_method("up_proj"),
         )
         self.down_proj = COLMMWeight(
+            in_dim=self.n_inter,
+            out_dims=[self.n_embed],
             weight_names=self._down_weight_name,
             data_type=self.data_type_,
             bias_names=self._down_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="down_proj",
+            quant_method=self.get_quant_method("down_proj"),
         )

@@ -9,9 +9,10 @@ from io import BytesIO
 from typing import List, Union
 from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
-from lightllm.server.embed_cache.utils import tensor2bytes, read_shm, create_shm, get_shm_name_data, get_shm_name_embed
+from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.multimodal_params import AudioItem
 from rpyc.utils.classic import obtain
+from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
@@ -161,13 +162,18 @@ class WhisperAudioModel:
         x = F.linear(x, weight=self.projector_weights["mlp2.3.weight"], bias=self.projector_weights["mlp2.3.bias"])
         return x
 
-    def encode(self, audio_items: List[AudioItem]):
+    def encode(self, audio_items: List[AudioItem], cpu_embed_cache_client: CpuEmbedCacheClient):
+        # 每个元素是一个chunk
         batch_audios = []
-        batch_audio_lens = np.zeros(len(audio_items), dtype=np.int32)
+        batch_audio_lens = []
         uuids = []
+        items: List[AudioItem] = []
+        # 记录每个chunk属于哪个audio_items下标
+        chunk_owner_index = []
         for i, item in enumerate(audio_items):
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
+                items.append(item)
                 audio_data = read_shm(get_shm_name_data(item.uuid))
                 audio = BytesIO(audio_data)
                 audio, _ = librosa.load(audio, sr=16000)
@@ -180,8 +186,25 @@ class WhisperAudioModel:
             if audio.shape[0] < MIN_AUDIO_LEN:
                 audio = np.pad(audio, (0, MIN_AUDIO_LEN - len(audio)), mode="constant", constant_values=0.0)
 
-            batch_audio_lens[i] = min(audio.shape[0], self.max_length)
-            batch_audios.append(audio)
+            if audio.shape[0] > self.max_length:
+                start = 0
+                while start < audio.shape[0]:
+                    end = min(start + self.max_length, audio.shape[0])
+                    chunk = audio[start:end]
+
+                    if chunk.shape[0] < MIN_AUDIO_LEN:
+                        chunk = np.pad(chunk, (0, MIN_AUDIO_LEN - chunk.shape[0]), mode="constant", constant_values=0.0)
+                    batch_audios.append(chunk)
+                    batch_audio_lens.append(min(chunk.shape[0], self.max_length))
+                    chunk_owner_index.append(i)
+
+                    start = end
+            else:
+                batch_audio_lens.append(min(audio.shape[0], self.max_length))
+                batch_audios.append(audio)
+                chunk_owner_index.append(i)
+
+        batch_audio_lens = np.array(batch_audio_lens, dtype=np.int32)
 
         audios, audio_lens_after_cnn = self.audio_processor(
             batch_audios, batch_audio_lens, sampling_rate=16000, return_tensors="pt"
@@ -190,13 +213,31 @@ class WhisperAudioModel:
         audio_lens_after_cnn = np.array(audio_lens_after_cnn, dtype=np.int32)
         audio_token_num = (audio_lens_after_cnn - 2) // 2 + 1
 
+        num_audios = len(audio_items)
+        per_audio_embeds = [[] for _ in range(num_audios)]
+
+        for chunk_idx, owner in enumerate(chunk_owner_index):
+            token_len = int(audio_token_num[chunk_idx])
+            if token_len <= 0:
+                continue
+            per_audio_embeds[owner].append(audios[chunk_idx][:token_len])
+
         ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
         ids_to_set = []
         for i, ready in enumerate(ready_audio):
-            if not ready:
-                uid = uuids[i]
-                cur_embed_bytes = tensor2bytes(audios[i][: audio_token_num[i]])
-                create_shm(get_shm_name_embed(uid), cur_embed_bytes)
-                ids_to_set.append(uid)
+            if ready:
+                continue
+
+            uid = uuids[i]
+            item = items[i]
+
+            # 拼接该 audio 的所有 chunk embedding
+            cur_embed = torch.cat(per_audio_embeds[i], dim=0)
+            cpu_embed_cache_client.copy_to_cache(
+                embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
+            )
+            ids_to_set.append(uid)
+
         if ids_to_set:
             self.cache_client.root.set_items_embed(ids=ids_to_set)
+            torch.cuda.current_stream().synchronize()

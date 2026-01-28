@@ -2,14 +2,17 @@ import torch
 import time
 import pytest
 import numpy as np
-from lightllm.common.fused_moe.softmax_topk import softmax_topk
+from lightllm.common.basemodel.triton_kernel.fused_moe.softmax_topk import softmax_topk
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
 def benchmark(M, N, K, renorm, runs):
-    import sgl_kernel as sgl_ops
+    try:
+        import sgl_kernel as sgl_ops
+    except Exception as e:
+        pytest.skip(f"no sgl_kernel error: {str(e)}", allow_module_level=True)
 
     gating = torch.randn(M, N, device="cuda", dtype=torch.float32)
     torch.cuda.synchronize()

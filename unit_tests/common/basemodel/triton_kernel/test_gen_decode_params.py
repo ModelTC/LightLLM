@@ -1,7 +1,5 @@
 import torch
 import pytest
-import numpy as np
-from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 
 

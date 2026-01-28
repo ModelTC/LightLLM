@@ -1,11 +1,9 @@
 import yaml
 import collections
 from .registry import QUANTMETHODS
-from .torchao_quant import *
-from .w8a8_quant import *
-from .triton_quant.triton_quant import *
-from .deepgemm_quant import *
-from .awq_quant import *
+from .w8a8 import *
+from .deepgemm import *
+from .awq import *
 from .no_quant import *
 from lightllm.utils.log_utils import init_logger
 
@@ -38,7 +36,7 @@ class Quantcfg:
         if self.hf_quantization_method == "fp8":
             block_size = self.hf_quantization_config.get("weight_block_size", None)
             if block_size == [128, 128]:
-                from lightllm.common.quantization.deepgemm_quant import HAS_DEEPGEMM
+                from lightllm.common.quantization.deepgemm import HAS_DEEPGEMM
 
                 if HAS_DEEPGEMM:
                     self.quant_type = "deepgemm-fp8w8a8-b128"

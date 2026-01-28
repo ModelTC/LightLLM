@@ -1,0 +1,22 @@
+{
+  "16_8192": {
+    "BLOCK_N": 32,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "32_8192": {
+    "BLOCK_N": 16,
+    "num_stages": 2,
+    "num_warps": 2
+  },
+  "64_8192": {
+    "BLOCK_N": 16,
+    "num_stages": 2,
+    "num_warps": 2
+  },
+  "8_8192": {
+    "BLOCK_N": 32,
+    "num_stages": 2,
+    "num_warps": 8
+  }
+}

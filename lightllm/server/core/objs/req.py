@@ -89,6 +89,7 @@ class Req(ctypes.Structure):
         ("candetoken_out_len", ctypes.c_int),
         ("prompt_cache_len", ctypes.c_int),  # 用于记录prompt cache 的命中长度，用于统计,这里指gpu kv cache命中长度
         ("cpu_prompt_cache_len", ctypes.c_int),  # 用于记录在 enable_cpu_cache 的场景下,命中的 cpu kv cache 的长度
+        ("disk_prompt_cache_len", ctypes.c_int),  # 用于记录从磁盘命中的长度
         ("is_paused", ctypes.c_bool),  # 标记一个Req因为显存资源管理的原因被临时暂停了。
         ("finish_status", FinishStatus),
         # 这个标记变量是http_server 写入，其他进程读取，用于标记该请求是否因为断网被aborted。
@@ -158,6 +159,7 @@ class Req(ctypes.Structure):
         self.candetoken_out_len = 0
         self.prompt_cache_len = 0
         self.cpu_prompt_cache_len = 0
+        self.disk_prompt_cache_len = 0
         self.finish_token_index = -1
         self.can_released_mark = False
         self.reward_score = math.nan
@@ -235,15 +237,13 @@ class Req(ctypes.Structure):
         return self.shm_prompt_ids.arr[: self.input_len]
 
     def to_router_rpc_obj(self):
-        if hasattr(self, "multimodal_params"):
-            return (
-                self.request_id,
-                self.index_in_shm_mem,
-                self.multimodal_params,
-                self.sample_params.suggested_dp_index,
-            )
-        else:
-            return (self.request_id, self.index_in_shm_mem, None, self.sample_params.suggested_dp_index)
+        assert hasattr(self, "multimodal_params")
+        return (
+            self.request_id,
+            self.index_in_shm_mem,
+            self.multimodal_params,
+            self.sample_params.suggested_dp_index,
+        )
 
     def can_release(self):
         # 只有管理节点有一个引用
@@ -354,8 +354,8 @@ class ChunkedPrefillReq(Req):
         need_tokens = min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
         if need_tokens == 1 and self._mtp_step > 0:
             # self._mtp_step > 0 时，说明开启了mtp 模式，每次decode需要额外的mem token 资源
-            # "deepseekv3_vanilla" 模式需要的 mem 用量为 self._mtp_step + 1
-            # "deepseekv3_eagle" 模式需要的 mem 用量为 （self._mtp_step + 1）* 2
+            # "vanilla_with_att" 模式需要的 mem 用量为 self._mtp_step + 1
+            # "eagle_with_att" 模式需要的 mem 用量为 （self._mtp_step + 1）* 2
             # 为了简化统一 返回 （self._mtp_step + 1）* 2
             need_tokens = (self._mtp_step + 1) * 2
 

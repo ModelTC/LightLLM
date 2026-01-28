@@ -12,7 +12,7 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 
 
 def padded_prepare_prefill_inputs(
-    req_objs: List[InferReq], dest_batch_size: Optional[int] = None, is_multimodal=False
+    req_objs: List[InferReq], dest_batch_size: Optional[int] = None
 ) -> Tuple[ModelInput, List[InferReq], int]:
 
     if dest_batch_size is None:
@@ -68,11 +68,11 @@ def padded_prepare_prefill_inputs(
         b_ready_cache_len.append(0)
         total_token_num += 1
         prefix_total_token_num += 0
+        batch_multimodal_params.append({"images": [], "audios": []})
 
     max_kv_seq_len = max(b_seq_len)
     max_cache_len = max(b_ready_cache_len)
     max_q_seq_len = max(b_q_seq_len)
-    max_len_in_batch = max(b_q_seq_len)
 
     input_ids = np.concatenate(input_ids, dtype=np.int64)
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
@@ -101,7 +101,6 @@ def padded_prepare_prefill_inputs(
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         max_cache_len=max_cache_len,
@@ -115,9 +114,8 @@ def padded_prepare_prefill_inputs(
         b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
+        multimodal_params=batch_multimodal_params,
     )
-    if is_multimodal:
-        model_input.multimodal_params = batch_multimodal_params
 
     return model_input, run_reqs, padded_req_num
 
@@ -143,14 +141,17 @@ def padded_prepare_decode_inputs(
     b_seq_len = []
     b_q_seq_len = []
     args_mtp_step = get_env_start_args().mtp_step
+    batch_multimodal_params = []
     for req in req_objs:
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
         seq_len = req.get_cur_total_len()
         assert req.cur_kv_len == seq_len - 1
         b_seq_len.append(seq_len)
+        b_q_seq_len.append(1)
         total_token_num += seq_len
         b_mtp_index.append(0)
+        batch_multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
         for step in range(req.mtp_step):
             run_reqs.append(req)
@@ -158,9 +159,9 @@ def padded_prepare_decode_inputs(
             total_token_num += seq_len
             b_req_idx.append(req.req_idx)
             b_seq_len.append(seq_len)
+            b_q_seq_len.append(1)
             b_mtp_index.append(step + 1)
-
-        b_q_seq_len.append(req.mtp_step + 1)
+            batch_multimodal_params.append(req.multimodal_params)
 
     # padding fake req for decode
     for _ in range(padded_req_num):
@@ -168,19 +169,20 @@ def padded_prepare_decode_inputs(
         total_token_num += seq_len
         b_req_idx.append(g_infer_context.req_manager.HOLD_REQUEST_ID)
         b_seq_len.append(seq_len)
+        b_q_seq_len.append(1)
         b_mtp_index.append(0)
+        batch_multimodal_params.append({"images": [], "audios": []})
         for step in range(args_mtp_step):
             seq_len += 1
             total_token_num += seq_len
             b_seq_len.append(seq_len)
+            b_q_seq_len.append(1)
             b_req_idx.append(g_infer_context.req_manager.HOLD_REQUEST_ID)
             b_mtp_index.append(step + 1)
-
-        b_q_seq_len.append(1 + args_mtp_step)
+            batch_multimodal_params.append({"images": [], "audios": []})
 
     max_kv_seq_len = max(b_seq_len)
     max_q_seq_len = max(b_q_seq_len)
-    max_len_in_batch = max(b_seq_len)
 
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
@@ -205,7 +207,6 @@ def padded_prepare_decode_inputs(
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
-        max_len_in_batch=max_len_in_batch,
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         input_ids=None,
@@ -214,6 +215,7 @@ def padded_prepare_decode_inputs(
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
         is_prefill=False,
+        multimodal_params=batch_multimodal_params,
     )
     return model_input, run_reqs, padded_req_num
 
@@ -235,15 +237,11 @@ def padded_overlap_prepare_decode_inputs(
     return micro_input, run_reqs, padded_req_num, micro_input1, run_reqs1, padded_req_num1
 
 
-def padded_overlap_prepare_prefill_inputs(req_objs: List[InferReq], is_multimodal=False):
+def padded_overlap_prepare_prefill_inputs(req_objs: List[InferReq]):
     micro_batch1_req_num = triton.cdiv(len(req_objs), 2)
 
-    micro_input, run_reqs, padded_req_num = padded_prepare_prefill_inputs(
-        req_objs[0:micro_batch1_req_num], is_multimodal=is_multimodal
-    )
+    micro_input, run_reqs, padded_req_num = padded_prepare_prefill_inputs(req_objs[0:micro_batch1_req_num])
 
-    micro_input1, run_reqs1, padded_req_num1 = padded_prepare_prefill_inputs(
-        req_objs[micro_batch1_req_num:], is_multimodal=is_multimodal
-    )
+    micro_input1, run_reqs1, padded_req_num1 = padded_prepare_prefill_inputs(req_objs[micro_batch1_req_num:])
 
     return micro_input, run_reqs, padded_req_num, micro_input1, run_reqs1, padded_req_num1

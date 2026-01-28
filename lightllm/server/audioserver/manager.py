@@ -11,7 +11,7 @@ from typing import List
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
+from lightllm.server.io_struct import BaseReq, GenerateReqIndex
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager, StartArgs
 from lightllm.server.multimodal_params import AudioItem
 from .model_infer.model_rpc import start_model_process, AudioModelRpcClient
@@ -42,7 +42,7 @@ class AudioManager:
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.cache_port = args.cache_port
-        self.waiting_reqs: List[GroupReqIndexes] = []
+        self.waiting_reqs: List[GenerateReqIndex] = []
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
         self.world_size = 1
@@ -136,8 +136,8 @@ class AudioManager:
 
     async def loop_for_netio_req(self):
         while True:
-            recv_req: GroupReqIndexes = await self.zmq_recv_socket.recv_pyobj()
-            if isinstance(recv_req, GroupReqIndexes):
+            recv_req: BaseReq = await self.zmq_recv_socket.recv_pyobj()
+            if isinstance(recv_req, GenerateReqIndex):
                 self.waiting_reqs.append(recv_req)
             else:
                 assert False, f"Error Req Inf {recv_req}"

@@ -17,8 +17,8 @@ def rename_weight_keys(weights):
 
 
 class Tarsier2Qwen2PreAndPostLayerWeight(Qwen2PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
         return
 
     def load_hf_weights(self, weights):
@@ -28,8 +28,8 @@ class Tarsier2Qwen2PreAndPostLayerWeight(Qwen2PreAndPostLayerWeight):
 
 
 class Tarsier2LlamaPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
         return
 
     def load_hf_weights(self, weights):

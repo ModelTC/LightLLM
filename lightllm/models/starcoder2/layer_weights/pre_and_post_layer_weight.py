@@ -1,54 +1,31 @@
-import torch
-import numpy as np
 from lightllm.common.basemodel import PreAndPostLayerWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, LayerNormWeight
 
 
 class Starcoder2PreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
-        self._create_weight()
-        return
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
+        hidden_size = network_config["hidden_size"]
+        vocab_size = network_config["vocab_size"]
+        self.wte_weight_ = EmbeddingWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
+            weight_name="model.embed_tokens.weight",
+            data_type=self.data_type_,
+        )
+        tie_word_embeddings = self.network_config_.get("tie_word_embeddings", False)
+        self.lm_head_weight_ = LMHeadWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
+            weight_name="lm_head.weight",
+            data_type=self.data_type_,
+            embedding_weight=self.wte_weight_ if tie_word_embeddings else None,
+        )
 
-    def _create_weight(self):
-        vob_size = self.network_config_["vocab_size"]
-        hidden_size = self.network_config_["hidden_size"]
-        split_indexes = np.linspace(0, vob_size, self.tp_world_size_ + 1, dtype=np.int64)
-        split_start = split_indexes[self.tp_rank_]
-        split_end = split_indexes[self.tp_rank_ + 1]
-        split_vob_size = split_end - split_start
-
-        # Pre-allocate memory for weights
-        self.wte_weight_ = torch.empty((split_vob_size, hidden_size), dtype=self.data_type_).cuda()
-        self.lm_head_weight_ = torch.empty((split_vob_size, hidden_size), dtype=self.data_type_).cuda()
-        self.final_norm_weight_ = torch.empty(hidden_size, dtype=self.data_type_).cuda()
-        self.final_norm_bias_ = torch.empty(hidden_size, dtype=self.data_type_).cuda()
-        return
-
-    def load_hf_weights(self, weights):
-        vob_size = self.network_config_["vocab_size"]
-        split_indexes = np.linspace(0, vob_size, self.tp_world_size_ + 1, dtype=np.int64)
-        split_start = split_indexes[self.tp_rank_]
-        split_end = split_indexes[self.tp_rank_ + 1]
-        if "model.embed_tokens.weight" in weights:
-            self.wte_weight_.copy_(weights["model.embed_tokens.weight"][split_start:split_end, :])
-
-            # for starcoder2-3b and 7b which didn't use lm_head.weight (tie_word_embeddings)
-            self.lm_head_weight_ = self.wte_weight_
-
-        if "lm_head.weight" in weights:
-            self.lm_head_weight_.copy_(weights["lm_head.weight"][split_start:split_end, :])
-
-        if "model.norm.weight" in weights:
-            self.final_norm_weight_.copy_(weights["model.norm.weight"])
-
-        if "model.norm.bias" in weights:
-            self.final_norm_bias_.copy_(weights["model.norm.bias"])
-
-        return
-
-    def verify_load(self):
-        errors = "weights load not ok"
-        weights = [self.wte_weight_, self.lm_head_weight_, self.final_norm_weight_, self.final_norm_bias_]
-        for i in range(len(weights)):
-            assert weights[i] is not None, "index:" + str(i) + " " + errors
+        self.final_norm_weight_ = LayerNormWeight(
+            dim=hidden_size,
+            weight_name="model.norm.weight",
+            data_type=self.data_type_,
+            bias_name="model.norm.bias",
+        )
         return
