@@ -24,6 +24,7 @@ from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.server.visualserver import set_vit_att_backend
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -42,7 +43,8 @@ class VisualModelRpcServer(rpyc.Service):
         self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.data_type = kvargs["data_type"]
-
+        self.vit_attn_backend = kvargs["vit_attn_backend"]
+        set_vit_att_backend(self.vit_attn_backend)
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 
