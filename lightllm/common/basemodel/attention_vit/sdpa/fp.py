@@ -15,13 +15,13 @@ class SdpaVitAttBackend(BaseVitAttBackend):
     ) -> torch.Tensor:
         assert q.ndim == k.ndim == v.ndim == o.ndim == 3
         assert cu_seqlens is not None and cu_seqlens.ndim == 1
-
+        cu_seqlens = cu_seqlens.detach().to("cpu")
         B = cu_seqlens.numel() - 1
 
         with torch.no_grad():
             for b in range(B):
-                s = int(cu_seqlens[b].item())
-                e = int(cu_seqlens[b + 1].item())
+                s = int(cu_seqlens[b])
+                e = int(cu_seqlens[b + 1])
                 L = e - s
                 if L <= 0:
                     continue
