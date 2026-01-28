@@ -63,6 +63,7 @@ def init_vision_distributed_env(kvargs):
     set_current_rank_in_dp(tp_rank_id)
     visual_gpu_ids = kvargs["visual_gpu_ids"]
     device_id = visual_gpu_ids[kvargs["vit_rank_id"]]
+    set_global_vit_rank(device_id)
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
     dist.init_process_group(
@@ -110,6 +111,14 @@ def init_distributed_env(kvargs):
     _a = torch.zeros([1]).to(f"cuda:{device_id}")
     dist.all_reduce(_a)
     del _a
+
+
+def set_global_vit_rank(global_vit_rank: int):
+    set_environ("LIGHTLLM_GLOBAL_VIT_RANK", global_vit_rank)
+
+
+def get_global_vit_rank():
+    return int(get_environ("LIGHTLLM_GLOBAL_VIT_RANK"))
 
 
 def set_global_rank(global_rank: int):
