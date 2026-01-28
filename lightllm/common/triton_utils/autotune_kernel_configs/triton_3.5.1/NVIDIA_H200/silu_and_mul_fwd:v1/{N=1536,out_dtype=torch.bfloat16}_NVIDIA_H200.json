@@ -35,6 +35,12 @@
     "NUM_STAGES": 4,
     "num_warps": 1
   },
+  "16640": {
+    "BLOCK_M": 1,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
+  },
   "2048": {
     "BLOCK_M": 8,
     "BLOCK_N": 256,
@@ -84,6 +90,12 @@
     "num_warps": 1
   },
   "65536": {
+    "BLOCK_M": 1,
+    "BLOCK_N": 128,
+    "NUM_STAGES": 4,
+    "num_warps": 1
+  },
+  "66560": {
     "BLOCK_M": 1,
     "BLOCK_N": 128,
     "NUM_STAGES": 4,
