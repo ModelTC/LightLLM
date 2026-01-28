@@ -149,17 +149,11 @@ def normal_or_p_d_start(args):
     else:
         args.visual_gpu_ids = args.visual_gpu_ids[:total_required_gpus]
 
-    # 检查visual_nccl_port数量是否足够
-    if len(args.visual_nccl_ports) < args.visual_dp:
-        raise ValueError(
-            f"Not enough visual_nccl_ports specified. You need at least {args.visual_dp}, "
-            f"but got ({len(args.visual_nccl_ports)})."
-        )
-    else:
-        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
-
     if args.visual_dp <= 0:
         raise ValueError("visual_dp must be a positive integer.")
+
+    if args.visual_infer_batch_size is None:
+        args.visual_infer_batch_size = args.visual_dp
 
     # 检查visual_infer_batch_size是否合理
     if args.visual_infer_batch_size // args.visual_dp < 1 or args.visual_infer_batch_size % args.visual_dp != 0:
@@ -171,15 +165,11 @@ def normal_or_p_d_start(args):
     if args.disable_chunked_prefill:
         args.chunked_prefill_size = args.max_req_total_len
         # 普通模式下
-        if args.batch_max_tokens is None:
-            args.batch_max_tokens = args.max_req_total_len
-        else:
-            assert args.batch_max_tokens >= args.max_req_total_len, "batch_max_tokens must >= max_req_total_len"
+        args.batch_max_tokens = args.max_req_total_len
     else:
         # chunked 模式下
-        if args.batch_max_tokens is None:
-            args.batch_max_tokens = min(args.max_req_total_len, 2 * args.chunked_prefill_size + 256)
-
+        args.batch_max_tokens = args.batch_max_tokens // args.dp
+        args.chunked_prefill_size = args.batch_max_tokens // 2
         assert (
             args.batch_max_tokens >= args.chunked_prefill_size
         ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
@@ -203,10 +193,7 @@ def normal_or_p_d_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port]
-    if args.run_mode == "decode":
-        already_uesd_ports = args.visual_nccl_ports + [args.nccl_port, args.port, args.pd_decode_rpyc_port]
-
+    already_uesd_ports = [args.port]
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
     ports_locker = PortLocker(already_uesd_ports)
@@ -214,10 +201,11 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=8 + node_world_size + args.visual_dp * args.visual_tp, used_nccl_ports=already_uesd_ports
+        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
+        nccl_port,
         router_port,
         detokenization_port,
         http_server_port,
@@ -226,16 +214,20 @@ def normal_or_p_d_start(args):
         cache_port,
         metric_port,
         multi_level_kv_cache_port,
-    ) = can_use_ports[0:8]
-    can_use_ports = can_use_ports[8:]
+        pd_decode_rpyc_port,
+    ) = can_use_ports[0:10]
+    can_use_ports = can_use_ports[10:]
 
     visual_model_tp_ports = []
+    visual_nccl_ports = []
     for _ in range(args.visual_dp):
         tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
-        can_use_ports = can_use_ports[args.visual_tp :]
         visual_model_tp_ports.append(tp_ports_for_dp)
+        visual_nccl_ports.append(can_use_ports[args.visual_tp])
+        can_use_ports = can_use_ports[args.visual_tp + 1 :]
 
     # 将申请好的端口放入args参数中
+    args.nccl_port = nccl_port
     args.router_port = router_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
@@ -244,7 +236,8 @@ def normal_or_p_d_start(args):
     args.cache_port = cache_port
     args.metric_port = metric_port
     args.multi_level_kv_cache_port = multi_level_kv_cache_port
-
+    args.pd_decode_rpyc_port = pd_decode_rpyc_port
+    args.visual_nccl_ports = visual_nccl_ports
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
