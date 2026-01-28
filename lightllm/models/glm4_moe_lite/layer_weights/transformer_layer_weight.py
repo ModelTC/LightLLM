@@ -17,9 +17,10 @@ class Glm4MoeLiteTransformerLayerWeight(Deepseek2TransformerLayerWeight):
 
         from lightllm.utils.envs_utils import get_env_start_args
 
-        self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
-        if get_env_start_args().enable_ep_moe and self.is_moe:
-            assert self.num_fused_shared_experts == 0, "n_shared_experts must be 0 when enable_ep_moe"
+        self.num_fused_shared_experts = 0
+        if get_env_start_args().enable_fused_shared_experts and self.is_moe:
+            assert not get_env_start_args().enable_ep_moe, "enable_fused_shared_experts can only work with tp mode."
+            self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
 
     def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
