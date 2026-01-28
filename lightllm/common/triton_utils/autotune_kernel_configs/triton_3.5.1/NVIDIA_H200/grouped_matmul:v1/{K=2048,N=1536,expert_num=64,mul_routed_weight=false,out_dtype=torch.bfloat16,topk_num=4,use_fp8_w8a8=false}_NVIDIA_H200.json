@@ -53,6 +53,15 @@
     "num_stages": 3,
     "num_warps": 4
   },
+  "16640": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 128,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 32,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 4
+  },
   "2048": {
     "BLOCK_SIZE_K": 64,
     "BLOCK_SIZE_M": 128,

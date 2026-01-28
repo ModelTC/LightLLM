@@ -24,12 +24,12 @@ class Glm4MoeLiteMTPPreLayerInfer(LlamaPreLayerInfer):
             input_embdings.shape[0] == tgt_embdings.shape[0]
         ), f"shape {input_embdings.shape} != shape {tgt_embdings.shape}"
 
-        layer_weight.enorm_weight_.rmsnorm_forward(
+        layer_weight.enorm_weight_(
             input=input_embdings,
             eps=self.eps_,
             out=input_embdings,
         )
-        layer_weight.hnorm_weight_.rmsnorm_forward(
+        layer_weight.hnorm_weight_(
             input=tgt_embdings,
             eps=self.eps_,
             out=tgt_embdings,
@@ -48,12 +48,12 @@ class Glm4MoeLiteMTPPreLayerInfer(LlamaPreLayerInfer):
         tgt_embdings = infer_state.mtp_draft_input_hiddens
         assert input_embdings.shape[0] == tgt_embdings.shape[0]
 
-        layer_weight.enorm_weight_.rmsnorm_forward(
+        layer_weight.enorm_weight_(
             input=input_embdings,
             eps=self.eps_,
             out=input_embdings,
         )
-        layer_weight.hnorm_weight_.rmsnorm_forward(
+        layer_weight.hnorm_weight_(
             input=tgt_embdings,
             eps=self.eps_,
             out=tgt_embdings,

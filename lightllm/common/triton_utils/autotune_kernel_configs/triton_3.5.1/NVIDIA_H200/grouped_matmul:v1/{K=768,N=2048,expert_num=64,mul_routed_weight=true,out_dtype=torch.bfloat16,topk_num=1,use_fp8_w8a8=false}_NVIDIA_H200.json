@@ -98,6 +98,15 @@
     "num_stages": 3,
     "num_warps": 4
   },
+  "66560": {
+    "BLOCK_SIZE_K": 64,
+    "BLOCK_SIZE_M": 128,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 32,
+    "NEED_TRANS": false,
+    "num_stages": 3,
+    "num_warps": 4
+  },
   "8192": {
     "BLOCK_SIZE_K": 64,
     "BLOCK_SIZE_M": 128,
