@@ -202,6 +202,8 @@ def normal_or_p_d_start(args):
     already_uesd_ports = [args.port]
     if args.nccl_port is not None:
         already_uesd_ports.append(args.nccl_port)
+    if args.pd_decode_rpyc_port is not None:
+        already_uesd_ports.append(args.pd_decode_rpyc_port)
 
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
@@ -239,6 +241,8 @@ def normal_or_p_d_start(args):
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
         args.nccl_port = nccl_port
+    if args.pd_decode_rpyc_port is None:
+        args.pd_decode_rpyc_port = pd_decode_rpyc_port
     args.router_port = router_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
@@ -247,7 +251,6 @@ def normal_or_p_d_start(args):
     args.cache_port = cache_port
     args.metric_port = metric_port
     args.multi_level_kv_cache_port = multi_level_kv_cache_port
-    args.pd_decode_rpyc_port = pd_decode_rpyc_port
     args.visual_nccl_ports = visual_nccl_ports
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
