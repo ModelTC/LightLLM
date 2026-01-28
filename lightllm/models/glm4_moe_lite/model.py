@@ -22,28 +22,8 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
 
     def _init_config(self):
         super()._init_config()
-
-        if "moe_layer_freq" not in self.config and self.config.get("n_routed_experts"):
-            self.config["moe_layer_freq"] = 1
-
-        if "routed_scaling_factor" not in self.config:
-            self.config["routed_scaling_factor"] = 1.8
-
-        if "topk_method" not in self.config:
-            self.config["topk_method"] = "noaux_tc"
-
         if "scoring_func" not in self.config:
             self.config["scoring_func"] = "sigmoid"
-
-        logger.info(
-            f"GLM-4.7-Flash config: "
-            f"n_routed_experts={self.config.get('n_routed_experts')}, "
-            f"n_shared_experts={self.config.get('n_shared_experts')}, "
-            f"num_experts_per_tok={self.config.get('num_experts_per_tok')}, "
-            f"first_k_dense_replace={self.config.get('first_k_dense_replace')}, "
-            f"routed_scaling_factor={self.config.get('routed_scaling_factor')}, "
-            f"scoring_func={self.config.get('scoring_func')}"
-        )
 
     def _init_custom(self):
         self._init_to_get_yarn_rotary()

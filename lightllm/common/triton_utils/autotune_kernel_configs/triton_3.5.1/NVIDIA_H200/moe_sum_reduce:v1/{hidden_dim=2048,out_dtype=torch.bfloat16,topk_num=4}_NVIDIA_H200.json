@@ -35,6 +35,12 @@
     "NUM_STAGE": 4,
     "num_warps": 4
   },
+  "16640": {
+    "BLOCK_DIM": 1024,
+    "BLOCK_M": 1,
+    "NUM_STAGE": 1,
+    "num_warps": 8
+  },
   "2048": {
     "BLOCK_DIM": 1024,
     "BLOCK_M": 1,

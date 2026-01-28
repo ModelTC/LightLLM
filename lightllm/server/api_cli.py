@@ -119,7 +119,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--batch_max_tokens",
         type=int,
-        default=16384,
+        default=None,
         help="max tokens num for new cat batch, it control prefill batch size to Preventing OOM",
     )
     parser.add_argument(

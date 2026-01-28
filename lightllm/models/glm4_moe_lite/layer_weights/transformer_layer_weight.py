@@ -9,15 +9,12 @@ class Glm4MoeLiteTransformerLayerWeight(Deepseek2TransformerLayerWeight):
         super().__init__(layer_num, data_type, network_config, quant_cfg)
 
     def _parse_config(self):
-        # Call parent's _parse_config to set n_embed, moe_inter, and other required attributes
         super()._parse_config()
 
-        # Override is_moe calculation for GLM4 (no moe_layer_freq check)
         self.is_moe = self.network_config_.get(
             "n_routed_experts"
         ) is not None and self.layer_num_ >= self.network_config_.get("first_k_dense_replace", 0)
 
-        # Override num_fused_shared_experts with GLM4-specific logic
         from lightllm.utils.envs_utils import get_env_start_args
 
         self.num_fused_shared_experts = 0
@@ -37,19 +34,16 @@ class Glm4MoeLiteTransformerLayerWeight(Deepseek2TransformerLayerWeight):
 
         if f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight" in weights:
             kv_b_proj_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight"]
-            # for quantized weights, dequantize first
             if self.quant_cfg.quantized_weight:
                 kv_b_proj_ = weight_dequant(
                     kv_b_proj_.cuda(),
                     weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix].cuda(),
                 ).cpu()
-            # Use GLM4-specific split methods (different from DeepSeek2's dimensions)
             k_b_proj_ = self._load_kb(kv_b_proj_)
             v_b_proj_ = self._load_vb(kv_b_proj_)
             weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight"] = k_b_proj_
             weights[f"model.layers.{self.layer_num_}.self_attn.v_b_proj.weight"] = v_b_proj_
 
-        # rename the shared experts weight
         if self.num_fused_shared_experts > 0:
             self._rename_shared_experts(weights, weight_scale_suffix)
 

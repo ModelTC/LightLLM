@@ -33,7 +33,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.is_moe = (
             network_config["n_routed_experts"] is not None
             and layer_num >= network_config["first_k_dense_replace"]
-            and layer_num % network_config["moe_layer_freq"] == 0
+            and layer_num % network_config.get("moe_layer_freq", 1) == 0
         )
 
         self.n_shared_experts = network_config["n_shared_experts"]

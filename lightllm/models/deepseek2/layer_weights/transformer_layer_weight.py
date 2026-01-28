@@ -25,7 +25,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self.is_moe = (
             self.network_config_["n_routed_experts"] is not None
             and self.layer_num_ >= self.network_config_["first_k_dense_replace"]
-            and self.layer_num_ % self.network_config_["moe_layer_freq"] == 0
+            and self.layer_num_ % self.network_config_.get("moe_layer_freq", 1) == 0
         )
         self.tp_q_head_num_ = self.network_config_["num_attention_heads"]
         self.tp_q_head_num_ = self.tp_q_head_num_ // self.tp_world_size_
