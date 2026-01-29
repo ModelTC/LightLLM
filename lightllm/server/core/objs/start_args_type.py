@@ -20,7 +20,7 @@ class StartArgs:
     pd_master_port: int = field(default=1212)
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
-    pd_decode_rpyc_port: int = field(default=42000)
+    pd_decode_rpyc_port: int = field(default=None)
     select_p_d_node_strategy: str = field(default=None)
     model_name: str = field(default="default_model_name")
     model_dir: Optional[str] = field(default=None)
@@ -61,9 +61,8 @@ class StartArgs:
     node_rank: int = field(default=0)
     max_req_total_len: int = field(default=2048 + 1024)
     nccl_host: str = field(default="127.0.0.1")
-    nccl_port: int = field(default=28765)
+    nccl_port: int = field(default=None)
     use_config_server_to_init_nccl: bool = field(default=False)
-    mode: List[str] = field(default_factory=list)
     trust_remote_code: bool = field(default=False)
     disable_log_stats: bool = field(default=False)
     log_stats_interval: int = field(default=10)
@@ -72,7 +71,7 @@ class StartArgs:
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
-    chunked_prefill_size: int = field(default=8192)
+    chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)
     token_healing_mode: bool = field(default=False)
@@ -98,12 +97,12 @@ class StartArgs:
     job_name: str = field(default="lightllm")
     grouping_key: List[str] = field(default_factory=list)
     push_interval: int = field(default=10)
-    visual_infer_batch_size: int = field(default=1)
+    visual_infer_batch_size: int = field(default=None)
     visual_send_batch_size: int = field(default=1)
     visual_gpu_ids: List[int] = field(default_factory=lambda: [0])
     visual_tp: int = field(default=1)
     visual_dp: int = field(default=1)
-    visual_nccl_ports: List[int] = field(default_factory=lambda: [29500])
+    visual_nccl_ports: List[int] = field(default=None)
     enable_monitor_auth: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
     enable_prefill_cudagraph: bool = field(default=False)
@@ -111,20 +110,32 @@ class StartArgs:
     graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
-    graph_max_len_in_batch: int = field(default=8192)
+    graph_max_len_in_batch: int = field(default=0)
     quant_type: Optional[str] = field(default=None)
     quant_cfg: Optional[str] = field(default=None)
     vit_quant_type: Optional[str] = field(default=None)
     vit_quant_cfg: Optional[str] = field(default=None)
-    enable_flashinfer_prefill: bool = field(default=False)
-    enable_flashinfer_decode: bool = field(default=False)
+    llm_prefill_att_backend: List[str] = field(
+        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+    )
+    llm_decode_att_backend: List[str] = field(
+        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+    )
+    vit_att_backend: List[str] = field(
+        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
+    )
+    llm_kv_type: str = field(default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv"]})
+    llm_kv_quant_group_size: int = field(default=8)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
     penalty_counter_mode: str = field(
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
     )
+    enable_ep_moe: bool = field(default=False)
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
-    mtp_mode: Optional[str] = field(default=None)
+    mtp_mode: Optional[str] = field(
+        default=None, metadata={"choices": ["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att"]}
+    )
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
@@ -151,6 +162,3 @@ class StartArgs:
     # multi_modal
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
-
-    # kernel setting
-    enable_fa3: bool = field(default=False)

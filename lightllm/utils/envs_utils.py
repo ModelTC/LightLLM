@@ -26,10 +26,7 @@ def get_unique_server_name():
 def set_cuda_arch(args):
     if not torch.cuda.is_available():
         return
-    if args.enable_flashinfer_prefill or args.enable_flashinfer_decode:
-        capability = torch.cuda.get_device_capability()
-        arch = f"{capability[0]}.{capability[1]}"
-        os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"
+    return
 
 
 def set_env_start_args(args):
@@ -190,14 +187,6 @@ def use_whisper_sdpa_attention() -> bool:
 
 
 @lru_cache(maxsize=None)
-def disable_cpu_kvcache_sync() -> bool:
-    """
-    实验用环境遍历，未来可能会移除
-    """
-    return enable_env_vars("LIGHTLLM_DISABLE_CPU_CACHE_SYNC")
-
-
-@lru_cache(maxsize=None)
 def enable_radix_tree_timer_merge() -> bool:
     """
     使能定期合并 radix tree的叶节点, 防止插入查询性能下降。
@@ -217,7 +206,7 @@ def get_diverse_max_batch_shared_group_size() -> int:
 
 @lru_cache(maxsize=None)
 def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
-    return get_env_start_args().diverse_mode and "ppl_int8kv_flashdecoding_diverse" in get_env_start_args().mode
+    return get_env_start_args().diverse_mode and "int8kv" == get_env_start_args().llm_kv_type
 
 
 @lru_cache(maxsize=None)
@@ -235,3 +224,15 @@ def enable_huge_page():
     "sudo reboot"
     """
     return enable_env_vars("LIGHTLLM_HUGE_PAGE_ENABLE")
+
+
+@lru_cache(maxsize=None)
+def get_added_mtp_kv_layer_num() -> int:
+    # mtp 模式下需要在mem manger上扩展draft model使用的layer
+    added_mtp_layer_num = 0
+    if get_env_start_args().mtp_mode == "eagle_with_att":
+        added_mtp_layer_num += 1
+    elif get_env_start_args().mtp_mode == "vanilla_with_att":
+        added_mtp_layer_num += get_env_start_args().mtp_step
+
+    return added_mtp_layer_num

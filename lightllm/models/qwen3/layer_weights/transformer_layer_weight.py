@@ -1,12 +1,12 @@
 from lightllm.models.qwen2.layer_weights.transformer_layer_weight import Qwen2TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
-    NormWeight,
+    QKRMSNORMWeight,
 )
 
 
 class Qwen3TransformerLayerWeight(Qwen2TransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
     def _init_weight_names(self):
@@ -19,6 +19,13 @@ class Qwen3TransformerLayerWeight(Qwen2TransformerLayerWeight):
 
     def _init_norm(self):
         super()._init_norm()
-
-        self.q_norm_weight_ = NormWeight(weight_name=self._q_norm_name, data_type=self.data_type_)
-        self.k_norm_weight_ = NormWeight(weight_name=self._k_norm_name, data_type=self.data_type_)
+        self.q_norm_weight_ = QKRMSNORMWeight(
+            dim=self.head_dim,
+            weight_name=self._q_norm_name,
+            data_type=self.data_type_,
+        )
+        self.k_norm_weight_ = QKRMSNORMWeight(
+            dim=self.head_dim,
+            weight_name=self._k_norm_name,
+            data_type=self.data_type_,
+        )

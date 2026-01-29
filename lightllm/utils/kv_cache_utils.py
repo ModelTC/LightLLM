@@ -8,19 +8,22 @@ import time
 import numpy as np
 import triton
 from functools import lru_cache
-from lightllm.utils.envs_utils import get_env_start_args, enable_huge_page, get_llm_data_type
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    enable_huge_page,
+    get_llm_data_type,
+    get_added_mtp_kv_layer_num,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
-    INT8KVMemoryManager,
     CalibrationFP8KVMemoryManager,
     ExportCalibrationMemoryManager,
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
-    Deepseek2FP8KVMemoryManager,
 )
 
 from typing import List, Tuple, Optional
@@ -72,17 +75,6 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
         )
-    elif mem_manager_class is Deepseek2FP8KVMemoryManager:
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
-            num_heads=1,
-            head_dim=512 + 64 + 2,
-            data_type=torch.uint8,
-            scale_head_dim=0,
-            scale_data_type=get_llm_data_type(),
-        )
     elif mem_manager_class is MemoryManager:
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
@@ -111,7 +103,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
     if args.mtp_mode is not None:
         # TODO 可能会存在不同mtp模式的精度问题
-        cpu_cache_meta.layer_num += 1
+        cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
     cpu_cache_page_num = int(
         (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.calcu_one_page_size())

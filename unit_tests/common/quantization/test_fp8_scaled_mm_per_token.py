@@ -1,7 +1,19 @@
 import torch
 import pytest
 import torch.nn.functional as F
-from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
+from lightllm.common.basemodel.triton_kernel.quantization.scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
+
+
+def is_fp8_native_supported():
+    """检查是否为 H100/B200 等原生支持 FP8 的硬件 (SM90+)"""
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability()
+    return major >= 9
+
+
+if not is_fp8_native_supported():
+    pytest.skip("not support fp8 in this gpu card", allow_module_level=True)
 
 
 @pytest.mark.parametrize("M", [1, 2, 4, 8, 16, 32, 64, 128])

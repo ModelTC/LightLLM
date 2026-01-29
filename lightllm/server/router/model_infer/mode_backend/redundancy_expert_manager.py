@@ -8,10 +8,10 @@ import threading
 import json
 from typing import List
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe_weight_ep_redundancy import (
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.ep_redundancy import (
     FusedMoeWeightEPAutoRedundancy,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe_weight_ep import FusedMoeWeightEP
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
 from lightllm.utils.envs_utils import get_env_start_args, get_redundancy_expert_update_interval
 from lightllm.utils.envs_utils import get_redundancy_expert_update_max_load_count
 from lightllm.utils.envs_utils import get_redundancy_expert_num
@@ -28,7 +28,7 @@ class RedundancyExpertManager:
         self.model = model
         self.ep_fused_moeweights: List[FusedMoeWeightEPAutoRedundancy] = []
         for layer in self.model.trans_layers_weight:
-            ep_weights = self._find_members_of_class(layer, FusedMoeWeightEP)
+            ep_weights = self._find_members_of_class(layer, FusedMoeWeight)
             assert len(ep_weights) <= 1
             self.ep_fused_moeweights.extend([FusedMoeWeightEPAutoRedundancy(e) for e in ep_weights])
 

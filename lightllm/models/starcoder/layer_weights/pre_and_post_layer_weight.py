@@ -1,51 +1,43 @@
-import torch
-import numpy as np
 from lightllm.common.basemodel import PreAndPostLayerWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import (
+    EmbeddingWeight,
+    LayerNormWeight,
+    NoTpPosEmbeddingWeight,
+    LMHeadWeight,
+)
 
 
 class StarcoderPreAndPostLayerWeight(PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
 
-    def load_hf_weights(self, weights):
+    def _create_weight(self):
+        hidden_size = self.network_config["hidden_size"]
+        vocab_size = self.network_config["vocab_size"]
+        max_position_embeddings = self.network_config["max_position_embeddings"]
+        self.wte_weight_ = EmbeddingWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
+            weight_name="transformer.wte.weight",
+            data_type=self.data_type_,
+        )
+        self.wpe_weight_ = NoTpPosEmbeddingWeight(
+            dim=hidden_size,
+            max_position_embeddings=max_position_embeddings,
+            weight_name="transformer.wpe.weight",
+            data_type=self.data_type_,
+        )
 
-        vob_size = self.network_config_["vocab_size"]
-        split_vob_size = vob_size // self.tp_world_size_
-        if "transformer.wte.weight" in weights:
-            # print(weights['transformer.wte.weight'].shape)
-            self.wte_weight_ = (
-                weights["transformer.wte.weight"][
-                    split_vob_size * self.tp_rank_ : split_vob_size * (self.tp_rank_ + 1), :
-                ]
-                .contiguous()
-                .to(self.data_type_)
-                .cuda()
-            )
-        if "transformer.wpe.weight" in weights:
-            # print(weights['transformer.wpe.weight'].shape)
-            self.wpe_weight_ = weights["transformer.wpe.weight"].to(self.data_type_).cuda()
-        if "lm_head.weight" in weights:
-            self.lm_head_weight_ = (
-                weights["lm_head.weight"][split_vob_size * self.tp_rank_ : split_vob_size * (self.tp_rank_ + 1), :]
-                .contiguous()
-                .to(self.data_type_)
-                .cuda()
-            )
-        if "transformer.ln_f.weight" in weights:
-            self.final_norm_weight_ = weights["transformer.ln_f.weight"].contiguous().to(self.data_type_).cuda()
-        if "transformer.ln_f.bias" in weights:
-            self.final_norm_bias_ = weights["transformer.ln_f.bias"].contiguous().to(self.data_type_).cuda()
-        return
-
-    def verify_load(self):
-        errors = "weights load not ok"
-        weights = [
-            self.final_norm_weight_,
-            self.final_norm_bias_,
-            self.wte_weight_,
-            self.wpe_weight_,
-            self.lm_head_weight_,
-        ]
-        for i in range(len(weights)):
-            assert weights[i] is not None, "index:" + str(i) + " " + errors
+        self.final_norm_weight_ = LayerNormWeight(
+            dim=hidden_size,
+            weight_name="transformer.ln_f.weight",
+            bias_name="transformer.ln_f.bias",
+            data_type=self.data_type_,
+        )
+        self.lm_head_weight_ = LMHeadWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
+            weight_name="lm_head.weight",
+            data_type=self.data_type_,
+        )
         return

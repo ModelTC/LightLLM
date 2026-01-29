@@ -1,11 +1,10 @@
 import os
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, FusedMoeWeightEP, create_tp_moe_wegiht_obj
 
 
 class Qwen3VLMOETransformerLayerWeight(Qwen3MOETransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
 
     def load_hf_weights(self, weights):
         moe_prefix = f"model.layers.{self.layer_num_}.mlp.experts"

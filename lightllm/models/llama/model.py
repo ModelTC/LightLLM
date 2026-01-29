@@ -8,40 +8,14 @@ from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInf
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.models.llama.layer_weights.ds_load_utils import load_ds_weights
-from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
-
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.models.llama.flashattention_infer_struct import FlashAttentionStateInfo
-from lightllm.models.llama.flashinfer_struct import LlamaFlashInferStateInfo
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 
 logger = init_logger(__name__)
-
-
-class LlamaFlashInferStateExtraInfo:
-    def __init__(self, model):
-        tp_world_size = get_dp_world_size()
-        self.tp_q_head_num = model.config["num_attention_heads"] // tp_world_size
-        self.tp_kv_head_num = max(model.config["num_key_value_heads"] // tp_world_size, 1)
-        head_dim = model.config["hidden_size"] // model.config["num_attention_heads"]
-        self.head_dim = model.config.get("head_dim", head_dim)
-        self.workspace_buffer = torch.empty(512 * 1024 * 1024, dtype=torch.int8, device=get_current_device_id())
-        self.max_seq_length = model.max_seq_length
-        self.kv_indices_buffer = [
-            torch.empty(
-                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
-            torch.empty(
-                model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
-        ]
-        self.q_data_type = model.data_type
-        self.kv_data_type = torch.float8_e4m3fn if "offline_calibration_fp8kv" in model.mode else model.data_type
 
 
 @ModelRegistry("llama")
@@ -59,9 +33,6 @@ class LlamaTpPartModel(TpPartBaseModel):
     infer_state_class = LlamaInferStateInfo
 
     def __init__(self, kvargs):
-        self.enable_flashinfer = (
-            get_env_start_args().enable_flashinfer_prefill or get_env_start_args().enable_flashinfer_decode
-        )
         super().__init__(kvargs)
         return
 
@@ -91,17 +62,10 @@ class LlamaTpPartModel(TpPartBaseModel):
             dtype=self.data_type,
             head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
             head_dim=head_dim_,
-            layer_num=self.config["num_hidden_layers"],
+            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
             mem_fraction=self.mem_fraction,
         )
         return
-
-    def _init_inferstate_cls(self):
-        if get_env_start_args().enable_fa3:
-            self.infer_state_class = FlashAttentionStateInfo
-        elif self.enable_flashinfer:
-            self.infer_state_class = LlamaFlashInferStateInfo
-            self.flashinfer_extra_state = LlamaFlashInferStateExtraInfo(self)
 
     def _init_custom(self):
         """
@@ -134,42 +98,6 @@ class LlamaTpPartModel(TpPartBaseModel):
             self._init_to_get_rotary()
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
-        return
-
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, mode=self.mode
-        )
-        self.trans_layers_weight = [
-            self.transformer_weight_class(
-                i,
-                self.data_type,
-                network_config=self.config,
-                mode=self.mode,
-                quant_cfg=self.quant_cfg,
-            )
-            for i in range(self.config["n_layer"])
-        ]
-        if self.load_way == "HF":
-            load_hf_weights(
-                self.data_type,
-                weight_dir=self.weight_dir_,
-                pre_post_layer=self.pre_post_weight,
-                transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict,
-            )
-        else:
-            load_ds_weights(
-                self.data_type,
-                weight_dir=self.weight_dir_,
-                pre_post_layer=self.pre_post_weight,
-                transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict,
-                prefix="model.layers.",
-                num_layer=self.config["n_layer"],
-            )
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
         return
 
     def _init_to_get_rotary(self, default_base=10000):

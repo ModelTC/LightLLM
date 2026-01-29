@@ -5,7 +5,7 @@
 export host=$1
 export config_server_host=$2
 nvidia-cuda-mps-control -d
-MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
+LOADWORKER=18 python -m lightllm.server.api_server \
 --model_dir /path/DeepSeek-R1 \
 --run_mode "prefill" \
 --host $host \
@@ -13,9 +13,9 @@ MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
 --tp 8 \
 --dp 8 \
 --nccl_port 2732 \
---enable_fa3 \
 --disable_cudagraph \
 --config_server_host $config_server_host \
---config_server_port 60088
+--config_server_port 60088 \
+--enable_ep_moe
 # if you want to enable microbatch overlap, you can uncomment the following lines
 #--enable_prefill_microbatch_overlap

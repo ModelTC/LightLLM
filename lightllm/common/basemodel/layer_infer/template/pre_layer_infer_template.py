@@ -5,11 +5,9 @@ from ..pre_layer_infer import PreLayerInfer
 class PreLayerInferTpl(PreLayerInfer):
     """ """
 
-    def __init__(self, network_config, mode):
-        super().__init__(network_config, mode)
+    def __init__(self, network_config):
+        super().__init__(network_config)
         self.eps_ = 1e-5
-        self.vob_start_id_ = -1
-        self.vob_end_id_ = -1
         return
 
     def _norm(self, input, infer_state, layer_weight) -> torch.Tensor:

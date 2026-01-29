@@ -1,5 +1,3 @@
-import torch
-import numpy as np
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 
 
@@ -14,8 +12,8 @@ def rename_weight_keys(weights):
 
 
 class LlavaPreAndPostLayerWeight(LlamaPreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
         return
 
     def load_hf_weights(self, weights):

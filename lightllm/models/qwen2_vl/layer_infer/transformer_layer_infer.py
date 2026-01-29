@@ -1,17 +1,12 @@
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
 from typing import Tuple
-from functools import partial
-
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 
 
 class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
-        super().__init__(layer_num, network_config, mode)
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
         mrope_section = network_config["rope_scaling"]["mrope_section"]
         self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")
 

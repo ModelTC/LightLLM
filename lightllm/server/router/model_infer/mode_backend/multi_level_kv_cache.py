@@ -2,10 +2,11 @@ import threading
 import torch.distributed as dist
 import torch
 import dataclasses
+from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.envs_utils import get_env_start_args, disable_cpu_kvcache_sync
+from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
@@ -26,11 +27,11 @@ class MultiLevelKvCacheModule(object):
         self.init_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.init_sync_group)
 
+        self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device="cuda")
+        self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
+
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
-
-        # 一些算子模式需要同步计算和 cpu cache 的 load 和 offload 操作
-        self.need_sync_compute_stream: bool = self.args.enable_fa3 and not disable_cpu_kvcache_sync()
 
     def wait(self):
         """
@@ -39,6 +40,26 @@ class MultiLevelKvCacheModule(object):
         attach_shm_handle = self.cpu_cache_client.attach_shm_handle
         if attach_shm_handle is not None:
             attach_shm_handle.wait()
+
+    @lru_cache()
+    def need_sync_compute_stream(self) -> bool:
+        """
+        fa3 在 offload 和 load kv cache 的时候，需要等待计算流完成，否则可能会概率崩溃。
+        """
+
+        model = self.backend.model
+        att_backends = [
+            model.prefill_att_backend,
+            model.decode_att_backend,
+            model.prefill_att_backend1,
+            model.decode_att_backend1,
+        ]
+        for att_backend in att_backends:
+            if att_backend is not None and "fa3" in att_backend.__class__.__name__.lower():
+                logger.info("MultiLevelKvCacheModule: need sync compute stream for fa3 backend.")
+                return True
+        logger.info("MultiLevelKvCacheModule: no need sync compute stream.")
+        return False
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
@@ -67,12 +88,12 @@ class MultiLevelKvCacheModule(object):
 
                     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
-                    if self.need_sync_compute_stream:
+                    if self.need_sync_compute_stream():
                         # TODO fa3 现在必须使用同步模式, 未来需要移除
                         g_infer_context.get_overlap_stream().synchronize()
 
                     # TODO 更有效的分配策略。
-                    grid_num = 16 if self.need_sync_compute_stream or (not self.args.enable_fa3) else 1
+                    grid_num = 16
 
                     mem_manager = self.backend.model.mem_manager
                     if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
@@ -89,14 +110,18 @@ class MultiLevelKvCacheModule(object):
                         cpu_kv_cache_scale = None
                         gpu_kv_cache_scale = None
 
+                    mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
+                    page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
+                        non_blocking=True
+                    )
                     # 将 cpu page 的内容拷贝到 gpu 页面中
                     load_cpu_kv_to_gpu(
-                        gpu_mem_indexes=mem_indexes.cuda(non_blocking=True),
+                        gpu_mem_indexes=mem_indexes_cuda,
                         gpu_kv_cache=mem_manager.kv_buffer,
                         gpu_kv_cache_scale=gpu_kv_cache_scale,
                         cpu_kv_cache=cpu_kv_cache,
                         cpu_kv_cache_scale=cpu_kv_cache_scale,
-                        page_indexes=torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True),
+                        page_indexes=page_indexes_cuda,
                         tp_index=self.backend.rank_in_dp,
                         tp_world_size=self.backend.dp_world_size,
                         grid_num=grid_num,
@@ -157,7 +182,7 @@ class MultiLevelKvCacheModule(object):
 
             assert req.cpu_cache_task_status.is_not_started()
 
-            if self.need_sync_compute_stream:
+            if self.need_sync_compute_stream():
                 # TODO fa3 现在必须使用同步模式, 未来需要移除, 必须等待 overlap stream 上的计算任务完成，不然会崩溃
                 g_infer_context.get_overlap_stream().synchronize()
 
@@ -170,7 +195,7 @@ class MultiLevelKvCacheModule(object):
             else:
                 true_finished_reqs.append(req)
 
-        if self.need_sync_compute_stream:
+        if self.need_sync_compute_stream():
             # TODO fa3 现在必须使用同步模式, 未来需要移除
             cpu_stream.synchronize()
 
@@ -221,12 +246,18 @@ class MultiLevelKvCacheModule(object):
 
             page_indexes = torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
             page_readies = torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
+            assert len(page_indexes) <= self.page_index_buffer.shape[0]
+            cuda_page_indexes = self.page_index_buffer[: len(page_indexes)]
+            cuda_page_readies = self.page_ready_buffer[: len(page_readies)]
+            cuda_page_indexes.copy_(page_indexes, non_blocking=True)
+            cuda_page_readies.copy_(page_readies, non_blocking=True)
+
             move_token_num = item_size * self.args.cpu_cache_token_page_size
             assert req.cur_kv_len >= item_size * self.args.cpu_cache_token_page_size
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
             # TODO 更有效的分配策略。
-            grid_num = 16 if self.need_sync_compute_stream or (not self.args.enable_fa3) else 1
+            grid_num = 16
 
             mem_manager = self.backend.model.mem_manager
             if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
@@ -248,8 +279,8 @@ class MultiLevelKvCacheModule(object):
                 gpu_kv_cache_scale=gpu_kv_cache_scale,
                 cpu_kv_cache=cpu_kv_cache,
                 cpu_kv_cache_scale=cpu_kv_cache_scale,
-                page_indexes=page_indexes,
-                page_readies=page_readies,
+                page_indexes=cuda_page_indexes,
+                page_readies=cuda_page_readies,
                 tp_index=self.backend.rank_in_dp,
                 tp_world_size=self.backend.dp_world_size,
                 grid_num=grid_num,

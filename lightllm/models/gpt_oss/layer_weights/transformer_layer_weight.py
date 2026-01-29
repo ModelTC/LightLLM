@@ -2,11 +2,14 @@ import os
 import torch
 import numpy as np
 
-from lightllm.common.basemodel.layer_weights.meta_weights.gpt_oss_fused_moe_weight_tp import GPTOSSFusedMoeWeightTP
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.gpt_oss_fused_moe_weight_tp import (
+    GPTOSSFusedMoeWeightTP,
+)
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMMWeight
-from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import NormWeight, TpNormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.envs_utils import get_env_start_args
 
 logger = init_logger(__name__)
 
@@ -17,24 +20,24 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
         layer_num,
         data_type,
         network_config,
-        mode=[],
         quant_cfg=None,
     ):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
     def _init_moe(self):
-        moe_mode = os.getenv("MOE_MODE", "TP")
+        enable_ep_moe = get_env_start_args().enable_ep_moe
         moe_intermediate_size = self.network_config_["intermediate_size"]
         n_routed_experts = self.network_config_["num_local_experts"]
-        assert moe_mode in ["TP"], "For now, GPT-OSS type model only support MOE TP mode."
+        assert not enable_ep_moe, "For now, GPT-OSS type model only support MOE TP mode."
 
         self.moe_gate = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[n_routed_experts],
             weight_names=self._router_weight_name,
             data_type=self.data_type_,
-            layer_num=self.layer_num_,
             bias_names=self._router_bias_name,
-            name="moe_gate",
+            quant_method=self.get_quant_method("moe_gate"),
             tp_rank=0,
             tp_world_size=1,
         )
@@ -45,19 +48,17 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
             e_score_correction_bias_name="",
             weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
             n_routed_experts=n_routed_experts,
-            split_inter_size=moe_intermediate_size // self.tp_world_size_,
+            hidden_size=self.n_embed,
+            moe_intermediate_size=moe_intermediate_size,
             data_type=self.data_type_,
-            network_config=self.network_config_,
-            layer_num=self.layer_num_,
-            world_size=self.tp_world_size_,  # diff with FusedMoeWeightTP
-            quant_cfg=self.quant_cfg,
+            quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
             num_fused_shared_experts=0,
+            layer_num=self.layer_num_,
+            network_config=self.network_config_,
         )
 
     def _init_weight_names(self):
         super()._init_weight_names()
-
-        self._attn_sink_name = f"model.layers.{self.layer_num_}.self_attn.sinks"
 
         self._q_bias_name = f"model.layers.{self.layer_num_}.self_attn.q_proj.bias"
         self._k_bias_name = f"model.layers.{self.layer_num_}.self_attn.k_proj.bias"
@@ -70,8 +71,11 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
     def _init_weight(self):
         super()._init_weight()
 
-        n_split_head = self.network_config_["num_attention_heads"] // self.tp_world_size_
-        self.attn_sinks = TpNormWeight(self._attn_sink_name, torch.bfloat16, n_split_head)
+        self.attn_sinks = TpAttSinkWeight(
+            all_q_head_num=self.q_head_num_,
+            weight_name=f"model.layers.{self.layer_num_}.self_attn.sinks",
+            data_type=torch.bfloat16,
+        )
 
     def _init_ffn(self):
         self._init_moe()

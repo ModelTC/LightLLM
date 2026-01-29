@@ -39,7 +39,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pd_decode_rpyc_port",
         type=int,
-        default=42000,
+        default=None,
         help="p d mode, decode node used for kv move manager rpyc server port",
     )
     parser.add_argument(
@@ -210,7 +210,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         When deploying in multi-node manner, the value should be set to the IP of the master node""",
     )
     parser.add_argument(
-        "--nccl_port", type=int, default=28765, help="the nccl_port to build a distributed environment for PyTorch"
+        "--nccl_port", type=int, default=None, help="the nccl_port to build a distributed environment for PyTorch"
     )
     parser.add_argument(
         "--use_config_server_to_init_nccl",
@@ -218,29 +218,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""use tcp store server started by config_server to init nccl, default is False, when set to True,
         the --nccl_host must equal to the config_server_host, and the --nccl_port must be unique for a config_server,
         dont use same nccl_port for different inference node, it will be critical error""",
-    )
-
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default=[],
-        nargs="+",
-        help="""Model mode: [triton_int8kv | ppl_int8kv | ppl_int8kv_flashdecoding | ppl_int8kv_flashdecoding_diverse
-                        | ppl_fp16 | triton_flashdecoding
-                        | triton_gqa_attention | triton_gqa_flashdecoding | triton_fp8kv | offline_calibration_fp8kv
-                        | export_fp8kv_calibration
-                        triton_flashdecoding mode is for long context, current support llama llama2 qwen;
-                        triton_gqa_attention and triton_gqa_flashdecoding is fast kernel for model which use GQA;
-                        triton_int8kv mode use int8 to store kv cache, can increase token capacity, use triton kernel;
-                        triton_fp8kv mode use float8 to store kv cache, currently only for deepseek2;
-                        offline_calibration_fp8kv mode use float8 to store kv cache, need fa3 or flashinfer backend,
-                        currently only for llama and qwen model;
-                        export_fp8kv_calibration record and export kv cache quant calibration results to a json file.
-                        It can be used for llama and qwen model.
-                        Calibration need to disable cudagraph and use fa3 or flashinfer backend.
-                        ppl_int8kv mode use int8 to store kv cache, and use ppl fast kernel;
-                        ppl_fp16 mode use ppl fast fp16 decode attention kernel;
-                        you need to read source code to make sure the supported detail mode for all models""",
     )
     parser.add_argument(
         "--trust_remote_code",
@@ -282,7 +259,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable_dynamic_prompt_cache", action="store_true", help="disable dynamic prompt cache")
 
-    parser.add_argument("--chunked_prefill_size", type=int, default=4096, help="chunked prefill size")
+    parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
@@ -337,21 +314,50 @@ def make_argument_parser() -> argparse.ArgumentParser:
         only deepseekv3 model supported now.""",
     )
     parser.add_argument(
-        "--enable_flashinfer_prefill",
-        action="store_true",
-        help="""inference backend will use the attention kernel of flashinfer for prefill,
-        only deepseekv3 model supported now.""",
+        "--llm_prefill_att_backend",
+        type=str,
+        nargs="+",
+        choices=["auto", "triton", "fa3", "flashinfer"],
+        default=["auto"],
+        help="""prefill attention kernel used in llm.
+                auto: automatically select best backend based on GPU and available packages
+                (priority: fa3 > flashinfer > triton)""",
     )
     parser.add_argument(
-        "--enable_flashinfer_decode",
-        action="store_true",
-        help="""inference backend will use the attention kernel of flashinfer for decode,
-        only deepseekv3 model supported now.""",
+        "--llm_decode_att_backend",
+        type=str,
+        nargs="+",
+        choices=["auto", "triton", "fa3", "flashinfer"],
+        default=["auto"],
+        help="""decode attention kernel used in llm.
+                auto: automatically select best backend based on GPU and available packages
+                (priority: fa3 > flashinfer > triton)""",
     )
     parser.add_argument(
-        "--enable_fa3",
-        action="store_true",
-        help="""inference backend will use the fa3 attention kernel for prefill and decode""",
+        "--vit_att_backend",
+        type=str,
+        nargs="+",
+        choices=["auto", "triton", "fa3", "sdpa", "xformers"],
+        default=["auto"],
+        help="""vit attention kernel used in vlm.
+                auto: automatically select best backend based on GPU and available packages
+                (priority: fa3 > xformers > sdpa > triton)""",
+    )
+    parser.add_argument(
+        "--llm_kv_type",
+        type=str,
+        choices=["None", "int8kv", "int4kv"],
+        default="None",
+        help="""kv type used in llm, None for dtype that llm used in config.json.
+                fp8kv: not fully supported yet, will support in future""",
+    )
+    parser.add_argument(
+        "--llm_kv_quant_group_size",
+        type=int,
+        default=8,
+        help="""kv quant group size used in llm kv, when llm_kv_type is quanted type,such as int8kv,
+        this params will be effective.
+        """,
     )
     parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
@@ -394,7 +400,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--push_interval", type=int, default=10, help="interval of pushing monitoring metrics")
     parser.add_argument(
-        "--visual_infer_batch_size", type=int, default=1, help="number of images to process in each inference batch"
+        "--visual_infer_batch_size", type=int, default=None, help="number of images to process in each inference batch"
     )
     parser.add_argument(
         "--visual_send_batch_size",
@@ -414,7 +420,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_nccl_ports",
         nargs="+",
         type=int,
-        default=[29500],
+        default=None,
         help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
     )
     parser.add_argument(
@@ -469,10 +475,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help="""Quantization method: ppl-w4a16-128 | flashllm-w6a16
-                        | ao-int4wo-[32,64,128,256] | ao-int8wo | ao-fp8w8a16 | ao-fp6w6a16
-                        | vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
-                        | triton-fp8w8a8-block128""",
+        help="""Quantization method: vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
+                        | deepgemm-fp8w8a8-b128 | triton-fp8w8a8-block128 | awq | awq_marlin""",
     )
     parser.add_argument(
         "--quant_cfg",
@@ -485,9 +489,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--vit_quant_type",
         type=str,
         default="none",
-        help="""Quantization method: ppl-w4a16-128 | flashllm-w6a16
-                        | ao-int4wo-[32,64,128,256] | ao-int8wo | ao-fp8w8a16 | ao-fp6w6a16
-                        | vllm-w8a8 | vllm-fp8w8a8""",
+        help="""Quantization method for ViT: vllm-w8a8 | vllm-fp8w8a8""",
     )
     parser.add_argument(
         "--vit_quant_cfg",
@@ -525,6 +527,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--enable_ep_moe",
+        action="store_true",
+        help="""Whether to enable ep moe for deepseekv3 model.""",
+    )
+    parser.add_argument(
         "--ep_redundancy_expert_config_path",
         type=str,
         default=None,
@@ -538,17 +545,21 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
-        help="""Whether to enable fused shared experts for deepseekv3 model. only work when MOE_MODE=TP """,
+        help="""Whether to enable fused shared experts for deepseekv3 model. only work when tensor parallelism""",
     )
     parser.add_argument(
         "--mtp_mode",
-        choices=["deepseekv3_vanilla", "deepseekv3_eagle", None],
+        choices=["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att", None],
         default=None,
-        help="""supported mtp mode, None is not enable mtp, """,
+        help="""Supported MTP modes.
+        None: Disables MTP.
+        *_with_att: Uses the MTP model with an attention mechanism to predict the next draft token.
+        *_no_att: Uses the MTP model without an attention module to predict the next draft token.""",
     )
     parser.add_argument(
         "--mtp_draft_model_dir",
         type=str,
+        nargs="+",
         default=None,
         help="""Path to the draft model for the MTP multi-prediction feature,
         used for loading the MTP multi-output token model.""",
@@ -607,5 +618,25 @@ def make_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
+    )
+    parser.add_argument(
+        "--hardware_platform",
+        type=str,
+        default="cuda",
+        choices=["cuda", "musa"],
+        help="""Hardware platform: cuda | musa""",
+    )
+    parser.add_argument(
+        "--enable_torch_fallback",
+        action="store_true",
+        help="""Whether to enable torch naive implementation for the op.
+        If the op is not implemented for the platform, it will use torch naive implementation.""",
+    )
+    parser.add_argument(
+        "--enable_triton_fallback",
+        action="store_true",
+        help="""Whether to enable triton implementation for the op.
+        If the op is not implemented for the platform and the hardware support triton,
+        it will use triton implementation.""",
     )
     return parser

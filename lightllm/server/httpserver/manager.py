@@ -550,6 +550,7 @@ class HttpServerManager:
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
+        sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
@@ -579,6 +580,8 @@ class HttpServerManager:
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
+                    sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
                         is_first_token = False
@@ -605,7 +608,7 @@ class HttpServerManager:
                         disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
 
                         mtp_avg_token_per_step = out_token_counter / max(
-                            (out_token_counter - metadata["mtp_accepted_token_num"]), 1
+                            (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
                         )
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
@@ -642,6 +645,9 @@ class HttpServerManager:
                         )
                         self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
                         self.metric_client.counter_inc("lightllm_request_success")
+                        self.metric_client.histogram_observe(
+                            "lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step
+                        )
 
                         return
                 req_status.out_token_info_list.clear()

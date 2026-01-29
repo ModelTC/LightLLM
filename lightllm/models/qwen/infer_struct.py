@@ -11,13 +11,13 @@ class QwenInferStateInfo(LlamaInferStateInfo):
         self.position_sin = None
         self.logn_values = None
 
-    def init_some_extra_state(self, model, input_ids: torch.Tensor):
+    def init_some_extra_state(self, model):
         use_dynamic_ntk = model.config.get("use_dynamic_ntk", False)
         if not use_dynamic_ntk:
-            super().init_some_extra_state(model, input_ids)
+            super().init_some_extra_state(model)
             return
 
-        InferStateInfo.init_some_extra_state(self, model, input_ids)
+        InferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
             position_ids = self.position_ids
             self.position_sin = []

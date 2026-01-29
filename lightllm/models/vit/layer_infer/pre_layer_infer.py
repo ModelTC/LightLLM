@@ -11,11 +11,10 @@ from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 class ViTPreLayerInfer:
     """ """
 
-    def __init__(self, network_config, mode):
+    def __init__(self, network_config):
         self.tp_rank_ = get_current_rank_in_dp()
         self.tp_world_size_ = get_dp_world_size()
         self.network_config_ = network_config
-        self.mode = mode
         return
 
     def forward(self, pixel_values, layer_weight: ViTPreAndPostLayerWeight):

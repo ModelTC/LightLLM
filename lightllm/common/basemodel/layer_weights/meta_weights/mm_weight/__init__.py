@@ -1,10 +1,5 @@
 from .mm_weight import (
-    MMWeightPack,
     MMWeightTpl,
 )
-from .mm_factory import (
-    MMWeight,
-    ROWMMWeight,
-    ROWBMMWeight,
-    COLMMWeight,
-)
+from .rowmm_weight import ROWMMWeight, KVROWNMMWeight, ROWBMMWeight
+from .colmm_weight import COLMMWeight
