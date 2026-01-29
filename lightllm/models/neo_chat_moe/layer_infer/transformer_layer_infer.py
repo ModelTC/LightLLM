@@ -118,8 +118,8 @@ class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         cache_kv = layer_weight.kv_proj.mm(input)  # [T, (Hk+Hv)*D]
 
         qk_rmsnorm_forward(q, weight=layer_weight.q_norm_weight_.weight, eps=self.eps_)
-        qk_rmsnorm_forward(q_hw, weight=layer_weight.q_norm_h_weight_.weight, eps=self.eps_)
-        qk_rmsnorm_forward(k_hw, weight=layer_weight.k_norm_w_weight_.weight, eps=self.eps_)
+        qk_rmsnorm_forward(q_hw, weight=layer_weight.q_norm_hw_weight_.weight, eps=self.eps_)
+        qk_rmsnorm_forward(k_hw, weight=layer_weight.k_norm_hw_weight_.weight, eps=self.eps_)
 
         q_hw = q_hw.view(q.shape[0], self.tp_q_head_num_, self.head_dim_)
         q_h, q_w = q_hw.chunk(2, dim=-1)
