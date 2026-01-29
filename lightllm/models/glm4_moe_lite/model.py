@@ -5,9 +5,7 @@ from lightllm.models.glm4_moe_lite.layer_infer.transformer_layer_infer import Gl
 from lightllm.models.glm4_moe_lite.layer_weights.transformer_layer_weight import Glm4MoeLiteTransformerLayerWeight
 from lightllm.models.glm4_moe_lite.infer_struct import Glm4MoeLiteInferStateInfo
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 @ModelRegistry("glm4_moe_lite")
@@ -19,6 +17,29 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
 
     def __init__(self, kvargs):
         super().__init__(kvargs)
+
+    def _init_att_backend(self):
+        args = get_env_start_args()
+        prefill_backend_str = args.llm_prefill_att_backend[0]
+        decode_backend_str = args.llm_decode_att_backend[0]
+
+        if prefill_backend_str in ("triton", "auto"):
+            from lightllm.models.glm4_moe_lite.triton_kernel.mla_att import GlmMlaTritonAttBackend
+
+            self.prefill_att_backend = GlmMlaTritonAttBackend(model=self)
+        else:
+            from lightllm.common.basemodel.attention import get_mla_prefill_att_backend_class
+
+            self.prefill_att_backend = get_mla_prefill_att_backend_class(index=0)(model=self)
+
+        if decode_backend_str in ("triton", "auto"):
+            from lightllm.models.glm4_moe_lite.triton_kernel.mla_att import GlmMlaTritonAttBackend
+
+            self.decode_att_backend = GlmMlaTritonAttBackend(model=self)
+        else:
+            from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class
+
+            self.decode_att_backend = get_mla_decode_att_backend_class(index=0)(model=self)
 
     def _init_config(self):
         super()._init_config()
