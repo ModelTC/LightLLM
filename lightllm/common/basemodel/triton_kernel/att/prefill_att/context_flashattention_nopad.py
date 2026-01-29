@@ -7,7 +7,7 @@ import triton.language as tl
 import math
 import torch.nn.functional as F
 
-from lightllm.utils.device_utils import is_tesla
+from lightllm.utils.device_utils import is_metax, is_tesla
 
 
 @triton.jit
@@ -123,8 +123,9 @@ def _fwd_kernel(
 def context_attention_fwd(
     q, k, v, o, b_req_idx, b_start_loc, b_seq_len, b_prompt_cache_len, max_input_len, req_to_token_indexs
 ):
-    BLOCK_M = 128 if not is_tesla() else 64
-    BLOCK_M = 64
+    BLOCK_M = 128
+    if is_tesla() or is_metax():
+        BLOCK_M = 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
