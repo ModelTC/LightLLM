@@ -4,6 +4,7 @@ from .mm_weight import (
     ROWMMWeight,
     KVROWNMMWeight,
     ROWBMMWeight,
+    QKVROWNMMWeight,
     COLMMWeight,
 )
 from .norm_weight import TpRMSNormWeight, RMSNormWeight, LayerNormWeight, NoTpGEMMANormWeight, QKRMSNORMWeight
