@@ -1,11 +1,4 @@
-import os
-import torch
-import torch.distributed as dist
-import triton
-from functools import partial
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
-from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.distributed.communication_op import reduce_scatter_tensor
 
 
 class Glm4MoeLiteTransformerLayerInfer(Deepseek2TransformerLayerInfer):

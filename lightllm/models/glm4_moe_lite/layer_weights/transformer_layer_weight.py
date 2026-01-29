@@ -1,4 +1,3 @@
-import os
 import torch
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, FusedMoeWeight

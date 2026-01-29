@@ -71,7 +71,7 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
             num_qo_heads=self.backend.tp_q_head_num,
             num_kv_heads=self.backend.tp_q_head_num,
             head_dim_qk=self.backend.qk_nope_head_dim + self.backend.qk_rope_head_dim,
-            head_dim_vo=self.backend.v_head_dim,  # Use v_head_dim, not qk_nope_head_dim
+            head_dim_vo=self.backend.v_head_dim,
             q_data_type=self.backend.q_data_type,
             causal=True,
             sm_scale=self.backend.softmax_scale,
@@ -103,7 +103,6 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
     ) -> torch.Tensor:
         self.backend: MlaFlashInferAttBackend = self.backend  # for typing
         k_nope, k_rope = k
-        # Output dimension is v_head_dim (from v.shape[-1]), not qk_nope_head_dim
         o_tensor = alloc_func((q.shape[0], q.shape[1], v.shape[-1]), q.dtype, device="cuda")
         q_head_num = q.shape[1]
         k = torch.cat([k_nope, torch.repeat_interleave(k_rope, q_head_num, dim=-2)], dim=-1)
