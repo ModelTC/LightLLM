@@ -136,9 +136,9 @@ class DistributeGroupManager:
         return self.groups[group_index]
 
     def new_deepep_group(self, n_routed_experts, hidden_size):
-        moe_mode = os.getenv("MOE_MODE", "TP")
+        enable_ep_moe = get_env_start_args().enable_ep_moe
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank()
-        if moe_mode == "TP":
+        if not enable_ep_moe:
             self.ep_buffer = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"

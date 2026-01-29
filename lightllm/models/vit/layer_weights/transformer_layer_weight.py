@@ -7,8 +7,9 @@ from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
-    NoTpNormWeight,
-    TpVitPadNormWeight,
+    RMSNormWeight,
+    LayerNormWeight,
+    TpRMSNormWeight,
 )
 from lightllm.utils.dist_utils import get_current_device_id
 
@@ -29,6 +30,9 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
         self.qkv_bias = self.network_config_.get("qkv_bias", True)
         self.layer_norm_eps = self.network_config_.get("layer_norm_eps", 1e-6)
         self.norm_type = self.network_config_.get("norm_type", "layer_norm")
+        self.n_embed = self.network_config_["hidden_size"] + self.padding_hidden_size
+        mlp_ratio = self.network_config_.get("mlp_ratio", 4)
+        self.n_inter = self.network_config_.get("intermediate_size", int(self.n_embed * mlp_ratio))
 
     def _init_weight_names(self):
         self._att_norm_weight_name = f"vision_model.encoder.layers.{self.layer_num_}.norm1.weight"
@@ -81,54 +85,85 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
 
     def _init_qkv(self):
         self.qkv_proj = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_embed, self.n_embed, self.n_embed],
             weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
             data_type=self.data_type_,
             bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="qkv_proj",
+            quant_method=self.get_quant_method("qkv_proj"),
         )
 
     def _init_o(self):
         self.o_proj = COLMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_embed],
             weight_names=self._o_weight_name,
             data_type=self.data_type_,
             bias_names=self._o_bias_name,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="o_proj",
+            quant_method=self.get_quant_method("o_proj"),
         )
 
     def _init_ffn(self):
         self.ffn_1_proj_ = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.n_inter],
             weight_names=self.fc1_weight_name_,
             data_type=self.data_type_,
             bias_names=self.fc1_bias_name_,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="ffn_1_proj",
+            quant_method=self.get_quant_method("ffn_1_proj"),
         )
 
         self.ffn_2_proj_ = COLMMWeight(
+            in_dim=self.n_inter,
+            out_dims=[self.n_embed],
             weight_names=self.fc2_weight_name_,
             data_type=self.data_type_,
             bias_names=self.fc2_bias_name_,
-            quant_cfg=self.quant_cfg,
-            layer_num=self.layer_num_,
-            name="ffn_2_proj",
+            quant_method=self.get_quant_method("ffn_2_proj"),
         )
 
     def _init_norm(self):
-        self.att_norm_weight_ = NoTpNormWeight(
-            self._att_norm_weight_name, self.data_type_, bias_name=self._att_norm_bias_name
-        )
-        self.ffn_norm_weight_ = NoTpNormWeight(
-            self._ffn_norm_weight_name, self.data_type_, bias_name=self._ffn_norm_bias_name
-        )
+        hidden_size = self.network_config_["hidden_size"]
+        if self.norm_type == "rms_norm":
+            self.att_norm_weight_ = RMSNormWeight(
+                dim=hidden_size,
+                weight_name=self._att_norm_weight_name,
+                data_type=self.data_type_,
+            )
+            self.ffn_norm_weight_ = RMSNormWeight(
+                dim=hidden_size,
+                weight_name=self._ffn_norm_weight_name,
+                data_type=self.data_type_,
+            )
+        else:
+            self.att_norm_weight_ = LayerNormWeight(
+                dim=hidden_size,
+                weight_name=self._att_norm_weight_name,
+                data_type=self.data_type_,
+                bias_name=self._att_norm_bias_name,
+            )
+            self.ffn_norm_weight_ = LayerNormWeight(
+                dim=hidden_size,
+                weight_name=self._ffn_norm_weight_name,
+                data_type=self.data_type_,
+                bias_name=self._ffn_norm_bias_name,
+            )
         if self.qk_norm:
             head_num = self.network_config_["num_attention_heads"]
-            self.q_norm_weight_ = TpVitPadNormWeight(self._q_norm_weight_name, self.data_type_, head_num=head_num)
-            self.k_norm_weight_ = TpVitPadNormWeight(self._k_norm_weight_name, self.data_type_, head_num=head_num)
+            head_dim = self.network_config_["hidden_size"] // head_num
+            head_dim = self.network_config_.get("head_dim", head_dim)
+            self.q_norm_weight_ = TpRMSNormWeight(
+                head_num=head_num,
+                head_dim=head_dim,
+                weight_name=self._q_norm_weight_name,
+                data_type=self.data_type_,
+            )
+            self.k_norm_weight_ = TpRMSNormWeight(
+                head_num=head_num,
+                head_dim=head_dim,
+                weight_name=self._k_norm_weight_name,
+                data_type=self.data_type_,
+            )
 
     def load_hf_weights(self, weights):
         if f"vision_model.encoder.layers.{self.layer_num_}.attn.qkv.weight" in weights:

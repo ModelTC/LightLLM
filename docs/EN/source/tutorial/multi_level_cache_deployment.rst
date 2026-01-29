@@ -66,8 +66,6 @@ Suitable for most scenarios, significantly increasing cache capacity while maint
         --model_dir /path/to/Qwen3-235B-A22B \
         --tp 8 \
         --graph_max_batch_size 500 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend fa3 \
         --mem_fraction 0.88 \
         --enable_cpu_cache \
         --cpu_cache_storage_size 400 \
@@ -82,7 +80,6 @@ Basic Parameters
 - ``--model_dir``: Model file path, supports local path or HuggingFace model name
 - ``--tp 8``: Tensor parallelism degree, using 8 GPUs for model inference
 - ``--graph_max_batch_size 500``: CUDA Graph maximum batch size, affects throughput and memory usage
-- ``--llm_prefill_att_backend fa3``: Enable Flash Attention 3.0 to improve attention computation speed. You can also switch to flashinfer backend for better performance
 - ``--mem_fraction 0.88``: GPU memory usage ratio, recommended to set to 0.88 or below
 
 CPU Cache Parameters
@@ -131,8 +128,6 @@ Suitable for ultra-long text or extremely high-concurrency scenarios, providing 
         --model_dir /path/to/Qwen3-235B-A22B \
         --tp 8 \
         --graph_max_batch_size 500 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend fa3 \
         --mem_fraction 0.88 \
         --enable_cpu_cache \
         --cpu_cache_storage_size 400 \

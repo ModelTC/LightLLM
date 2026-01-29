@@ -1,4 +1,4 @@
-.. _tutorial/api_server_args_zh:
+.. _tutorial/api_server_args:
 
 APIServer 参数详解
 ==================
@@ -284,6 +284,17 @@ PD 分离模式参数
 
     为 ViT 构建分布式环境的 NCCL 端口列表，例如 29500 29501 29502，默认为 [29500]
 
+.. option:: --vit_att_backend
+
+    设置 ViT 使用的注意力后端。可选值为：
+
+    * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > xformers > sdpa > triton
+    * ``fa3``: 使用 Flash-Attention 3 后端
+    * ``xformers``: 使用 xformers 后端
+    * ``sdpa``: 使用 sdpa 后端
+    * ``triton``: 使用 Triton 后端
+
+
 性能优化参数
 ------------
 
@@ -310,6 +321,24 @@ PD 分离模式参数
 .. option:: --enable_decode_microbatch_overlap
 
     推理后端将为解码使用微批次重叠模式
+
+.. option:: --llm_prefill_att_backend
+
+    设置预填充（Prefill）阶段使用的注意力后端。可选值为：
+
+    * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > flashinfer > triton
+    * ``fa3``: 使用 Flash-Attention 3 后端
+    * ``flashinfer``: 使用 FlashInfer 后端
+    * ``triton``: 使用 Triton 后端
+
+.. option:: --llm_decode_att_backend
+
+    设置解码（Decode）阶段使用的注意力后端。可选值为：
+
+    * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > flashinfer > triton
+    * ``fa3``: 使用 Flash-Attention 3 后端
+    * ``flashinfer``: 使用 FlashInfer 后端
+    * ``triton``: 使用 Triton 后端
     
 .. option:: --llm_kv_type
 
@@ -349,17 +378,14 @@ PD 分离模式参数
 .. option:: --quant_type
 
     量化方法，可选值：
-    
-    * ``ppl-w4a16-128``
-    * ``flashllm-w6a16``
-    * ``ao-int4wo-[32,64,128,256]``
-    * ``ao-int8wo``
-    * ``ao-fp8w8a16``
-    * ``ao-fp6w6a16``
+
     * ``vllm-w8a8``
     * ``vllm-fp8w8a8``
     * ``vllm-fp8w8a8-b128``
+    * ``deepgemm-fp8w8a8-b128``
     * ``triton-fp8w8a8-block128``
+    * ``awq``
+    * ``awq_marlin``
     * ``none`` (默认)
 
 .. option:: --quant_cfg
@@ -371,13 +397,7 @@ PD 分离模式参数
 .. option:: --vit_quant_type
 
     ViT 量化方法，可选值：
-    
-    * ``ppl-w4a16-128``
-    * ``flashllm-w6a16``
-    * ``ao-int4wo-[32,64,128,256]``
-    * ``ao-int8wo``
-    * ``ao-fp8w8a16``
-    * ``ao-fp6w6a16``
+
     * ``vllm-w8a8``
     * ``vllm-fp8w8a8``
     * ``none`` (默认)

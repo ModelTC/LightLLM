@@ -1,4 +1,4 @@
-.. _tutorial/api_server_args_zh:
+.. _tutorial/api_server_args:
 
 APIServer Parameter Details
 ===========================
@@ -282,6 +282,17 @@ Multimodal Parameters
 
     List of NCCL ports for ViT, e.g., 29500 29501 29502, default is [29500]
 
+.. option:: --vit_att_backend
+
+    Set the attention backend for ViT. Available options:
+
+    * ``auto``: Automatically select the best backend (default), with priority fa3 > xformers > sdpa > triton
+    * ``fa3``: Use Flash-Attention 3 backend
+    * ``xformers``: Use xformers backend
+    * ``sdpa``: Use sdpa backend
+    * ``triton``: Use Triton backend
+
+
 Performance Optimization Parameters
 -----------------------------------
 
@@ -303,11 +314,29 @@ Performance Optimization Parameters
 
     The inference backend will use microbatch overlap mode for prefill
     
-    Currently only supports deepseek series models
+    Currently only supports deepseek series.
 
 .. option:: --enable_decode_microbatch_overlap
 
     The inference backend will use microbatch overlap mode for decoding
+
+.. option:: --llm_prefill_att_backend
+
+    Set the attention backend for the prefill phase. Available options:
+
+    * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
+    * ``fa3``: Use Flash-Attention 3 backend
+    * ``flashinfer``: Use FlashInfer backend
+    * ``triton``: Use Triton backend
+
+.. option:: --llm_decode_att_backend
+
+    Set the attention backend for the decode phase. Available options:
+
+    * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
+    * ``fa3``: Use Flash-Attention 3 backend
+    * ``flashinfer``: Use FlashInfer backend
+    * ``triton``: Use Triton backend
 
 .. option:: --disable_cudagraph
 
@@ -341,17 +370,14 @@ Quantization Parameters
 .. option:: --quant_type
 
     Quantization method, optional values:
-    
-    * ``ppl-w4a16-128``
-    * ``flashllm-w6a16``
-    * ``ao-int4wo-[32,64,128,256]``
-    * ``ao-int8wo``
-    * ``ao-fp8w8a16``
-    * ``ao-fp6w6a16``
+
     * ``vllm-w8a8``
     * ``vllm-fp8w8a8``
     * ``vllm-fp8w8a8-b128``
+    * ``deepgemm-fp8w8a8-b128``
     * ``triton-fp8w8a8-block128``
+    * ``awq``
+    * ``awq_marlin``
     * ``none`` (default)
 
 .. option:: --quant_cfg
@@ -363,13 +389,7 @@ Quantization Parameters
 .. option:: --vit_quant_type
 
     ViT quantization method, optional values:
-    
-    * ``ppl-w4a16-128``
-    * ``flashllm-w6a16``
-    * ``ao-int4wo-[32,64,128,256]``
-    * ``ao-int8wo``
-    * ``ao-fp8w8a16``
-    * ``ao-fp6w6a16``
+
     * ``vllm-w8a8``
     * ``vllm-fp8w8a8``
     * ``none`` (default)
