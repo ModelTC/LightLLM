@@ -311,6 +311,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=self.n_group,
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
+            microbatch_index=infer_state.microbatch_index,
         )
 
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
@@ -337,6 +338,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
             is_prefill=infer_state.is_prefill,
+            microbatch_index=infer_state.microbatch_index,
         )
 
         if self.n_shared_experts is not None:

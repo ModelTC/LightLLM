@@ -13,6 +13,7 @@ from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.basemodel.routing_manager import get_next_moe_layer_index
 
 logger = init_logger(__name__)
 
@@ -35,6 +36,7 @@ class FusedMoeWeight(BaseWeightTpl):
         network_config: Dict[str, Any] = None,
     ) -> None:
         super().__init__(data_type=data_type)
+        self.moe_layer_index = get_next_moe_layer_index()
         self.w1_weight_name = gate_proj_name
         self.w2_weight_name = down_proj_name
         self.w3_weight_name = up_proj_name
@@ -130,6 +132,7 @@ class FusedMoeWeight(BaseWeightTpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        microbatch_index: int = 0,
     ) -> torch.Tensor:
         """Backward compatible method that routes to platform-specific implementation."""
         return self.fuse_moe_impl(
@@ -145,6 +148,8 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             is_prefill=is_prefill,
+            moe_layer_index=self.moe_layer_index,
+            microbatch_index=microbatch_index,
         )
 
     def low_latency_dispatch(

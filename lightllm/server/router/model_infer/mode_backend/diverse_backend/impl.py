@@ -77,6 +77,7 @@ class DiversehBackend(ChunkedPrefillBackend):
                 next_token_ids=next_token_ids, next_token_logprobs=next_token_logprobs
             )
 
+            self._flush_routing_after_sample(model_input.mem_indexes)
             sync_event = torch.cuda.Event()
             sync_event.record()
 

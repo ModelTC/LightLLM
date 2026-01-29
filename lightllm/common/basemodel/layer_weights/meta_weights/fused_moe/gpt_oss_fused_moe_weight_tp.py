@@ -8,6 +8,7 @@ from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.basemodel.routing_manager import g_routing_capture_manager
 
 logger = init_logger(__name__)
 
@@ -144,9 +145,13 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        microbatch_index: int = 0,
     ):
 
         topk_weights, topk_ids = self._router(router_logits, top_k)
+
+        if g_routing_capture_manager is not None:
+            g_routing_capture_manager.capture(self.moe_layer_index, topk_ids, microbatch_index)
 
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2

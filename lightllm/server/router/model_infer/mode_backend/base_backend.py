@@ -40,6 +40,7 @@ from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
+from lightllm.common.basemodel.routing_manager import flush_routing_capture
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 
 
@@ -793,6 +794,9 @@ class ModeBackend:
             next_token_ids, next_token_logprobs
         )
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu
+
+    def _flush_routing_after_sample(self, mem_indexes: torch.Tensor, microbatch_index: int = 0) -> None:
+        flush_routing_capture(mem_indexes, microbatch_index)
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
