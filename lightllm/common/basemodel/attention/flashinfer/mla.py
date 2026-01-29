@@ -16,8 +16,7 @@ class MlaFlashInferAttBackend(BaseAttBackend):
         self.qk_nope_head_dim = model.qk_nope_head_dim
         self.qk_rope_head_dim = model.qk_rope_head_dim
         self.kv_lora_rank = model.kv_lora_rank
-        # v_head_dim may differ from qk_nope_head_dim (e.g., GLM-4.7-Flash: v_head_dim=256, qk_nope_head_dim=192)
-        self.v_head_dim = getattr(model, "v_head_dim", self.qk_nope_head_dim)
+        self.v_head_dim = model.v_head_dim
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
         self.workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=get_current_device_id())

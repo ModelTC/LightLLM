@@ -36,9 +36,6 @@ def _fwd_kernel_with_v(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_ROPE_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_V_DMODEL: tl.constexpr,
-    ACTUAL_DMODEL: tl.constexpr,
-    ACTUAL_V_DMODEL: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -56,13 +53,8 @@ def _fwd_kernel_with_v(
     # initialize offsets
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
-    offs_v_d = tl.arange(0, BLOCK_V_DMODEL)
     offs_rope_d = tl.arange(0, BLOCK_ROPE_DMODEL)
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-
-    d_mask = offs_d < ACTUAL_DMODEL
-    v_d_mask = offs_v_d < ACTUAL_V_DMODEL
-
     off_q = (cur_batch_in_q_start_index + offs_m[:, None]) * stride_q_bs + cur_head * stride_q_h + offs_d[None, :]
     off_q_rope = (
         (cur_batch_in_q_start_index + offs_m[:, None]) * stride_q_rope_bs
@@ -71,10 +63,9 @@ def _fwd_kernel_with_v(
     )
     off_k = offs_n[None, :] * stride_k_bs + cur_k_head * stride_k_h + offs_d[:, None]
     off_k_rope = offs_n[None, :] * stride_k_rope_bs + offs_rope_d[:, None]
-    off_v = offs_n[:, None] * stride_vbs + cur_k_head * stride_vh + offs_v_d[None, :]
+    off_v = offs_n[:, None] * stride_vbs + cur_k_head * stride_vh + offs_d[None, :]
 
-    q_mask = (offs_m[:, None] < cur_batch_seq_len) & d_mask[None, :]
-    q = tl.load(Q_nope + off_q, mask=q_mask, other=0.0)
+    q = tl.load(Q_nope + off_q, mask=offs_m[:, None] < cur_batch_seq_len, other=0.0)
     q_rope = tl.load(Q_rope + off_q_rope, mask=offs_m[:, None] < cur_batch_seq_len, other=0.0)
 
     k_ptrs = K_nope + off_k
@@ -84,7 +75,7 @@ def _fwd_kernel_with_v(
     # initialize pointer to m and l
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
-    acc = tl.zeros([BLOCK_M, BLOCK_V_DMODEL], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
     block_end_loc = tl.minimum((start_m + 1) * BLOCK_M + prompt_cache_len, cur_batch_seq_len + prompt_cache_len)
@@ -92,16 +83,14 @@ def _fwd_kernel_with_v(
     for start_n in range(0, block_mask * block_end_loc, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        k_seq_mask = (start_n + offs_n[None, :]) < block_end_loc
-        k_mask = k_seq_mask & d_mask[:, None]
         k = tl.load(
             k_ptrs + (cur_batch_in_kv_start_index + start_n) * stride_k_bs,
-            mask=k_mask,
+            mask=(start_n + offs_n[None, :]) < block_end_loc,
             other=0.0,
         )
         k_rope = tl.load(
             k_rope_ptrs + (cur_batch_in_kv_start_index + start_n) * stride_k_rope_bs,
-            mask=k_seq_mask,
+            mask=(start_n + offs_n[None, :]) < block_end_loc,
             other=0.0,
         )
 
@@ -123,11 +112,9 @@ def _fwd_kernel_with_v(
         # -- update output accumulator --
         acc = acc * alpha[:, None]
         # update acc
-        v_seq_mask = (start_n + offs_n[:, None]) < block_end_loc
-        v_mask = v_seq_mask & v_d_mask[None, :]
         v = tl.load(
             v_ptrs + (cur_batch_in_kv_start_index + start_n) * stride_vbs,
-            mask=v_mask,
+            mask=(start_n + offs_n[:, None]) < block_end_loc,
             other=0.0,
         )
         p = p.to(v.dtype)
@@ -137,10 +124,9 @@ def _fwd_kernel_with_v(
 
     acc = acc / l_i[:, None]
     # initialize pointers to output
-    off_o = (cur_batch_in_q_start_index + offs_m[:, None]) * stride_obs + cur_head * stride_oh + offs_v_d[None, :]
+    off_o = (cur_batch_in_q_start_index + offs_m[:, None]) * stride_obs + cur_head * stride_oh + offs_d[None, :]
     out_ptrs = Out + off_o
-    o_mask = (offs_m[:, None] < cur_batch_seq_len) & v_d_mask[None, :]
-    tl.store(out_ptrs, acc, mask=o_mask)
+    tl.store(out_ptrs, acc, mask=offs_m[:, None] < cur_batch_seq_len)
     return
 
 
@@ -163,14 +149,13 @@ def context_attention_fwd_with_v(
     BLOCK = 128 if not is_tesla() else 64
     q_nope_dim = q_nope.shape[-1]
     q_rope_dim = q_rope.shape[-1]
-    v_dim = v.shape[-1]
     assert q_nope_dim == k_nope.shape[-1]
     assert q_rope_dim == k_rope.shape[-1]
+    assert q_nope_dim in {16, 32, 64, 128, 256, 512}
+    assert q_rope_dim in {16, 32, 64, 128, 256}
+    assert q_nope_dim == v.shape[-1]
 
-    q_nope_dim_padded = triton.next_power_of_2(q_nope_dim)
-    v_dim_padded = triton.next_power_of_2(v_dim)
-
-    if q_nope_dim_padded >= 512 or v_dim_padded >= 512:
+    if q_nope_dim >= 512:
         BLOCK = 64 if not is_tesla() else 32
     else:
         BLOCK = 128 if not is_tesla() else 64
@@ -182,7 +167,7 @@ def context_attention_fwd_with_v(
     batch, head = b_seq_len.shape[0], q_nope.shape[1]
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))  # batch, head,
-    num_warps = 4 if q_nope_dim_padded <= 64 else 8
+    num_warps = 4 if q_nope_dim <= 64 else 8
 
     _fwd_kernel_with_v[grid](
         q_nope,
@@ -209,12 +194,9 @@ def context_attention_fwd_with_v(
         o.stride(1),
         b_prompt_cache_len=b_prompt_cache_len,
         BLOCK_M=BLOCK,
-        BLOCK_DMODEL=q_nope_dim_padded,
+        BLOCK_DMODEL=q_nope_dim,
         BLOCK_ROPE_DMODEL=q_rope_dim,
         BLOCK_N=BLOCK,
-        BLOCK_V_DMODEL=v_dim_padded,
-        ACTUAL_DMODEL=q_nope_dim,
-        ACTUAL_V_DMODEL=v_dim,
         num_warps=num_warps,
         num_stages=1,
     )

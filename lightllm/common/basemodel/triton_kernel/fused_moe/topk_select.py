@@ -196,12 +196,10 @@ def select_experts(
                 scoring_func=scoring_func,
             )
         else:
-            if correction_bias is not None:
+            group_score_topk_num = 1
+            # for deepseek v3
+            if topk_group == 4 and num_expert_group == 8 and top_k == 8:
                 group_score_topk_num = 2
-            elif topk_group == 4 and num_expert_group == 8 and top_k == 8:
-                group_score_topk_num = 2
-            else:
-                group_score_topk_num = 1
 
             topk_weights, topk_ids = triton_grouped_topk(
                 hidden_states=hidden_states,

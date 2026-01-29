@@ -1,6 +1,6 @@
 from typing import List
+from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
-from lightllm.models.glm4_moe_lite_mtp.layer_infer.pre_layer_infer import Glm4MoeLiteMTPPreLayerInfer
 from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight import (
     Glm4MoeLiteMTPPreAndPostLayerWeight,
 )
@@ -11,7 +11,7 @@ from lightllm.common.basemodel.basemodel import load_hf_weights
 class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
 
     pre_and_post_weight_class = Glm4MoeLiteMTPPreAndPostLayerWeight
-    pre_layer_infer_class = Glm4MoeLiteMTPPreLayerInfer
+    pre_layer_infer_class = Deepseek3MTPPreLayerInfer
 
     def __init__(self, kvargs: dict):
         self._pre_init(kvargs)
