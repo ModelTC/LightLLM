@@ -95,6 +95,12 @@
     "NUM_STAGES": 1,
     "num_warps": 4
   },
+  "40": {
+    "BLOCK_M": 1,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
+  },
   "400": {
     "BLOCK_M": 1,
     "BLOCK_N": 256,
@@ -106,6 +112,12 @@
     "BLOCK_N": 256,
     "NUM_STAGES": 4,
     "num_warps": 1
+  },
+  "5": {
+    "BLOCK_M": 1,
+    "BLOCK_N": 128,
+    "NUM_STAGES": 4,
+    "num_warps": 8
   },
   "500": {
     "BLOCK_M": 1,

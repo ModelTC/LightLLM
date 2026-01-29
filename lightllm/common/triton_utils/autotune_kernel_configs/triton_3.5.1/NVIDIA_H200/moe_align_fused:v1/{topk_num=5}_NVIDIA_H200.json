@@ -1,4 +1,8 @@
 {
+  "1": {
+    "BLOCK_SIZE": 128,
+    "num_warps": 4
+  },
   "100": {
     "BLOCK_SIZE": 128,
     "num_warps": 8

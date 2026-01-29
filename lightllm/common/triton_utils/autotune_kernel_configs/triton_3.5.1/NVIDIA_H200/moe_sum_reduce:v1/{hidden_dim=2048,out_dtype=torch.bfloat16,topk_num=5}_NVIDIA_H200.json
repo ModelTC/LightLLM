@@ -1,4 +1,10 @@
 {
+  "1": {
+    "BLOCK_DIM": 128,
+    "BLOCK_M": 16,
+    "NUM_STAGE": 4,
+    "num_warps": 4
+  },
   "100": {
     "BLOCK_DIM": 1024,
     "BLOCK_M": 1,
@@ -58,5 +64,11 @@
     "BLOCK_M": 1,
     "NUM_STAGE": 1,
     "num_warps": 4
+  },
+  "8": {
+    "BLOCK_DIM": 256,
+    "BLOCK_M": 1,
+    "NUM_STAGE": 4,
+    "num_warps": 2
   }
 }
