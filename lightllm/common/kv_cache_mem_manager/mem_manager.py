@@ -61,7 +61,7 @@ class MemoryManager:
             self.size,
             dtype,
             head_num,
-            head_dim,
+            self.head_dim,
             layer_num,
         )
         self.HOLD_TOKEN_MEMINDEX = self.size
