@@ -96,7 +96,7 @@ model_name = []
 def post_stream_openai(url: str, text_input: str, max_new_tokens: int) -> List[float]:
     data = {
         "model": model_name[0],
-        "prompt": text_input,
+        "messages": [{"role": "user", "content": text_input}],
         "n": 1,
         "ignore_eos": True,
         "max_tokens": max_new_tokens,
@@ -115,7 +115,7 @@ def post_stream_openai(url: str, text_input: str, max_new_tokens: int) -> List[f
             if line == "[DONE]":
                 continue
             data = json.loads(line)
-            if not data["choices"][0]["text"]:
+            if not data["choices"][0]["delta"]["content"]:
                 continue
             current_time = time.time()
             elapsed_time = current_time - last_time
