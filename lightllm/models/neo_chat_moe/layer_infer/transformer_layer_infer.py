@@ -17,6 +17,7 @@ from lightllm.models.qwen3.triton_kernel.qk_norm import qk_rmsnorm_forward
 
 class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     def __init__(self, data_type, network_config, mode):
+        self._is_merge_kv = network_config["is_merge_kv"]
         super().__init__(data_type, network_config, mode)
         return
 
@@ -27,6 +28,14 @@ class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         return
 
     def _get_qkv(self, input, infer_state: NeoChatInferStateInfo, layer_weight: NeoChatMOETransformerLayerWeight):
+        if self._is_merge_kv:
+            return self._get_qkv_mergekv(input, infer_state, layer_weight)
+        else:
+            return self._get_qkv_not_mergekv(input, infer_state, layer_weight)
+
+    def _get_qkv_not_mergekv(
+        self, input, infer_state: NeoChatInferStateInfo, layer_weight: NeoChatMOETransformerLayerWeight
+    ):
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)  # [T, Hq*D]
 
@@ -61,6 +70,68 @@ class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         qk_rmsnorm_forward(k_w_2d, weight=layer_weight.k_norm_w_weight_.weight, eps=self.eps_)
         k_h = k_h_2d.view(q.shape[0], self.tp_k_head_num_, self.head_dim_ // 2)
         k_w = k_w_2d.view(q.shape[0], self.tp_k_head_num_, self.head_dim_ // 2)
+
+        cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+
+        rotary_emb_fwd(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            cache_kv[:, : self.tp_k_head_num_, :],
+            infer_state.position_cos,
+            infer_state.position_sin,
+        )
+        rotary_emb_fwd(
+            q_h,
+            k_h,
+            infer_state.position_cos_h,
+            infer_state.position_sin_h,
+        )
+        rotary_emb_fwd(
+            q_w,
+            k_w,
+            infer_state.position_cos_w,
+            infer_state.position_sin_w,
+        )
+
+        q3 = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        q3 = torch.cat([q3, q_h, q_w], dim=-1)
+        q = q3.reshape(q3.shape[0], -1)
+
+        k = cache_kv[:, : self.tp_k_head_num_, :]
+        k = torch.cat([k, k_h, k_w], dim=-1)
+
+        v = cache_kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :]
+        v_pad = torch.zeros((v.shape[0], v.shape[1], self.head_dim_), device=v.device, dtype=v.dtype)
+        v = torch.cat([v, v_pad], dim=-1)
+
+        cache_kv = torch.cat([k, v], dim=1)
+        return q, cache_kv
+
+    def _get_qkv_mergekv(
+        self, input, infer_state: NeoChatInferStateInfo, layer_weight: NeoChatMOETransformerLayerWeight
+    ):
+        input = input.view(-1, self.embed_dim_)
+
+        q = layer_weight.q_proj.mm(input)  # [T, Hq*D]
+        q_hw = layer_weight.q_hw_proj.mm(input)
+        k_hw = layer_weight.k_hw_proj.mm(input)
+
+        cache_kv = layer_weight.kv_proj.mm(input)  # [T, (Hk+Hv)*D]
+
+        qk_rmsnorm_forward(q, weight=layer_weight.q_norm_weight_.weight, eps=self.eps_)
+        qk_rmsnorm_forward(q_hw, weight=layer_weight.q_norm_h_weight_.weight, eps=self.eps_)
+        qk_rmsnorm_forward(k_hw, weight=layer_weight.k_norm_w_weight_.weight, eps=self.eps_)
+
+        q_hw = q_hw.view(q.shape[0], self.tp_q_head_num_, self.head_dim_)
+        q_h, q_w = q_hw.chunk(2, dim=-1)
+
+        qk_rmsnorm_forward(
+            cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
+            weight=layer_weight.k_norm_weight_.weight,
+            eps=self.eps_,
+        )
+
+        k_hw = k_hw.view(q.shape[0], self.tp_k_head_num_, self.head_dim_)
+        k_h, k_w = k_hw.chunk(2, dim=-1)
 
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
