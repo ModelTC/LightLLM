@@ -57,7 +57,13 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    思考解析（Reasoning Parser） <tutorial/reasoning_parser>
    APIServer 参数详解 <tutorial/api_server_args_zh>
    lightllm api介绍 <tutorial/api_param>
-   
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Cookbook
+
+   GLM-4.7-Flash 部署 <cookbook/glm4_deployment>
+
 .. toctree::
    :maxdepth: 1
    :caption: 模型支持

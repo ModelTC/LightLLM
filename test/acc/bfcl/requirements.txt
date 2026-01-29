@@ -1,0 +1,13 @@
+# Evaluation benchmark dependencies
+aiohttp>=3.8.0
+tqdm>=4.64.0
+transformers>=4.30.0
+numpy>=1.21.0
+openai>=1.0.0
+huggingface_hub>=0.20.0
+
+# Optional: official human-eval package for dataset loading
+# pip install git+https://github.com/openai/human-eval.git
+
+# Optional: official BFCL evaluation package
+# pip install bfcl-eval

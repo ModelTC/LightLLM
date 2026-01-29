@@ -56,7 +56,13 @@ Documentation List
    Reasoning Parser <tutorial/reasoning_parser>
    APIServer Parameters <tutorial/api_server_args_zh>
    Lightllm API Introduction <tutorial/api_param>
-   
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Cookbook
+
+   GLM-4.7-Flash Deployment <cookbook/glm4_deployment>
+
 .. toctree::
    :maxdepth: 1
    :caption: Model Support

@@ -25,7 +25,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self.is_moe = (
             self.network_config_["n_routed_experts"] is not None
             and self.layer_num_ >= self.network_config_["first_k_dense_replace"]
-            and self.layer_num_ % self.network_config_["moe_layer_freq"] == 0
+            and self.layer_num_ % self.network_config_.get("moe_layer_freq", 1) == 0
         )
         self.tp_q_head_num_ = self.network_config_["num_attention_heads"]
         self.tp_q_head_num_ = self.tp_q_head_num_ // self.tp_world_size_
@@ -65,7 +65,9 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self._init_norm()
 
     def _split_kv_b_proj(self, kv_b_proj_):
-        kv_b_proj_ = kv_b_proj_.view(self.num_attention_heads, self.qk_nope_head_dim * 2, self.kv_lora_rank)
+        kv_b_proj_ = kv_b_proj_.view(
+            self.num_attention_heads, self.qk_nope_head_dim + self.v_head_dim, self.kv_lora_rank
+        )
         k_b_proj_, v_b_proj_ = torch.split(kv_b_proj_, [self.qk_nope_head_dim, self.v_head_dim], dim=-2)
         # num_attention_heads x qk_nope_head_dim x kv_lora_rank
         k_b_proj_ = k_b_proj_.contiguous().to(kv_b_proj_.dtype)
