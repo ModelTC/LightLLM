@@ -39,7 +39,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pd_decode_rpyc_port",
         type=int,
-        default=42000,
+        default=None,
         help="p d mode, decode node used for kv move manager rpyc server port",
     )
     parser.add_argument(
@@ -210,7 +210,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         When deploying in multi-node manner, the value should be set to the IP of the master node""",
     )
     parser.add_argument(
-        "--nccl_port", type=int, default=28765, help="the nccl_port to build a distributed environment for PyTorch"
+        "--nccl_port", type=int, default=None, help="the nccl_port to build a distributed environment for PyTorch"
     )
     parser.add_argument(
         "--use_config_server_to_init_nccl",
@@ -334,6 +334,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
                 (priority: fa3 > flashinfer > triton)""",
     )
     parser.add_argument(
+        "--vit_att_backend",
+        type=str,
+        nargs="+",
+        choices=["auto", "triton", "fa3", "sdpa", "xformers"],
+        default=["auto"],
+        help="""vit attention kernel used in vlm.
+                auto: automatically select best backend based on GPU and available packages
+                (priority: fa3 > xformers > sdpa > triton)""",
+    )
+    parser.add_argument(
         "--llm_kv_type",
         type=str,
         choices=["None", "int8kv", "int4kv"],
@@ -390,7 +400,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--push_interval", type=int, default=10, help="interval of pushing monitoring metrics")
     parser.add_argument(
-        "--visual_infer_batch_size", type=int, default=1, help="number of images to process in each inference batch"
+        "--visual_infer_batch_size", type=int, default=None, help="number of images to process in each inference batch"
     )
     parser.add_argument(
         "--visual_send_batch_size",
@@ -410,7 +420,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_nccl_ports",
         nargs="+",
         type=int,
-        default=[29500],
+        default=None,
         help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
     )
     parser.add_argument(
