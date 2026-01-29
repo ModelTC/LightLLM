@@ -244,7 +244,6 @@ def _launch_subprocesses(args: StartArgs):
     (
         nccl_port,
         router_port,
-        router_rpc_port,
         detokenization_port,
         http_server_port,
         visual_port,
@@ -272,7 +271,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.pd_decode_rpyc_port is None:
         args.pd_decode_rpyc_port = pd_decode_rpyc_port
     args.router_port = router_port
-    args.router_rpc_port = router_rpc_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
     args.visual_port = visual_port

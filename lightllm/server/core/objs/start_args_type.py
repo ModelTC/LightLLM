@@ -156,7 +156,6 @@ class StartArgs:
     enable_dp_prompt_cache_fetch: bool = field(default=False)
     # zmp ports
     router_port: int = field(default=None)
-    router_rpc_port: int = field(default=None)
     detokenization_port: int = field(default=None)
     http_server_port: int = field(default=None)
     visual_port: int = field(default=None)
@@ -181,5 +180,8 @@ class StartArgs:
     disable_custom_allreduce: bool = field(default=False)
     enable_torch_memory_saver: bool = field(default=False)
     enable_weight_cpu_backup: bool = field(default=False)
+    hardware_platform: str = field(default="cuda", metadata={"choices": ["cuda", "musa"]})
+    enable_torch_fallback: bool = field(default=False)
+    enable_triton_fallback: bool = field(default=False)
 
     weight_version: str = "default"

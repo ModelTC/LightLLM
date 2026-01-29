@@ -184,7 +184,7 @@ class TpPartBaseModel:
         return
 
     def load_weights(self, weight_dict: dict):
-        assert isinstance(weight_dict, dict), "weight_dict must be a dict"
+        assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(
             self.data_type,
             self.weight_dir_,
