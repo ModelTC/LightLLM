@@ -17,8 +17,8 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
         self.position_cos_w = None
         self.position_sin_w = None
 
-    def init_some_extra_state(self, model: LlamaTpPartModel, input_ids: torch.Tensor):
-        LlamaInferStateInfo.init_some_extra_state(self, model, input_ids)
+    def init_some_extra_state(self, model: LlamaTpPartModel):
+        LlamaInferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
             self.position_ids = self.get_neo_position(self.multimodal_params)
         else:
@@ -94,6 +94,6 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
             position_ids=position_ids,
             b_ready_cache_len=self.b_ready_cache_len,
             b_q_seq_len=self.b_q_seq_len,
-            b_start_loc=self.b_start_loc,
+            b_start_loc=self.b_q_start_loc,
         )
         return position_ids

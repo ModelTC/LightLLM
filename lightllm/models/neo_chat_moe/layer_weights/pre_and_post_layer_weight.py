@@ -13,8 +13,8 @@ def rename_weight_keys(weights):
 
 
 class NeoChatMOEPreAndPostLayerWeight(Qwen2PreAndPostLayerWeight):
-    def __init__(self, data_type, network_config, mode):
-        super().__init__(data_type, network_config, mode)
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
         return
 
     def load_hf_weights(self, weights):

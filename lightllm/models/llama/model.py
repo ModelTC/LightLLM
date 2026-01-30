@@ -110,7 +110,6 @@ class LlamaTpPartModel(TpPartBaseModel):
             rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
 
         base = self.config.get("rope_theta", float(default_base))
-        print(f"base is {base}")
         if "max_sequence_length" in self.config:
             max_seq_len = self.config["max_sequence_length"]
         else:
@@ -151,7 +150,6 @@ class LlamaTpPartModel(TpPartBaseModel):
             rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
 
         base = self.config.get("rope_theta_hw", float(default_base))
-        print(f"hw_base is {base}")
         if "max_sequence_length" in self.config:
             max_seq_len = self.config["max_sequence_length"]
         else:
