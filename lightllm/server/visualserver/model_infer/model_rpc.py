@@ -4,6 +4,7 @@ import rpyc
 import torch
 import socket
 import inspect
+import setproctitle
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
@@ -26,6 +27,8 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
+from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.envs_utils import get_unique_server_name
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -175,6 +178,8 @@ class VisualModelRpcClient:
 def _init_env(port, device_id):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server::RANK{device_id}")
+    start_parent_check_thread()
 
     import lightllm.utils.rpyc_fix_utils as _
 
