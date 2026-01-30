@@ -1,13 +1,6 @@
-"""GLM-4.7-Flash MLA attention backend."""
-
 import dataclasses
 import torch
-from lightllm.common.basemodel.attention.base_att import (
-    BaseAttBackend,
-    BasePrefillAttState,
-    BaseDecodeAttState,
-    AttControl,
-)
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Tuple
 
 
@@ -37,9 +30,9 @@ class GlmMlaTritonPrefillAttState(BasePrefillAttState):
             and att_control.use_sliding_window is False
             and att_control.use_att_sink is False
         )
-        return self._mla_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
+        return self._glm_mla_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
 
-    def _mla_prefill_att(
+    def _glm_mla_prefill_att(
         self,
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
@@ -47,27 +40,25 @@ class GlmMlaTritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
-        from .context_flashattention_nopad import glm_context_attention_fwd_with_v
+        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
 
-        qk_rope_head_dim = 64
-        q_nope, q_rope = q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:]
-        o_tensor = alloc_func((q_nope.shape[0], q_nope.shape[1], v.shape[-1]), dtype=q_nope.dtype, device=q.device)
         k_nope, k_rope = k
-        assert att_control.mla_prefill
-        softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
-        glm_context_attention_fwd_with_v(
-            q_nope,
-            q_rope,
-            k_nope,
-            k_rope,
+        q_head_num = q.shape[1]
+
+        k_merged = torch.cat([k_nope.expand(-1, q_head_num, -1), k_rope.expand(-1, q_head_num, -1)], dim=-1)
+
+        o_tensor = alloc_func(q.shape, dtype=q.dtype, device=q.device)
+
+        context_attention_fwd_contiguous_kv(
+            q,
+            k_merged,
             v,
             o_tensor,
             self.infer_state.b_q_start_loc,
             self.infer_state.b1_cu_kv_seq_len,
             self.infer_state.b_seq_len,
-            self.infer_state.b_ready_cache_len,
             self.infer_state.max_q_seq_len,
-            softmax_scale,
+            self.infer_state.b_ready_cache_len,
         )
         return o_tensor
 
@@ -114,9 +105,7 @@ class GlmMlaTritonDecodeAttState(BaseDecodeAttState):
         assert att_control.mla_decode
         softmax_scale = att_control.mla_decode_dict["softmax_scale"]
 
-        from lightllm.common.basemodel.triton_kernel.mla_att.decode_att import (
-            gqa_token_decode_attention_flash_decoding,
-        )
+        from ...triton_kernel.mla_att.decode_att import gqa_token_decode_attention_flash_decoding
 
         qk_rope_head_dim = 64
         q_nope, q_rope = q

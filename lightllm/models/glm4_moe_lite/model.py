@@ -24,7 +24,7 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
         decode_backend_str = args.llm_decode_att_backend[0]
 
         if prefill_backend_str in ("triton", "auto"):
-            from lightllm.models.glm4_moe_lite.triton_kernel.mla_att import GlmMlaTritonAttBackend
+            from lightllm.common.basemodel.attention.triton.glm_mla import GlmMlaTritonAttBackend
 
             self.prefill_att_backend = GlmMlaTritonAttBackend(model=self)
         else:
@@ -33,7 +33,7 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
             self.prefill_att_backend = get_mla_prefill_att_backend_class(index=0)(model=self)
 
         if decode_backend_str in ("triton", "auto"):
-            from lightllm.models.glm4_moe_lite.triton_kernel.mla_att import GlmMlaTritonAttBackend
+            from lightllm.common.basemodel.attention.triton.glm_mla import GlmMlaTritonAttBackend
 
             self.decode_att_backend = GlmMlaTritonAttBackend(model=self)
         else:
