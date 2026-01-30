@@ -62,7 +62,7 @@ def autotune(
         as needed before invocation.
     """
 
-    def decorator(fn):
+    def decorator(fn: Callable) -> Callable:
         return Autotuner(
             fn=fn,
             kernel_name=kernel_name,

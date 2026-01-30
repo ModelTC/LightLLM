@@ -33,7 +33,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.is_moe = (
             network_config["n_routed_experts"] is not None
             and layer_num >= network_config["first_k_dense_replace"]
-            and layer_num % network_config["moe_layer_freq"] == 0
+            and layer_num % network_config.get("moe_layer_freq", 1) == 0
         )
 
         self.n_shared_experts = network_config["n_shared_experts"]
@@ -65,10 +65,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.is_moe:
             enable_ep_moe = get_env_start_args().enable_ep_moe
             if enable_ep_moe:
-                self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn_edp, self)
+                self._ffn = self._moe_ffn_edp
                 self._tpsp_ffn = self._tpsp_ffn_ep
             else:
-                self._ffn = partial(Deepseek2TransformerLayerInfer._moe_ffn, self)
+                self._ffn = self._moe_ffn
                 self._tpsp_ffn = self._tpsp_ffn_tp
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
@@ -257,7 +257,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         if input.shape[2] == self.kv_lora_rank:
             input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
-        o_tensor = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.qk_nope_head_dim))
+        o_tensor = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim))
         return o_tensor
 
     def _tpsp_get_o(
@@ -269,7 +269,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         if input.shape[2] == self.kv_lora_rank:
             input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
 
-        input = input.reshape(-1, self.tp_q_head_num_ * self.qk_nope_head_dim)
+        input = input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim)
         dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
         o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
         layer_weight.o_weight_.mm(input, out=o_tensor[0 : len(infer_state.input_ids), :])
@@ -302,7 +302,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 
-        router_logits = layer_weight.moe_gate.mm(hidden_states)
+        moe_gate_dtype = layer_weight.moe_gate.data_type_
+        router_logits = layer_weight.moe_gate.mm(hidden_states.to(moe_gate_dtype))
         layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
@@ -327,7 +328,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.n_shared_experts is not None:
             shared_output = LlamaTransformerLayerInfer._ffn(self, hidden_states, infer_state, layer_weight)
 
-        router_logits = layer_weight.moe_gate.mm(hidden_states)
+        moe_gate_dtype = layer_weight.moe_gate.data_type_
+        router_logits = layer_weight.moe_gate.mm(hidden_states.to(moe_gate_dtype))
         ep_output = layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
@@ -405,7 +407,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings.add_(_0_o.view(-1, self.embed_dim_))
         _0_o = None
         _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        _0_router_logits = layer_weight.moe_gate.mm(_0_input1)
+        moe_gate_dtype = layer_weight.moe_gate.data_type_
+        _0_router_logits = layer_weight.moe_gate.mm(_0_input1.to(moe_gate_dtype))
         # 1 hook
         if getattr(infer_state1, "hook", None) is not None:
             infer_state1.hook()
@@ -439,7 +442,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)
         # to do gate and disptatch
 
-        _1_router_logits = layer_weight.moe_gate.mm(_1_input1)
+        moe_gate_dtype = layer_weight.moe_gate.data_type_
+        _1_router_logits = layer_weight.moe_gate.mm(_1_input1.to(moe_gate_dtype))
         # 0 hook
         if getattr(infer_state, "hook", None) is not None:
             infer_state.hook()
@@ -529,7 +533,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings.add_(_0_o.view(-1, self.embed_dim_))
         _0_o = None
         _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        _0_router_logits = layer_weight.moe_gate.mm(_0_input1)
+        moe_gate_dtype = layer_weight.moe_gate.data_type_
+        _0_router_logits = layer_weight.moe_gate.mm(_0_input1.to(moe_gate_dtype))
 
         # wait last 1 combine
         if getattr(infer_state1, "hook", None) is not None:
@@ -556,7 +561,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)
         # to do gate and disptatch
 
-        _1_router_logits = layer_weight.moe_gate.mm(_1_input1)
+        moe_gate_dtype = layer_weight.moe_gate.data_type_
+        _1_router_logits = layer_weight.moe_gate.mm(_1_input1.to(moe_gate_dtype))
 
         # 0 dispatch execute
         (
