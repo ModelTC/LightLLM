@@ -62,12 +62,12 @@ def init_vision_distributed_env(kvargs):
     set_dp_size(dp_size)
     set_dp_world_size(tp_world_size)
     set_current_rank_in_dp(tp_rank_id)
-
     visual_gpu_ids = kvargs["visual_gpu_ids"]
     device_id = visual_gpu_ids[kvargs["vit_rank_id"]]
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
 
+    # Can't init process group in device twice, we don't init it vision env
     if is_metax():
         return
 

@@ -267,7 +267,7 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
         handle.tasks_finished.set()
 
     def _metax_worker():
-        mc = ctypes.CDLL("/opt/maca/lib/libmcruntime.so")
+        mc = ctypes.CDLL(os.path.join(os.getenv("MACA_PATH", "/opt/maca"), "lib/libmcruntime.so"))
         mc.mcHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
         mc.mcHostRegister.restype = ctypes.c_int
         mc.mcHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
@@ -291,7 +291,7 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
             raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
         handle.tasks_finished.set()
 
-    _worker_func = _metax_worker() if is_metax() else _worker()
+    _worker_func = _metax_worker if is_metax() else _worker
     th = threading.Thread(target=_worker_func, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
     handle.thread = th
     th.start()
