@@ -164,6 +164,10 @@ def _launch_subprocesses(args: StartArgs):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
+    # automatically set visual_dp based on visual_tp and tp
+    if args.visual_tp < args.tp and args.tp % args.visual_tp == 0:
+        args.visual_dp = args.tp // args.visual_tp
+
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
