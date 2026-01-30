@@ -185,45 +185,57 @@ class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         o3 = o3[:, :, : self.head_dim_].contiguous()
         return o3.view(o3.shape[0], -1)
 
-    def _token_attention_kernel(self, q, infer_state: NeoChatInferStateInfo, layer_weight):
-        total_token_num = infer_state.total_token_num
-        batch_size = infer_state.batch_size
+    def _token_attention_kernel(
+        self,
+        q: torch.Tensor,
+        infer_state: NeoChatInferStateInfo,
+        layer_weight: NeoChatMOETransformerLayerWeight,
+    ) -> torch.Tensor:
+        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_ * 2)
+        o_tensor = infer_state.decode_att_state.decode_att(q=_q, k=_k, v=_v, alloc_func=self.alloc_tensor)
+        o_tensor = o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_ * 2)[:, :, : self.head_dim_].contiguous()
+        return o_tensor
 
-        q_3d = q.view(batch_size, self.tp_q_head_num_, self.head_dim_ * 2)
+    # def _token_attention_kernel(self, q, infer_state: NeoChatInferStateInfo, layer_weight):
+    #     total_token_num = infer_state.total_token_num
+    #     batch_size = infer_state.batch_size
 
-        att_m_tensor = self.alloc_tensor((self.tp_q_head_num_, total_token_num), torch.float32)
+    #     q_3d = q.view(batch_size, self.tp_q_head_num_, self.head_dim_ * 2)
 
-        k_3d = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
-        token_att_fwd(
-            q_3d,
-            k_3d,
-            att_m_tensor,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_kv_start_loc,
-            infer_state.b_seq_len,
-            infer_state.max_kv_seq_len,
-        )
+    #     att_m_tensor = self.alloc_tensor((self.tp_q_head_num_, total_token_num), torch.float32)
 
-        from lightllm.common.basemodel.triton_kernel.att.decode_att.mha.stage3_decode_att import (
-            token_attention_softmax_and_reducev,
-        )
+    #     k_3d = infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0 : self.tp_k_head_num_, :]
+    #     token_att_fwd(
+    #         q_3d,
+    #         k_3d,
+    #         att_m_tensor,
+    #         infer_state.req_manager.req_to_token_indexs,
+    #         infer_state.b_req_idx,
+    #         infer_state.b_kv_start_loc,
+    #         infer_state.b_seq_len,
+    #         infer_state.max_kv_seq_len,
+    #     )
 
-        token_softmax_reducev_fwd = token_attention_softmax_and_reducev.token_softmax_reducev_fwd
+    #     from lightllm.common.basemodel.triton_kernel.att.decode_att.mha.stage3_decode_att import (
+    #         token_attention_softmax_and_reducev,
+    #     )
 
-        v_3d = infer_state.mem_manager.kv_buffer[self.layer_num_][
-            :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, : self.head_dim_
-        ]
+    #     token_softmax_reducev_fwd = token_attention_softmax_and_reducev.token_softmax_reducev_fwd
 
-        o_3d = self.alloc_tensor((batch_size, self.tp_q_head_num_, self.head_dim_), q.dtype)
+    #     v_3d = infer_state.mem_manager.kv_buffer[self.layer_num_][
+    #         :, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, : self.head_dim_
+    #     ]
 
-        token_softmax_reducev_fwd(
-            att_m_tensor,
-            v_3d,
-            o_3d,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_kv_start_loc,
-            infer_state.b_seq_len,
-        )
-        return o_3d.view(batch_size, -1)
+    #     o_3d = self.alloc_tensor((batch_size, self.tp_q_head_num_, self.head_dim_), q.dtype)
+
+    #     token_softmax_reducev_fwd(
+    #         att_m_tensor,
+    #         v_3d,
+    #         o_3d,
+    #         infer_state.req_manager.req_to_token_indexs,
+    #         infer_state.b_req_idx,
+    #         infer_state.b_kv_start_loc,
+    #         infer_state.b_seq_len,
+    #     )
+    #     return o_3d.view(batch_size, -1)
