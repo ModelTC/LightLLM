@@ -558,10 +558,16 @@ class TpPartBaseModel:
 
         def prefill_func(input_tensors, infer_state):
             _input_embs = input_tensors[0]
+            _residual = None
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
                 layer_method = (layer.context_forward, layer.tpsp_context_forward)[run_mode_index]
-                _input_embs = layer_method(_input_embs, infer_state, self.trans_layers_weight[i])
+                _input_embs, _residual = layer_method(
+                    _input_embs, infer_state, self.trans_layers_weight[i], residual=_residual
+                )
+            if _residual is not None:
+                _input_embs.add_(_residual)
+            _residual = None
             return [_input_embs]
 
         handle_token_num = input_ids.shape[0]
@@ -607,11 +613,16 @@ class TpPartBaseModel:
         cuda_input_ids = input_ids
         pre_method = (self.pre_infer.token_forward, self.pre_infer.tpsp_token_forward)[run_mode_index]
         input_embs = pre_method(cuda_input_ids, infer_state, self.pre_post_weight)
+        _residual = None
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             layer_method = (layer.token_forward, layer.tpsp_token_forward)[run_mode_index]
-            input_embs: torch.Tensor = layer_method(input_embs, infer_state, self.trans_layers_weight[i])
-
+            input_embs, _residual = layer_method(
+                input_embs, infer_state, self.trans_layers_weight[i], residual=_residual
+            )
+        if _residual is not None:
+            input_embs.add_(_residual)
+        _residual = None
         post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
         predict_logits: torch.Tensor = post_method(input_embs, infer_state, self.pre_post_weight)
 

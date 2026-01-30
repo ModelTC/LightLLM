@@ -2,7 +2,7 @@ import torch
 from typing import Optional, Dict
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
-from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward, add_rmsnorm_fused_forward
 from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward
 from .platform_op import PlatformAwareOp
@@ -29,10 +29,17 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         return self.weight.load_ok
 
     def _native_forward(
-        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
-    ) -> torch.Tensor:
+        self,
+        input: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+        residual: torch.Tensor = None,
+    ):
         assert input.ndim == 2 and self.weight.ndim == 1
         assert input.shape[-1] == self.dim, f"Expected hidden_size to be {self.dim}, but found: {input.shape[-1]}"
+        if residual is not None:
+            input.add_(residual)
         x = input.to(torch.float32)
         x_var = x
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
@@ -44,26 +51,45 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         return x
 
     def _triton_forward(
-        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+        self,
+        input: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+        residual: torch.Tensor = None,
     ) -> torch.Tensor:
         assert (
             input.ndim in [2, 3] and self.weight.ndim == 1
         ), f"input.ndim: {input.ndim} != 2 or weight.ndim: {self.weight.ndim} != 1"
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
+        if residual is not None:
+            # add_rmsnorm_fused_forward 会 in-place 修改 input (input = input + residual)
+            norm_out = add_rmsnorm_fused_forward(x=input, residual=residual, weight=self.weight, eps=eps, out=out)
+            return norm_out
         return rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out)
 
     def _cuda_forward(
-        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+        self,
+        input: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+        residual: torch.Tensor = None,
     ) -> torch.Tensor:
         # only triton implementation is supported for rmsnorm on cuda platform
-        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func, residual=residual)
 
     def _musa_forward(
-        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
-    ) -> torch.Tensor:
+        self,
+        input: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+        residual: torch.Tensor = None,
+    ):
         # triton implementation is supported by musa.
-        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func, residual=residual)
 
     def __call__(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
