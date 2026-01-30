@@ -15,9 +15,6 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
     transformer_layer_infer_class = Glm4MoeLiteTransformerLayerInfer
     infer_state_class = Glm4MoeLiteInferStateInfo
 
-    # GLM 使用 contiguous kv prefill 模式
-    use_contiguous_kv_prefill = True
-
     def __init__(self, kvargs):
         super().__init__(kvargs)
 

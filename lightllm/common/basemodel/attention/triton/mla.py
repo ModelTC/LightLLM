@@ -14,10 +14,6 @@ class MlaTritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class MlaTritonPrefillAttState(BasePrefillAttState):
-    def __post_init__(self):
-        if getattr(self.backend.model, "use_contiguous_kv_prefill", False):
-            self._mla_prefill_att = self._contiguous_kv_prefill_att
-
     def init_state(self):
         pass
 
@@ -34,7 +30,11 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
             and att_control.use_sliding_window is False
             and att_control.use_att_sink is False
         )
-        return self._mla_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
+        if q.shape[2] == 256:
+            # glm model
+            return self._contiguous_kv_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
+        else:
+            return self._mla_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
 
     def _mla_prefill_att(
         self,
