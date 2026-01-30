@@ -1,3 +1,4 @@
+from lightllm.utils.device_utils import is_metax
 import torch.distributed as dist
 import os
 import torch
@@ -61,10 +62,15 @@ def init_vision_distributed_env(kvargs):
     set_dp_size(dp_size)
     set_dp_world_size(tp_world_size)
     set_current_rank_in_dp(tp_rank_id)
+
     visual_gpu_ids = kvargs["visual_gpu_ids"]
     device_id = visual_gpu_ids[kvargs["vit_rank_id"]]
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
+
+    if is_metax():
+        return
+
     dist.init_process_group(
         "nccl",
         init_method=f'tcp://127.0.0.1:{kvargs["visual_nccl_port"]}',

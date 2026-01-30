@@ -1,3 +1,4 @@
+from lightllm.utils.device_utils import is_metax
 import torch
 import ctypes
 import dataclasses
@@ -265,7 +266,33 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
         assert host_ptr.value == device_ptr.value
         handle.tasks_finished.set()
 
-    th = threading.Thread(target=_worker, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
+    def _metax_worker():
+        mc = ctypes.CDLL("/opt/maca/lib/libmcruntime.so")
+        mc.mcHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+        mc.mcHostRegister.restype = ctypes.c_int
+        mc.mcHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
+        mc.mcHostGetDevicePointer.restype = ctypes.c_int
+
+        cudaHostRegisterFlag = 3
+
+        torch.cuda.set_device(get_current_device_id())
+        # TODO 这个地方的分块注册是否具备合法性和合理性。
+        for offset, seg_len in tasks:
+            ptr = ctypes.c_void_p(shm_ptr + offset)
+            r = mc.mcHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
+            if r != 0:
+                raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
+            handle.task_count += 1
+
+        device_ptr = ctypes.c_void_p()
+        host_ptr = ctypes.c_void_p(shm_ptr)
+        res = mc.mcHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+        if res != 0:
+            raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
+        handle.tasks_finished.set()
+
+    _worker_func = _metax_worker() if is_metax() else _worker()
+    th = threading.Thread(target=_worker_func, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
     handle.thread = th
     th.start()
     return handle
