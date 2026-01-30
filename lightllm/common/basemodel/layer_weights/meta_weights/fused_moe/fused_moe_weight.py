@@ -349,12 +349,14 @@ class FusedMoeWeight(BaseWeightTpl):
         w1_merge_weight = f"{self.weight_prefix}.{self.w1_weight_name}"
         w2_merge_weight = f"{self.weight_prefix}.{self.w2_weight_name}"
         w3_merge_weight = f"{self.weight_prefix}.{self.w3_weight_name}"
+        row_slice_func = self.row_slicer._slice_weight
+        col_slice_func = self.col_slicer._slice_weight
         if w1_merge_weight in weights:
-            self.quant_method.load_weight(weights[w1_merge_weight], self.w1)
+            self.quant_method.load_weight(row_slice_func(weights[w1_merge_weight]), self.w1)
         if w2_merge_weight in weights:
-            self.quant_method.load_weight(weights[w2_merge_weight], self.w2)
+            self.quant_method.load_weight(col_slice_func(weights[w2_merge_weight]), self.w2)
         if w3_merge_weight in weights:
-            self.quant_method.load_weight(weights[w3_merge_weight], self.w3)
+            self.quant_method.load_weight(row_slice_func(weights[w3_merge_weight]), self.w3)
 
     def _load_expert_scale(
         self,
