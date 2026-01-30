@@ -15,31 +15,11 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
     transformer_layer_infer_class = Glm4MoeLiteTransformerLayerInfer
     infer_state_class = Glm4MoeLiteInferStateInfo
 
+    # GLM 使用 contiguous kv prefill 模式
+    use_contiguous_kv_prefill = True
+
     def __init__(self, kvargs):
         super().__init__(kvargs)
-
-    def _init_att_backend(self):
-        args = get_env_start_args()
-        prefill_backend_str = args.llm_prefill_att_backend[0]
-        decode_backend_str = args.llm_decode_att_backend[0]
-
-        if prefill_backend_str in ("triton", "auto"):
-            from lightllm.common.basemodel.attention.triton.glm_mla import GlmMlaTritonAttBackend
-
-            self.prefill_att_backend = GlmMlaTritonAttBackend(model=self)
-        else:
-            from lightllm.common.basemodel.attention import get_mla_prefill_att_backend_class
-
-            self.prefill_att_backend = get_mla_prefill_att_backend_class(index=0)(model=self)
-
-        if decode_backend_str in ("triton", "auto"):
-            from lightllm.common.basemodel.attention.triton.glm_mla import GlmMlaTritonAttBackend
-
-            self.decode_att_backend = GlmMlaTritonAttBackend(model=self)
-        else:
-            from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class
-
-            self.decode_att_backend = get_mla_decode_att_backend_class(index=0)(model=self)
 
     def _init_config(self):
         super()._init_config()

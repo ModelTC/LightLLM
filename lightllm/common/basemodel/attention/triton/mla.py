@@ -14,6 +14,10 @@ class MlaTritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class MlaTritonPrefillAttState(BasePrefillAttState):
+    def __post_init__(self):
+        if getattr(self.backend.model, "use_contiguous_kv_prefill", False):
+            self._mla_prefill_att = self._contiguous_kv_prefill_att
+
     def init_state(self):
         pass
 
@@ -61,6 +65,36 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
             self.infer_state.b_ready_cache_len,
             self.infer_state.max_q_seq_len,
             softmax_scale,
+        )
+        return o_tensor
+
+    def _contiguous_kv_prefill_att(
+        self,
+        q: torch.Tensor,
+        k: Tuple[torch.Tensor, torch.Tensor],
+        v: torch.Tensor,
+        att_control: AttControl,
+        alloc_func=torch.empty,
+    ):
+        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+
+        k_nope, k_rope = k
+        q_head_num = q.shape[1]
+
+        k_merged = torch.cat([k_nope.expand(-1, q_head_num, -1), k_rope.expand(-1, q_head_num, -1)], dim=-1)
+
+        o_tensor = alloc_func(q.shape, dtype=q.dtype, device=q.device)
+
+        context_attention_fwd_contiguous_kv(
+            q,
+            k_merged,
+            v,
+            o_tensor,
+            self.infer_state.b_q_start_loc,
+            self.infer_state.b1_cu_kv_seq_len,
+            self.infer_state.b_seq_len,
+            self.infer_state.max_q_seq_len,
+            self.infer_state.b_ready_cache_len,
         )
         return o_tensor
 
