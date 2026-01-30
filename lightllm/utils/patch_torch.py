@@ -9,7 +9,8 @@ from torch.multiprocessing import reductions
 def monkey_patch_torch_reductions():
     """Monkey patching before Torch https://github.com/pytorch/pytorch/pull/149248 is fixed"""
 
-    # Currently, NPU does not support UUID. This has been temporarily commented out, with support expected in the fourth quarter.
+    # Currently, NPU does not support UUID. This has been temporarily commented out,
+    # with support expected in the fourth quarter.
     # if _is_npu:
     #     return
 
@@ -32,9 +33,7 @@ _REDUCE_TENSOR_ARG_DEVICE_INDEX = 6
 
 def _reduce_tensor_modified(*args, **kwargs):
     output_fn, output_args = reductions._reduce_tensor_original(*args, **kwargs)
-    output_args = _modify_tuple(
-        output_args, _REDUCE_TENSOR_ARG_DEVICE_INDEX, _device_to_uuid
-    )
+    output_args = _modify_tuple(output_args, _REDUCE_TENSOR_ARG_DEVICE_INDEX, _device_to_uuid)
     return output_fn, output_args
 
 
@@ -62,4 +61,3 @@ def _device_from_maybe_uuid(device_maybe_uuid: Union[int, str]) -> int:
 
 def _modify_tuple(t, index: int, modifier: Callable):
     return *t[:index], modifier(t[index]), *t[index + 1 :]
-

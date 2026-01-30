@@ -1,4 +1,3 @@
-
 # copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/common.py
 
 import base64
@@ -108,24 +107,22 @@ class SafeUnpickler(pickle.Unpickler):
         # Block deterministic attacks
         if (module, name) in self.DENY_CLASSES:
             raise RuntimeError(
-                f"Blocked unsafe class loading ({module}.{name}), "
-                f"to prevent exploitation of CVE-2025-10164"
+                f"Blocked unsafe class loading ({module}.{name}), " f"to prevent exploitation of CVE-2025-10164"
             )
         # Allowlist of safe-to-load modules.
-        if any(
-            (module + ".").startswith(prefix) for prefix in self.ALLOWED_MODULE_PREFIXES
-        ):
+        if any((module + ".").startswith(prefix) for prefix in self.ALLOWED_MODULE_PREFIXES):
             return super().find_class(module, name)
 
         # Block everything else. (Potential attack surface)
         raise RuntimeError(
-            f"Blocked unsafe class loading ({module}.{name}), "
-            f"to prevent exploitation of CVE-2025-10164"
+            f"Blocked unsafe class loading ({module}.{name}), " f"to prevent exploitation of CVE-2025-10164"
         )
+
 
 @dataclass
 class LocalSerializedTensor:
-    """torch.Tensor that gets serialized by MultiprocessingSerializer (which only serializes a pointer and not the data).
+    """torch.Tensor that gets serialized by MultiprocessingSerializer
+    (which only serializes a pointer and not the data).
     The i-th element in the list corresponds to i-th rank's GPU."""
 
     values: List[bytes]

@@ -1,4 +1,6 @@
-# copy from https://raw.githubusercontent.com/sgl-project/sglang/refs/heads/main/python/sglang/srt/weight_sync/tensor_bucket.py
+# copy from
+# https://raw.githubusercontent.com/sgl-project/sglang/refs/heads/main/python/sglang/
+# srt/weight_sync/tensor_bucket.py
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -74,9 +76,7 @@ class FlattenedTensorBucket:
         else:
             # Initialize from pre-flattened data
             if flattened_tensor is None or metadata is None:
-                raise ValueError(
-                    "Must provide either named_tensors or both flattened_tensor and metadata"
-                )
+                raise ValueError("Must provide either named_tensors or both flattened_tensor and metadata")
             self.flattened_tensor = flattened_tensor
             self.metadata = metadata
 
@@ -97,11 +97,7 @@ class FlattenedTensorBucket:
         reconstructed = [None] * len(self.metadata)
 
         for i, meta in enumerate(self.metadata):
-            tensor = (
-                self.flattened_tensor[meta.start_idx : meta.end_idx]
-                .view(meta.dtype)
-                .reshape(meta.shape)
-            )
+            tensor = self.flattened_tensor[meta.start_idx : meta.end_idx].view(meta.dtype).reshape(meta.shape)
 
             reconstructed[i] = (meta.name, tensor)
 
